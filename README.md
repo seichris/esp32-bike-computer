@@ -18,5 +18,7 @@ Research on similar open source code:
 
 https://gemini.google.com/u/2/app/bbf4be62d0d00c6b
 
-- https://www.thilinag.com/projects/esp32-bike-computer 
-- https://github.com/thilinag/bikeapp-esp32-web-ble/tree/main 
+- https://www.thilinag.com/projects/esp32-bike-computer / https://github.com/thilinag/bikeapp-esp32-web-ble/tree/main
+- Connects to Komoot app: https://github.com/euphi/TRGB-BikeComputer
+- Cool but different: https://github.com/lspr98/bike-computer-32
+- 
