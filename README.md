@@ -21,6 +21,8 @@ https://gemini.google.com/u/2/app/bbf4be62d0d00c6b
 - https://www.thilinag.com/projects/esp32-bike-computer / https://github.com/thilinag/bikeapp-esp32-web-ble/tree/main
 - Connects to Komoot app: https://github.com/euphi/TRGB-BikeComputer
 - Cool but different: https://github.com/lspr98/bike-computer-32
+- Overcomplicated: https://github.com/m-gracia/esp32-bike-computer-main
+- Overcomplicated: https://github.com/wilhelmzeuschner/esp32_gps_bicycle_computer
 - 
 
 ### MapKit Integration Strategy
@@ -92,3 +94,65 @@ graph TD
         HK -->|Start Activity| Watch
     end
 ```
+
+---
+
+# Board specs
+
+<img width="559" height="685" alt="image" src="https://github.com/user-attachments/assets/280c03e8-c557-42e9-b19b-b3355f3d89bd" />
+
+Waveshare ESP32-S3 1.69 inch Touch-LCD
+
+- Equipped with ESP32-S3R8 high-performance Xtensa 32-bit LX7 dual-core processor, up to 240 MHz main frequency
+- Supports 2.4 GHz Wi-Fi (802.11 b/g/n) and Bluetooth 5 (LE), on-board antenna
+- Built-in 512KB SRAM and 384KB ROM, additionally packaged with 8MB PSRAM and external 16MB Flash
+- Uses Type-C interface, keeping up with the times, no need to worry about plug orientation
+- On-board 1.69-inch LCD screen, 240×280 resolution, 262K colors, capable of displaying clear color images
+- Built-in ST7789V2 driver chip, uses SPI without occupying excessive interface pin resources
+- On-board QM18658 six-axis Inertial Measurement Unit (3-axis acceleration, 3-axis gyroscope), can detect motion posture, step counting, etc.
+- On-board PCF85063 RTC chip, reserved SH1.0 battery socket (supports charging), easily enabling RTC functionality needs
+- On-board RST, BOOT, and a side button with customizable function, convenient for custom function development using buttons
+- On-board 3.7V MX1.25 lithium battery charge/discharge interface
+- Exposes 5 GPIOs, I2C and UART pins for connecting external devices and debugging, allowing flexible configuration of peripheral functions
+- Supports flexible clocking, independent power settings for modules, and other precise controls to achieve low-power modes for multiple scenarios
+
+---
+
+<img width="826" height="427" alt="image" src="https://github.com/user-attachments/assets/22cb8e0b-93f5-4689-be52-873877d06690" />
+
+Waveshare ESP32-S3 2.06-inch AMOLED Watch
+
+- Equipped with the ESP32-S3R8 high-performance Xtensa 32-bit LX7 dual-core processor, with a main frequency up to 240MHz.
+- Supports 2.4GHz Wi-Fi (802.11 b/g/n) and Bluetooth 5 (LE), with an onboard antenna.
+- Built-in 512KB SRAM and 384KB ROM, packaged with 8MB PSRAM, and external 32MB Flash.
+- Uses a Type-C interface, improving user convenience and device compatibility.
+- Onboard 2.06-inch capacitive touch HD AMOLED screen, 410 × 502 resolution, 16.7 million colors, capable of displaying color images clearly.
+- Built-in CO5300 display driver chip and FT3168 capacitive touch chip, communicating via QSPI and I2C interfaces respectively, minimizing the use of interface pin resources.
+- Onboard QMI8658 six-axis inertial measurement unit (3-axis accelerometer, 3-axis gyroscope), enabling motion detection, step counting, and other functions.
+- Onboard PCF85063 RTC chip, connected to the battery via the AXP2101, enabling uninterrupted power supply.
+- Onboard PWR and BOOT side buttons with customizable functions, facilitating custom function development via buttons.
+- Onboard 3.7V MX1.25 lithium battery charge/discharge interface.
+- Exposes one I2C, one UART, and one USB solder pad for connecting external devices and debugging.
+- Onboard Micro SD card slot provides expanded storage, fast data transfer, and flexibility, suitable for data logging and media playback, simplifying circuit design.
+- Benefits of using the AXP2101 include efficient power management, support for multiple output voltages, charging and battery management functions, and optimization of battery life.
+- Using an AMOLED screen offers advantages such as higher contrast, wide viewing angles, rich colors, fast response times, slim design, low power consumption, and flexibility.
+
+- Supports offline voice recognition and AI voice interaction
+- Equipped with the ES8311 audio codec chip and the ES7210 echo cancellation circuit
+
+---
+
+<img width="826" height="427" alt="image" src="https://github.com/user-attachments/assets/b4d633d6-8b2d-4cbf-b4c6-e76e6cd65b26" />
+
+
+ESP32-S3R8-1.8inch-Touch-LCD-360-Aida64
+
+This dual-core MCU integrates Wi-Fi and Bluetooth BLE 5.0, with a main frequency of up to 240 MHz. The chip includes 520 KB SRAM, 8 MB PSRAM, 448 KB ROM, and an additional 16 MB Flash. The display resolution is 360x360 with capacitive touch. The module includes an LCD display, backlight control circuit, touchscreen control circuit, I2S digital microphone circuit, I2S DAC circuit, TF card interface, and wireless power supply circuit. It supports secondary development in Arduino IDE, ESP IDE, MicroPython, and GUITION environments.
+
+Network Configuration https://chat.deepseek.com/a/chat/s/f322519d-2302-4584-82b6-ede1fa19927f
+The AIDA64 secondary screen and weather clock functions require network configuration.
+After powering on, the device automatically opens an AP named "My-Ap" with the password "12345678". Connect your phone to this AP. A network configuration page will pop up shortly, automatically searching for nearby hotspots. Select your hotspot, enter the password, and the configuration will be complete. After configuration, the screen will obtain an IP address, which can be viewed in the WiFi settings page.
+Note: Some phones may automatically disconnect from the AP and switch to 5G if the hotspot has no internet connection. In this case, reconnect to the AP. If the configuration page does not pop up, enter "192.168.4.1" in your phone's browser to access it.
+
+
+
