@@ -23,7 +23,7 @@ https://gemini.google.com/u/2/app/bbf4be62d0d00c6b
 - Cool but different: https://github.com/lspr98/bike-computer-32
 - Overcomplicated: https://github.com/m-gracia/esp32-bike-computer-main
 - Overcomplicated: https://github.com/wilhelmzeuschner/esp32_gps_bicycle_computer
-- 
+- Sends Google Maps navigation notifications via BLE to the esp32: https://youtu.be/qGODX6ALO_U?t=145 , https://chronos.ke/ , https://github.com/fbiego/chronos-esp32?tab=readme-ov-file
 
 ### MapKit Integration Strategy
 
@@ -155,4 +155,41 @@ After powering on, the device automatically opens an AP named "My-Ap" with the p
 Note: Some phones may automatically disconnect from the AP and switch to 5G if the hotspot has no internet connection. In this case, reconnect to the AP. If the configuration page does not pop up, enter "192.168.4.1" in your phone's browser to access it.
 
 
+---
 
+# esp32-bike-computer - based on xiaozhi AI
+
+## Navigating inside xiaozhi
+
+### First try to show a weather widget
+
+- Put eg `weather_sunny.png` into the `assets` partition (Partition Table v2)
+- Relevant File: `main/display/emote_display.cc` (or `emote_display.cc`)
+    - `SetupUI()` initializes the screen. You can add a "Layer" on top of everything else for your widgets. See https://gemini.google.com/u/2/app/19825b80e1047669
+- whenever the weather mcp tool answers, it shows the relevant icon
+
+## Show AMap directions in xiaozhi UI
+
+AMap API: https://console.amap.com/dev/key/app
+AMap docs: https://lbs.amap.com/api/webservice/guide/api/newroute
+Xiaozhi server: https://github.com/xinnan-tech/xiaozhi-esp32-server/blob/main/README_en.md
+Xiaozhi client with AMap MCP: https://github.com/huangjunsen0406/py-xiaozhi/blob/6cad76501619f1b4eecd7645322615c47f0360e6/documents/docs/mcp/amap.md?plain=1#L3
+
+- Run a xiaozhi server in the cloud.
+    - Even if we do it via MCP, we still gotta run an MCP server ?!
+    - So we try to do it all on our own custom xiaozhi server
+    - Is railway with gemini accessible without vpn?
+    - 
+https://gemini.google.com/u/2/app/f6a08aefa2ab8999 :
+
+1. Our App lets the user input a destination
+    a. Deeplinks into Apple Maps, to drive this destination
+    b. Deeplinks into AMap
+2. Our App sends destination & current location to the server.
+3. Server tells xiaozhi device where I am (and where I'm going)
+   a. xiaozhi shows my location (on a cool graphic map, like simplified tiles, stored on a SD card?)
+   b. shows the next moves ("In 50 meters left")
+
+Baidu has a traffic light API: https://lbsyun.baidu.com/faq/api?title=webapi/countlight/base
+- Show this
+- Tell me if I should speed up or slow down
