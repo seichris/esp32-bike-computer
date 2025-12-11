@@ -21,9 +21,10 @@ https://gemini.google.com/u/2/app/bbf4be62d0d00c6b
 - https://www.thilinag.com/projects/esp32-bike-computer / https://github.com/thilinag/bikeapp-esp32-web-ble/tree/main
 - Connects to Komoot app: https://github.com/euphi/TRGB-BikeComputer
 - Cool but different: https://github.com/lspr98/bike-computer-32
+- Sends Google Maps navigation notifications via BLE to the esp32: https://youtu.be/qGODX6ALO_U?t=145 , https://chronos.ke/ , https://github.com/fbiego/chronos-esp32?tab=readme-ov-file
+- Full navigation with gps. Explains how to get vectorized maps: https://github.com/jgauchia/IceNav-v3
 - Overcomplicated: https://github.com/m-gracia/esp32-bike-computer-main
 - Overcomplicated: https://github.com/wilhelmzeuschner/esp32_gps_bicycle_computer
-- Sends Google Maps navigation notifications via BLE to the esp32: https://youtu.be/qGODX6ALO_U?t=145 , https://chronos.ke/ , https://github.com/fbiego/chronos-esp32?tab=readme-ov-file
 
 ### MapKit Integration Strategy
 
