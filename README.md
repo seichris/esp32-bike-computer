@@ -159,7 +159,7 @@ Note: Some phones may automatically disconnect from the AP and switch to 5G if t
 
 # esp32-bike-computer - based on xiaozhi AI
 
-Question: Implement this on top of Xiaozhi, or by itself without AI????
+# Question: Implement this on top of Xiaozhi, or by itself without AI???? https://gemini.google.com/u/2/app/9c894e018995d34e
 
 ## Navigating inside xiaozhi
 
