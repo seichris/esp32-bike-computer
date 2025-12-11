@@ -196,3 +196,7 @@ https://gemini.google.com/u/2/app/f6a08aefa2ab8999 :
 Baidu has a traffic light API: https://lbsyun.baidu.com/faq/api?title=webapi/countlight/base , https://gemini.google.com/u/2/app/92b8ff1362777065
 - Shows me the next traffic light count down
 - Tell me if I should speed up or slow down
+
+---
+
+Lets first build the iOs app + server + red light indicator thing. Outside of xiaozhi
