@@ -159,6 +159,8 @@ Note: Some phones may automatically disconnect from the AP and switch to 5G if t
 
 # esp32-bike-computer - based on xiaozhi AI
 
+Question: Implement this on top of Xiaozhi, or by itself without AI????
+
 ## Navigating inside xiaozhi
 
 ### First try to show a weather widget
@@ -190,6 +192,6 @@ https://gemini.google.com/u/2/app/f6a08aefa2ab8999 :
    a. xiaozhi shows my location (on a cool graphic map, like simplified tiles, stored on a SD card?)
    b. shows the next moves ("In 50 meters left")
 
-Baidu has a traffic light API: https://lbsyun.baidu.com/faq/api?title=webapi/countlight/base
-- Show this
+Baidu has a traffic light API: https://lbsyun.baidu.com/faq/api?title=webapi/countlight/base , https://gemini.google.com/u/2/app/92b8ff1362777065
+- Shows me the next traffic light count down
 - Tell me if I should speed up or slow down
