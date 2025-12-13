@@ -105,6 +105,30 @@ graph TD
 <details>
   <summary># Board specs</summary>
 
+<img width="541" height="281" alt="image" src="https://github.com/user-attachments/assets/4672c5f0-3ca5-442f-bae9-536ce6d2c260" />
+
+ESP32-S3 1.75inch AMOLED ([specs](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31262) , [wiki](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75))
+
+The ESP32-S3-Touch-AMOLED-1.75 is a high-performance, highly integrated MCU board designed by Waveshare. It is compact in size, onboard 1.75inch AMOLED capacitive touch display, power management IC, 6-axis sensor (3-axis accelerometer and 3-axis gyroscope), RTC chip, low power audio codec, echo cancellation circuit, and so on, which makes it easy for you to develop and integrate into the products quickly.
+
+- Equipped with ESP32-S3R8 Xtensa 32-bit LX7 dual-core processor, up to 240MHz main frequency
+- Supports 2.4GHz Wi-Fi (802.11 b/g/n) and Bluetooth 5 (LE), with onboard antenna
+- Built in 512KB of SRAM and 384KB ROM, with onboard 8MB PSRAM and an external 16MB Flash memory
+- Type-C connector, improving device compatibility, easier to use
+- Onboard 1.75inch AMOLED capacitive touch display for clear color picture display, 466 × 466 resolution, 16.7M color
+- Built-in CO5300 display driver and CST9217 capacitive touch chip, using QSPI and I2C communication respectively, effectively saving the IO resources
+- Equipped with dual microphones array for audio algorithms such as noise reduction and echo cancellation, suitable for accurate speech recognition and near-field / far-field voice wake-up applications
+- Onboard QMI8658 6-axis IMU (3-axis accelerometer and 3-axis gyroscope) for detecting motion gesture, counting steps, etc.
+- Onboard PCF85063 RTC chip, powered by Lithium battery through AXP2101 chip for uninterrupted power supply
+- Onboard PWR and BOOT programmable buttons for easy custom function development
+- Onboard 3.7V MX1.25 Lithium battery recharge/discharge header
+- Onboard 8PIN 2.54mm header adapting 3 × GPIO and 1 × UART, and reserved pads of I2C and 3 × expanded IO interfaces, for connecting peripherals and debugging
+- Onboard TF card slot for extended storage and fast data transfer, suitable for applications such as data recording and media playback, simplifying circuit design
+- Adopts AXP2101 IC for efficient power management, supports multiple voltage outputs, battery charging, battery management, and battery life optimization, etc.
+- Adopts AMOLED screen, featuring advantages of high contrast, wide viewing angle, rich colors, fast response, thinner design, and low power consumption, etc.
+
+
+---
 
 <img width="559" height="685" alt="image" src="https://github.com/user-attachments/assets/280c03e8-c557-42e9-b19b-b3355f3d89bd" />
 
