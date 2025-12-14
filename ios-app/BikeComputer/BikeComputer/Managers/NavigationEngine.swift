@@ -72,6 +72,33 @@ class NavigationEngine: NSObject, ObservableObject {
         locationManager.stopUpdatingLocation()
         print("Navigation stopped")
     }
+
+    /// Send test navigation data for BLE testing
+    func sendTestNavigationData() {
+        guard let bleManager = bleManager, bleManager.isConnected else {
+            print("BLE not connected, cannot send test data")
+            return
+        }
+
+        // Test data packets with different navigation scenarios
+        let testPackets = [
+            "2|150|Turn Left onto Main St",           // Turn left
+            "4|300|Slight Right onto Oak Ave",        // Slight right
+            "0|75|Continue straight for 75m",         // Continue straight
+            "5|0|Make U-turn",                        // U-turn
+            "8|25|Arrive at destination"              // Destination
+        ]
+
+        // Send each test packet with a delay
+        for (index, packet) in testPackets.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 2.0) {
+                print("Sending test data: \(packet)")
+                bleManager.sendNavigationData(packet)
+            }
+        }
+
+        print("Started sending test navigation data sequence")
+    }
     
     // MARK: - Private Methods
     
@@ -117,7 +144,13 @@ class NavigationEngine: NSObject, ObservableObject {
         let newStep = route.steps[currentStepIndex]
         let newInstruction = extractInstruction(from: newStep)
         let newIconID = mapInstructionToIconID(newStep.instructions)
-        let newDistance = distanceRemaining
+
+        // Recalculate distance to the new step's endpoint after advancement
+        let newStepEndLocation = CLLocation(
+            latitude: newStep.polyline.coordinate.latitude,
+            longitude: newStep.polyline.coordinate.longitude
+        )
+        let newDistance = Int(location.distance(from: newStepEndLocation))
         
         // Update published properties
         currentInstruction = newInstruction

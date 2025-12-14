@@ -270,10 +270,10 @@ void setupBLE() {
   // Create Service
   NimBLEService *pService = pServer->createService(SERVICE_UUID);
   
-  // Create Characteristic (WRITE)
+  // Create Characteristic (WRITE WITHOUT RESPONSE for better performance)
   pCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID,
-    NIMBLE_PROPERTY::WRITE
+    NIMBLE_PROPERTY::WRITE_NR
   );
   
   pCharacteristic->setCallbacks(new CharacteristicCallbacks());

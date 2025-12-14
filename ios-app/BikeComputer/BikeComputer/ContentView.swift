@@ -67,11 +67,21 @@ struct ContentView: View {
                         }
                     }
                     
+                    if bleManager.isConnected {
+                        Button(action: {
+                            navEngine.sendTestNavigationData()
+                        }) {
+                            Label("Send Test Data", systemImage: "arrow.up.message.fill")
+                                .font(.subheadline)
+                                .foregroundColor(.green)
+                        }
+                    }
+
                     if !bleManager.isConnected {
                         Button(action: {
                             bleManager.startScanning()
                         }) {
-                            Label(bleManager.isScanning ? "Scanning..." : "Reconnect", 
+                            Label(bleManager.isScanning ? "Scanning..." : "Reconnect",
                                   systemImage: "antenna.radiowaves.left.and.right")
                                 .font(.subheadline)
                                 .foregroundColor(.blue)
