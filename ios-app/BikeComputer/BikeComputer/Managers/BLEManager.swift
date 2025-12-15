@@ -30,6 +30,13 @@ class BLEManager: NSObject, ObservableObject {
     private var autoReconnect: Bool = true
     private var lastConnectedPeripheralIdentifier: UUID?
     
+    // MARK: - Reconnection with Exponential Backoff (Optimization #14)
+    private var reconnectAttempts: Int = 0
+    private var maxReconnectAttempts: Int = 10
+    private var baseReconnectDelay: TimeInterval = 1.0 // Start with 1 second
+    private var maxReconnectDelay: TimeInterval = 60.0 // Cap at 60 seconds
+    private var reconnectTimer: Timer?
+    
     // MARK: - Initialization
     override init() {
         super.init()
@@ -184,6 +191,9 @@ extension BLEManager: CBCentralManagerDelegate {
         peripheralName = peripheral.name ?? "BikeComputer"
         lastConnectedPeripheralIdentifier = peripheral.identifier
         
+        // Reset reconnection state on successful connection (Optimization #14)
+        resetReconnectionState()
+        
         // Discover services
         peripheral.discoverServices([serviceUUID])
     }
@@ -201,13 +211,38 @@ extension BLEManager: CBCentralManagerDelegate {
         connectedPeripheral = nil
         navigationCharacteristic = nil
         
-        // Auto-reconnect if enabled
+        // Auto-reconnect if enabled with exponential backoff
         if autoReconnect {
-            print("Attempting to reconnect...")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                self?.reconnectToLastDevice()
-            }
+            scheduleReconnectWithBackoff()
         }
+    }
+    
+    // MARK: - Exponential Backoff Reconnection (Optimization #14)
+    
+    private func scheduleReconnectWithBackoff() {
+        reconnectTimer?.invalidate()
+        
+        guard reconnectAttempts < maxReconnectAttempts else {
+            print("❌ Max reconnection attempts reached (\(maxReconnectAttempts))")
+            reconnectAttempts = 0
+            return
+        }
+        
+        // Calculate delay with exponential backoff: base * 2^attempts
+        let delay = min(baseReconnectDelay * pow(2.0, Double(reconnectAttempts)), maxReconnectDelay)
+        reconnectAttempts += 1
+        
+        print("🔄 Reconnection attempt \(reconnectAttempts)/\(maxReconnectAttempts) in \(String(format: "%.1f", delay))s...")
+        
+        reconnectTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            self?.reconnectToLastDevice()
+        }
+    }
+    
+    private func resetReconnectionState() {
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
+        reconnectAttempts = 0
     }
     
     func centralManager(_ central: CBCentralManager, 

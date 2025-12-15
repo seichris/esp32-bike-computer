@@ -21,9 +21,16 @@
 	<!-- Bluetooth Permission -->
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>BikeComputer uses Bluetooth to connect to your ESP32 bike computer display.</string>
-	
+
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>BikeComputer uses Bluetooth to communicate with your bike computer display.</string>
+
+	<!-- HealthKit Permission -->
+	<key>NSHealthShareUsageDescription</key>
+	<string>BikeComputer uses HealthKit to track your cycling workouts and activity data.</string>
+
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>BikeComputer saves your cycling workout data to HealthKit.</string>
 	
 	<!-- Location Accuracy -->
 	<key>NSLocationTemporaryUsageDescriptionDictionary</key>
