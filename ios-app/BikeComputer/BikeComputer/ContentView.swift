@@ -625,23 +625,12 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
 
 struct ContentView: View {
     
-    @StateObject private var bleManager = BLEManager()
-    @StateObject private var navEngine = NavigationEngine()
-    @StateObject private var locationManager = CurrentLocationManager()
-    @StateObject private var healthKitManager = HealthKitManager()
+    // MARK: - Coordinator Pattern (Optimization #7)
+    @StateObject private var coordinator = BikeComputerCoordinator()
     
     @State private var showingRouteInput = false
     @State private var sourceAddress = ""
     @State private var destinationAddress = ""
-    @State private var routeCalculation = RouteCalculationState() // Optimization #11
-    @State private var currentRoute: MKRoute?
-    @State private var selectedView = 0  // 0 = map, 1 = navigation+workout
-    @State private var alert = AlertState() // Optimization #11
-    
-    // Optimization #4: Track ongoing searches to cancel if needed
-    @State private var ongoingSourceSearch: MKLocalSearch?
-    @State private var ongoingDestinationSearch: MKLocalSearch?
-    @State private var ongoingDirections: MKDirections?
     @State private var transportType: MKDirectionsTransportType = {
         if #available(iOS 18.0, *) {
             return .cycling
@@ -663,9 +652,9 @@ struct ContentView: View {
                 connectionStatusView
                 
                 // Main Content Views
-                if navEngine.isNavigating {
+                if coordinator.isNavigating {
                     // Swipeable view: map | navigation+workout
-                    TabView(selection: $selectedView) {
+                    TabView(selection: $coordinator.selectedView) {
                         mapView
                             .tag(0)
 
@@ -675,11 +664,11 @@ struct ContentView: View {
                     .tabViewStyle(PageTabViewStyle(indexDisplayMode: .automatic))
                     .indexViewStyle(PageIndexViewStyle(backgroundDisplayMode: .always))
                     .frame(height: 550)
-                } else if routeCalculation.isCalculating {
+                } else if coordinator.routeCalculation.isCalculating {
                     calculationStatusView
                 } else {
                     // Swipeable view: map | workout
-                    TabView(selection: $selectedView) {
+                    TabView(selection: $coordinator.selectedView) {
                         mapView
                             .tag(0)
 
@@ -693,7 +682,7 @@ struct ContentView: View {
                 
                 // Control Buttons
                 VStack(spacing: 15) {
-                    if !navEngine.isNavigating {
+                    if !coordinator.isNavigating {
                         // Search bar for destination
                         Button(action: {
                             showingRouteInput = true
@@ -709,15 +698,11 @@ struct ContentView: View {
                             .background(Color(.systemGray6))
                                 .cornerRadius(12)
                         }
-                        .disabled(!bleManager.isConnected)
-                        .opacity(bleManager.isConnected ? 1.0 : 0.5)
+                        .disabled(!coordinator.isConnected)
+                        .opacity(coordinator.isConnected ? 1.0 : 0.5)
                     } else {
                         Button(action: {
-                            navEngine.stopNavigation()
-                            currentRoute = nil
-                            // Optimization #3: Disable navigation tracking
-                            locationManager.setNavigating(false)
-                            selectedView = 0
+                            coordinator.stopNavigation()
                         }) {
                             Label("Stop Navigation", systemImage: "stop.fill")
                                 .font(.headline)
@@ -737,27 +722,22 @@ struct ContentView: View {
                 RouteInputView(
                     sourceAddress: $sourceAddress,
                     destinationAddress: $destinationAddress,
-                    locationManager: locationManager,
+                    currentAddress: coordinator.currentAddress,
                     onStartNavigation: { source, destination, transport in
                         transportType = transport
-                        calculateRoute(from: source, to: destination)
+                        coordinator.startNavigation(from: source, to: destination, transportType: transport)
                     }
                 )
             }
-            .alert("Navigation Error", isPresented: $alert.isShowing) {
+            .alert("Navigation Error", isPresented: $coordinator.alert.isShowing) {
                 Button("OK", role: .cancel) { }
             } message: {
-                Text(alert.message)
+                Text(coordinator.alert.message)
             }
         }
-        .onAppear {
-            setupManagers()
-            // Optimization #3: Start tracking location for map view
-            locationManager.setViewingMap(true)
-        }
-        .onChange(of: selectedView) { newValue in
-            // Optimization #3: Track if user is viewing the map
-            locationManager.setViewingMap(newValue == 0)
+        .onChange(of: coordinator.selectedView) { newValue in
+            // Notify coordinator of view change
+            coordinator.updateSelectedView(newValue)
         }
     }
     
@@ -767,16 +747,16 @@ struct ContentView: View {
     
     private var navigationAndWorkoutView: some View {
         VStack(spacing: 15) {
-            if navEngine.isNavigating {
+            if coordinator.isNavigating {
                 // Navigation Details
                 VStack(spacing: 15) {
                     // Arrow Icon
-                    Image(systemName: arrowIcon(for: navEngine.currentIconID))
+                    Image(systemName: arrowIcon(for: coordinator.currentIconID))
                         .font(.system(size: 60))
                         .foregroundColor(.blue)
                     
                     // Distance
-                    Text("\(navEngine.distanceToManeuver)")
+                    Text("\(coordinator.distanceToManeuver)")
                         .font(.system(size: 56, weight: .bold, design: .rounded))
                         .foregroundColor(.primary)
                     
@@ -785,7 +765,7 @@ struct ContentView: View {
                         .foregroundColor(.secondary)
                     
                     // Instruction
-                    Text(navEngine.currentInstruction)
+                    Text(coordinator.currentInstruction)
                         .font(.title3)
                         .fontWeight(.medium)
                         .multilineTextAlignment(.center)
@@ -798,7 +778,7 @@ struct ContentView: View {
                 .padding(.vertical, 5)
             
             // Workout Section
-            if healthKitManager.isWorkoutActive {
+            if coordinator.isWorkoutActive {
                 // Compact Workout Metrics
                 VStack(spacing: 12) {
                     Text("Workout Active")
@@ -812,7 +792,7 @@ struct ContentView: View {
                             Image(systemName: "gauge.high")
                                 .font(.title3)
                                 .foregroundColor(.blue)
-                            Text(String(format: "%.1f", healthKitManager.currentSpeedKmh))
+                            Text(String(format: "%.1f", coordinator.currentSpeedKmh))
                                 .font(.system(size: 20, weight: .bold, design: .rounded))
                                 .foregroundColor(.primary)
                             Text("km/h")
@@ -826,7 +806,7 @@ struct ContentView: View {
                             Image(systemName: "road.lanes")
                                 .font(.title3)
                                 .foregroundColor(.green)
-                            Text(String(format: "%.2f", healthKitManager.distanceKm))
+                            Text(String(format: "%.2f", coordinator.distanceKm))
                                 .font(.system(size: 20, weight: .bold, design: .rounded))
                                 .foregroundColor(.primary)
                             Text("km")
@@ -842,13 +822,13 @@ struct ContentView: View {
                             Image(systemName: "heart.fill")
                                 .font(.title3)
                                 .foregroundColor(.red)
-                            Text(healthKitManager.heartRateInt.map { "\($0)" } ?? "--")
+                            Text(coordinator.heartRate.map { "\($0)" } ?? "--")
                                 .font(.system(size: 20, weight: .bold, design: .rounded))
                                 .foregroundColor(.primary)
                             Text("BPM")
                                 .font(.caption2)
-                                .foregroundColor(.secondary)
-                        }
+                        .foregroundColor(.secondary)
+                    }
                         .frame(maxWidth: .infinity)
                         
                         // Time
@@ -856,7 +836,7 @@ struct ContentView: View {
                             Image(systemName: "timer")
                                 .font(.title3)
                                 .foregroundColor(.orange)
-                            Text(healthKitManager.formattedElapsedTime)
+                            Text(coordinator.formattedElapsedTime)
                                 .font(.system(size: 20, weight: .bold, design: .monospaced))
                                 .foregroundColor(.primary)
                             Text("TIME")
@@ -867,11 +847,11 @@ struct ContentView: View {
                     }
                     
                     // End Workout Button (small version)
-                    Button(action: {
-                        healthKitManager.endBikeWorkout()
-                    }) {
+                        Button(action: {
+                        coordinator.endWorkout()
+                        }) {
                         Label("End Workout", systemImage: "stop.circle.fill")
-                            .font(.subheadline)
+                                .font(.subheadline)
                             .foregroundColor(.white)
                             .padding(.horizontal, 20)
                             .padding(.vertical, 8)
@@ -882,19 +862,19 @@ struct ContentView: View {
             } else {
                 // Start Workout Button (small version during navigation)
                 Button(action: {
-                    healthKitManager.startBikeWorkout()
+                    coordinator.startWorkout()
                 }) {
                     Label("Start Workout", systemImage: "play.circle.fill")
                         .font(.subheadline)
                         .foregroundColor(.white)
                         .padding(.horizontal, 20)
                         .padding(.vertical, 8)
-                        .background(healthKitManager.isAuthorized ? Color.green : Color.gray)
+                        .background(coordinator.isHealthKitAuthorized ? Color.green : Color.gray)
                         .cornerRadius(10)
                 }
-                .disabled(!healthKitManager.isAuthorized)
+                .disabled(!coordinator.isHealthKitAuthorized)
                 
-                if !healthKitManager.isAuthorized {
+                if !coordinator.isHealthKitAuthorized {
                     Text("HealthKit access required")
                         .font(.caption2)
                         .foregroundColor(.secondary)
@@ -914,7 +894,7 @@ struct ContentView: View {
     
     private var workoutOnlyView: some View {
         VStack(spacing: 30) {
-            if healthKitManager.isWorkoutActive {
+            if coordinator.isWorkoutActive {
                 // Active Workout Display
                 VStack(spacing: 20) {
                     // Workout Icon
@@ -935,7 +915,7 @@ struct ContentView: View {
                                 Image(systemName: "gauge.high")
                                     .font(.system(size: 30))
                                     .foregroundColor(.blue)
-                                Text(String(format: "%.1f", healthKitManager.currentSpeedKmh))
+                                Text(String(format: "%.1f", coordinator.currentSpeedKmh))
                                     .font(.system(size: 36, weight: .bold, design: .rounded))
                                     .foregroundColor(.primary)
                                 Text("km/h")
@@ -952,7 +932,7 @@ struct ContentView: View {
                                 Image(systemName: "road.lanes")
                                     .font(.system(size: 30))
                                     .foregroundColor(.green)
-                                Text(String(format: "%.2f", healthKitManager.distanceKm))
+                                Text(String(format: "%.2f", coordinator.distanceKm))
                                     .font(.system(size: 36, weight: .bold, design: .rounded))
                                     .foregroundColor(.primary)
                                 Text("km")
@@ -971,7 +951,7 @@ struct ContentView: View {
                                 Image(systemName: "heart.fill")
                                     .font(.system(size: 30))
                                     .foregroundColor(.red)
-                                Text(healthKitManager.heartRateInt.map { "\($0)" } ?? "--")
+                                Text(coordinator.heartRate.map { "\($0)" } ?? "--")
                                     .font(.system(size: 36, weight: .bold, design: .rounded))
                                     .foregroundColor(.primary)
                                 Text("BPM")
@@ -988,7 +968,7 @@ struct ContentView: View {
                                 Image(systemName: "timer")
                                     .font(.system(size: 30))
                                     .foregroundColor(.orange)
-                                Text(healthKitManager.formattedElapsedTime)
+                                Text(coordinator.formattedElapsedTime)
                                     .font(.system(size: 36, weight: .bold, design: .monospaced))
                                     .foregroundColor(.primary)
                                 Text("TIME")
@@ -1005,7 +985,7 @@ struct ContentView: View {
                     
                     // End Workout Button
                     Button(action: {
-                        healthKitManager.endBikeWorkout()
+                        coordinator.endWorkout()
                     }) {
                         Label("End Workout", systemImage: "stop.circle.fill")
                             .font(.headline)
@@ -1036,19 +1016,19 @@ struct ContentView: View {
                     }
                     
                     Button(action: {
-                        healthKitManager.startBikeWorkout()
+                        coordinator.startWorkout()
                     }) {
                         Label("Start Bike Workout", systemImage: "play.circle.fill")
                             .font(.headline)
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
                             .padding()
-                            .background(healthKitManager.isAuthorized ? Color.green : Color.gray)
+                            .background(coordinator.isHealthKitAuthorized ? Color.green : Color.gray)
                             .cornerRadius(15)
                     }
-                    .disabled(!healthKitManager.isAuthorized)
+                    .disabled(!coordinator.isHealthKitAuthorized)
                     
-                    if !healthKitManager.isAuthorized {
+                    if !coordinator.isHealthKitAuthorized {
                         Text("HealthKit access required for workout tracking")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -1065,10 +1045,10 @@ struct ContentView: View {
 
     private var mapView: some View {
         MapViewContainer(
-            location: locationManager.currentLocation,
-            route: currentRoute,
-            onDestinationSelected: navEngine.isNavigating ? nil : { coordinate, mapLocation in
-                handleDestinationSelection(coordinate: coordinate, mapLocation: mapLocation)
+            location: coordinator.currentLocation,
+            route: coordinator.currentRoute,
+            onDestinationSelected: coordinator.isNavigating ? nil : { coordinate, mapLocation in
+                coordinator.handleDestinationSelection(coordinate: coordinate, mapLocation: mapLocation)
             }
         )
         .cornerRadius(20)
@@ -1083,8 +1063,8 @@ struct ContentView: View {
             // Changed to Image(systemName: "circle.fill") to match the size of the signal icon exactly
             Image(systemName: "circle.fill")
                 .font(.caption)
-                .foregroundColor(bleManager.isConnected ? .green : .red)
-                .shadow(color: bleManager.isConnected ? .green.opacity(0.5) : .red.opacity(0.5), 
+                .foregroundColor(coordinator.isConnected ? .green : .red)
+                .shadow(color: coordinator.isConnected ? .green.opacity(0.5) : .red.opacity(0.5), 
                        radius: 4)
             
             // 2. "BikeComputer" Label
@@ -1094,32 +1074,31 @@ struct ContentView: View {
                         .foregroundColor(.secondary)
                     
             // 3. Signal Info
-            if bleManager.isConnected && bleManager.signalStrength != 0 {
+            if coordinator.isConnected && coordinator.signalStrength != 0 {
                 // Adds a small divider dot or just space
                 Text("•")
                     .font(.caption)
                     .foregroundColor(.secondary.opacity(0.5))
                 
-                            Image(systemName: signalIcon(for: bleManager.signalStrength))
+                            Image(systemName: signalIcon(for: coordinator.signalStrength))
                         .font(.caption)
                         .foregroundColor(.secondary)
                     
-                            Text("\(bleManager.signalStrength) dBm")
+                            Text("\(coordinator.signalStrength) dBm")
                     .font(.caption)
                         .foregroundColor(.secondary)
                     }
 
             // 4. Reconnect Button (only shown when not connected)
-            if !bleManager.isConnected {
+            if !coordinator.isConnected {
                 Button(action: {
-                    bleManager.startScanning()
+                    // Coordinator will handle reconnection
+                    coordinator.disconnect()
                 }) {
-                    Label(bleManager.isScanning ? "Scanning..." : "Reconnect",
-                          systemImage: "antenna.radiowaves.left.and.right")
+                    Label("Reconnect", systemImage: "antenna.radiowaves.left.and.right")
                         .font(.caption)
                         .foregroundColor(.blue)
                 }
-                .disabled(bleManager.isScanning)
             }
         }
         .padding()
@@ -1136,12 +1115,12 @@ struct ContentView: View {
     private var navigationStatusView: some View {
         VStack(spacing: 20) {
             // Arrow Icon
-            Image(systemName: arrowIcon(for: navEngine.currentIconID))
+            Image(systemName: arrowIcon(for: coordinator.currentIconID))
                 .font(.system(size: 80))
                 .foregroundColor(.blue)
             
             // Distance
-            Text("\(navEngine.distanceToManeuver)")
+            Text("\(coordinator.distanceToManeuver)")
                 .font(.system(size: 72, weight: .bold, design: .rounded))
                 .foregroundColor(.primary)
             
@@ -1150,7 +1129,7 @@ struct ContentView: View {
                 .foregroundColor(.secondary)
             
             // Instruction
-            Text(navEngine.currentInstruction)
+            Text(coordinator.currentInstruction)
                 .font(.title2)
                 .fontWeight(.medium)
                 .multilineTextAlignment(.center)
@@ -1176,8 +1155,8 @@ struct ContentView: View {
                 .font(.title2)
                 .foregroundColor(.secondary)
 
-            if !routeCalculation.status.isEmpty {
-                Text(routeCalculation.status)
+            if !coordinator.routeCalculation.status.isEmpty {
+                Text(coordinator.routeCalculation.status)
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -1199,7 +1178,7 @@ struct ContentView: View {
                 .font(.title2)
                 .foregroundColor(.secondary)
             
-            if bleManager.isConnected {
+            if coordinator.isConnected {
                 Text("Tap 'Start Navigation' to begin")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
@@ -1214,261 +1193,7 @@ struct ContentView: View {
     
     // MARK: - Helper Functions
     
-    private func setupManagers() {
-        navEngine.setBLEManager(bleManager)
-        bleManager.startScanning()
-        bleManager.startMonitoringRSSI()
-        // Link managers for workout tracking
-        locationManager.healthKitManager = healthKitManager
-        healthKitManager.locationManager = locationManager
-    }
-    
-    private func handleDestinationSelection(coordinate: CLLocationCoordinate2D, mapLocation: CLLocation?) {
-        print("Destination selected at: \(coordinate.latitude), \(coordinate.longitude)")
-        
-        // Check if BLE is connected
-        guard bleManager.isConnected else {
-            print("BLE not connected - cannot start navigation")
-            alert.message = "Please connect to your bike computer before starting navigation."
-            alert.isShowing = true
-            return
-        }
-        
-        // Get current location - try locationManager first, then fall back to map's location
-        let sourceLocation: CLLocation
-        if let currentLoc = locationManager.currentLocation {
-            sourceLocation = currentLoc
-            print("Using locationManager location: \(currentLoc.coordinate.latitude), \(currentLoc.coordinate.longitude)")
-        } else if let mapLoc = mapLocation {
-            sourceLocation = mapLoc
-            print("Using map's user location: \(mapLoc.coordinate.latitude), \(mapLoc.coordinate.longitude)")
-        } else {
-            print("Warning: No location available from any source")
-            alert.message = "Unable to determine your current location. Please enable location services."
-            alert.isShowing = true
-            locationManager.requestLocation()
-            return
-        }
-        
-        // Create map items for route calculation
-        let sourceItem = MKMapItem(placemark: MKPlacemark(coordinate: sourceLocation.coordinate))
-        sourceItem.name = "Current Location"
-        
-        let destinationItem = MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
-        destinationItem.name = "Selected Location"
-        
-        // Start route calculation
-        routeCalculation.isCalculating = true
-        routeCalculation.status = "Calculating route..."
-        
-        // Calculate the route
-        let request = MKDirections.Request()
-        request.source = sourceItem
-        request.destination = destinationItem
-        request.transportType = transportType
-        request.requestsAlternateRoutes = false
-        
-        print("Calculating route with transport type: \(transportType.rawValue)")
-        
-        let directions = MKDirections(request: request)
-        directions.calculate { [self] response, error in
-            if let error = error {
-                print("Error calculating route: \(error.localizedDescription)")
-                self.routeCalculation.status = "Route calculation failed"
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                    self.routeCalculation.isCalculating = false
-                    self.routeCalculation.status = ""
-                }
-                return
-            }
-            
-            guard let route = response?.routes.first else {
-                print("No routes found")
-                self.routeCalculation.status = "No route available"
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                    self.routeCalculation.isCalculating = false
-                    self.routeCalculation.status = ""
-                }
-                return
-            }
-            
-            print("Route calculated successfully!")
-            print("Distance: \(route.distance)m, ETA: \(route.expectedTravelTime)s")
-            print("Steps: \(route.steps.count)")
-            
-            self.routeCalculation.status = "Starting navigation..."
-            
-            // Store the route for map display
-            self.currentRoute = route
-            
-            // Start simulated navigation with the real route
-            self.navEngine.startSimulatedNavigation(with: route)
-            
-            // Optimization #3: Enable location tracking for navigation
-            self.locationManager.setNavigating(true)
-            
-            // Show navigation+workout view
-            self.selectedView = 1
-            
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                self.routeCalculation.isCalculating = false
-                self.routeCalculation.status = ""
-            }
-        }
-    }
-    
-    private func calculateRoute(from source: String, to destination: String) {
-        print("Starting route calculation from '\(source)' to '\(destination)'")
-        
-        // Optimization #4: Cancel any ongoing searches
-        ongoingSourceSearch?.cancel()
-        ongoingDestinationSearch?.cancel()
-        ongoingDirections?.cancel()
-
-        routeCalculation.isCalculating = true
-        routeCalculation.status = "Searching for locations..."
-
-        // Check if source is current location
-        let isUsingCurrentLocation = source.contains("Current Location") || source.contains("Getting current location")
-        
-        if isUsingCurrentLocation, let currentLoc = locationManager.currentLocation {
-            // Use current location directly
-            let sourceItem = MKMapItem(placemark: MKPlacemark(coordinate: currentLoc.coordinate))
-            sourceItem.name = "Current Location"
-            
-            print("Using current location: \(currentLoc.coordinate.latitude), \(currentLoc.coordinate.longitude)")
-            self.routeCalculation.status = "Finding destination..."
-            
-            // Find destination and calculate route
-            self.findDestinationAndCalculateRoute(from: sourceItem, destination: destination)
-        } else {
-            // Use MKLocalSearch for source address
-            let sourceSearchRequest = MKLocalSearch.Request()
-            sourceSearchRequest.naturalLanguageQuery = source
-            
-            let sourceSearch = MKLocalSearch(request: sourceSearchRequest)
-            self.ongoingSourceSearch = sourceSearch // Optimization #4: Store reference
-            sourceSearch.start { (response, error) in
-                self.ongoingSourceSearch = nil // Clear reference when done
-                if let error = error {
-                    print("Error searching for source: \(error.localizedDescription)")
-                    self.routeCalculation.status = "Could not find starting location"
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        self.routeCalculation.isCalculating = false
-                        self.routeCalculation.status = ""
-                    }
-                    return
-                }
-                
-                guard let sourceItem = response?.mapItems.first else {
-                    print("No results for source location")
-                    self.routeCalculation.status = "Starting location not found"
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        self.routeCalculation.isCalculating = false
-                        self.routeCalculation.status = ""
-                    }
-                    return
-                }
-                
-                print("Source found: \(sourceItem.name ?? "Unknown") at \(sourceItem.placemark.coordinate.latitude), \(sourceItem.placemark.coordinate.longitude)")
-                self.routeCalculation.status = "Finding destination..."
-                
-                // Find destination and calculate route
-                self.findDestinationAndCalculateRoute(from: sourceItem, destination: destination)
-            }
-        }
-    }
-    
-    private func findDestinationAndCalculateRoute(from sourceItem: MKMapItem, destination: String) {
-        let destinationSearchRequest = MKLocalSearch.Request()
-        destinationSearchRequest.naturalLanguageQuery = destination
-        
-        let destinationSearch = MKLocalSearch(request: destinationSearchRequest)
-        self.ongoingDestinationSearch = destinationSearch // Optimization #4: Store reference
-        destinationSearch.start { (response, error) in
-            self.ongoingDestinationSearch = nil // Clear reference when done
-                if let error = error {
-                    print("Error searching for destination: \(error.localizedDescription)")
-                    self.routeCalculation.status = "Could not find destination"
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        self.routeCalculation.isCalculating = false
-                        self.routeCalculation.status = ""
-                    }
-                    return
-                }
-                
-                guard let destinationItem = response?.mapItems.first else {
-                    print("No results for destination location")
-                    self.routeCalculation.status = "Destination not found"
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        self.routeCalculation.isCalculating = false
-                        self.routeCalculation.status = ""
-                    }
-                    return
-                }
-                
-                print("Destination found: \(destinationItem.name ?? "Unknown") at \(destinationItem.placemark.coordinate.latitude), \(destinationItem.placemark.coordinate.longitude)")
-                self.routeCalculation.status = "Calculating route..."
-                
-                // Now calculate the route
-                let request = MKDirections.Request()
-                request.source = sourceItem
-                request.destination = destinationItem
-                request.transportType = self.transportType
-                request.requestsAlternateRoutes = false
-                
-                print("Calculating route with transport type: \(self.transportType.rawValue)")
-                
-                let directions = MKDirections(request: request)
-                self.ongoingDirections = directions // Optimization #4: Store reference
-                directions.calculate { response, error in
-                    self.ongoingDirections = nil // Clear reference when done
-                    if let error = error {
-                        print("Error calculating route: \(error.localizedDescription)")
-                        self.routeCalculation.status = "Route calculation failed"
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                            self.routeCalculation.isCalculating = false
-                            self.routeCalculation.status = ""
-                        }
-                        return
-                    }
-                    
-                    guard let route = response?.routes.first else {
-                        print("No routes found")
-                        self.routeCalculation.status = "No route available"
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                            self.routeCalculation.isCalculating = false
-                            self.routeCalculation.status = ""
-                        }
-                        return
-                    }
-                    
-                    print("Route calculated successfully!")
-                    print("Distance: \(route.distance)m, ETA: \(route.expectedTravelTime)s")
-                    print("Steps: \(route.steps.count)")
-                    
-                    for (index, step) in route.steps.enumerated() {
-                        print("Step \(index): \(step.instructions) - \(step.distance)m")
-                    }
-                    
-                    self.routeCalculation.status = "Starting navigation..."
-                    
-                    // Store the route for map display
-                    self.currentRoute = route
-                    
-                    // Start simulated navigation with the real route
-                    self.navEngine.startSimulatedNavigation(with: route)
-                    
-                    // Reset to show navigation details first
-                    self.selectedView = 1
-                    
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                        self.routeCalculation.isCalculating = false
-                        self.routeCalculation.status = ""
-                }
-            }
-        }
-    }
+    // Setup and route calculation now handled by coordinator
     
     private func signalIcon(for rssi: Int) -> String {
         if rssi > -50 {
@@ -1538,7 +1263,7 @@ struct RouteInputView: View {
     
     @Binding var sourceAddress: String
     @Binding var destinationAddress: String
-    @ObservedObject var locationManager: CurrentLocationManager
+    let currentAddress: String
     
     var onStartNavigation: (String, String, MKDirectionsTransportType) -> Void
     
@@ -1591,7 +1316,7 @@ struct RouteInputView: View {
                             Image(systemName: "location.fill")
                                 .foregroundColor(.blue)
                             
-                            Text(locationManager.currentAddress)
+                            Text(currentAddress)
                                 .foregroundColor(.primary)
                             
                             Spacer()
@@ -1643,7 +1368,7 @@ struct RouteInputView: View {
                 // Go button (only shown after destination is selected)
                 if hasSelectedDestination {
                     Button(action: {
-                        onStartNavigation(locationManager.currentAddress, destinationAddress, selectedTransportType)
+                        onStartNavigation(currentAddress, destinationAddress, selectedTransportType)
                         dismiss()
                     }) {
                         Text("Go")
@@ -1675,8 +1400,7 @@ struct RouteInputView: View {
                 // Auto-focus destination field when view appears
                 isDestinationFieldFocused = true
                 
-                // Request current location
-                locationManager.startUpdatingLocation()
+                // Location updates handled by coordinator
             }
             .onDisappear {
                 // Reset state when dismissed
@@ -1749,3 +1473,4 @@ struct ContentView_Previews: PreviewProvider {
         ContentView()
     }
 }
+
