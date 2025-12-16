@@ -14,6 +14,11 @@ ios-app/*.hmap
 ios-app/*.ipa
 ios-app/*.dSYM.zip
 ios-app/*.dSYM
+# iOS - User-specific data only
+ios-app/*.xcuserstate
+ios-app/xcuserdata/
+ios-app/BikeComputer.xcuserdata/
+*.xcuserdatad/
 
 .vscode/
 esp32-bike-computer.code-workspace
