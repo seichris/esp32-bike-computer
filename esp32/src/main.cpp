@@ -77,7 +77,7 @@ static lv_disp_drv_t disp_drv;
 
 // ============================================================================
 // LVGL DISPLAY FLUSH CALLBACK
-// CRITICAL: CO5300 expects Big Endian RGB565 (LV_COLOR_16_SWAP handles this)
+// Using full screen buffer to prevent partial update artifacts on AMOLED
 // ============================================================================
 
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
@@ -85,9 +85,12 @@ void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color
   uint32_t w = (area->x2 - area->x1 + 1);
   uint32_t h = (area->y2 - area->y1 + 1);
 
-  // Use Arduino_GFX's high-level draw16bitRGBBitmap method
-  // This handles all byte swapping and communication correctly for CO5300
-  gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)color_p, w, h);
+  // Try using startWrite/endWrite with drawBitmap for better control
+  // This might bypass some Arduino_GFX issues with CO5300
+  gfx->startWrite();
+  gfx->setAddrWindow(area->x1, area->y1, w, h);
+  gfx->writePixels((uint16_t *)color_p, w * h);
+  gfx->endWrite();
 
   // Inform LVGL that flushing is complete
   lv_disp_flush_ready(disp);
@@ -299,21 +302,19 @@ void setupLVGL() {
   
   lv_init();
   
-  // Allocate display buffer - larger buffer with PSRAM for better performance
-  // Use 1/5 of screen if PSRAM available, otherwise 1/10
+  // Allocate display buffer - full screen buffer for AMOLED to prevent artifacts
+  // Use full screen buffer to avoid partial update issues that cause black stripes
+  uint32_t bufSize = SCREEN_WIDTH * SCREEN_HEIGHT;
+  Serial.printf("Allocating LVGL buffer: %d bytes (full screen)\n", bufSize * sizeof(lv_color_t));
+
   #ifdef BOARD_HAS_PSRAM
-    uint32_t bufSize = SCREEN_WIDTH * SCREEN_HEIGHT / 5;
-    Serial.printf("Allocating LVGL buffer: %d bytes (using PSRAM)\n", bufSize * sizeof(lv_color_t));
     // Try PSRAM first (SPIRAM), fallback to internal DMA-capable RAM
     disp_draw_buf = (lv_color_t *)heap_caps_malloc(bufSize * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
     if (!disp_draw_buf) {
       Serial.println("PSRAM allocation failed, trying internal RAM...");
-      bufSize = SCREEN_WIDTH * SCREEN_HEIGHT / 10;  // Smaller buffer for internal RAM
       disp_draw_buf = (lv_color_t *)heap_caps_malloc(bufSize * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     }
   #else
-    uint32_t bufSize = SCREEN_WIDTH * SCREEN_HEIGHT / 10;
-    Serial.printf("Allocating LVGL buffer: %d bytes (internal RAM)\n", bufSize * sizeof(lv_color_t));
     disp_draw_buf = (lv_color_t *)heap_caps_malloc(bufSize * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   #endif
   

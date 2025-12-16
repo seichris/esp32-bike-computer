@@ -210,6 +210,25 @@
 #define LV_USE_USER_DATA 1
 
 /*==================
+   DRAWING
+ *==================*/
+
+/* Enable the GPU interface*/
+#define LV_USE_GPU_STM32_DMA2D 0
+#define LV_USE_GPU_NXP_PXP 0
+#define LV_USE_GPU_NXP_VG_LITE 0
+#define LV_USE_GPU_SDL 0
+
+/* Enable anti-aliasing (AA) for smoother curves and circles */
+#define LV_USE_DRAW_SW_COMPLEX 1
+
+/* Enable anti-aliasing for lines, arcs, and other shapes */
+#define LV_USE_DRAW_MASKS 1
+
+/* Use 8x8 antialiasing instead of 4x4 for better quality */
+#define LV_DRAW_SW_COMPLEX_ANTIALIAS 1
+
+/*==================
    LOGGING
  *==================*/
 
