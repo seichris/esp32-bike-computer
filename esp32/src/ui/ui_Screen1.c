@@ -16,226 +16,262 @@ lv_obj_t *ui_IconPlaceholder = NULL;
 // Canvas buffer for drawing arrows
 static lv_color_t *canvas_buf = NULL;
 
-// Arrow drawing functions
+// --- Helper: Draw a filled rounded arrowhead ---
+// We use a polygon for the head, but shaped like a wide arrow
+void draw_arrow_head_poly(lv_point_t *points, int count, lv_color_t color) {
+  lv_draw_rect_dsc_t draw_dsc;
+  lv_draw_rect_dsc_init(&draw_dsc);
+  draw_dsc.bg_color = color;
+  draw_dsc.bg_opa = LV_OPA_COVER;
+  lv_canvas_draw_polygon(ui_IconPlaceholder, points, count, &draw_dsc);
+}
+
+// --- Arrow Drawing Functions ---
+
 void draw_up_arrow(lv_color_t color) {
-    if (!ui_IconPlaceholder || !canvas_buf) return;
+  if (!ui_IconPlaceholder || !canvas_buf)
+    return;
 
-    // Clear canvas with transparent background
-    lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
+  lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
 
-    // Draw up arrow: triangle pointing up with stem
-    static lv_point_t arrow_points[] = {
-        {40, 15},  // Top point
-        {25, 35},  // Bottom left
-        {30, 35},  // Bottom left inner
-        {30, 65},  // Stem bottom left
-        {50, 65},  // Stem bottom right
-        {50, 35},  // Bottom right inner
-        {55, 35},  // Bottom right
-    };
+  lv_draw_line_dsc_t line_dsc;
+  lv_draw_line_dsc_init(&line_dsc);
+  line_dsc.color = color;
+  line_dsc.width = 14;
+  line_dsc.round_start = true;
+  line_dsc.round_end = false;
+  line_dsc.opa = LV_OPA_COVER;
 
-    // Create draw descriptor for filled arrow
-    static lv_draw_rect_dsc_t draw_dsc;
-    lv_draw_rect_dsc_init(&draw_dsc);
-    draw_dsc.bg_color = color;
-    draw_dsc.bg_opa = LV_OPA_COVER;
+  // Code-LEFT points Screen-UP
+  lv_point_t points_shaft[] = {{70, 40}, {30, 40}};
+  lv_canvas_draw_line(ui_IconPlaceholder, points_shaft, 2, &line_dsc);
 
-    lv_canvas_draw_polygon(ui_IconPlaceholder, arrow_points, 7, &draw_dsc);
+  static lv_point_t head_points[] = {
+      {10, 40}, // Tip
+      {36, 22}, // Top
+      {36, 58}  // Bottom
+  };
+  draw_arrow_head_poly(head_points, 3, color);
 }
 
 void draw_left_arrow(lv_color_t color) {
-    if (!ui_IconPlaceholder || !canvas_buf) return;
+  if (!ui_IconPlaceholder || !canvas_buf)
+    return;
 
-    lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
+  lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
 
-    static lv_point_t arrow_points[] = {
-        {25, 40},  // Left point
-        {45, 25},  // Top right
-        {45, 30},  // Top right inner
-        {75, 30},  // Stem top right
-        {75, 50},  // Stem bottom right
-        {45, 50},  // Bottom right inner
-        {45, 55},  // Bottom right
-    };
+  lv_draw_line_dsc_t line_dsc;
+  lv_draw_line_dsc_init(&line_dsc);
+  line_dsc.color = color;
+  line_dsc.width = 14;
+  line_dsc.round_start = true;
+  line_dsc.round_end = false;
+  line_dsc.opa = LV_OPA_COVER;
 
-    // Create draw descriptor for filled arrow
-    static lv_draw_rect_dsc_t draw_dsc;
-    lv_draw_rect_dsc_init(&draw_dsc);
-    draw_dsc.bg_color = color;
-    draw_dsc.bg_opa = LV_OPA_COVER;
+  // Code-DOWN points Screen-LEFT
+  lv_point_t points_shaft[] = {{40, 10}, {40, 50}};
+  lv_canvas_draw_line(ui_IconPlaceholder, points_shaft, 2, &line_dsc);
 
-    lv_canvas_draw_polygon(ui_IconPlaceholder, arrow_points, 7, &draw_dsc);
+  static lv_point_t head_points[] = {
+      {40, 70}, // Tip
+      {22, 44}, // Left
+      {58, 44}  // Right
+  };
+  draw_arrow_head_poly(head_points, 3, color);
 }
 
 void draw_right_arrow(lv_color_t color) {
-    if (!ui_IconPlaceholder || !canvas_buf) return;
+  if (!ui_IconPlaceholder || !canvas_buf)
+    return;
 
-    lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
+  lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
 
-    static lv_point_t arrow_points[] = {
-        {55, 40},  // Right point
-        {35, 25},  // Top left
-        {35, 30},  // Top left inner
-        {5, 30},   // Stem top left
-        {5, 50},   // Stem bottom left
-        {35, 50},  // Bottom left inner
-        {35, 55},  // Bottom left
-    };
+  lv_draw_line_dsc_t line_dsc;
+  lv_draw_line_dsc_init(&line_dsc);
+  line_dsc.color = color;
+  line_dsc.width = 14;
+  line_dsc.round_start = true;
+  line_dsc.round_end = false;
+  line_dsc.opa = LV_OPA_COVER;
 
-    // Create draw descriptor for filled arrow
-    static lv_draw_rect_dsc_t draw_dsc;
-    lv_draw_rect_dsc_init(&draw_dsc);
-    draw_dsc.bg_color = color;
-    draw_dsc.bg_opa = LV_OPA_COVER;
+  // Code-UP points Screen-RIGHT
+  lv_point_t points_shaft[] = {{40, 70}, {40, 30}};
+  lv_canvas_draw_line(ui_IconPlaceholder, points_shaft, 2, &line_dsc);
 
-    lv_canvas_draw_polygon(ui_IconPlaceholder, arrow_points, 7, &draw_dsc);
+  static lv_point_t head_points[] = {
+      {40, 10}, // Tip
+      {22, 36}, // Left
+      {58, 36}  // Right
+  };
+  draw_arrow_head_poly(head_points, 3, color);
 }
 
 void draw_u_turn_arrow(lv_color_t color) {
-    if (!ui_IconPlaceholder || !canvas_buf) return;
+  if (!ui_IconPlaceholder || !canvas_buf)
+    return;
 
-    lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
+  lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
 
-    // Draw a curved U-turn arrow (simplified as two left arrows)
-    static lv_point_t arrow1_points[] = {
-        {15, 30},  // Left point 1
-        {35, 15},  // Top right 1
-        {35, 20},  // Top right inner 1
-        {65, 20},  // Stem top right 1
-        {65, 40},  // Stem bottom right 1
-        {35, 40},  // Bottom right inner 1
-        {35, 45},  // Bottom right 1
-    };
+  lv_draw_line_dsc_t line_dsc;
+  lv_draw_line_dsc_init(&line_dsc);
+  line_dsc.color = color;
+  line_dsc.width = 14;
+  line_dsc.round_start = true;
+  line_dsc.round_end = false;
+  line_dsc.opa = LV_OPA_COVER;
 
-    static lv_point_t arrow2_points[] = {
-        {25, 50},  // Left point 2
-        {45, 35},  // Top right 2
-        {45, 40},  // Top right inner 2
-        {75, 40},  // Stem top right 2
-        {75, 60},  // Stem bottom right 2
-        {45, 60},  // Bottom right inner 2
-        {45, 65},  // Bottom right 2
-    };
+  lv_draw_arc_dsc_t arc_dsc;
+  lv_draw_arc_dsc_init(&arc_dsc);
+  arc_dsc.color = color;
+  arc_dsc.width = 14;
+  arc_dsc.rounded = false;
+  arc_dsc.opa = LV_OPA_COVER;
 
-    // Create draw descriptor for filled arrow
-    static lv_draw_rect_dsc_t draw_dsc;
-    lv_draw_rect_dsc_init(&draw_dsc);
-    draw_dsc.bg_color = color;
-    draw_dsc.bg_opa = LV_OPA_COVER;
+  // Screen: UP -> Curve Left -> DOWN
+  // Code (90 deg CW rotation): LEFT -> Curve Down -> RIGHT
 
-    lv_canvas_draw_polygon(ui_IconPlaceholder, arrow1_points, 7, &draw_dsc);
-    lv_canvas_draw_polygon(ui_IconPlaceholder, arrow2_points, 7, &draw_dsc);
+  // 1. Bottom Horizontal (Code-LEFT)
+  lv_point_t p_left[] = {{70, 25}, {35, 25}};
+  lv_canvas_draw_line(ui_IconPlaceholder, p_left, 2, &line_dsc);
+
+  // 2. The Curve (Code-DOWN side)
+  // Center (35, 45), Radius 20.
+  // From 270 (Top/Right-start) to 90 (Bottom/Right-end) via 180
+  // (Left/DOWN-side)
+  lv_canvas_draw_arc(ui_IconPlaceholder, 35, 45, 20, 90, 270, &arc_dsc);
+
+  // 3. Top Horizontal (Code-RIGHT)
+  lv_point_t p_right[] = {{35, 65}, {45, 65}};
+  lv_canvas_draw_line(ui_IconPlaceholder, p_right, 2, &line_dsc);
+
+  // 4. Arrow Head (Pointing Code-RIGHT)
+  static lv_point_t head_points[] = {
+      {70, 65}, // Tip
+      {46, 49}, // Top wing
+      {46, 81}  // Bottom wing
+  };
+  draw_arrow_head_poly(head_points, 3, color);
 }
 
 // event functions
-
 // build functions
 
-void ui_Screen1_screen_init(void)
-{
-ui_Screen1 = lv_obj_create(NULL);
-lv_obj_clear_flag( ui_Screen1, LV_OBJ_FLAG_SCROLLABLE );    /// Flags
-lv_obj_set_style_bg_color(ui_Screen1, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+void ui_Screen1_screen_init(void) {
+  ui_Screen1 = lv_obj_create(NULL);
+  lv_obj_clear_flag(ui_Screen1, LV_OBJ_FLAG_SCROLLABLE); /// Flags
+  lv_obj_set_style_bg_color(ui_Screen1, lv_color_hex(0x000000),
+                            LV_PART_MAIN | LV_STATE_DEFAULT);
 
-// ========== Device Status Section (Top) ==========
+  // ========== Device Status Section (Top) ==========
 
-// BLE Connection Status
-ui_LabelBLEStatus = lv_label_create(ui_Screen1);
-lv_obj_set_width(ui_LabelBLEStatus, LV_SIZE_CONTENT);
-lv_obj_set_height(ui_LabelBLEStatus, LV_SIZE_CONTENT);
-lv_obj_set_x(ui_LabelBLEStatus, 0);
-lv_obj_set_y(ui_LabelBLEStatus, -190);
-lv_obj_set_align(ui_LabelBLEStatus, LV_ALIGN_CENTER);
-lv_label_set_text(ui_LabelBLEStatus, "BLE: Disconnected");
-lv_obj_set_style_text_color(ui_LabelBLEStatus, lv_color_hex(0xFF6B6B), LV_PART_MAIN | LV_STATE_DEFAULT);
-lv_obj_set_style_text_font(ui_LabelBLEStatus, &lv_font_montserrat_18, LV_PART_MAIN | LV_STATE_DEFAULT);
+  // BLE Connection Status
+  ui_LabelBLEStatus = lv_label_create(ui_Screen1);
+  lv_obj_set_width(ui_LabelBLEStatus, LV_SIZE_CONTENT);
+  lv_obj_set_height(ui_LabelBLEStatus, LV_SIZE_CONTENT);
+  lv_obj_set_x(ui_LabelBLEStatus, 0);
+  lv_obj_set_y(ui_LabelBLEStatus, -190);
+  lv_obj_set_align(ui_LabelBLEStatus, LV_ALIGN_CENTER);
+  lv_label_set_text(ui_LabelBLEStatus, "BLE: Disconnected");
+  lv_obj_set_style_text_color(ui_LabelBLEStatus, lv_color_hex(0xFF6B6B),
+                              LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_text_font(ui_LabelBLEStatus, &lv_font_montserrat_18,
+                             LV_PART_MAIN | LV_STATE_DEFAULT);
 
-// Heap Memory Status
-ui_LabelHeapFree = lv_label_create(ui_Screen1);
-lv_obj_set_width(ui_LabelHeapFree, LV_SIZE_CONTENT);
-lv_obj_set_height(ui_LabelHeapFree, LV_SIZE_CONTENT);
-lv_obj_set_x(ui_LabelHeapFree, -80);
-lv_obj_set_y(ui_LabelHeapFree, -150);
-lv_obj_set_align(ui_LabelHeapFree, LV_ALIGN_CENTER);
-lv_label_set_text(ui_LabelHeapFree, "Heap: -- KB");
-lv_obj_set_style_text_color(ui_LabelHeapFree, lv_color_hex(0x00D4FF), LV_PART_MAIN | LV_STATE_DEFAULT);
-lv_obj_set_style_text_font(ui_LabelHeapFree, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
+  // Heap Memory Status
+  ui_LabelHeapFree = lv_label_create(ui_Screen1);
+  lv_obj_set_width(ui_LabelHeapFree, LV_SIZE_CONTENT);
+  lv_obj_set_height(ui_LabelHeapFree, LV_SIZE_CONTENT);
+  lv_obj_set_x(ui_LabelHeapFree, -80);
+  lv_obj_set_y(ui_LabelHeapFree, -150);
+  lv_obj_set_align(ui_LabelHeapFree, LV_ALIGN_CENTER);
+  lv_label_set_text(ui_LabelHeapFree, "Heap: -- KB");
+  lv_obj_set_style_text_color(ui_LabelHeapFree, lv_color_hex(0x00D4FF),
+                              LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_text_font(ui_LabelHeapFree, &lv_font_montserrat_14,
+                             LV_PART_MAIN | LV_STATE_DEFAULT);
 
-// PSRAM Memory Status
-ui_LabelPSRAMFree = lv_label_create(ui_Screen1);
-lv_obj_set_width(ui_LabelPSRAMFree, LV_SIZE_CONTENT);
-lv_obj_set_height(ui_LabelPSRAMFree, LV_SIZE_CONTENT);
-lv_obj_set_x(ui_LabelPSRAMFree, 80);
-lv_obj_set_y(ui_LabelPSRAMFree, -150);
-lv_obj_set_align(ui_LabelPSRAMFree, LV_ALIGN_CENTER);
-lv_label_set_text(ui_LabelPSRAMFree, "PSRAM: -- KB");
-lv_obj_set_style_text_color(ui_LabelPSRAMFree, lv_color_hex(0x00D4FF), LV_PART_MAIN | LV_STATE_DEFAULT);
-lv_obj_set_style_text_font(ui_LabelPSRAMFree, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
+  // PSRAM Memory Status
+  ui_LabelPSRAMFree = lv_label_create(ui_Screen1);
+  lv_obj_set_width(ui_LabelPSRAMFree, LV_SIZE_CONTENT);
+  lv_obj_set_height(ui_LabelPSRAMFree, LV_SIZE_CONTENT);
+  lv_obj_set_x(ui_LabelPSRAMFree, 80);
+  lv_obj_set_y(ui_LabelPSRAMFree, -150);
+  lv_obj_set_align(ui_LabelPSRAMFree, LV_ALIGN_CENTER);
+  lv_label_set_text(ui_LabelPSRAMFree, "PSRAM: -- KB");
+  lv_obj_set_style_text_color(ui_LabelPSRAMFree, lv_color_hex(0x00D4FF),
+                              LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_text_font(ui_LabelPSRAMFree, &lv_font_montserrat_14,
+                             LV_PART_MAIN | LV_STATE_DEFAULT);
 
-// ========== Navigation Section (Center) ==========
+  // ========== Navigation Section (Center) ==========
 
-// Navigation Arrow/Icon Display (Canvas for vector arrows)
-ui_IconPlaceholder = lv_canvas_create(ui_Screen1);
-lv_obj_set_width(ui_IconPlaceholder, 80);
-lv_obj_set_height(ui_IconPlaceholder, 80);
-lv_obj_set_x(ui_IconPlaceholder, 0);
-lv_obj_set_y(ui_IconPlaceholder, -20);
-lv_obj_set_align(ui_IconPlaceholder, LV_ALIGN_CENTER);
-lv_obj_clear_flag(ui_IconPlaceholder, LV_OBJ_FLAG_SCROLLABLE);
+  // Navigation Arrow/Icon Display (Canvas for vector arrows)
+  ui_IconPlaceholder = lv_canvas_create(ui_Screen1);
+  lv_obj_set_width(ui_IconPlaceholder, 80);
+  lv_obj_set_height(ui_IconPlaceholder, 80);
+  lv_obj_set_x(ui_IconPlaceholder, 0);
+  lv_obj_set_y(ui_IconPlaceholder, -20);
+  lv_obj_set_align(ui_IconPlaceholder, LV_ALIGN_CENTER);
+  lv_obj_clear_flag(ui_IconPlaceholder, LV_OBJ_FLAG_SCROLLABLE);
 
-// Allocate canvas buffer (80x80 pixels) with error checking
-canvas_buf = (lv_color_t *)lv_mem_alloc(80 * 80 * sizeof(lv_color_t));
-if (canvas_buf != NULL) {
-    lv_canvas_set_buffer(ui_IconPlaceholder, canvas_buf, 80, 80, LV_IMG_CF_TRUE_COLOR);
-    lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
-} else {
+  // Allocate canvas buffer (80x80 pixels) with error checking
+  canvas_buf = (lv_color_t *)lv_mem_alloc(80 * 80 * sizeof(lv_color_t));
+  if (canvas_buf != NULL) {
+    lv_canvas_set_buffer(ui_IconPlaceholder, canvas_buf, 80, 80,
+                         LV_IMG_CF_TRUE_COLOR);
+    lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0),
+                      LV_OPA_TRANSP);
+  } else {
     // Canvas buffer allocation failed - hide the placeholder
     lv_obj_add_flag(ui_IconPlaceholder, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  // Distance Label (Large, below icon)
+  ui_LabelDistance = lv_label_create(ui_Screen1);
+  lv_obj_set_width(ui_LabelDistance, LV_SIZE_CONTENT);
+  lv_obj_set_height(ui_LabelDistance, LV_SIZE_CONTENT);
+  lv_obj_set_x(ui_LabelDistance, 0);
+  lv_obj_set_y(ui_LabelDistance, 80);
+  lv_obj_set_align(ui_LabelDistance, LV_ALIGN_CENTER);
+  lv_label_set_text(ui_LabelDistance, "-- m");
+  lv_obj_set_style_text_color(ui_LabelDistance, lv_color_hex(0xFFFFFF),
+                              LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_text_font(ui_LabelDistance, &lv_font_montserrat_48,
+                             LV_PART_MAIN | LV_STATE_DEFAULT);
+
+  // Instruction Label (Below distance)
+  ui_LabelInstruction = lv_label_create(ui_Screen1);
+  lv_obj_set_width(ui_LabelInstruction, 400);
+  lv_obj_set_height(ui_LabelInstruction, LV_SIZE_CONTENT);
+  lv_obj_set_x(ui_LabelInstruction, 0);
+  lv_obj_set_y(ui_LabelInstruction, 150);
+  lv_obj_set_align(ui_LabelInstruction, LV_ALIGN_CENTER);
+  lv_label_set_text(ui_LabelInstruction, "Waiting for navigation...");
+  lv_obj_set_style_text_color(ui_LabelInstruction, lv_color_hex(0xCCCCCC),
+                              LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_text_font(ui_LabelInstruction, &lv_font_montserrat_20,
+                             LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_text_align(ui_LabelInstruction, LV_TEXT_ALIGN_CENTER,
+                              LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_label_set_long_mode(ui_LabelInstruction, LV_LABEL_LONG_WRAP);
 }
 
-// Distance Label (Large, below icon)
-ui_LabelDistance = lv_label_create(ui_Screen1);
-lv_obj_set_width(ui_LabelDistance, LV_SIZE_CONTENT);
-lv_obj_set_height(ui_LabelDistance, LV_SIZE_CONTENT);
-lv_obj_set_x(ui_LabelDistance, 0);
-lv_obj_set_y(ui_LabelDistance, 80);
-lv_obj_set_align(ui_LabelDistance, LV_ALIGN_CENTER);
-lv_label_set_text(ui_LabelDistance, "-- m");
-lv_obj_set_style_text_color(ui_LabelDistance, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
-lv_obj_set_style_text_font(ui_LabelDistance, &lv_font_montserrat_48, LV_PART_MAIN | LV_STATE_DEFAULT);
+void ui_Screen1_screen_destroy(void) {
+  if (ui_Screen1)
+    lv_obj_del(ui_Screen1);
 
-// Instruction Label (Below distance)
-ui_LabelInstruction = lv_label_create(ui_Screen1);
-lv_obj_set_width(ui_LabelInstruction, 400);
-lv_obj_set_height(ui_LabelInstruction, LV_SIZE_CONTENT);
-lv_obj_set_x(ui_LabelInstruction, 0);
-lv_obj_set_y(ui_LabelInstruction, 150);
-lv_obj_set_align(ui_LabelInstruction, LV_ALIGN_CENTER);
-lv_label_set_text(ui_LabelInstruction, "Waiting for navigation...");
-lv_obj_set_style_text_color(ui_LabelInstruction, lv_color_hex(0xCCCCCC), LV_PART_MAIN | LV_STATE_DEFAULT);
-lv_obj_set_style_text_font(ui_LabelInstruction, &lv_font_montserrat_20, LV_PART_MAIN | LV_STATE_DEFAULT);
-lv_obj_set_style_text_align(ui_LabelInstruction, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
-lv_label_set_long_mode(ui_LabelInstruction, LV_LABEL_LONG_WRAP);
-
-}
-
-void ui_Screen1_screen_destroy(void)
-{
-   if (ui_Screen1) lv_obj_del(ui_Screen1);
-
-// Free canvas buffer
-if (canvas_buf) {
+  // Free canvas buffer
+  if (canvas_buf) {
     lv_mem_free(canvas_buf);
     canvas_buf = NULL;
-}
+  }
 
-// NULL screen variables
-ui_Screen1 = NULL;
-ui_LabelBLEStatus = NULL;
-ui_LabelHeapFree = NULL;
-ui_LabelPSRAMFree = NULL;
-ui_LabelDistance = NULL;
-ui_LabelInstruction = NULL;
-ui_IconPlaceholder = NULL;
-
+  // NULL screen variables
+  ui_Screen1 = NULL;
+  ui_LabelBLEStatus = NULL;
+  ui_LabelHeapFree = NULL;
+  ui_LabelPSRAMFree = NULL;
+  ui_LabelDistance = NULL;
+  ui_LabelInstruction = NULL;
+  ui_IconPlaceholder = NULL;
 }
