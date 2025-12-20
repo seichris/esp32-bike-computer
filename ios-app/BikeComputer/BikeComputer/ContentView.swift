@@ -82,8 +82,6 @@ struct ContentView: View {
                             .background(Color(.systemGray6))
                             .cornerRadius(12)
                         }
-                        .disabled(!coordinator.isConnected)
-                        .opacity(coordinator.isConnected ? 1.0 : 0.5)
                     } else {
                         Button(action: {
                             coordinator.stopNavigation()

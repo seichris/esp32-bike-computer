@@ -179,12 +179,6 @@ class BikeComputerCoordinator: ObservableObject {
     }
     
     func handleDestinationSelection(coordinate: CLLocationCoordinate2D, mapLocation: CLLocation?) {
-        guard isConnected else {
-            alert.message = "Please connect to your bike computer before starting navigation."
-            alert.isShowing = true
-            return
-        }
-        
         let sourceAddress = currentAddress
         
         guard let _ = mapLocation ?? currentLocation else {
