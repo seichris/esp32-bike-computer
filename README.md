@@ -1,3 +1,16 @@
+- how bright is our display right now? Make it full brightness!
+
+- Actually there should be two modes for map rotation (switched by clicking on the red dot in the device): The default mode always shows north, as it is right now. The other mode shows into the direction where i am driving in (based on direction my phone is pointing to, as transmitted by the ios app)
+
+- rotate everything on the device by 90 degrees left. Is setRotation the native way to do this?
+Can we add a setting in the app for this? It should be saved on the device, so it keeps its set rotation after a restart.
+- rerouting logic in the iOS app (after taking a wrong path)
+- can we make the dragging more responsive? or is it limited by the device cpu, or what else would be the bottleneck? How could we measure?
+
+
+- opp hat noch gemini 3 pro
+
+
 # esp32-bike-computer
 A good-looking bike computer that shows data from Apple Workout & Apple Maps
 

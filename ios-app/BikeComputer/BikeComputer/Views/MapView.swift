@@ -17,11 +17,17 @@ class DestinationAnnotation: MKPointAnnotation {
     }
 }
 
+// MARK: - Simulated Position Annotation
+
+class SimulatedPositionAnnotation: MKPointAnnotation {}
+
 // MARK: - Map View Container
 
 struct MapViewContainer: UIViewRepresentable {
     let location: CLLocation?
     let route: MKRoute?
+    let simulatedPosition: CLLocationCoordinate2D?
+    let isSimulationMode: Bool
     let onDestinationSelected: ((CLLocationCoordinate2D, CLLocation?) -> Void)?
     
     func makeUIView(context: Context) -> MKMapView {
@@ -56,8 +62,11 @@ struct MapViewContainer: UIViewRepresentable {
         if let location = location, 
            !context.coordinator.hasSetInitialRegion,
            context.coordinator.lastRoute == nil {
+             // Use simulated position if available and in simulation mode
+             let center = (isSimulationMode && simulatedPosition != nil) ? simulatedPosition! : location.coordinate
+             
             let region = MKCoordinateRegion(
-                center: location.coordinate,
+                center: center,
                 span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
             )
             uiView.setRegion(region, animated: false)
@@ -75,12 +84,10 @@ struct MapViewContainer: UIViewRepresentable {
             // Add new route overlay
             uiView.addOverlay(route.polyline, level: .aboveRoads)
             
-            // Fit route to view
-            uiView.setVisibleMapRect(
-                route.polyline.boundingMapRect,
-                edgePadding: UIEdgeInsets(top: 60, left: 60, bottom: 60, right: 60),
-                animated: true
-            )
+            // Handle simulated position annotation
+            // Remove existing one
+            let existingSimAnnotations = uiView.annotations.filter { $0 is SimulatedPositionAnnotation }
+            uiView.removeAnnotations(existingSimAnnotations)
             
             context.coordinator.lastRoute = route
         } else if route == nil && context.coordinator.lastRoute != nil {
@@ -92,9 +99,46 @@ struct MapViewContainer: UIViewRepresentable {
             let destinationAnnotations = uiView.annotations.filter { $0 is DestinationAnnotation }
             uiView.removeAnnotations(destinationAnnotations)
             
+            // Remove simulation annotation
+            let simAnnotations = uiView.annotations.filter { $0 is SimulatedPositionAnnotation }
+            uiView.removeAnnotations(simAnnotations)
+            
             // Re-enable user tracking when navigation stops
             uiView.userTrackingMode = .follow
+            uiView.showsUserLocation = true 
             context.coordinator.hasSetInitialRegion = false
+        }
+        
+        // Update simulated position
+        let existingSimAnnotations = uiView.annotations.filter { $0 is SimulatedPositionAnnotation }
+        
+        if isSimulationMode, let simPos = simulatedPosition {
+            // Hide real user location
+            if uiView.showsUserLocation {
+                uiView.showsUserLocation = false
+            }
+            
+            // Update or add annotation
+            if let annotation = existingSimAnnotations.first as? SimulatedPositionAnnotation {
+                // Animate coordinate change
+                UIView.animate(withDuration: 1.0) {
+                    annotation.coordinate = simPos
+                }
+            } else {
+                let annotation = SimulatedPositionAnnotation()
+                annotation.coordinate = simPos
+                annotation.title = "Simulated Position"
+                uiView.addAnnotation(annotation)
+            }
+        } else {
+            // Show real user location if not simulating
+            if !uiView.showsUserLocation {
+                uiView.showsUserLocation = true
+            }
+            // Remove sim annotation if present
+            if !existingSimAnnotations.isEmpty {
+                uiView.removeAnnotations(existingSimAnnotations)
+            }
         }
     }
     
@@ -146,10 +190,28 @@ struct MapViewContainer: UIViewRepresentable {
             return MKOverlayRenderer(overlay: overlay)
         }
         
+
+        
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             // Use default view for user location
             if annotation is MKUserLocation {
                 return nil
+            }
+            
+            // Handle simulated position annotation
+            if let _ = annotation as? SimulatedPositionAnnotation {
+                let identifier = "SimulatedPositionPin"
+                var annotationView = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? MKMarkerAnnotationView
+                
+                if annotationView == nil {
+                    annotationView = MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+                    annotationView?.canShowCallout = true
+                    annotationView?.markerTintColor = .red
+                    annotationView?.glyphImage = UIImage(systemName: "bicycle")
+                } else {
+                    annotationView?.annotation = annotation
+                }
+                return annotationView
             }
             
             // Handle destination annotation

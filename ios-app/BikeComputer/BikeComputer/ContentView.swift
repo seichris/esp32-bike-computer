@@ -105,9 +105,9 @@ struct ContentView: View {
                     sourceAddress: $sourceAddress,
                     destinationAddress: $destinationAddress,
                     currentAddress: coordinator.currentAddress,
-                    onStartNavigation: { source, destination, transport in
+                    onStartNavigation: { source, destination, transport, isTestMode in
                         transportType = transport
-                        coordinator.startNavigation(from: source, to: destination, transportType: transport)
+                        coordinator.startNavigation(from: source, to: destination, transportType: transport, isTestMode: isTestMode)
                     }
                 )
             }
@@ -129,6 +129,8 @@ struct ContentView: View {
         MapViewContainer(
             location: coordinator.currentLocation,
             route: coordinator.currentRoute,
+            simulatedPosition: coordinator.simulatedPosition,
+            isSimulationMode: coordinator.isSimulationMode,
             onDestinationSelected: coordinator.isNavigating ? nil : { coordinate, mapLocation in
                 coordinator.handleDestinationSelection(coordinate: coordinate, mapLocation: mapLocation)
             }

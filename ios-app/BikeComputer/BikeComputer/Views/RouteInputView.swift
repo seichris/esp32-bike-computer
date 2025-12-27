@@ -44,13 +44,14 @@ struct RouteInputView: View {
     @Binding var destinationAddress: String
     let currentAddress: String
     
-    var onStartNavigation: (String, String, MKDirectionsTransportType) -> Void
+    var onStartNavigation: (String, String, MKDirectionsTransportType, Bool) -> Void
     
     @StateObject private var destinationCompleter = AddressSearchCompleter()
     @FocusState private var isDestinationFieldFocused: Bool
     
     @State private var hasSelectedDestination = false
     @State private var isSelectingFromSuggestion = false
+    @State private var isTestMode = false
     @State private var selectedTransportType: MKDirectionsTransportType = {
         if #available(iOS 18.0, *) {
             return .cycling
@@ -135,6 +136,19 @@ struct RouteInputView: View {
                     }
                     .padding(.horizontal)
                     .transition(.move(edge: .top).combined(with: .opacity))
+                    
+                    // Test Mode Toggle
+                    Toggle(isOn: $isTestMode) {
+                        HStack {
+                            Image(systemName: "testtube.2")
+                                .foregroundColor(.orange)
+                            Text("Test Mode")
+                                .foregroundColor(.primary)
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    .tint(.orange)
                 }
                 
                 // Suggestions (shown while typing destination)
@@ -147,15 +161,15 @@ struct RouteInputView: View {
                 // Go button (only shown after destination is selected)
                 if hasSelectedDestination {
                     Button(action: {
-                        onStartNavigation(currentAddress, destinationAddress, selectedTransportType)
+                        onStartNavigation(currentAddress, destinationAddress, selectedTransportType, isTestMode)
                         dismiss()
                     }) {
-                        Text("Go")
+                        Text(isTestMode ? "Go (Test)" : "Go")
                             .font(.headline)
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
                             .padding()
-                            .background(Color.blue)
+                            .background(isTestMode ? Color.orange : Color.blue)
                             .cornerRadius(12)
                     }
                     .padding()

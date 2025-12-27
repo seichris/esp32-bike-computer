@@ -18,6 +18,8 @@ class NavigationEngine: NSObject, ObservableObject {
     @Published var distanceToManeuver: Int = 0
     @Published var currentIconID: Int = 0
     @Published var isNavigating: Bool = false
+    @Published var isSimulationMode: Bool = false
+    @Published var simulatedPosition: CLLocationCoordinate2D?
     
     // MARK: - Private Properties
     private var locationManager: CLLocationManager
@@ -27,11 +29,25 @@ class NavigationEngine: NSObject, ObservableObject {
     private var lastSentInstruction: String = ""
     private var lastSentIconID: Int = 0
     
+    // Simulation state
+    private var simulationTimer: Timer?
+    private var simulationProgress: Double = 0.0 // 0.0 to 1.0 along route
+    private var simulationSpeed: Double = 10.0 // meters per second (~36 km/h)
+    private var lastSimulationUpdate: Date?
+    
+    // Route geometry state
+    private var lastSentGeometryHash: Int = 0
+    private var geometrySendInterval: TimeInterval = 2.0  // Send geometry every 2 seconds
+    private var lastGeometrySendTime: Date = .distantPast
+    
     // BLE Manager reference
     private var bleManager: BLEManager?
     
     // Distance threshold for sending updates (meters)
     private let distanceThreshold: Int = 10
+    
+    // Route geometry window size (number of points)
+    private let geometryWindowSize: Int = 30
     
     // MARK: - Initialization
     override init() {
@@ -48,20 +64,25 @@ class NavigationEngine: NSObject, ObservableObject {
     }
     
     /// Start navigation with a given route
-    func startNavigation(with route: MKRoute) {
+    func startNavigation(with route: MKRoute, isTestMode: Bool = false) {
         currentRoute = route
         currentStepIndex = 0
         isNavigating = true
+        isSimulationMode = isTestMode
         
         // Reset tracking
         lastSentDistance = 0
         lastSentInstruction = ""
         lastSentIconID = 0
         
-        print("Navigation started with \(route.steps.count) steps")
+        print("Navigation started with \(route.steps.count) steps (Test Mode: \(isTestMode))")
         
-        // Start location updates
-        locationManager.startUpdatingLocation()
+        if isTestMode {
+            startSimulation()
+        } else {
+            // Start location updates
+            locationManager.startUpdatingLocation()
+        }
     }
     
     /// Stop navigation
@@ -70,7 +91,102 @@ class NavigationEngine: NSObject, ObservableObject {
         currentRoute = nil
         currentStepIndex = 0
         locationManager.stopUpdatingLocation()
+        stopSimulation()
         print("Navigation stopped")
+    }
+    
+    // MARK: - Simulation Methods
+    
+    private func startSimulation() {
+        print("Starting simulated navigation")
+        simulationProgress = 0.0
+        lastSimulationUpdate = Date()
+        
+        simulationTimer?.invalidate()
+        simulationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.updateSimulation()
+        }
+    }
+    
+    internal func stopSimulation() {
+        simulationTimer?.invalidate()
+        simulationTimer = nil
+        isSimulationMode = false
+        simulatedPosition = nil
+    }
+    
+    private func updateSimulation() {
+        guard let route = currentRoute, let lastUpdate = lastSimulationUpdate else { return }
+        
+        let now = Date()
+        let timeDelta = now.timeIntervalSince(lastUpdate)
+        lastSimulationUpdate = now
+        
+        // Calculate distance covered in this time step
+        let distanceCovered = simulationSpeed * timeDelta
+        let totalDistance = route.distance
+        
+        // Update progress
+        let progressDelta = distanceCovered / totalDistance
+        simulationProgress += progressDelta
+        
+        if simulationProgress >= 1.0 {
+            simulationProgress = 1.0
+            print("Simulation complete")
+            stopSimulation()
+            stopNavigation()
+            return
+        }
+        
+        // Calculate position
+        if let position = interpolatePositionAlongRoute(progress: simulationProgress) {
+            simulatedPosition = position
+            
+            // Send to ESP32
+            bleManager?.sendGPSPosition(lat: position.latitude, lon: position.longitude)
+            
+            // Trigger geometry update if needed
+            let location = CLLocation(latitude: position.latitude, longitude: position.longitude)
+            sendRouteGeometryIfNeeded(currentLocation: location)
+            
+            // Also process location for navigation instructions
+            processLocation(location)
+        }
+    }
+    
+    private func interpolatePositionAlongRoute(progress: Double) -> CLLocationCoordinate2D? {
+        guard let route = currentRoute else { return nil }
+        
+        let polyline = route.polyline
+        let pointCount = polyline.pointCount
+        guard pointCount > 1 else { return nil }
+        
+        var points = [CLLocationCoordinate2D](repeating: CLLocationCoordinate2D(), count: pointCount)
+        polyline.getCoordinates(&points, range: NSRange(location: 0, length: pointCount))
+        
+        let targetDistance = progress * route.distance
+        var currentDist = 0.0
+        
+        for i in 0..<(pointCount - 1) {
+            let p1 = CLLocation(latitude: points[i].latitude, longitude: points[i].longitude)
+            let p2 = CLLocation(latitude: points[i+1].latitude, longitude: points[i+1].longitude)
+            let dist = p1.distance(from: p2)
+            
+            if currentDist + dist >= targetDistance {
+                // We are in this segment
+                let remaining = targetDistance - currentDist
+                let ratio = remaining / dist
+                
+                let lat = points[i].latitude + (points[i+1].latitude - points[i].latitude) * ratio
+                let lon = points[i].longitude + (points[i+1].longitude - points[i].longitude) * ratio
+                
+                return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+            }
+            
+            currentDist += dist
+        }
+        
+        return points.last
     }
 
     /// Send test navigation data for BLE testing
@@ -89,15 +205,54 @@ class NavigationEngine: NSObject, ObservableObject {
             "8|25|Arrive at destination"              // Destination
         ]
 
+        // Send test route geometry first
+        sendTestRouteGeometry()
+
         // Send each test packet with a delay
         for (index, packet) in testPackets.enumerated() {
             DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 2.0) {
                 print("Sending test data: \(packet)")
-                bleManager.sendNavigationData(packet)
+                self.bleManager?.sendNavigationData(packet)
             }
         }
 
         print("Started sending test navigation data sequence")
+    }
+
+    /// Send a synthetic test route geometry for debugging
+    private func sendTestRouteGeometry() {
+        guard let bleManager = bleManager, bleManager.isConnected else { return }
+
+        print("Generating test route geometry...")
+
+        // Start at default location (Kusel, Germany: 49.623877, 7.550343)
+        let startLat = 49.623877
+        let startLon = 7.550343
+
+        var points: [CLLocationCoordinate2D] = []
+        points.append(CLLocationCoordinate2D(latitude: startLat, longitude: startLon))
+
+        // Create an L-shape route:
+        // 1. Go North ~200m
+        for i in 1...10 {
+            points.append(CLLocationCoordinate2D(
+                latitude: startLat + (Double(i) * 0.00020), // ~20m per step North
+                longitude: startLon
+            ))
+        }
+
+        // 2. Turn East ~200m
+        let cornerLat = startLat + 0.0020
+        for i in 1...10 {
+            points.append(CLLocationCoordinate2D(
+                latitude: cornerLat,
+                longitude: startLon + (Double(i) * 0.00030) // ~20m per step East
+            ))
+        }
+
+        let geometryData = compressRoutePoints(points)
+        bleManager.sendRouteGeometry(geometryData)
+        print("Sent test route geometry: \(geometryData.count) bytes")
     }
     
     // MARK: - Private Methods
@@ -161,6 +316,9 @@ class NavigationEngine: NSObject, ObservableObject {
         if shouldSendUpdate(iconID: newIconID, distance: newDistance, instruction: newInstruction) {
             sendNavigationDataToESP32(iconID: newIconID, distance: newDistance, instruction: newInstruction)
         }
+        
+        // Send route geometry for map overlay (rate-limited internally)
+        sendRouteGeometryIfNeeded(currentLocation: location)
     }
     
     /// Extract clean instruction text from MKRoute.Step
@@ -285,6 +443,16 @@ extension NavigationEngine {
         
         print("Simulated navigation started")
         
+        // Send initial geometry (window around start point)
+        // This ensures overlay appears even in simulation mode
+        if route.polyline.pointCount > 0 {
+             var startCoord = CLLocationCoordinate2D()
+             route.polyline.getCoordinates(&startCoord, range: NSRange(location: 0, length: 1))
+             
+             let startLoc = CLLocation(latitude: startCoord.latitude, longitude: startCoord.longitude)
+             sendRouteGeometryIfNeeded(currentLocation: startLoc)
+        }
+        
         // Simulate location updates along the route
         simulateRouteProgress()
     }
@@ -330,5 +498,111 @@ extension NavigationEngine {
                 self.sendNavigationDataToESP32(iconID: iconID, distance: simulatedDistance, instruction: instruction)
             }
         }
+    }
+}
+
+// MARK: - Route Geometry Extraction for Map Overlay
+
+extension NavigationEngine {
+    
+    /// Extract next ~30 points from route polyline relative to user's current location
+    /// Uses a sliding window approach to always show the upcoming route segment
+    func extractSlidingWindowGeometry(currentLocation: CLLocation) -> Data? {
+        guard let route = currentRoute else { return nil }
+        
+        // Get all polyline points from the route
+        let polyline = route.polyline
+        let pointCount = polyline.pointCount
+        
+        guard pointCount > 0 else { return nil }
+        
+        var points = [CLLocationCoordinate2D](repeating: CLLocationCoordinate2D(), count: pointCount)
+        polyline.getCoordinates(&points, range: NSRange(location: 0, length: pointCount))
+        
+        // Find the closest point to user's current location
+        var closestIndex = 0
+        var closestDistance = Double.greatestFiniteMagnitude
+        
+        for (i, point) in points.enumerated() {
+            let pointLocation = CLLocation(latitude: point.latitude, longitude: point.longitude)
+            let dist = currentLocation.distance(from: pointLocation)
+            if dist < closestDistance {
+                closestDistance = dist
+                closestIndex = i
+            }
+        }
+        
+        // Extract window of points starting from closest point
+        let endIndex = min(closestIndex + geometryWindowSize, pointCount)
+        let windowPoints = Array(points[closestIndex..<endIndex])
+        
+        guard !windowPoints.isEmpty else { return nil }
+        
+        return compressRoutePoints(windowPoints)
+    }
+    
+    /// Compress route points to binary format for efficient BLE transfer
+    /// Format: [StartLat:4][StartLon:4][DeltaLat:2][DeltaLon:2]...
+    /// Uses microdegrees (lat * 1,000,000) for ~0.1m precision
+    private func compressRoutePoints(_ points: [CLLocationCoordinate2D]) -> Data {
+        guard let first = points.first else { return Data() }
+        
+        var data = Data()
+        
+        // Start point: 4 bytes lat, 4 bytes lon (scaled Int32 in microdegrees)
+        let startLat = Int32(first.latitude * 1_000_000)
+        let startLon = Int32(first.longitude * 1_000_000)
+        
+        // Append as little-endian (ESP32 is little-endian)
+        withUnsafeBytes(of: startLat.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: startLon.littleEndian) { data.append(contentsOf: $0) }
+        
+        // Delta points: 2 bytes each (Int16 delta from previous point)
+        // Max delta of ~3.2km at 0.1m precision per axis
+        var prevLat = startLat
+        var prevLon = startLon
+        
+        for point in points.dropFirst() {
+            let lat = Int32(point.latitude * 1_000_000)
+            let lon = Int32(point.longitude * 1_000_000)
+            
+            // Clamp deltas to Int16 range (-32768 to 32767)
+            // This gives us ~3.2km range per step at 0.1m precision
+            let deltaLat = Int16(clamping: lat - prevLat)
+            let deltaLon = Int16(clamping: lon - prevLon)
+            
+            withUnsafeBytes(of: deltaLat.littleEndian) { data.append(contentsOf: $0) }
+            withUnsafeBytes(of: deltaLon.littleEndian) { data.append(contentsOf: $0) }
+            
+            prevLat = lat
+            prevLon = lon
+        }
+        
+        return data
+    }
+    
+    /// Send route geometry to ESP32 if enough time has passed
+    func sendRouteGeometryIfNeeded(currentLocation: CLLocation) {
+        guard let bleManager = bleManager, bleManager.isConnected else { return }
+        
+        // Rate limit geometry updates
+        let now = Date()
+        guard now.timeIntervalSince(lastGeometrySendTime) >= geometrySendInterval else { return }
+        
+        guard let geometryData = extractSlidingWindowGeometry(currentLocation: currentLocation) else {
+            return
+        }
+        
+        // Check if geometry has changed (simple hash of data)
+        let hash = geometryData.hashValue
+        guard hash != lastSentGeometryHash else { return }
+        
+        // Send the compressed geometry
+        bleManager.sendRouteGeometry(geometryData)
+        
+        lastGeometrySendTime = now
+        lastSentGeometryHash = hash
+        
+        print("Route geometry sent: \(geometryData.count) bytes, hash: \(hash)")
     }
 }

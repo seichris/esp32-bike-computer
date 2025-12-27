@@ -36,6 +36,8 @@ class BikeComputerCoordinator: ObservableObject {
     @Published var distanceToManeuver: Int = 0
     @Published var currentIconID: Int = 0
     @Published var currentRoute: MKRoute?
+    @Published var isSimulationMode: Bool = false
+    @Published var simulatedPosition: CLLocationCoordinate2D?
     
     // Workout
     @Published var isWorkoutActive: Bool = false
@@ -99,6 +101,12 @@ class BikeComputerCoordinator: ObservableObject {
                 self?.locationManager.setNavigating(navigating)
             }
             .store(in: &cancellables)
+            
+        navEngine.$isSimulationMode
+            .assign(to: &$isSimulationMode)
+            
+        navEngine.$simulatedPosition
+            .assign(to: &$simulatedPosition)
         
         navEngine.$currentInstruction
             .assign(to: &$currentInstruction)
@@ -142,6 +150,16 @@ class BikeComputerCoordinator: ObservableObject {
         
         locationManager.$currentAddress
             .assign(to: &$currentAddress)
+            
+        // Send GPS to device whenever location updates and we are connected AND ready
+        locationManager.$currentLocation
+            .combineLatest(bleManager.$isGPSReady)
+            .sink { [weak self] location, ready in
+                guard let self = self, ready, let loc = location else { return }
+                // Send current position to device to update map/waiting screen
+                self.bleManager.sendGPSPosition(lat: loc.coordinate.latitude, lon: loc.coordinate.longitude)
+            }
+            .store(in: &cancellables)
     }
     
     private func setupManagers() {
@@ -166,9 +184,9 @@ class BikeComputerCoordinator: ObservableObject {
     
     // MARK: - Public API: Navigation
     
-    func startNavigation(from source: String, to destination: String, transportType: MKDirectionsTransportType) {
+    func startNavigation(from source: String, to destination: String, transportType: MKDirectionsTransportType, isTestMode: Bool = false) {
         self.transportType = transportType
-        calculateRoute(from: source, to: destination)
+        calculateRoute(from: source, to: destination, isTestMode: isTestMode)
     }
     
     func stopNavigation() {
@@ -249,7 +267,7 @@ class BikeComputerCoordinator: ObservableObject {
 
 extension BikeComputerCoordinator {
     
-    private func calculateRoute(from source: String, to destination: String) {
+    private func calculateRoute(from source: String, to destination: String, isTestMode: Bool = false) {
         print("Starting route calculation from '\(source)' to '\(destination)'")
         
         // Cancel any ongoing searches
@@ -271,7 +289,7 @@ extension BikeComputerCoordinator {
             print("Using current location: \(currentLoc.coordinate.latitude), \(currentLoc.coordinate.longitude)")
             routeCalculation.status = "Finding destination..."
             
-            findDestinationAndCalculateRoute(from: sourceItem, destination: destination)
+            findDestinationAndCalculateRoute(from: sourceItem, destination: destination, isTestMode: isTestMode)
         } else {
             // Use MKLocalSearch for source address
             let sourceSearchRequest = MKLocalSearch.Request()
@@ -306,12 +324,12 @@ extension BikeComputerCoordinator {
                 print("Source found: \(sourceItem.name ?? "Unknown") at \(sourceItem.placemark.coordinate.latitude), \(sourceItem.placemark.coordinate.longitude)")
                 self.routeCalculation.status = "Finding destination..."
                 
-                self.findDestinationAndCalculateRoute(from: sourceItem, destination: destination)
+                self.findDestinationAndCalculateRoute(from: sourceItem, destination: destination, isTestMode: isTestMode)
             }
         }
     }
     
-    private func findDestinationAndCalculateRoute(from sourceItem: MKMapItem, destination: String) {
+    private func findDestinationAndCalculateRoute(from sourceItem: MKMapItem, destination: String, isTestMode: Bool = false) {
         let destinationSearchRequest = MKLocalSearch.Request()
         destinationSearchRequest.naturalLanguageQuery = destination
         
@@ -389,7 +407,7 @@ extension BikeComputerCoordinator {
                 self.currentRoute = route
                 
                 // Start navigation
-                self.navEngine.startSimulatedNavigation(with: route)
+                self.navEngine.startNavigation(with: route, isTestMode: isTestMode)
                 
                 // Enable location tracking for navigation
                 self.locationManager.setNavigating(true)

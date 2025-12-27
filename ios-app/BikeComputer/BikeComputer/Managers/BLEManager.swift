@@ -15,17 +15,22 @@ class BLEManager: NSObject, ObservableObject {
     // MARK: - Published Properties
     @Published var isScanning: Bool = false
     @Published var isConnected: Bool = false
+    @Published var isGPSReady: Bool = false // Ready to send GPS data
     @Published var peripheralName: String = ""
     @Published var signalStrength: Int = 0
     
     // MARK: - BLE UUIDs (matching ESP32)
     private let serviceUUID = CBUUID(string: "1819")           // Navigation Service
     private let characteristicUUID = CBUUID(string: "2A6E")    // Navigation Data Characteristic
+    private let routeGeometryCharacteristicUUID = CBUUID(string: "2A6F")  // Route Geometry Characteristic
+    private let gpsPositionCharacteristicUUID = CBUUID(string: "2A72")    // GPS Position Characteristic (Location and Speed)
     
     // MARK: - Private Properties
     private var centralManager: CBCentralManager!
     private var connectedPeripheral: CBPeripheral?
     private var navigationCharacteristic: CBCharacteristic?
+    private var routeGeometryCharacteristic: CBCharacteristic?
+    private var gpsPositionCharacteristic: CBCharacteristic?
     
     private var autoReconnect: Bool = true
     private var lastConnectedPeripheralIdentifier: UUID?
@@ -100,6 +105,45 @@ class BLEManager: NSObject, ObservableObject {
         )
         
         print("Sent: \(data) (\(dataToSend.count) bytes)")
+    }
+    
+    /// Send route geometry data to ESP32 (binary format)
+    func sendRouteGeometry(_ data: Data) {
+        guard let peripheral = connectedPeripheral,
+              let characteristic = routeGeometryCharacteristic,
+              isConnected else {
+            print("Cannot send geometry: not connected or characteristic not found")
+            return
+        }
+        
+        // Write without response for better performance
+        peripheral.writeValue(
+            data,
+            for: characteristic,
+            type: .withoutResponse
+        )
+        
+        print("Sent route geometry: \(data.count) bytes")
+    }
+    
+    /// Send GPS position to ESP32 (for simulation mode)
+    func sendGPSPosition(lat: Double, lon: Double) {
+        guard let peripheral = connectedPeripheral,
+              let characteristic = gpsPositionCharacteristic,
+              isConnected else {
+            return
+        }
+        
+        // Format: [Lat:4][Lon:4] Int32 microdegrees
+        var data = Data()
+        
+        let latInt = Int32(lat * 1_000_000)
+        let lonInt = Int32(lon * 1_000_000)
+        
+        withUnsafeBytes(of: latInt.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: lonInt.littleEndian) { data.append(contentsOf: $0) }
+        
+        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
     }
     
     /// Attempt to reconnect to last known peripheral
@@ -208,6 +252,7 @@ extension BLEManager: CBCentralManagerDelegate {
         }
         
         isConnected = false
+        isGPSReady = false
         connectedPeripheral = nil
         navigationCharacteristic = nil
         
@@ -280,7 +325,11 @@ extension BLEManager: CBPeripheralDelegate {
             
             if service.uuid == serviceUUID {
                 // Discover characteristics for navigation service
-                peripheral.discoverCharacteristics([characteristicUUID], for: service)
+                peripheral.discoverCharacteristics([
+                    characteristicUUID, 
+                    routeGeometryCharacteristicUUID,
+                    gpsPositionCharacteristicUUID
+                ], for: service)
             }
         }
     }
@@ -306,6 +355,22 @@ extension BLEManager: CBPeripheralDelegate {
                 if characteristic.properties.contains(.notify) {
                     peripheral.setNotifyValue(true, for: characteristic)
                 }
+            }
+            
+            if characteristic.uuid == routeGeometryCharacteristicUUID {
+                routeGeometryCharacteristic = characteristic
+                print("Route Geometry characteristic ready!")
+            }
+            
+            if characteristic.uuid == gpsPositionCharacteristicUUID {
+                gpsPositionCharacteristic = characteristic
+                print("GPS Position characteristic ready!")
+            }
+            
+            if characteristic.uuid == gpsPositionCharacteristicUUID {
+                gpsPositionCharacteristic = characteristic
+                isGPSReady = true // Mark as ready to receive GPS
+                print("GPS Position characteristic ready!")
             }
         }
     }
