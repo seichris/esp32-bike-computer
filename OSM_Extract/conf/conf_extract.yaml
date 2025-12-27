@@ -1,0 +1,42 @@
+---
+##### Lines #####
+lines:
+  feature_types:
+    highway:
+      path: [sac_scale, trail_visibility] # <- tags to extract
+      track: [tracktype]
+      residential: [width]
+      service: []
+      footway: []
+      steps: []
+      living_street: []
+      pedestrian: []
+      primary: []
+      secondary: []
+      tertiary: []
+      secondary_link: []
+      tertiary: []
+      motorway: []
+      trunk: []
+      motorway_link: []
+      unclassified: []
+    waterway: [stream, drain, river, canal]
+    railway: []
+    natural: [coastline]
+
+# Some features are defined just by a tag, like railway.
+  tags: 
+    - railway
+    - natural]
+
+
+##### Polygons #####
+polygons:
+  feature_types:
+    building: []
+    amenity: []
+    leisure: []
+    natural: [beach, wood, scrub, grassland, water, heath]
+    landuse: [grass, meadow, allotments, brownfield, forest, wood, farmland, farmyard, cemetery, quarry, orchard, landfill]
+  tags:
+    - natural
