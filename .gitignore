@@ -24,5 +24,20 @@ ios-app/BikeComputer.xcuserdata/
 esp32-bike-computer.code-workspace
 
 # IceNav-v3/
+IceNav-v3/.pio
+IceNav-v3/.vscode/.browse.c_cpp.db*
+IceNav-v3/.vscode/c_cpp_properties.json
+IceNav-v3/.vscode/extensions.json
+IceNav-v3/.vscode/launch.json
+IceNav-v3/.vscode/ipch
+IceNav-v3/.vscode/settings.json
+IceNav-v3/assets
+IceNav-v3/tools/*.raw
+IceNav-v3/tools/*.png
 
 # OSM_Extract/
+OSM_Extract/maps/mymap
+OSM_Extract/pbf
+OSM_Extract/__pycache__
+OSM_Extract/conf/test*
+OSM_Extract/maps/test*
