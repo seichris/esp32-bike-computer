@@ -142,14 +142,20 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             if let placemark = placemarks?.first {
                 var addressComponents: [String] = []
                 
-                if let street = placemark.thoroughfare {
-                    addressComponents.append(street)
+                // Build street address (number + street name)
+                var streetAddress = ""
+                if let streetNumber = placemark.subThoroughfare {
+                    streetAddress = streetNumber
                 }
+                if let street = placemark.thoroughfare {
+                    streetAddress = streetAddress.isEmpty ? street : "\(streetAddress) \(street)"
+                }
+                if !streetAddress.isEmpty {
+                    addressComponents.append(streetAddress)
+                }
+                
                 if let city = placemark.locality {
                     addressComponents.append(city)
-                }
-                if let state = placemark.administrativeArea {
-                    addressComponents.append(state)
                 }
                 
                 self?.currentAddress = addressComponents.isEmpty ? "Current Location" : addressComponents.joined(separator: ", ")

@@ -105,6 +105,7 @@ struct ContentView: View {
                     sourceAddress: $sourceAddress,
                     destinationAddress: $destinationAddress,
                     currentAddress: coordinator.currentAddress,
+                    currentLocation: coordinator.currentLocation,
                     onStartNavigation: { source, destination, transport, isTestMode in
                         transportType = transport
                         coordinator.startNavigation(from: source, to: destination, transportType: transport, isTestMode: isTestMode)

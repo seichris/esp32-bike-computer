@@ -8,6 +8,7 @@
 import SwiftUI
 import MapKit
 import Combine
+import CoreLocation
 
 // MARK: - Address Search Completer
 
@@ -19,11 +20,17 @@ class AddressSearchCompleter: NSObject, ObservableObject, MKLocalSearchCompleter
     override init() {
         super.init()
         completer.delegate = self
-        completer.resultTypes = .address
+        // Include both addresses and points of interest for street-level searches
+        completer.resultTypes = [.address, .pointOfInterest, .query]
     }
     
     func search(query: String) {
         completer.queryFragment = query
+    }
+    
+    /// Update search region to prioritize results near user's location
+    func updateRegion(_ region: MKCoordinateRegion) {
+        completer.region = region
     }
     
     func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
@@ -43,6 +50,7 @@ struct RouteInputView: View {
     @Binding var sourceAddress: String
     @Binding var destinationAddress: String
     let currentAddress: String
+    let currentLocation: CLLocation?  // User's exact GPS location for region-biased search
     
     var onStartNavigation: (String, String, MKDirectionsTransportType, Bool) -> Void
     
@@ -96,8 +104,16 @@ struct RouteInputView: View {
                             Image(systemName: "location.fill")
                                 .foregroundColor(.blue)
                             
-                            Text(currentAddress)
-                                .foregroundColor(.primary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Your Location")
+                                    .foregroundColor(.primary)
+                                    .font(.body)
+                                if !currentAddress.contains("Current Location") && !currentAddress.contains("Getting") {
+                                    Text(currentAddress)
+                                        .foregroundColor(.secondary)
+                                        .font(.caption)
+                                }
+                            }
                             
                             Spacer()
                         }
@@ -192,6 +208,16 @@ struct RouteInputView: View {
             .onAppear {
                 // Auto-focus destination field when view appears
                 isDestinationFieldFocused = true
+                
+                // Set search region based on user's current location for better results
+                if let location = currentLocation {
+                    let region = MKCoordinateRegion(
+                        center: location.coordinate,
+                        latitudinalMeters: 50000,  // ~50km radius for search relevance
+                        longitudinalMeters: 50000
+                    )
+                    destinationCompleter.updateRegion(region)
+                }
             }
             .onDisappear {
                 // Reset state when dismissed
