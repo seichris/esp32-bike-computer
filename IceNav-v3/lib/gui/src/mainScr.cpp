@@ -406,6 +406,30 @@ void scrollMapEvent(lv_event_t *event) {
 
     case LV_EVENT_RELEASED:
     case LV_EVENT_PRESS_LOST: {
+      lv_indev_get_point(indev, &p);
+
+      // Detect short-tap on GPS indicator dot to toggle rotation mode
+      // Short tap = released within 300ms with minimal movement
+      if (!longPressTriggered && pressStartTime > 0 &&
+          millis() - pressStartTime < 300) {
+        int totalMove = abs(p.x - pressStartX) + abs(p.y - pressStartY);
+        if (totalMove < 30) {
+          // GPS indicator is always at center when followGps is true
+          // When followGps is false, it could be anywhere - use center area
+          // anyway since user expects to tap the center indicator
+          int centerX = mapView.mapScrWidth / 2;
+          int centerY = mapView.mapScrHeight / 2;
+          int distX = abs(p.x - centerX);
+          int distY = abs(p.y - centerY);
+          log_i("SHORT TAP CHECK: pos(%d,%d) center(%d,%d) dist(%d,%d)", p.x,
+                p.y, centerX, centerY, distX, distY);
+          if (distX < 60 && distY < 60) {
+            log_i("SHORT TAP ON GPS DOT: Toggling rotation mode");
+            mapView.toggleRotationMode();
+          }
+        }
+      }
+
       isDragging = false;
       isScrollingMap = false;
       pressStartTime = 0;

@@ -53,7 +53,8 @@ public:
    * @param mapScrHeight Map screen height (for Y-axis flip)
    */
   void drawRoute(lv_obj_t *canvas, int32_t centerLat, int32_t centerLon,
-                 uint8_t zoom, uint16_t mapScrWidth, uint16_t mapScrHeight);
+                 uint8_t zoom, uint16_t mapScrWidth, uint16_t mapScrHeight,
+                 double rotationRad = 0.0);
 
   /**
    * @brief Clear all route points

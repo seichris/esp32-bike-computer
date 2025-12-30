@@ -191,15 +191,17 @@ void RouteOverlay::drawThickLine(uint16_t *buf, int32_t bufW, int32_t bufH,
 
 void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerLat,
                              int32_t centerLon, uint8_t zoom,
-                             uint16_t mapScrWidth, uint16_t mapScrHeight) {
+                             uint16_t mapScrWidth, uint16_t mapScrHeight,
+                             double rotationRad) {
   if (points.size() < 2) {
     Serial.println("RouteOverlay: Not enough points to draw (need >= 2)");
     return; // Need at least 2 points to draw a line
   }
 
-  Serial.printf(
-      "RouteOverlay::drawRoute: center=(%.6f°,%.6f°) zoom=%d points=%d\n",
-      centerLat / 1000000.0, centerLon / 1000000.0, zoom, points.size());
+  Serial.printf("RouteOverlay::drawRoute: center=(%.6f°,%.6f°) zoom=%d "
+                "points=%d rot=%.2frad\n",
+                centerLat / 1000000.0, centerLon / 1000000.0, zoom,
+                points.size(), rotationRad);
 
   // Get canvas buffer
   lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
@@ -217,6 +219,12 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerLat,
   Serial.printf("RouteOverlay: Canvas buffer W=%d H=%d stride=%d\n", bufW, bufH,
                 stride);
 
+  // Pre-calculate rotation values
+  double cosA = cos(rotationRad);
+  double sinA = sin(rotationRad);
+  int16_t halfW = bufW / 2;
+  int16_t halfH = bufH / 2;
+
   int drawnCount = 0;
   // Draw route segments
   for (size_t i = 0; i < points.size() - 1; i++) {
@@ -227,6 +235,21 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerLat,
     int16_t y1 = geoToScreenY(points[i].lat, centerLat, zoom, bufH, bufW);
     int16_t x2 = geoToScreenX(points[i + 1].lon, centerLon, zoom, bufW);
     int16_t y2 = geoToScreenY(points[i + 1].lat, centerLat, zoom, bufH, bufW);
+
+    // Apply rotation transform if rotationRad is non-zero
+    if (rotationRad != 0.0) {
+      // Transform point 1: translate to center, rotate, translate back
+      double dx1 = x1 - halfW;
+      double dy1 = y1 - halfH;
+      x1 = (int16_t)(dx1 * cosA - dy1 * sinA + halfW);
+      y1 = (int16_t)(dx1 * sinA + dy1 * cosA + halfH);
+
+      // Transform point 2
+      double dx2 = x2 - halfW;
+      double dy2 = y2 - halfH;
+      x2 = (int16_t)(dx2 * cosA - dy2 * sinA + halfW);
+      y2 = (int16_t)(dx2 * sinA + dy2 * cosA + halfH);
+    }
 
     // Log first few segments for debugging
     if (i < 3) {

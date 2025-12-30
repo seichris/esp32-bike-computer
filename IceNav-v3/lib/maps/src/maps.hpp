@@ -193,4 +193,5 @@ public:
   RotationMode rotationMode = ROT_NORTH_UP;
   double rotationRad = 0; // Current rotation in radians
   void toggleRotationMode();
+  void updateArrowColor();
 };

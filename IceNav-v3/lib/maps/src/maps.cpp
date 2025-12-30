@@ -884,19 +884,15 @@ void Maps::readVectorMap(Maps::ViewPort &viewPort, Maps::MemCache &memCache,
   double cosA = 1.0;
   double sinA = 0.0;
 
-  /*
   if (rotationMode == ROT_COURSE_UP) {
     // Use negative heading to rotate map so heading points UP
     // Using gps.gpsData.heading (degrees)
-    // Check if heading is valid? Assuming 0 if not.
     rotationRad = -DEG2RAD(gps.gpsData.heading);
     cosA = cos(rotationRad);
     sinA = sin(rotationRad);
   } else {
     rotationRad = 0;
   }
-  */
-  rotationRad = 0;
 
   int16_t halfW = Maps::mapScrWidth / 2;
   int16_t halfH = Maps::mapScrHeight / 2;
@@ -1490,12 +1486,42 @@ void Maps::toggleRotationMode() {
     rotationRad = 0;
     log_i("Map Rotation: NORTH UP");
   }
+  // Update arrow color to indicate mode
+  updateArrowColor();
   // Force redraw
   redrawMap = true;
   // If we switched to Course Up, update position immediately if possible
   if (rotationMode == ROT_COURSE_UP) {
     isPosMoved = true; // Trigger regeneration
   }
+}
+
+/**
+ * @brief Update GPS indicator arrow color based on rotation mode
+ */
+void Maps::updateArrowColor() {
+  if (!Maps::canvasArrow)
+    return;
+
+  // Choose color based on rotation mode
+  // North-Up = Red, Course-Up = Blue
+  uint32_t color = (rotationMode == ROT_NORTH_UP) ? 0xFF0000 : 0x0066FF;
+
+  // Redraw the arrow canvas with new color
+  lv_canvas_fill_bg(Maps::canvasArrow, lv_color_hex(0x000000), LV_OPA_TRANSP);
+  lv_layer_t layer;
+  lv_canvas_init_layer(Maps::canvasArrow, &layer);
+  lv_draw_rect_dsc_t rect_dsc;
+  lv_draw_rect_dsc_init(&rect_dsc);
+  rect_dsc.bg_color = lv_color_hex(color);
+  rect_dsc.bg_opa = LV_OPA_COVER;
+  rect_dsc.radius = 20;
+  lv_area_t area = {4, 4, 44, 44};
+  lv_draw_rect(&layer, &rect_dsc, &area);
+  lv_canvas_finish_layer(Maps::canvasArrow, &layer);
+
+  log_i("Arrow color updated: %s (0x%06X)",
+        (rotationMode == ROT_NORTH_UP) ? "RED" : "BLUE", color);
 }
 
 /**
@@ -1702,8 +1728,10 @@ void Maps::generateVectorMap(uint8_t zoom) {
              routeOverlay.getPointCount());
 
     routeOverlay.drawRoute(Maps::canvasMap, centerLatMicro, centerLonMicro,
-                           zoom, Maps::mapScrWidth, Maps::mapScrHeight);
-    ESP_LOGI(TAG, "Route overlay draw complete");
+                           zoom, Maps::mapScrWidth, Maps::mapScrHeight,
+                           rotationRad);
+    ESP_LOGI(TAG, "Route overlay draw complete (rotation=%.2f rad)",
+             rotationRad);
   } else {
     ESP_LOGI(TAG, "No route overlay to draw (no route data)");
   }
