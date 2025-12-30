@@ -884,6 +884,7 @@ void Maps::readVectorMap(Maps::ViewPort &viewPort, Maps::MemCache &memCache,
   double cosA = 1.0;
   double sinA = 0.0;
 
+  /*
   if (rotationMode == ROT_COURSE_UP) {
     // Use negative heading to rotate map so heading points UP
     // Using gps.gpsData.heading (degrees)
@@ -894,6 +895,8 @@ void Maps::readVectorMap(Maps::ViewPort &viewPort, Maps::MemCache &memCache,
   } else {
     rotationRad = 0;
   }
+  */
+  rotationRad = 0;
 
   int16_t halfW = Maps::mapScrWidth / 2;
   int16_t halfH = Maps::mapScrHeight / 2;
@@ -1463,17 +1466,16 @@ void Maps::createMapScrSprites() {
   lv_canvas_finish_layer(Maps::canvasArrow, &layer);
 
   // Make arrow clickable to toggle rotation mode
-  lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(
-      Maps::canvasArrow,
-      [](lv_event_t *e) {
-        Maps *maps = (Maps *)lv_event_get_user_data(e);
-        maps->toggleRotationMode();
-      },
-      LV_EVENT_CLICKED, this);
+  // lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_CLICKABLE);
+  // lv_obj_add_event_cb(
+  //     Maps::canvasArrow,
+  //     [](lv_event_t *e) {
+  //       Maps *maps = (Maps *)lv_event_get_user_data(e);
+  //       maps->toggleRotationMode();
+  //     },
+  //     LV_EVENT_CLICKED, this);
 
   // Maps::arrowSprite.pushImage(0, 0, 16, 16, (uint16_t *)navigation);
-  */
 }
 
 /**
@@ -1786,7 +1788,9 @@ void Maps::scrollMap(int16_t dx, int16_t dy) {
     // When user drags down (negative dy after negation), we want map to move
     // down (show south) which means decreasing viewport center Y (since lower Y
     // = north)
-    Maps::point.y -= (int32_t)(dy * zoom); // Note: subtracting dy!
+    // CORRECTION: Drag UP (screen dy -ve) -> maps dy +ve. map moves UP. View
+    // moves SOUTH (Increase Y). So we need to ADD dy.
+    Maps::point.y += (int32_t)(dy * zoom);
     ESP_LOGI(TAG, "scrollMap (Vector): dx=%d dy=%d zoom=%d -> point(%d, %d)",
              dx, dy, zoom, Maps::point.x, Maps::point.y);
     Maps::isPosMoved = true;

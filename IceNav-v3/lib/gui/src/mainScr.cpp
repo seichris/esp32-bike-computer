@@ -396,6 +396,8 @@ void scrollMapEvent(lv_event_t *event) {
         log_i("PRESSING: p(%d,%d) last(%d,%d) -> dx=%d dy=%d", p.x, p.y, last_x,
               last_y, dx, dy);
         mapView.scrollMap(-dx, -dy);
+        // FORCE UPDATE: Trigger map redraw immediately after scroll
+        lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
         last_x = p.x;
         last_y = p.y;
       }

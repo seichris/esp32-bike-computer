@@ -34,10 +34,13 @@ IceNav-v3/.vscode/settings.json
 IceNav-v3/assets
 IceNav-v3/tools/*.raw
 IceNav-v3/tools/*.png
+waveshare_test/.pio
 
 # OSM_Extract/
-OSM_Extract/maps/mymap
+OSM_Extract/maps/
 OSM_Extract/pbf
 OSM_Extract/__pycache__
 OSM_Extract/conf/test*
-OSM_Extract/maps/test*
+
+# waveshare_demo/
+waveshare_demo/
