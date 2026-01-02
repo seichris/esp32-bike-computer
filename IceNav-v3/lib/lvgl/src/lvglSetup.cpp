@@ -441,6 +441,8 @@ void loadMainScreen() {
   activeTile = 1; // MAP (for compatibility)
   isReady = true;
   mapView.redrawMap = true;
+  lv_timer_resume(mainTimer); // MISTAKE FIXED: Timer was paused in
+                              // createSearchSatScr and never resumed!
   mapView.createMapScrSprites();
 
   // Center map on current GPS location (injected defaults)

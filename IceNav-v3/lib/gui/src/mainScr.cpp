@@ -145,6 +145,22 @@ void scrollTile(lv_event_t *event) {
  *
  */
 void updateMainScreen(lv_timer_t *t) {
+  // Handle BLE-triggered map updates OUTSIDE of isScrolled check
+  // This ensures continuous updates even when user hasn't dragged
+  if (isMainScreen && activeTile == MAP &&
+      (mapView.isPosMoved || mapView.redrawMap)) {
+    log_i("BLE map update: isPosMoved=%d redrawMap=%d followGps=%d",
+          mapView.isPosMoved, mapView.redrawMap, mapView.followGps);
+
+    // Re-center on GPS if in follow mode
+    if (mapView.followGps) {
+      mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
+    }
+
+    // Trigger map regeneration and display
+    lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
+  }
+
   if (isScrolled && isMainScreen) {
     switch (activeTile) {
     case COMPASS:
@@ -199,12 +215,26 @@ void updateMainScreen(lv_timer_t *t) {
                                       // smooth transition
       }
 
-      if (gps.hasLocationChange()) {
-        // If we are following GPS, center the map
+      // Handle BLE simulated GPS: triggerMapRedraw() sets isPosMoved/redrawMap
+      // ALWAYS regenerate map when these flags are set, regardless of followGps
+      // This ensures continuous updates for GPS position and route overlay
+      if (mapView.isPosMoved || mapView.redrawMap) {
+        log_i(
+            "MAP case: Flags detected! isPosMoved=%d redrawMap=%d followGps=%d",
+            mapView.isPosMoved, mapView.redrawMap, mapView.followGps);
+        // Only re-center on GPS if in follow mode
         if (mapView.followGps) {
           mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
         }
+        mapView.redrawMap = true;
       }
+
+      // Also handle hardware GPS location changes (when in follow mode)
+      if (gps.hasLocationChange() && mapView.followGps) {
+        mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
+        mapView.redrawMap = true;
+      }
+
       lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
       break;
     }
@@ -269,10 +299,15 @@ void updateMap(lv_event_t *event) {
       mapView.generateVectorMap(zoom);
     else
       mapView.generateRenderMap(zoom);
+    // Clear flag AFTER generation complete (not inside generateVectorMap)
+    // This ensures BLE updates during generation will queue another cycle
+    mapView.isPosMoved = false;
   }
 
-  if (mapView.redrawMap)
+  if (mapView.redrawMap) {
     mapView.displayMap();
+    mapView.redrawMap = false; // Clear after display
+  }
 }
 
 /**
@@ -420,6 +455,7 @@ void scrollMapEvent(lv_event_t *event) {
         log_i("PRESSING: p(%d,%d) last(%d,%d) -> dx=%d dy=%d", p.x, p.y, last_x,
               last_y, dx, dy);
         mapView.scrollMap(-dx, -dy);
+        mapView.redrawMap = true; // Enable continuous redraw during drag
         // FORCE UPDATE: Trigger map redraw immediately after scroll
         lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
         last_x = p.x;

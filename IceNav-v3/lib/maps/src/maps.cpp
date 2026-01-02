@@ -1735,9 +1735,8 @@ void Maps::generateVectorMap(uint8_t zoom) {
   } else {
     ESP_LOGI(TAG, "No route overlay to draw (no route data)");
   }
-
-  // Mark as not moved after rendering
-  Maps::isPosMoved = false;
+  // NOTE: isPosMoved flag is now cleared in updateMap() after display,
+  // not here, to allow queued BLE updates to trigger new regenerations
 }
 
 /**
