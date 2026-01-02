@@ -34,7 +34,7 @@ class CoordinateConverter {
     /// Uses iterative method for accurate inverse conversion
     static func gcj02ToWGS84(lat: Double, lon: Double) -> (lat: Double, lon: Double) {
         if !isInChina(lat: lat, lon: lon) {
-            return (lat, lon)
+             return (lat, lon)
         }
         
         // Iterative approach for more accurate inverse
@@ -54,10 +54,8 @@ class CoordinateConverter {
     /// Apply manual calibration nudge to WGS-84 coordinates
     /// Used to correct specific map tile offsets (e.g. ~50m offset in Shanghai)
     static func applyCalibration(lat: Double, lon: Double) -> (lat: Double, lon: Double) {
-        // User reports result is ~100m too South (needs more North)
-        // and was 50m too East (now shifting 50m West -> 0 offset)
-        // 1 deg Lat ~ 111km; 100m = 0.00090
-        // 1 deg Lon ~ 96km (Shanghai); 50m = 0.00052
+        // Standard calibration: +80m North, 0m East/West
+        // User confirmed this provides correct alignment in North-Up mode.
         return (lat + 0.00080, lon + 0.0)
     }
     

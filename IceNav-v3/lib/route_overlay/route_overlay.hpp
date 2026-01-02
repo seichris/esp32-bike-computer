@@ -47,14 +47,15 @@ public:
    *
    * @param canvas LVGL canvas object to draw on
    * @param centerLat Map center latitude in microdegrees
-   * @param centerLon Map center longitude in microdegrees
+   * @param centerMercatorX Map center X in Mercator units (meters)
+   * @param centerMercatorY Map center Y in Mercator units (meters)
    * @param zoom Current zoom level (higher = more zoomed in)
    * @param mapScrWidth Map screen width (for coordinate centering)
    * @param mapScrHeight Map screen height (for Y-axis flip)
    */
-  void drawRoute(lv_obj_t *canvas, int32_t centerLat, int32_t centerLon,
-                 uint8_t zoom, uint16_t mapScrWidth, uint16_t mapScrHeight,
-                 double rotationRad = 0.0);
+  void drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,
+                 int32_t centerMercatorY, uint8_t zoom, uint16_t mapScrWidth,
+                 uint16_t mapScrHeight, double rotationRad = 0.0);
 
   /**
    * @brief Clear all route points

@@ -1655,20 +1655,29 @@ void Maps::displayMap() {
       int32_t gpsX = lon2x(gps.gpsData.longitude);
       int32_t gpsY = lat2y(gps.gpsData.latitude);
 
-      // Use toScreenCoord to properly transform from world to screen space
-      // This matches how the map renders features (48x48 icon, so offset by
-      // -24)
-      x = Maps::toScreenCoord(gpsX, Maps::viewPort.center.x) - 24;
-      // Y-axis needs to be flipped to match map rendering: mapScrHeight -
-      // toScreenCoord This is because Mercator Y increases southward but screen
-      // Y increases downward
-      y = h - Maps::toScreenCoord(gpsY, Maps::viewPort.center.y) - 24;
+      // Apply rotation to match map rendering
+      // 1. Convert from map coords to screen-space offset (Y inverted)
+      double dx = (double)(gpsX - Maps::viewPort.center.x) / zoom;
+      double dy = -(double)(gpsY - Maps::viewPort.center.y) /
+                  zoom; // Invert Y to screen space
+
+      // 2. Rotate in screen space
+      double cosA = cos(rotationRad);
+      double sinA = sin(rotationRad);
+      double rx = dx * cosA - dy * sinA;
+      double ry = dx * sinA + dy * cosA;
+
+      // 3. Translate to screen center (centered on arrow)
+      // 48x48 icon, so offset by -24
+      x = (round(rx) + Maps::mapScrWidth / 2) - 24;
+      y = (round(ry) + h / 2) - 24;
 
       ESP_LOGI(TAG,
                "GPS indicator: gps(%.6f,%.6f) -> mercator(%d,%d) -> "
-               "screen(%d,%d), viewport center(%d,%d) zoom=%d",
+               "screen(%d,%d), viewport center(%d,%d) zoom=%d rot=%.2f",
                gps.gpsData.latitude, gps.gpsData.longitude, gpsX, gpsY, x, y,
-               Maps::viewPort.center.x, Maps::viewPort.center.y, zoom);
+               Maps::viewPort.center.x, Maps::viewPort.center.y, zoom,
+               rotationRad);
 
       lv_obj_set_pos(Maps::canvasArrow, x, y);
 
@@ -1713,22 +1722,15 @@ void Maps::generateVectorMap(uint8_t zoom) {
   ESP_LOGI(TAG, "Checking for route overlay: hasRoute=%d",
            routeOverlay.hasRoute());
   if (routeOverlay.hasRoute()) {
-    // Convert center point from Mercator to lat/lon microdegrees for route
-    // overlay
-    double centerLat = Maps::mercatorY2lat(Maps::viewPort.center.y);
-    double centerLon = Maps::mercatorX2lon(Maps::viewPort.center.x);
-    int32_t centerLatMicro = (int32_t)(centerLat * 1000000.0);
-    int32_t centerLonMicro = (int32_t)(centerLon * 1000000.0);
-
     ESP_LOGI(TAG,
-             "Drawing route overlay: center=(%.6f°,%.6f°) microdegrees=(%d,%d) "
+             "Drawing route overlay: centerMerc=(%d,%d) "
              "zoom=%d points=%d",
-             centerLat, centerLon, centerLatMicro, centerLonMicro, zoom,
+             Maps::viewPort.center.x, Maps::viewPort.center.y, zoom,
              routeOverlay.getPointCount());
 
-    routeOverlay.drawRoute(Maps::canvasMap, centerLatMicro, centerLonMicro,
-                           zoom, Maps::mapScrWidth, Maps::mapScrHeight,
-                           rotationRad);
+    routeOverlay.drawRoute(Maps::canvasMap, Maps::viewPort.center.x,
+                           Maps::viewPort.center.y, zoom, Maps::mapScrWidth,
+                           Maps::mapScrHeight, rotationRad);
     ESP_LOGI(TAG, "Route overlay draw complete (rotation=%.2f rad)",
              rotationRad);
   } else {

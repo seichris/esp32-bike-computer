@@ -82,16 +82,15 @@ void RouteOverlay::clear() {
 #define DEG2RAD(a) ((a) / (180.0 / M_PI))
 #endif
 
-int16_t RouteOverlay::geoToScreenX(int32_t lonMicro, int32_t centerLonMicro,
+int16_t RouteOverlay::geoToScreenX(int32_t lonMicro, int32_t centerMercatorX,
                                    uint8_t zoom, int16_t screenWidth) {
   // Convert microdegrees to degrees
   double lon = lonMicro / 1000000.0;
-  double centerLon = centerLonMicro / 1000000.0;
 
   // Use the exact same projection as maps.cpp: lon2x(lon) = DEG2RAD(lon) *
   // EARTH_RADIUS
   double worldX = DEG2RAD(lon) * EARTH_RADIUS;
-  double centerWorldX = DEG2RAD(centerLon) * EARTH_RADIUS;
+  double centerWorldX = (double)centerMercatorX;
 
   // Transform to screen space using the same logic as Maps::toScreenCoord
   // Formula: round((worldX - centerWorldX) / zoom) + screenWidth / 2
@@ -101,25 +100,23 @@ int16_t RouteOverlay::geoToScreenX(int32_t lonMicro, int32_t centerLonMicro,
   return screenX;
 }
 
-int16_t RouteOverlay::geoToScreenY(int32_t latMicro, int32_t centerLatMicro,
+int16_t RouteOverlay::geoToScreenY(int32_t latMicro, int32_t centerMercatorY,
                                    uint8_t zoom, int16_t screenHeight,
                                    int16_t screenWidth) {
   // Convert microdegrees to degrees
   double lat = latMicro / 1000000.0;
-  double centerLat = centerLatMicro / 1000000.0;
 
   // Use the exact same projection as maps.cpp: lat2y(lat) =
   // log(tan(DEG2RAD(lat) / 2 + M_PI / 4)) * EARTH_RADIUS
   double worldY = log(tan(DEG2RAD(lat) / 2.0 + M_PI / 4.0)) * EARTH_RADIUS;
-  double centerWorldY =
-      log(tan(DEG2RAD(centerLat) / 2.0 + M_PI / 4.0)) * EARTH_RADIUS;
+  double centerWorldY = (double)centerMercatorY;
 
-  // Transform to screen space with Y inversion (North = Up = lower screen Y)
-  // maps.cpp formula: screenY = mapScrHeight - toScreenCoord(worldY, centerY)
-  //                 = mapScrHeight - ((worldY - centerY)/zoom + mapScrWidth/2)
-  //                 = (mapScrHeight - mapScrWidth/2) - (worldY - centerY)/zoom
-  int16_t screenY = (int16_t)((screenHeight - screenWidth / 2.0) -
-                              round((worldY - centerWorldY) / zoom));
+  // Match map's approach exactly:
+  // dy = -(worldY - centerWorldY) / zoom (Y inverted)
+  // sy = dy + screenHeight/2
+  // Combined: screenHeight/2 - (worldY - centerWorldY) / zoom
+  int16_t screenY =
+      (int16_t)(round(-(worldY - centerWorldY) / zoom) + (screenHeight / 2.0));
 
   return screenY;
 }
@@ -189,8 +186,8 @@ void RouteOverlay::drawThickLine(uint16_t *buf, int32_t bufW, int32_t bufH,
   }
 }
 
-void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerLat,
-                             int32_t centerLon, uint8_t zoom,
+void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,
+                             int32_t centerMercatorY, uint8_t zoom,
                              uint16_t mapScrWidth, uint16_t mapScrHeight,
                              double rotationRad) {
   if (points.size() < 2) {
@@ -198,10 +195,10 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerLat,
     return; // Need at least 2 points to draw a line
   }
 
-  Serial.printf("RouteOverlay::drawRoute: center=(%.6f°,%.6f°) zoom=%d "
+  Serial.printf("RouteOverlay::drawRoute: centerMerc=(%d,%d) zoom=%d "
                 "points=%d rot=%.2frad\n",
-                centerLat / 1000000.0, centerLon / 1000000.0, zoom,
-                points.size(), rotationRad);
+                centerMercatorX, centerMercatorY, zoom, points.size(),
+                rotationRad);
 
   // Get canvas buffer
   lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
@@ -229,16 +226,15 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerLat,
   // Draw route segments
   for (size_t i = 0; i < points.size() - 1; i++) {
     // Convert geographic coordinates to screen pixels
-    // Use actual canvas buffer dimensions for transformation to align with
-    // canvas
-    int16_t x1 = geoToScreenX(points[i].lon, centerLon, zoom, bufW);
-    int16_t y1 = geoToScreenY(points[i].lat, centerLat, zoom, bufH, bufW);
-    int16_t x2 = geoToScreenX(points[i + 1].lon, centerLon, zoom, bufW);
-    int16_t y2 = geoToScreenY(points[i + 1].lat, centerLat, zoom, bufH, bufW);
+    int16_t x1 = geoToScreenX(points[i].lon, centerMercatorX, zoom, bufW);
+    int16_t y1 = geoToScreenY(points[i].lat, centerMercatorY, zoom, bufH, bufW);
+    int16_t x2 = geoToScreenX(points[i + 1].lon, centerMercatorX, zoom, bufW);
+    int16_t y2 =
+        geoToScreenY(points[i + 1].lat, centerMercatorY, zoom, bufH, bufW);
 
     // Apply rotation transform if rotationRad is non-zero
     if (rotationRad != 0.0) {
-      // Transform point 1: translate to center, rotate, translate back
+      // Transform point 1
       double dx1 = x1 - halfW;
       double dy1 = y1 - halfH;
       x1 = (int16_t)(dx1 * cosA - dy1 * sinA + halfW);
@@ -251,16 +247,24 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerLat,
       y2 = (int16_t)(dx2 * sinA + dy2 * cosA + halfH);
     }
 
-    // Log first few segments for debugging
-    if (i < 3) {
-      Serial.printf(
-          "  Segment %d: (%.6f°,%.6f°)->(%.6f°,%.6f°) screen(%d,%d)->(%d,%d)\n",
-          i, points[i].lat / 1000000.0, points[i].lon / 1000000.0,
-          points[i + 1].lat / 1000000.0, points[i + 1].lon / 1000000.0, x1, y1,
-          x2, y2);
+    // LOGGING: Debug Center Offset for the first segment
+    if (i == 0) {
+      ESP_LOGI(
+          "RouteOverlay",
+          "DEBUG_OFFSET: Center(%d,%d) StartPixel(%d,%d) Diff(%d,%d) Rot(%.2f)",
+          halfW, halfH, x1, y1, x1 - halfW, y1 - halfH, rotationRad);
     }
 
-    // Skip if both endpoints are far off-screen (optimization)
+    // Log first few segments for debugging
+    if (i < 3) {
+      ESP_LOGI("RouteOverlay",
+               "  Segment %d: (%.6f,%.6f)->(%.6f,%.6f) screen(%d,%d)->(%d,%d)",
+               (int)i, points[i].lat / 1000000.0, points[i].lon / 1000000.0,
+               points[i + 1].lat / 1000000.0, points[i + 1].lon / 1000000.0, x1,
+               y1, x2, y2);
+    }
+
+    // Skip if both endpoints are far off-screen
     const int16_t margin = 50;
     if ((x1 < -margin && x2 < -margin) ||
         (x1 > bufW + margin && x2 > bufW + margin) ||
@@ -275,6 +279,6 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerLat,
     drawnCount++;
   }
 
-  Serial.printf("Route drawn: %d/%d segments (some off-screen)\n", drawnCount,
-                (int)points.size() - 1);
+  ESP_LOGI("RouteOverlay", "Route drawn: %d/%d segments (some off-screen)",
+           drawnCount, (int)points.size() - 1);
 }

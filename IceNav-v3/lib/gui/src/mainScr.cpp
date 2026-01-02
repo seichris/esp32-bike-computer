@@ -419,7 +419,9 @@ void scrollMapEvent(lv_event_t *event) {
 
       // SANITY FILTER: Reject sudden large jumps (touch driver glitch)
       // A human can't move more than ~100px between samples
-      const int MAX_JUMP = 150;
+      // INCREASED to 400 because low FPS (150ms redraw) allows finger to move
+      // further
+      const int MAX_JUMP = 400;
       if (abs(dx) > MAX_JUMP || abs(dy) > MAX_JUMP) {
         log_w("GLITCH REJECTED: p(%d,%d) last(%d,%d) jump: dx=%d dy=%d", p.x,
               p.y, last_x, last_y, dx, dy);
@@ -483,7 +485,8 @@ void scrollMapEvent(lv_event_t *event) {
           int distY = abs(p.y - centerY);
           log_i("SHORT TAP CHECK: pos(%d,%d) center(%d,%d) dist(%d,%d)", p.x,
                 p.y, centerX, centerY, distX, distY);
-          if (distX < 60 && distY < 60) {
+          // Increased hit area to 120px radius (user request to double it)
+          if (distX < 120 && distY < 120) {
             log_i("SHORT TAP ON GPS DOT: Toggling rotation mode");
             mapView.toggleRotationMode();
           }
