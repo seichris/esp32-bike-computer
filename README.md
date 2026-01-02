@@ -1,5 +1,5 @@
 
-- (this one we tried and failed. but maybe just because the app search was broken. try it again) Actually there should be two modes for map rotation (switched by clicking on the red dot in the device): The default mode always shows north, as it is right now. The other mode shows into the direction where i am driving in (based on direction my phone is pointing to, as transmitted by the ios app)
+- How does map rotation currently work? It is switched by clicking on the red dot in the device: The default mode (showing red dot) always shows north. The other mode shows a blue dot, and shows into the direction where i am driving in (?!?) based on what?
 
 - it says the GPS follow mode is activated by default, but it doesnt seem so?!
 
@@ -8,7 +8,7 @@ Can we add a setting in the app for this? It should be saved on the device, so i
 - rerouting logic in the iOS app (after taking a wrong path)
 - can we make the dragging more responsive? or is it limited by the device cpu, or what else would be the bottleneck? How could we measure?
 
-
+- use a proper library to calculate china offsets
 
 
 

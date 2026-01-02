@@ -55,10 +55,16 @@ struct RouteInputView: View {
     var onStartNavigation: (String, String, MKDirectionsTransportType, Bool) -> Void
     
     @StateObject private var destinationCompleter = AddressSearchCompleter()
+    @StateObject private var sourceCompleter = AddressSearchCompleter()
+    
     @FocusState private var isDestinationFieldFocused: Bool
+    @FocusState private var isSourceFieldFocused: Bool
     
     @State private var hasSelectedDestination = false
     @State private var isSelectingFromSuggestion = false
+    @State private var isEditingSource = false
+    @State private var hasSelectedSource = false
+    
     @State private var isTestMode = false
     @State private var selectedTransportType: MKDirectionsTransportType = {
         if #available(iOS 18.0, *) {
@@ -71,8 +77,10 @@ struct RouteInputView: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                // Destination Search Field (always visible)
+                // Search Fields
                 VStack(spacing: 16) {
+                    
+                    // DESTINATION FIELD (Always visible)
                     HStack(spacing: 12) {
                         Image(systemName: "magnifyingglass")
                             .foregroundColor(.secondary)
@@ -81,14 +89,12 @@ struct RouteInputView: View {
                             .textContentType(.fullStreetAddress)
                             .focused($isDestinationFieldFocused)
                             .onChange(of: destinationAddress) { newValue in
-                                // Skip processing if we're programmatically selecting from suggestions
                                 if isSelectingFromSuggestion {
                                     isSelectingFromSuggestion = false
                                     return
                                 }
                                 
                                 destinationCompleter.search(query: newValue)
-                                // Reset selection state when user starts typing again
                                 if hasSelectedDestination {
                                     hasSelectedDestination = false
                                 }
@@ -98,34 +104,82 @@ struct RouteInputView: View {
                     .background(Color(.systemGray6))
                     .cornerRadius(12)
                     
-                    // From field (only shown after destination is selected)
+                    // SOURCE FIELD (Only shown after destination is selected)
                     if hasSelectedDestination {
-                        HStack(spacing: 12) {
-                            Image(systemName: "location.fill")
-                                .foregroundColor(.blue)
+                        if isEditingSource {
+                            // EDIT MODE: Text Field
+                            HStack(spacing: 12) {
+                                Image(systemName: "location.fill")
+                                    .foregroundColor(.blue)
+                                
+                                TextField("Search start location", text: $sourceAddress)
+                                    .focused($isSourceFieldFocused)
+                                    .onChange(of: sourceAddress) { newValue in
+                                        if isSelectingFromSuggestion {
+                                            isSelectingFromSuggestion = false
+                                            return
+                                        }
+                                        sourceCompleter.search(query: newValue)
+                                    }
+                                
+                                Button("Cancel") {
+                                    isEditingSource = false
+                                    isSourceFieldFocused = false
+                                    // Revert to current address if user cancels and hasn't picked a valid one?
+                                    // Actually, let's keep whatever is there, or revert if empty.
+                                    if sourceAddress.isEmpty {
+                                        sourceAddress = currentAddress
+                                        hasSelectedSource = false
+                                    }
+                                }
+                                .font(.caption)
+                            }
+                            .padding()
+                            .background(Color(.systemGray6))
+                            .cornerRadius(12)
                             
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Your Location")
-                                    .foregroundColor(.primary)
-                                    .font(.body)
-                                if !currentAddress.contains("Current Location") && !currentAddress.contains("Getting") {
-                                    Text(currentAddress)
-                                        .foregroundColor(.secondary)
+                        } else {
+                            // READ-ONLY MODE: Label (Tap to Edit)
+                            Button(action: {
+                                isEditingSource = true
+                                // Default to current address text so they can edit it or see it
+                                if sourceAddress.isEmpty || (!hasSelectedSource && sourceAddress != currentAddress) {
+                                    sourceAddress = currentAddress
+                                }
+                                isSourceFieldFocused = true
+                            }) {
+                                HStack(spacing: 12) {
+                                    Image(systemName: "location.fill")
+                                        .foregroundColor(.blue)
+                                    
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(hasSelectedSource ? "Start Location" : "Your Location")
+                                            .foregroundColor(.primary)
+                                            .font(.body)
+                                        
+                                        Text(hasSelectedSource ? sourceAddress : currentAddress)
+                                            .foregroundColor(.secondary)
+                                            .font(.caption)
+                                            .lineLimit(1)
+                                    }
+                                    
+                                    Spacer()
+                                    
+                                    Image(systemName: "pencil")
+                                        .foregroundColor(.gray)
                                         .font(.caption)
                                 }
+                                .padding()
+                                .background(Color(.systemGray6))
+                                .cornerRadius(12)
                             }
-                            
-                            Spacer()
                         }
-                        .padding()
-                        .background(Color(.systemGray6))
-                        .cornerRadius(12)
                     }
                 }
                 .padding()
                 
                 // Transport Type Selection (only shown after destination is selected)
-                if hasSelectedDestination {
+                if hasSelectedDestination && !isEditingSource {
                     HStack(spacing: 12) {
                         if #available(iOS 18.0, *) {
                             TransportButton(
@@ -157,9 +211,9 @@ struct RouteInputView: View {
                     Toggle(isOn: $isTestMode) {
                         HStack {
                             Image(systemName: "testtube.2")
-                                .foregroundColor(.orange)
+                            .foregroundColor(.orange)
                             Text("Test Mode")
-                                .foregroundColor(.primary)
+                            .foregroundColor(.primary)
                         }
                     }
                     .padding(.horizontal)
@@ -167,17 +221,43 @@ struct RouteInputView: View {
                     .tint(.orange)
                 }
                 
-                // Suggestions (shown while typing destination)
-                if !hasSelectedDestination && !destinationCompleter.suggestions.isEmpty {
-                    suggestionsList(for: destinationCompleter.suggestions)
+                // Suggestions List
+                if isEditingSource {
+                    // Show SOURCE suggestions
+                    if !sourceCompleter.suggestions.isEmpty {
+                        suggestionsList(for: sourceCompleter.suggestions) { suggestion in
+                            let fullAddress = "\(suggestion.title), \(suggestion.subtitle)"
+                            isSelectingFromSuggestion = true
+                            sourceAddress = fullAddress
+                            hasSelectedSource = true
+                            isEditingSource = false
+                            isSourceFieldFocused = false
+                        }
+                    } else {
+                        Spacer()
+                    }
+                    
                 } else {
-                    Spacer()
+                    // Show DESTINATION suggestions (if searching)
+                    if !hasSelectedDestination && !destinationCompleter.suggestions.isEmpty {
+                        suggestionsList(for: destinationCompleter.suggestions) { suggestion in
+                            let fullAddress = "\(suggestion.title), \(suggestion.subtitle)"
+                            isSelectingFromSuggestion = true
+                            destinationAddress = fullAddress
+                            hasSelectedDestination = true
+                            isDestinationFieldFocused = false
+                        }
+                    } else {
+                        Spacer()
+                    }
                 }
                 
-                // Go button (only shown after destination is selected)
-                if hasSelectedDestination {
+                // Go button (only shown after destination is selected & NOT editing)
+                if hasSelectedDestination && !isEditingSource {
                     Button(action: {
-                        onStartNavigation(currentAddress, destinationAddress, selectedTransportType, isTestMode)
+                        // Use sourceAddress if custom selected, else currentAddress
+                        let finalSource = hasSelectedSource ? sourceAddress : currentAddress
+                        onStartNavigation(finalSource, destinationAddress, selectedTransportType, isTestMode)
                         dismiss()
                     }) {
                         Text(isTestMode ? "Go (Test)" : "Go")
@@ -213,28 +293,28 @@ struct RouteInputView: View {
                 if let location = currentLocation {
                     let region = MKCoordinateRegion(
                         center: location.coordinate,
-                        latitudinalMeters: 50000,  // ~50km radius for search relevance
+                        latitudinalMeters: 50000,
                         longitudinalMeters: 50000
                     )
                     destinationCompleter.updateRegion(region)
+                    sourceCompleter.updateRegion(region)
                 }
             }
             .onDisappear {
                 // Reset state when dismissed
                 hasSelectedDestination = false
                 destinationAddress = ""
+                // Reset source state too? usually good idea.
+                isEditingSource = false
+                hasSelectedSource = false
             }
         }
     }
     
-    private func suggestionsList(for suggestions: [MKLocalSearchCompletion]) -> some View {
+    private func suggestionsList(for suggestions: [MKLocalSearchCompletion], onSelect: @escaping (MKLocalSearchCompletion) -> Void) -> some View {
         List(suggestions, id: \.self) { suggestion in
             Button(action: {
-                let fullAddress = "\(suggestion.title), \(suggestion.subtitle)"
-                isSelectingFromSuggestion = true
-                destinationAddress = fullAddress
-                hasSelectedDestination = true
-                isDestinationFieldFocused = false
+                onSelect(suggestion)
             }) {
                 HStack(spacing: 12) {
                     Image(systemName: "mappin.circle.fill")
