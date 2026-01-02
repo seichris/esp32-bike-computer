@@ -136,15 +136,14 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
         
-        // Apply calibration (nudge) to align with map tiles
-        let calibrated = CoordinateConverter.applyCalibration(lat: lat, lon: lon)
+        // GPS coordinates arrive already converted from GCJ-02 to WGS-84 by NavigationEngine
+        // Do NOT apply additional calibration here - that would cause double offset
         
         // Format: [Lat:4][Lon:4][Heading:2] Int32 microdegrees + UInt16 degrees
-        // GPS coordinates stay in WGS-84 (no conversion needed - map tiles are WGS-84)
         var data = Data()
         
-        let latInt = Int32(calibrated.lat * 1_000_000)
-        let lonInt = Int32(calibrated.lon * 1_000_000)
+        let latInt = Int32(lat * 1_000_000)
+        let lonInt = Int32(lon * 1_000_000)
         
         // Heading: 0-359 degrees (UInt16), -1 means invalid
         let headingDeg: UInt16 = heading >= 0 ? UInt16(min(heading, 359)) : 0

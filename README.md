@@ -1,6 +1,8 @@
 
 - (this one we tried and failed. but maybe just because the app search was broken. try it again) Actually there should be two modes for map rotation (switched by clicking on the red dot in the device): The default mode always shows north, as it is right now. The other mode shows into the direction where i am driving in (based on direction my phone is pointing to, as transmitted by the ios app)
 
+- it says the GPS follow mode is activated by default, but it doesnt seem so?!
+
 - rotate everything on the device by 90 degrees left. Is setRotation the native way to do this?
 Can we add a setting in the app for this? It should be saved on the device, so it keeps its set rotation after a restart.
 - rerouting logic in the iOS app (after taking a wrong path)

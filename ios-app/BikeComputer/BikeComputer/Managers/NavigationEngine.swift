@@ -102,10 +102,16 @@ class NavigationEngine: NSObject, ObservableObject {
         simulationProgress = 0.0
         lastSimulationUpdate = Date()
         
+        // Start location manager to keep app alive in background
+        // This ensures simulation continues even when phone is locked
+        locationManager.startUpdatingLocation()
+        
         simulationTimer?.invalidate()
         simulationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.updateSimulation()
         }
+        // Add timer to RunLoop to ensure it fires in common run loop modes (including background)
+        RunLoop.current.add(simulationTimer!, forMode: .common)
     }
     
     internal func stopSimulation() {
@@ -290,6 +296,7 @@ class NavigationEngine: NSObject, ObservableObject {
         locationManager.activityType = .fitness
         locationManager.allowsBackgroundLocationUpdates = true
         locationManager.pausesLocationUpdatesAutomatically = false
+        locationManager.showsBackgroundLocationIndicator = true  // Show blue bar when in background
         
         // Request authorization
         locationManager.requestAlwaysAuthorization()

@@ -158,9 +158,14 @@ class BikeComputerCoordinator: ObservableObject {
                 guard let self = self, ready, let loc = location else { return }
                 // Send current position and heading to device to update map
                 // CLLocation.course is -1 if invalid, 0-359 if valid
+                
+                // Calibrate real GPS using standard converter
+                // Should align with simulation behavior (Lat+0.00090, Lon+0.0)
+                let calibrated = CoordinateConverter.applyCalibration(lat: loc.coordinate.latitude, lon: loc.coordinate.longitude)
+                
                 self.bleManager.sendGPSPosition(
-                    lat: loc.coordinate.latitude, 
-                    lon: loc.coordinate.longitude,
+                    lat: calibrated.lat,
+                    lon: calibrated.lon,
                     heading: loc.course
                 )
             }

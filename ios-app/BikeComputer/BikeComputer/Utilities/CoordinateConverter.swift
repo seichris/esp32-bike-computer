@@ -54,11 +54,11 @@ class CoordinateConverter {
     /// Apply manual calibration nudge to WGS-84 coordinates
     /// Used to correct specific map tile offsets (e.g. ~50m offset in Shanghai)
     static func applyCalibration(lat: Double, lon: Double) -> (lat: Double, lon: Double) {
-        // User reports result is ~50m too South-West ("low and left")
-        // We add ~50m North (+Lat) and ~50m East (+Lon)
-        // 1 deg Lat ~ 111km; 50m = 0.00045
+        // User reports result is ~100m too South (needs more North)
+        // and was 50m too East (now shifting 50m West -> 0 offset)
+        // 1 deg Lat ~ 111km; 100m = 0.00090
         // 1 deg Lon ~ 96km (Shanghai); 50m = 0.00052
-        return (lat + 0.00045, lon + 0.00052)
+        return (lat + 0.00080, lon + 0.0)
     }
     
     /// Convert CLLocationCoordinate2D from GCJ-02 to WGS-84
