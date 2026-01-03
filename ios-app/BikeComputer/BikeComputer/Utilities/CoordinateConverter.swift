@@ -54,7 +54,10 @@ class CoordinateConverter {
     /// Apply manual calibration nudge to WGS-84 coordinates
     /// Used to correct specific map tile offsets (e.g. ~50m offset in Shanghai)
     static func applyCalibration(lat: Double, lon: Double) -> (lat: Double, lon: Double) {
-        // Standard calibration: +80m North, 0m East/West
+        if !isInChina(lat: lat, lon: lon) {
+             return (lat, lon)
+        }
+        // Standard calibration: +80m North, 0m East/West (China only)
         // User confirmed this provides correct alignment in North-Up mode.
         return (lat + 0.00080, lon + 0.0)
     }

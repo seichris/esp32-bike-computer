@@ -51,7 +51,6 @@ Maps mapView;
 void triggerMapRedraw() {
   mapView.isPosMoved = true;
   mapView.redrawMap = true;
-  log_i("Map redraw triggered by BLE route update");
 }
 
 /**

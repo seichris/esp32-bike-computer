@@ -1,11 +1,23 @@
 
 - Fix Blue Dot Mode (Facing navigation direction) alignment: The navigation line does not stick perfectly to the street (coordinate offset issue or rotation related issue?)."
+In Red Dot Mode (Always facing north) the blue navigation line aligns well with the road.
+And in Blue Dot Mode, when following a street that faces North, the blue line also aligns with that road.
+But in Blue Dot Mode, when it rotates, the dot and the line goes into different directions.
+In CoordinateConverter.swift we convert coordinates from Chinese (GCJ-02) to Western (WGS-84).
+Iterative Conversion: Since there is no closed-form formula to go from GCJ-02 back to WGS-84, the app uses an iterative approach (running the forward conversion 3 times) to "guess" the original WGS-84 coordinate with high precision.
+applyCalibration: At the end of that function, it calls applyCalibration, which currently applies the +80m North offset (+0.00080 Latitude) that aligns the map in North-Up mode.
+
+Lets test if the rotation issue is because of this conversion.
+Lets set our default coordinates to Frankfurt (our SD card has a Frankfurt map), and I will test a route inside frankfurt.
+
 
 - it says the GPS follow mode is activated by default, but it doesnt seem so?!
 
 - rotate everything on the device by 90 degrees left, so the device's usb port faces the user. Is setRotation the native way to do this?
 Can we add a setting in the app for this? It should be saved on the device, so it keeps its set rotation after a restart.
 - rerouting logic in the iOS app (after taking a wrong path)
+also when starting a navigation, it should default to starting from the actual current gps location. Is that possible? vs right now it 'converts' our current location into a location name. And sometimes thats not accurately at our actual location. 
+
 - can we make the dragging more responsive? or is it limited by the device cpu, or what else would be the bottleneck? How could we measure?
 
 

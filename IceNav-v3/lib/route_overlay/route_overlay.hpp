@@ -8,6 +8,7 @@
  * as a thick blue line overlay on the existing vector map.
  */
 
+#include "../utils/src/psram_allocator.hpp"
 #include "lvgl.h"
 #include <Arduino.h>
 #include <cstdint>
@@ -74,7 +75,7 @@ public:
   size_t getPointCount() const { return points.size(); }
 
 private:
-  std::vector<GeoPoint> points;
+  std::vector<GeoPoint, PsramAllocator<GeoPoint>> points;
 
   // Route rendering settings
   static constexpr int16_t ROUTE_LINE_WIDTH = 6;

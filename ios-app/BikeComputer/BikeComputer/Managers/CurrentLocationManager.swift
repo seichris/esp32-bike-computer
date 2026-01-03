@@ -88,9 +88,10 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let location = locations.last else { return }
+        
         currentLocation = location
         
-        // Track distance and speed if workout is active
+        // Pass to HealthKit to calculate speed/distance
         if let healthKit = healthKitManager, healthKit.isWorkoutActive {
             if let last = lastLocation {
                 // Calculate distance increment

@@ -27,6 +27,8 @@
 
 #include "globalGpxDef.h"
 
+#include "../../utils/src/psram_allocator.hpp"
+
 /**
  * @brief Point in 16 bits projected coordinates (x,y) Vector Maps
  *
@@ -65,10 +67,33 @@ struct BBox {
   BBox() {};
   BBox(Point32 min, Point32 max) : min(min), max(max) {};
   BBox operator-(const Point32 p) { return BBox(min - p, max - p); };
-  bool containsPoint(const Point32 p);
-  bool intersects(const BBox b);
+  bool containsPoint(const Point32 p) const;
+  bool intersects(const BBox b) const;
   Point32 min;
   Point32 max;
+};
+
+/**
+ * @brief Polyline struct
+ *
+ */
+struct Polyline {
+  std::vector<Point16, PsramAllocator<Point16>> points;
+  BBox bbox;
+  uint16_t color;
+  uint8_t width;
+  uint8_t maxZoom;
+};
+
+/**
+ * @brief Polygon struct
+ *
+ */
+struct Polygon {
+  std::vector<Point16, PsramAllocator<Point16>> points;
+  BBox bbox;
+  uint16_t color;
+  uint8_t maxZoom;
 };
 
 static const String mapVectorFolder PROGMEM =

@@ -42,6 +42,7 @@ class NavigationEngine: NSObject, ObservableObject {
     
     // BLE Manager reference
     private var bleManager: BLEManager?
+    private var cancellables = Set<AnyCancellable>()
     
     // Distance threshold for sending updates (meters)
     private let distanceThreshold: Int = 10
@@ -290,6 +291,28 @@ class NavigationEngine: NSObject, ObservableObject {
     // MARK: - Private Methods
     
     private func setupLocationManager() {
+        bleManager?.$isRouteReady
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isReady in
+                if isReady {
+                    print("BLE Route Ready: Resetting route geometry state to force resend")
+                    self?.lastSentGeometryHash = 0
+                    self?.lastGeometrySendTime = Date.distantPast
+                    
+                    // Force immediate update if navigating
+                    if let self = self, self.isNavigating, let route = self.currentRoute {
+                         // Send initial geometry again
+                         if route.polyline.pointCount > 0 {
+                              var startCoord = CLLocationCoordinate2D()
+                              route.polyline.getCoordinates(&startCoord, range: NSRange(location: 0, length: 1))
+                              let startLoc = CLLocation(latitude: startCoord.latitude, longitude: startCoord.longitude)
+                              self.sendRouteGeometryIfNeeded(currentLocation: startLoc)
+                         }
+                    }
+                }
+            }
+            .store(in: &cancellables)
+            
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
         locationManager.distanceFilter = 5 // Update every 5 meters

@@ -29,11 +29,11 @@ extern Point16::Point16(char *coordsPair) {
   y = (int16_t)round(strtod(++next, NULL)); // 2nd coord
 }
 
-bool BBox::containsPoint(const Point32 p) {
+bool BBox::containsPoint(const Point32 p) const {
   return p.x >= min.x && p.x <= max.x && p.y >= min.y && p.y <= max.y;
 }
 
-bool BBox::intersects(BBox b) {
+bool BBox::intersects(const BBox b) const {
   if (b.min.x > max.x || b.max.x < min.x || b.min.y > max.y || b.max.y < min.y)
     return false;
   return true;
@@ -616,7 +616,8 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
  * @param points
  * @param color
  */
-void Maps::fillPolygon(Polygon p, lv_obj_t *canvas) // scanline fill algorithm
+void Maps::fillPolygon(const Polygon &p,
+                       lv_obj_t *canvas) // scanline fill algorithm
 {
   int16_t maxY = p.bbox.max.y;
   int16_t minY = p.bbox.min.y;
@@ -875,24 +876,14 @@ void Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
  * @param map -> Map Sprite
  * @param zoom -> Zoom Level
  */
-void Maps::readVectorMap(Maps::ViewPort &viewPort, Maps::MemCache &memCache,
-                         lv_obj_t *canvas, uint8_t zoom) {
+void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
+                         lv_obj_t *canvas, uint8_t zoom, double rotation) {
   Polygon newPolygon;
   lv_canvas_fill_bg(canvas, lv_color_hex(BACKGROUND_COLOR), LV_OPA_COVER);
 
-  // Calculate rotation
-  double cosA = 1.0;
-  double sinA = 0.0;
-
-  if (rotationMode == ROT_COURSE_UP) {
-    // Use negative heading to rotate map so heading points UP
-    // Using gps.gpsData.heading (degrees)
-    rotationRad = -DEG2RAD(gps.gpsData.heading);
-    cosA = cos(rotationRad);
-    sinA = sin(rotationRad);
-  } else {
-    rotationRad = 0;
-  }
+  // Calculate rotation from passed argument
+  double cosA = cos(rotation);
+  double sinA = sin(rotation);
 
   int16_t halfW = Maps::mapScrWidth / 2;
   int16_t halfH = Maps::mapScrHeight / 2;
@@ -931,7 +922,7 @@ void Maps::readVectorMap(Maps::ViewPort &viewPort, Maps::MemCache &memCache,
       ////// Polygons
       int poly_total = mblock->polygons.size();
       int poly_drawn = 0;
-      for (Polygon polygon : mblock->polygons) {
+      for (const auto &polygon : mblock->polygons) {
         // DISABLE ZOOM FILTER to see map
         /*
         if (zoom > polygon.maxZoom) {
@@ -977,7 +968,7 @@ void Maps::readVectorMap(Maps::ViewPort &viewPort, Maps::MemCache &memCache,
         newPolygon.points.clear();
         int16_t minX = 32000, maxX = -32000, minY = 32000, maxY = -32000;
 
-        for (Point16 p : polygon.points) {
+        for (const auto &p : polygon.points) {
           Point16 tp = transformPoint(p);
           newPolygon.points.push_back(tp);
           if (tp.x < minX)
@@ -1004,7 +995,7 @@ void Maps::readVectorMap(Maps::ViewPort &viewPort, Maps::MemCache &memCache,
 
       ////// Lines
       // Removed lv_draw_line usage to fix crash
-      for (Polyline line : mblock->polylines) {
+      for (const auto &line : mblock->polylines) {
         if (zoom > line.maxZoom)
           continue;
         if (!line.bbox.intersects(screen_bbox_mc))
@@ -1702,6 +1693,15 @@ void Maps::generateVectorMap(uint8_t zoom) {
   Maps::mapTileSize = Maps::vectorMapTileSize;
   Maps::zoomLevel = zoom;
 
+  // CRITICAL: Update Rotation ONCE per generation frame to ensure map and route
+  // align
+  if (rotationMode == ROT_COURSE_UP) {
+    // Use negative heading to rotate map so heading points UP
+    rotationRad = -DEG2RAD(gps.gpsData.heading);
+  } else {
+    rotationRad = 0;
+  }
+
   // Viewport
   Maps::viewPort.zoom = zoom;
   Maps::viewPort.setCenter(Maps::point);
@@ -1715,8 +1715,9 @@ void Maps::generateVectorMap(uint8_t zoom) {
            Maps::viewPort.bbox.min.x, Maps::viewPort.bbox.min.y,
            Maps::viewPort.bbox.max.x, Maps::viewPort.bbox.max.y);
 
-  // Read Vector Map to Canvas
-  Maps::readVectorMap(Maps::viewPort, Maps::memCache, Maps::canvasMap, zoom);
+  // Read Vector Map to Canvas (Pass calculated rotation)
+  Maps::readVectorMap(Maps::viewPort, Maps::memCache, Maps::canvasMap, zoom,
+                      rotationRad);
 
   // Draw route overlay from iOS navigation (if available)
   ESP_LOGI(TAG, "Checking for route overlay: hasRoute=%d",

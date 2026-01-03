@@ -16,6 +16,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var isScanning: Bool = false
     @Published var isConnected: Bool = false
     @Published var isGPSReady: Bool = false // Ready to send GPS data
+    @Published var isRouteReady: Bool = false // Ready to send Route data
     @Published var peripheralName: String = ""
     @Published var signalStrength: Int = 0
     
@@ -262,6 +263,7 @@ extension BLEManager: CBCentralManagerDelegate {
         
         isConnected = false
         isGPSReady = false
+        isRouteReady = false
         connectedPeripheral = nil
         navigationCharacteristic = nil
         
@@ -368,6 +370,7 @@ extension BLEManager: CBPeripheralDelegate {
             
             if characteristic.uuid == routeGeometryCharacteristicUUID {
                 routeGeometryCharacteristic = characteristic
+                isRouteReady = true // Mark as ready to send Route data
                 print("Route Geometry characteristic ready!")
             }
             

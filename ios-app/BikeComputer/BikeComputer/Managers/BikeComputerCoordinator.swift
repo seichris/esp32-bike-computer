@@ -339,7 +339,7 @@ extension BikeComputerCoordinator {
         }
     }
     
-    private func findDestinationAndCalculateRoute(from sourceItem: MKMapItem, destination: String, isTestMode: Bool = false) {
+    private func findDestinationAndCalculateRoute(from sourceItem: MKMapItem, destination: String, isTestMode: Bool) {
         let destinationSearchRequest = MKLocalSearch.Request()
         destinationSearchRequest.naturalLanguageQuery = destination
         
@@ -372,63 +372,67 @@ extension BikeComputerCoordinator {
             print("Destination found: \(destinationItem.name ?? "Unknown") at \(destinationItem.placemark.coordinate.latitude), \(destinationItem.placemark.coordinate.longitude)")
             self.routeCalculation.status = "Calculating route..."
             
-            // Now calculate the route
-            let request = MKDirections.Request()
-            request.source = sourceItem
-            request.destination = destinationItem
-            request.transportType = self.transportType
-            request.requestsAlternateRoutes = false
+            self.requestDirections(from: sourceItem, to: destinationItem, isTestMode: isTestMode)
+        }
+    }
+    
+    private func requestDirections(from sourceItem: MKMapItem, to destinationItem: MKMapItem, isTestMode: Bool) {
+        let request = MKDirections.Request()
+        request.source = sourceItem
+        request.destination = destinationItem
+        request.transportType = self.transportType
+        request.requestsAlternateRoutes = false
+        
+        print("Calculating route with transport type: \(self.transportType.rawValue)")
+        
+        let directions = MKDirections(request: request)
+        self.ongoingDirections = directions
+        directions.calculate { [weak self] response, error in
+            guard let self = self else { return }
+            self.ongoingDirections = nil
             
-            print("Calculating route with transport type: \(self.transportType.rawValue)")
-            
-            let directions = MKDirections(request: request)
-            self.ongoingDirections = directions
-            directions.calculate { [weak self] response, error in
-                guard let self = self else { return }
-                self.ongoingDirections = nil
-                
-                if let error = error {
-                    print("Error calculating route: \(error.localizedDescription)")
-                    self.routeCalculation.status = "Route calculation failed"
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        self.routeCalculation.isCalculating = false
-                        self.routeCalculation.status = ""
-                    }
-                    return
-                }
-                
-                guard let route = response?.routes.first else {
-                    print("No routes found")
-                    self.routeCalculation.status = "No route available"
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        self.routeCalculation.isCalculating = false
-                        self.routeCalculation.status = ""
-                    }
-                    return
-                }
-                
-                print("Route calculated successfully!")
-                print("Distance: \(route.distance)m, ETA: \(route.expectedTravelTime)s")
-                print("Steps: \(route.steps.count)")
-                
-                self.routeCalculation.status = "Starting navigation..."
-                
-                // Store the route for map display
-                self.currentRoute = route
-                
-                // Start navigation
-                self.navEngine.startNavigation(with: route, isTestMode: isTestMode)
-                
-                // Enable location tracking for navigation
-                self.locationManager.setNavigating(true)
-                
-                // Show navigation+workout view
-                self.selectedView = 1
-                
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            if let error = error {
+                print("Error calculating route: \(error.localizedDescription)")
+                // SHOW ERROR ON SCREEN
+                self.routeCalculation.status = "Err: \(error.localizedDescription)"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
                     self.routeCalculation.isCalculating = false
                     self.routeCalculation.status = ""
                 }
+                return
+            }
+            
+            guard let route = response?.routes.first else {
+                print("No routes found")
+                self.routeCalculation.status = "No route available"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    self.routeCalculation.isCalculating = false
+                    self.routeCalculation.status = ""
+                }
+                return
+            }
+            
+            print("Route calculated successfully!")
+            print("Distance: \(route.distance)m, ETA: \(route.expectedTravelTime)s")
+            print("Steps: \(route.steps.count)")
+            
+            self.routeCalculation.status = "Starting navigation..."
+            
+            // Store the route for map display
+            self.currentRoute = route
+            
+            // Start navigation
+            self.navEngine.startNavigation(with: route, isTestMode: isTestMode)
+            
+            // Enable location tracking for navigation
+            self.locationManager.setNavigating(true)
+            
+            // Show navigation+workout view
+            self.selectedView = 1
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                self.routeCalculation.isCalculating = false
+                self.routeCalculation.status = ""
             }
         }
     }

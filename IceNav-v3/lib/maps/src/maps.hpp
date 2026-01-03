@@ -105,12 +105,12 @@ private:
   BBox parseBbox(String str);
   MapBlock *readMapBlock(String fileName);
   MapBlock *readMapBlockBinary(char *buffer, size_t fileSize);
-  void fillPolygon(Polygon p, lv_obj_t *canvas);
+  void fillPolygon(const Polygon &p, lv_obj_t *canvas);
   void drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
                 int16_t y2, uint16_t color);
   void getMapBlocks(BBox &bbox, MemCache &memCache);
   void readVectorMap(ViewPort &viewPort, MemCache &memCache, lv_obj_t *canvas,
-                     uint8_t zoom);
+                     uint8_t zoom, double rotation);
   void getPosition(double lat, double lon);
 
   // Common
