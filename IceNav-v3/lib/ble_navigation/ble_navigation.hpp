@@ -28,7 +28,7 @@ struct NavigationData {
 /**
  * @brief Map rendering settings (configurable via BLE from iOS app)
  * Settings IDs: 1=minPolygonSize, 2=detailLevel, 3=routeLineWidth,
- * 4=displayRotation, 6=mapRotationMode
+ * 4=displayRotation, 6=mapRotationMode, 7=zoomLevel, 8=visibilityMask
  */
 struct MapRenderSettings {
   uint8_t minPolygonSize = 0; // 0-50: Skip polygons smaller than N pixels²
@@ -37,7 +37,9 @@ struct MapRenderSettings {
   uint8_t displayRotation =
       0; // 0-3: Display rotation (0=0°, 1=90°, 2=180°, 3=270°)
   uint8_t mapRotationMode = 0; // 0=North Up, 1=Course Up
-  uint8_t zoomLevel = 4;       // 1-4: Zoom level (1=closest, 4=farthest)
+  uint8_t zoomLevel = 2;       // 0-5: Zoom level (0=super, 2=default)
+  uint32_t visibilityMask =
+      0xFFFFFFFF; // Bitmask: bit0=buildings, bit1=nature, bit2=minorRoads
 };
 
 extern MapRenderSettings mapRenderSettings;

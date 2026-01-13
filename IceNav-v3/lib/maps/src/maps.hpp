@@ -57,6 +57,8 @@ private:
     uint16_t color;
     uint8_t width;
     uint8_t maxZoom;
+    uint8_t typeId; // Feature type: 0=unknown, 1-49=roads, 50-99=paths,
+                    // 100+=buildings/nature
   };
   struct Polygon // Polygon struct
   {
@@ -64,6 +66,7 @@ private:
     BBox bbox;
     uint16_t color;
     uint8_t maxZoom;
+    uint8_t typeId; // Feature type: 0=unknown, 100+=buildings, 150+=nature
   };
   // Spatial grid constants for polygon culling optimization
   static const int GRID_BITS = 4;              // 16x16 grid

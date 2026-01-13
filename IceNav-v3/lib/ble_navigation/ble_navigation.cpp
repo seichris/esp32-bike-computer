@@ -251,6 +251,16 @@ public:
                       mapRenderSettings.zoomLevel);
         break;
       }
+      case 8: { // visibilityMask (bitmask for feature type visibility)
+        mapRenderSettings.visibilityMask = (uint32_t)settingValue;
+        // Save to NVS for persistence across reboots
+        settingsPrefs.begin("mapSettings", false);
+        settingsPrefs.putUInt("visMask", mapRenderSettings.visibilityMask);
+        settingsPrefs.end();
+        Serial.printf("BLE Settings: visibilityMask = 0x%08X (saved)\n",
+                      mapRenderSettings.visibilityMask);
+        break;
+      }
       default:
         Serial.printf("BLE Settings: Unknown setting ID %d\n", settingId);
         break;
@@ -279,6 +289,7 @@ static void loadSettingsFromNVS() {
   mapRenderSettings.displayRotation = prefs.getUChar("rotation", 0);
   mapRenderSettings.mapRotationMode = prefs.getUChar("mapRotMode", 0);
   mapRenderSettings.zoomLevel = prefs.getUChar("zoomLevel", 4);
+  mapRenderSettings.visibilityMask = prefs.getUInt("visMask", 0xFFFFFFFF);
 
   prefs.end();
 

@@ -23,8 +23,27 @@ struct MapRenderSettings {
   uint8_t minPolygonSize;
   uint8_t detailLevel;
   uint8_t routeLineWidth;
+  uint8_t displayRotation;
+  uint8_t mapRotationMode;
+  uint8_t zoomLevel;
+  uint32_t visibilityMask;
 };
 extern MapRenderSettings mapRenderSettings;
+
+// Helper: Check if a typeId is visible based on visibilityMask
+// Bit 0 = buildings (100-149), Bit 1 = nature (150-199), Bit 2 = minor roads
+// (50-99)
+static inline bool isTypeVisible(uint8_t typeId, uint32_t visMask) {
+  if (typeId == 0)
+    return true; // Unknown types always visible
+  if (typeId >= 100 && typeId < 150)
+    return (visMask & (1 << 0)) != 0; // Buildings
+  if (typeId >= 150 && typeId < 200)
+    return (visMask & (1 << 1)) != 0; // Nature
+  if (typeId >= 50 && typeId < 100)
+    return (visMask & (1 << 2)) != 0; // Minor roads
+  return true; // Major roads (1-49) and others always visible
+}
 
 static void *bufMapTemp = nullptr;
 static void *bufMapIcon = nullptr;
@@ -538,18 +557,25 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
 
 /**
  * @brief High performance binary map block reader
+ * Supports both v1 (legacy) and v2 (with typeId) formats
  */
 Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   MapBlock *mblock = new MapBlock();
   size_t offset = 0;
 
-  // Check Magic
-  if (fileSize < 4 || memcmp(file, "FMB\x01", 4) != 0) {
+  // Check Magic (first 3 bytes must be "FMB")
+  if (fileSize < 4 || memcmp(file, "FMB", 3) != 0) {
     ESP_LOGE(TAG, "Invalid Binary Map Header");
     delete mblock;
     Maps::isMapFound = false;
     return new MapBlock();
   }
+
+  // Get version from 4th byte
+  uint8_t version = (uint8_t)file[3];
+  bool hasTypeId = (version >= 2);
+  ESP_LOGI(TAG, "Map file version: %d (typeId: %s)", version,
+           hasTypeId ? "yes" : "no");
   offset += 4;
 
   // Polygons
@@ -563,6 +589,15 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
     offset += 2;
     poly.maxZoom = *(uint8_t *)(file + offset);
     offset += 1;
+
+    // V2: Read typeId after maxZoom
+    if (hasTypeId) {
+      poly.typeId = *(uint8_t *)(file + offset);
+      offset += 1;
+    } else {
+      poly.typeId = 0; // Unknown for legacy maps
+    }
+
     poly.bbox.min.x = *(int16_t *)(file + offset);
     offset += 2;
     poly.bbox.min.y = *(int16_t *)(file + offset);
@@ -593,6 +628,15 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
     offset += 1;
     line.maxZoom = *(uint8_t *)(file + offset);
     offset += 1;
+
+    // V2: Read typeId after maxZoom
+    if (hasTypeId) {
+      line.typeId = *(uint8_t *)(file + offset);
+      offset += 1;
+    } else {
+      line.typeId = 0; // Unknown for legacy maps
+    }
+
     line.bbox.min.x = *(int16_t *)(file + offset);
     offset += 2;
     line.bbox.min.y = *(int16_t *)(file + offset);
@@ -1046,6 +1090,12 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               continue;
             }
 
+            // Skip if type is hidden by visibility mask
+            if (!isTypeVisible(polygon.typeId,
+                               mapRenderSettings.visibilityMask)) {
+              continue;
+            }
+
             poly_drawn++;
             newPolygon.color = polygon.color;
 
@@ -1099,6 +1149,10 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           continue;
 
         if (line.points.size() < 2)
+          continue;
+
+        // Skip if type is hidden by visibility mask
+        if (!isTypeVisible(line.typeId, mapRenderSettings.visibilityMask))
           continue;
 
         uint16_t color_swapped = line.color; // Use color directly (RGB565)

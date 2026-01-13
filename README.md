@@ -1,7 +1,9 @@
 ## Other TODOs
 
-- zoom, also as setting in the app
-- we can hide xxx with lesspolygons. Can we also hide/show specific parts of the map?
+- Map Customization (Style & Hiding):
+    - Current map files lack metadata (type/kind) to distinguish features (e.g. Park vs Forest).
+    - PLAN: Update `OSM_Extract/scripts/extract_features.py` to write an extra `type` byte to the binary `.fmb` files.
+    - This enables the ESP32 to filter features or change styles (colors/widths) based on type, controlled via iOS settings.
 - rerouting logic in the iOS app (after taking a wrong path)
 also when starting a navigation, it should default to starting from the actual current gps location. Is that possible? vs right now it 'converts' our current location into a location name. And sometimes thats not accurately at our actual location. 
 

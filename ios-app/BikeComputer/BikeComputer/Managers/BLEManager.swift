@@ -28,6 +28,11 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapRotationMode: Int = 0 // 0=North Up, 1=Course Up  // 0-3: 0°, 90°, 180°, 270°
     @Published var zoomLevel: Int = 2 // 0-4: 0=super-zoom, 1=closest, 4=farthest
     
+    // Feature Visibility
+    @Published var showBuildings: Bool = true
+    @Published var showNature: Bool = true
+    @Published var showMinorRoads: Bool = true
+    
     // MARK: - BLE UUIDs (matching ESP32)
     private let serviceUUID = CBUUID(string: "1819")           // Navigation Service
     private let characteristicUUID = CBUUID(string: "2A6E")    // Navigation Data Characteristic
@@ -59,6 +64,9 @@ class BLEManager: NSObject, ObservableObject {
         static let detailLevel = "mapSettings.detailLevel"
         static let routeLineWidth = "mapSettings.routeLineWidth"
         static let displayRotation = "mapSettings.displayRotation"
+        static let showBuildings = "mapSettings.showBuildings"
+        static let showNature = "mapSettings.showNature"
+        static let showMinorRoads = "mapSettings.showMinorRoads"
     }
     
     // MARK: - Initialization
@@ -74,6 +82,9 @@ class BLEManager: NSObject, ObservableObject {
         detailLevel = defaults.object(forKey: SettingsKeys.detailLevel) as? Int ?? 2
         routeLineWidth = defaults.object(forKey: SettingsKeys.routeLineWidth) as? Double ?? 4.0
         displayRotation = defaults.object(forKey: SettingsKeys.displayRotation) as? Int ?? 0
+        showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
+        showNature = defaults.object(forKey: SettingsKeys.showNature) as? Bool ?? true
+        showMinorRoads = defaults.object(forKey: SettingsKeys.showMinorRoads) as? Bool ?? true
     }
     
     func saveSettings() {
@@ -82,6 +93,9 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(detailLevel, forKey: SettingsKeys.detailLevel)
         defaults.set(routeLineWidth, forKey: SettingsKeys.routeLineWidth)
         defaults.set(displayRotation, forKey: SettingsKeys.displayRotation)
+        defaults.set(showBuildings, forKey: SettingsKeys.showBuildings)
+        defaults.set(showNature, forKey: SettingsKeys.showNature)
+        defaults.set(showMinorRoads, forKey: SettingsKeys.showMinorRoads)
     }
     
     // MARK: - Public Methods
@@ -211,6 +225,17 @@ class BLEManager: NSObject, ObservableObject {
         
         // Persist settings to UserDefaults
         saveSettings()
+    }
+    
+    /// Send feature visibility bitmask
+    func sendVisibilityMask() {
+        var mask: Int32 = 0
+        if showBuildings { mask |= (1 << 0) }
+        if showNature { mask |= (1 << 1) }
+        if showMinorRoads { mask |= (1 << 2) }
+        // Bits 3-31 are unused for now (0)
+        
+        sendSetting(id: 8, value: mask)
     }
     
     /// Attempt to reconnect to last known peripheral

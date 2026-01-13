@@ -29,6 +29,46 @@ min_lon, min_lat, max_lon, max_lat = sys.argv[1], sys.argv[2], sys.argv[3], sys.
 area_min_x, area_min_y = lon2x( float( min_lon)), lat2y( float( min_lat))
 area_max_x, area_max_y = lon2x( float( max_lon)), lat2y( float( max_lat))
 
+def get_type_id(type_str):
+    """ Map feature type string to integer ID """
+    if not type_str: return 0
+    t = type_str.lower()
+    
+    # Roads (1-49)
+    if 'motorway' in t: return 1
+    if 'trunk' in t: return 2
+    if 'primary' in t: return 3
+    if 'secondary' in t: return 4
+    if 'tertiary' in t: return 5
+    if 'unclassified' in t: return 6
+    if 'residential' in t: return 7
+    if 'service' in t: return 10
+    
+    # Paths (50-99)
+    if 'track' in t: return 50
+    if 'cycleway' in t: return 51
+    if 'footway' in t: return 52
+    if 'path' in t: return 53
+    if 'steps' in t: return 54
+    
+    # Buildings (100-149)
+    if 'building' in t: return 100
+    
+    # Nature/Landuse (150-199)
+    if 'forest' in t or 'wood' in t: return 150
+    if 'grass' in t or 'meadow' in t: return 151
+    if 'water' in t: return 152
+    if 'coastline' in t: return 153
+    if 'park' in t: return 154
+    
+    # Infrastructure/Other (200-255)
+    if 'amenity' in t: return 200
+    if 'leisure' in t: return 201
+    if 'railway' in t: return 210
+    
+    return 0
+
+
 print("  Step 1/5 reading lines files")
 lines = json.load( open( LINES_INPUT_FILE, "r"))
 print("  Step 2/5 reading polygons files")
@@ -95,6 +135,7 @@ for init_x in range(area_min_x, area_max_x, 4096):
             for feat in clipped_polygons:
                 file.write( f"{feat['color']}\n")
                 file.write( f"{feat['maxzoom']}\n")
+                file.write( f"{get_type_id(feat['type'])}\n") # Type ID
                 # bbox of the feature
                 file.write( f"bbox:{int(round( feat['bbox'][0] - min_x))},{int(round( feat['bbox'][1] - min_y))},{int(round( feat['bbox'][2] - min_x))},{int(round( feat['bbox'][3] - min_y))}\n")
                 file.write("coords:")
@@ -107,6 +148,7 @@ for init_x in range(area_min_x, area_max_x, 4096):
                 file.write( f"{feat['color']}\n")
                 file.write( f"{feat['width']}\n")
                 file.write( f"{feat['maxzoom']}\n")
+                file.write( f"{get_type_id(feat['type'])}\n") # Type ID
                 # bbox of the feature
                 file.write( f"bbox:{int(round( feat['bbox'][0] - min_x))},{int(round( feat['bbox'][1] - min_y))},{int(round( feat['bbox'][2] - min_x))},{int(round( feat['bbox'][3] - min_y))}\n")
                 file.write("coords:")
@@ -116,8 +158,8 @@ for init_x in range(area_min_x, area_max_x, 4096):
 
         # BINARY VERSION (.fmb)
         with open( f"{file_name}.fmb", "wb") as file:
-            # Header: Magic 'FMB' + Version 1
-            file.write(b'FMB\x01')
+            # Header: Magic 'FMB' + Version 2 (includes Type ID)
+            file.write(b'FMB\x02')
             
             # Polygons
             file.write(struct.pack('<H', len(clipped_polygons)))
@@ -127,6 +169,7 @@ for init_x in range(area_min_x, area_max_x, 4096):
                 
                 file.write(struct.pack('<H', color_int))
                 file.write(struct.pack('<B', maxzoom_int))
+                file.write(struct.pack('<B', get_type_id(feat['type']))) # Type ID (u8)
                 # BBox
                 file.write(struct.pack('<hhhh', 
                     int(round(feat['bbox'][0] - min_x)), 
@@ -149,6 +192,7 @@ for init_x in range(area_min_x, area_max_x, 4096):
                 file.write(struct.pack('<H', color_int))
                 file.write(struct.pack('<B', width_int))
                 file.write(struct.pack('<B', maxzoom_int))
+                file.write(struct.pack('<B', get_type_id(feat['type']))) # Type ID (u8)
                 # BBox
                 file.write(struct.pack('<hhhh', 
                     int(round(feat['bbox'][0] - min_x)), 
