@@ -210,6 +210,11 @@ public:
         Serial.printf("BLE Settings: displayRotation = %d (reboot to apply)\n",
                       mapRenderSettings.displayRotation);
         break;
+      case 5: // Reboot command from iOS app
+        Serial.println("BLE Settings: Reboot command received! Restarting...");
+        delay(500); // Brief delay to allow BLE response
+        ESP.restart();
+        break;
       default:
         Serial.printf("BLE Settings: Unknown setting ID %d\n", settingId);
         break;

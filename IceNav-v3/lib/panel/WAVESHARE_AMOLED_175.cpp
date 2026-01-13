@@ -261,28 +261,33 @@ void setupDisplay() {
   // Attempt raw MADCTL command for rotation
   // CO5300 MADCTL register (0x36) bits:
   // - Standard panels use: 0x80=MY, 0x40=MX, 0x20=MV (row/col exchange)
-  // - CO5300 uses different bits: 0x02=X_FLIP, 0x05=Y_FLIP
-  // Let's try adding 0x20 (MV) to see if true rotation works
-  if (rotation != 0) {
-    uint8_t madctl = 0x00; // Start with RGB color order
-    switch (rotation) {
-    case 1:                 // 90° CCW - try MV + adjustments
-      madctl = 0x20 | 0x02; // MV + X_FLIP
-      break;
-    case 2:                 // 180°
-      madctl = 0x02 | 0x05; // X_FLIP + Y_FLIP
-      break;
-    case 3:                 // 270° CCW
-      madctl = 0x20 | 0x05; // MV + Y_FLIP
-      break;
-    }
-    Serial.printf("Sending raw MADCTL: 0x%02X for rotation %d\n", madctl,
-                  rotation);
+  // - CO5300 uses different bits: 0x02=X_FLIP, 0x05=Y_FLIP, 0x20=MV
+  //
+  // IMPORTANT: CO5300 hardware only supports 0° and 90° rotation correctly!
+  // 180° and 270° attempts all resulted in mirroring or wrong direction.
+  //
+  // What we tried for 180° (all failed):
+  // - 0x07 (X_FLIP + Y_FLIP): shows 0° mirrored
+  // - 0x27 (MV + X_FLIP + Y_FLIP): shows same as 90°
+  // - 0x25 (MV + Y_FLIP): shows 270° mirrored
+  // - 0x05 (Y_FLIP only): shows same as 0°
+  //
+  // What we tried for 270° (all failed):
+  // - 0x25 (MV + Y_FLIP): mirrored
+  // - 0x02 (X_FLIP only): shows 0° mirrored
+  // - 0x07 (X_FLIP + Y_FLIP): shows 0° mirrored
+  // - 0x20 (MV only): correct direction but mirrored
+  //
+  if (rotation == 1) {
+    // 90° CCW - MV + X_FLIP (verified working!)
+    uint8_t madctl = 0x20 | 0x02; // MV + X_FLIP = 0x22
+    Serial.printf("Sending raw MADCTL: 0x%02X for 90° rotation\n", madctl);
     gfx->startWrite();
-    // Use bus writeC8D8 to send raw command (0x36 is MADCTL register)
     bus->writeC8D8(0x36, madctl);
     gfx->endWrite();
   }
+  // Note: rotation values 2 (180°) and 3 (270°) are not supported by CO5300
+  // The iOS app now only offers 0° and 90° options
 
   // Turn on display and set brightness (CRITICAL for AMOLED!)
   Serial.println("Turning on display and setting brightness...");
