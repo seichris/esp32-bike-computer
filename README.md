@@ -1,15 +1,38 @@
 
-- Fix Blue Dot Mode (Facing navigation direction) alignment: The navigation line does not stick perfectly to the street (coordinate offset issue or rotation related issue?)."
-In Red Dot Mode (Always facing north) the blue navigation line aligns well with the road.
-And in Blue Dot Mode, when following a street that faces North, the blue line also aligns with that road.
-But in Blue Dot Mode, when it rotates, the dot and the line goes into different directions.
-In CoordinateConverter.swift we convert coordinates from Chinese (GCJ-02) to Western (WGS-84).
-Iterative Conversion: Since there is no closed-form formula to go from GCJ-02 back to WGS-84, the app uses an iterative approach (running the forward conversion 3 times) to "guess" the original WGS-84 coordinate with high precision.
-applyCalibration: At the end of that function, it calls applyCalibration, which currently applies the +80m North offset (+0.00080 Latitude) that aligns the map in North-Up mode.
+## TODO: Performance Optimizations
 
-Lets test if the rotation issue is because of this conversion.
-Lets set our default coordinates to Frankfurt (our SD card has a Frankfurt map), and I will test a route inside frankfurt.
+### 1. Map Block Caching (HIGH IMPACT)
+The same map block is re-loaded from SD card every frame (~4 seconds each load):
+```
+[maps.cpp:365] Loading /sdcard/VECTMAP/+232+063/8_14.fmb (Binary)
+... 4 seconds later ...
+[maps.cpp:863] Block loaded: 0x3fcdf15c, offset(15237120, 4186112)
+```
+**Fix:** Cache the current map block in PSRAM instead of re-reading from SD card every frame. Only reload when viewport moves to a different block.
+**Files:** `lib/maps/src/maps.cpp` - `getMapBlocks()`, `readMapBlock()`
 
+### 2. Polygon Culling Optimization
+Iterating through ~26k polygons to draw only a few hundred:
+```
+[Maps] Block polygons: Total=25994, Drawn=804
+```
+**Fix:** Implement spatial indexing (quadtree/R-tree) or pre-filter polygons by bounding box before the draw loop.
+**Files:** `lib/maps/src/maps.cpp` - `readVectorMap()` polygon loop
+
+### 3. BLE Route Geometry Debouncing
+Multiple route geometry updates arrive during a single map render cycle:
+```
+BLE Route geometry received: 124 bytes
+Route parsed: 30 points from 124 bytes
+BLE Route geometry received: 124 bytes  <-- redundant
+Route parsed: 30 points from 124 bytes
+```
+**Fix:** Debounce/batch route updates - only parse the latest geometry after rendering completes.
+**Files:** `lib/ble_navigation/ble_navigation.cpp`, `lib/route_overlay/route_overlay.cpp`
+
+---
+
+## Other TODOs
 
 - it says the GPS follow mode is activated by default, but it doesnt seem so?!
 
@@ -19,11 +42,6 @@ Can we add a setting in the app for this? It should be saved on the device, so i
 also when starting a navigation, it should default to starting from the actual current gps location. Is that possible? vs right now it 'converts' our current location into a location name. And sometimes thats not accurately at our actual location. 
 
 - can we make the dragging more responsive? or is it limited by the device cpu, or what else would be the bottleneck? How could we measure?
-
-
-
-
-
 
 
 
