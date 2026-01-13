@@ -51,6 +51,10 @@ static Preferences settingsPrefs;
 static NavigationData currentNavData = {0, 0, ""};
 static volatile bool navDataUpdated = false;
 
+// Route geometry debouncing - skip redundant parses
+static uint32_t lastRouteHash = 0;
+static size_t lastRouteLen = 0;
+
 /**
  * @brief Parse navigation instruction data
  */
@@ -121,6 +125,21 @@ public:
   void onWrite(NimBLECharacteristic *pChar) override {
     std::string value = pChar->getValue();
     if (value.length() > 0) {
+      // Debounce: compute simple hash and skip if identical to last route
+      uint32_t hash = 0;
+      const uint8_t *data = (const uint8_t *)value.data();
+      for (size_t i = 0; i < value.length(); i++) {
+        hash = hash * 31 + data[i];
+      }
+
+      if (hash == lastRouteHash && value.length() == lastRouteLen) {
+        // Skip redundant route update
+        return;
+      }
+
+      lastRouteHash = hash;
+      lastRouteLen = value.length();
+
       Serial.printf("BLE Route geometry received: %d bytes\n", value.length());
 
       // Parse route data into the global route overlay
