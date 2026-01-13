@@ -885,8 +885,11 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
   double cosA = cos(rotation);
   double sinA = sin(rotation);
 
-  int16_t halfW = Maps::mapScrWidth / 2;
-  int16_t halfH = Maps::mapScrHeight / 2;
+  // BUGFIX: Use actual canvas dimensions, not mapScrHeight which may differ
+  // from canvas height in fullscreen mode
+  lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
+  int16_t halfW = draw_buf ? draw_buf->header.w / 2 : Maps::mapScrWidth / 2;
+  int16_t halfH = draw_buf ? draw_buf->header.h / 2 : Maps::mapScrHeight / 2;
 
   uint32_t totalTime = millis();
   log_i("readVectorMap: Draw start. isMapFound=%d, Blocks=%d", Maps::isMapFound,
@@ -1729,11 +1732,15 @@ void Maps::generateVectorMap(uint8_t zoom) {
              Maps::viewPort.center.x, Maps::viewPort.center.y, zoom,
              routeOverlay.getPointCount());
 
+    // BUGFIX: Use actual canvas height, not mapScrHeight which differs in
+    // fullscreen mode
+    uint16_t canvasHeight =
+        mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
     routeOverlay.drawRoute(Maps::canvasMap, Maps::viewPort.center.x,
                            Maps::viewPort.center.y, zoom, Maps::mapScrWidth,
-                           Maps::mapScrHeight, rotationRad);
-    ESP_LOGI(TAG, "Route overlay draw complete (rotation=%.2f rad)",
-             rotationRad);
+                           canvasHeight, rotationRad);
+    ESP_LOGI(TAG, "Route overlay draw complete (rotation=%.2f rad, canvasH=%d)",
+             rotationRad, canvasHeight);
   } else {
     ESP_LOGI(TAG, "No route overlay to draw (no route data)");
   }
