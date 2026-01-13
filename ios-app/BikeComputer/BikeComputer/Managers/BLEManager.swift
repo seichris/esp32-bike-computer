@@ -24,7 +24,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published var minPolygonSize: Double = 0
     @Published var detailLevel: Int = 2
     @Published var routeLineWidth: Double = 4
-    @Published var displayRotation: Int = 0  // 0-3: 0°, 90°, 180°, 270°
+    @Published var displayRotation: Int = 0 
+    @Published var mapRotationMode: Int = 0 // 0=North Up, 1=Course Up  // 0-3: 0°, 90°, 180°, 270°
     
     // MARK: - BLE UUIDs (matching ESP32)
     private let serviceUUID = CBUUID(string: "1819")           // Navigation Service

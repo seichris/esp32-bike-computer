@@ -74,6 +74,18 @@ struct SettingsView: View {
                     ))
                 }
                 
+                Section(header: Text("Map Mode")) {
+                    Picker("Rotation", selection: $bleManager.mapRotationMode) {
+                        Text("North Up (Red)").tag(0)
+                        Text("Head Up (Blue)").tag(1)
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: bleManager.mapRotationMode) { newValue in
+                        // ID 6 = mapRotationMode
+                        bleManager.sendSetting(id: 6, value: Int32(newValue))
+                    }
+                }
+                
                 Section(header: Text("Device")) {
                     Button(action: {
                         bleManager.sendSetting(id: 5, value: 1) // Reboot command

@@ -1,16 +1,8 @@
+## Other TODOs
 
-## TODO: Performance Optimizations
-
-### BLE Route Geometry Debouncing
-Multiple route geometry updates arrive during a single map render cycle:
-```
-BLE Route geometry received: 124 bytes
-Route parsed: 30 points from 124 bytes
-BLE Route geometry received: 124 bytes  <-- redundant
-Route parsed: 30 points from 124 bytes
-```
-**Fix:** Debounce/batch route updates - only parse the latest geometry after rendering completes.
-**Files:** `lib/ble_navigation/ble_navigation.cpp`, `lib/route_overlay/route_overlay.cpp`
+- zoom, also as setting in the app
+- rerouting logic in the iOS app (after taking a wrong path)
+also when starting a navigation, it should default to starting from the actual current gps location. Is that possible? vs right now it 'converts' our current location into a location name. And sometimes thats not accurately at our actual location. 
 
 ### Display Rotation Issues (Legacy / Hardware Limitation)
 We implemented 90° rotation, but encountered hardware limitations with the CO5300 driver/panel.
@@ -24,13 +16,6 @@ We implemented 90° rotation, but encountered hardware limitations with the CO53
 - **Future fix ideas:** Modify `Arduino_CO5300` driver to handle rotation offsets dynamically, or use LVGL software rotation.
 
 ---
-
-## Other TODOs
-
-- it says the GPS follow mode is activated by default, but it doesnt seem so?!
-- zoom, also as setting in the app
-- rerouting logic in the iOS app (after taking a wrong path)
-also when starting a navigation, it should default to starting from the actual current gps location. Is that possible? vs right now it 'converts' our current location into a location name. And sometimes thats not accurately at our actual location. 
 
 
 

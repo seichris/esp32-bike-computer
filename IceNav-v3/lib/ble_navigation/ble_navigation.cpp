@@ -20,27 +20,9 @@ BLENavigationServer bleNavServer;
 // Forward declaration of map redraw trigger
 extern void triggerMapRedraw();
 
-// Navigation data structure (matching iOS app format:
-// "IconID|Distance|Instruction")
-struct NavigationData {
-  uint8_t iconID;
-  uint16_t distance;
-  char instruction[64];
-};
+// NavigationData struct is now in ble_navigation.hpp
 
-/**
- * @brief Map rendering settings (configurable via BLE from iOS app)
- * Settings IDs: 1=minPolygonSize, 2=detailLevel, 3=routeLineWidth,
- * 4=displayRotation
- */
-struct MapRenderSettings {
-  uint8_t minPolygonSize = 0; // 0-50: Skip polygons smaller than N pixels²
-  uint8_t detailLevel = 2;    // 0=Low, 1=Med, 2=High
-  uint8_t routeLineWidth = 4; // 2-8: Route overlay line width in pixels
-  uint8_t displayRotation =
-      0; // 0-3: Display rotation (0=0°, 1=90°, 2=180°, 3=270°)
-};
-
+// Map rendering settings moved to header for external access
 // Global map render settings (accessible from maps.cpp)
 MapRenderSettings mapRenderSettings;
 
@@ -246,6 +228,16 @@ public:
         delay(500); // Brief delay to allow BLE response
         ESP.restart();
         break;
+      case 6: // mapRotationMode (0=North Up, 1=Course Up)
+        mapRenderSettings.mapRotationMode =
+            (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)1);
+        // Save to NVS for persistence across reboots
+        settingsPrefs.begin("mapSettings", false);
+        settingsPrefs.putUChar("mapRotMode", mapRenderSettings.mapRotationMode);
+        settingsPrefs.end();
+        Serial.printf("BLE Settings: mapRotationMode = %d (saved)\n",
+                      mapRenderSettings.mapRotationMode);
+        break;
       default:
         Serial.printf("BLE Settings: Unknown setting ID %d\n", settingId);
         break;
@@ -272,6 +264,7 @@ static void loadSettingsFromNVS() {
   mapRenderSettings.detailLevel = prefs.getUChar("detailLevel", 2);
   mapRenderSettings.routeLineWidth = prefs.getUChar("routeWidth", 4);
   mapRenderSettings.displayRotation = prefs.getUChar("rotation", 0);
+  mapRenderSettings.mapRotationMode = prefs.getUChar("mapRotMode", 0);
 
   prefs.end();
 

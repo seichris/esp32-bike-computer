@@ -7,6 +7,7 @@
  */
 
 #include "mainScr.hpp"
+#include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
 // #include "../../compass/compass.hpp"
 
 bool isMainScreen = false; // Flag to indicate main screen is selected
@@ -148,6 +149,24 @@ void updateMainScreen(lv_timer_t *t) {
   // This ensures continuous updates even when user hasn't dragged
   if (isMainScreen && activeTile == MAP &&
       (mapView.isPosMoved || mapView.redrawMap)) {
+
+    // Check if settings changed externally (via BLE) and sync map state
+    // If setting says CourseUp but map is NorthUp, switch it
+    if (mapRenderSettings.mapRotationMode == 1 &&
+        mapView.rotationMode != Maps::ROT_COURSE_UP) {
+      mapView.rotationMode = Maps::ROT_COURSE_UP;
+      mapView.updateArrowColor();
+      mapView.isPosMoved = true; // Force redraw
+      log_i("Creating Map: Syncing rotation to Course Up (from settings)");
+    } else if (mapRenderSettings.mapRotationMode == 0 &&
+               mapView.rotationMode != Maps::ROT_NORTH_UP) {
+      mapView.rotationMode = Maps::ROT_NORTH_UP;
+      mapView.rotationRad = 0;
+      mapView.updateArrowColor();
+      mapView.isPosMoved = true; // Force redraw
+      log_i("Creating Map: Syncing rotation to North Up (from settings)");
+    }
+
     log_i("BLE map update: isPosMoved=%d redrawMap=%d followGps=%d",
           mapView.isPosMoved, mapView.redrawMap, mapView.followGps);
 
@@ -488,6 +507,13 @@ void scrollMapEvent(lv_event_t *event) {
           if (distX < 120 && distY < 120) {
             log_i("SHORT TAP ON GPS DOT: Toggling rotation mode");
             mapView.toggleRotationMode();
+
+            // Sync back to mapRenderSettings so it persists if we save or app
+            // queries it (though app push is one-way usually)
+            mapRenderSettings.mapRotationMode =
+                (mapView.rotationMode == Maps::ROT_COURSE_UP) ? 1 : 0;
+            log_i("Synced rotation mode to settings: %d",
+                  mapRenderSettings.mapRotationMode);
           }
         }
       }
@@ -642,4 +668,14 @@ void createMainScr() {
   // Map Tile Events
   lv_obj_add_event_cb(mapTile, updateMap, LV_EVENT_VALUE_CHANGED, NULL);
   lv_obj_add_event_cb(mapTile, scrollMapEvent, LV_EVENT_ALL, NULL);
+
+  // Initialize Map Rotation Mode from Settings
+  // Sync map view state with persisted BLE setting
+  if (mapRenderSettings.mapRotationMode == 1) { // 1 = Course Up
+    mapView.rotationMode = Maps::ROT_COURSE_UP;
+  } else {
+    mapView.rotationMode = Maps::ROT_NORTH_UP;
+  }
+  mapView.rotationRad = 0; // Reset rotation
+  mapView.updateArrowColor();
 }
