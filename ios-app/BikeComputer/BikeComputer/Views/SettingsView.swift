@@ -64,7 +64,7 @@ struct SettingsView: View {
                     }
                 }
                 
-                Section(header: Text("Display Rotation"), footer: Text("Rotate display 90° CCW. Requires reboot.\n(Note: 180°/270° not supported by CO5300 hardware)")) {
+                Section(header: Text("Display Rotation"), footer: Text("Rotate display 90° CCW. Requires reboot.")) {
                     Toggle("Rotate 90°", isOn: Binding(
                         get: { bleManager.displayRotation == 1 },
                         set: { newValue in
@@ -83,6 +83,22 @@ struct SettingsView: View {
                     .onChange(of: bleManager.mapRotationMode) { newValue in
                         // ID 6 = mapRotationMode
                         bleManager.sendSetting(id: 6, value: Int32(newValue))
+                    }
+                }
+                
+                Section(header: Text("Zoom Level"), footer: Text("0 = Super Zoom, 5 = Farthest")) {
+                    Picker("Zoom", selection: $bleManager.zoomLevel) {
+                        Text("0").tag(0)
+                        Text("1").tag(1)
+                        Text("2").tag(2)
+                        Text("3").tag(3)
+                        Text("4").tag(4)
+                        Text("5").tag(5)
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: bleManager.zoomLevel) { newValue in
+                        // ID 7 = zoomLevel
+                        bleManager.sendSetting(id: 7, value: Int32(newValue))
                     }
                 }
                 

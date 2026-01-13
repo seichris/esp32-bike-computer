@@ -37,6 +37,7 @@ struct MapRenderSettings {
   uint8_t displayRotation =
       0; // 0-3: Display rotation (0=0°, 1=90°, 2=180°, 3=270°)
   uint8_t mapRotationMode = 0; // 0=North Up, 1=Course Up
+  uint8_t zoomLevel = 4;       // 1-4: Zoom level (1=closest, 4=farthest)
 };
 
 extern MapRenderSettings mapRenderSettings;

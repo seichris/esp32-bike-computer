@@ -238,6 +238,19 @@ public:
         Serial.printf("BLE Settings: mapRotationMode = %d (saved)\n",
                       mapRenderSettings.mapRotationMode);
         break;
+      case 7: { // zoomLevel (0-5: 0=super, 1=1.5x, 2=1x, 3-5=divided)
+        extern uint8_t zoom; // Global zoom variable from settings.cpp
+        mapRenderSettings.zoomLevel =
+            (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)5);
+        zoom = mapRenderSettings.zoomLevel; // Apply to global zoom
+        // Save to NVS for persistence across reboots
+        settingsPrefs.begin("mapSettings", false);
+        settingsPrefs.putUChar("zoomLevel", mapRenderSettings.zoomLevel);
+        settingsPrefs.end();
+        Serial.printf("BLE Settings: zoomLevel = %d (saved)\n",
+                      mapRenderSettings.zoomLevel);
+        break;
+      }
       default:
         Serial.printf("BLE Settings: Unknown setting ID %d\n", settingId);
         break;
@@ -265,6 +278,7 @@ static void loadSettingsFromNVS() {
   mapRenderSettings.routeLineWidth = prefs.getUChar("routeWidth", 4);
   mapRenderSettings.displayRotation = prefs.getUChar("rotation", 0);
   mapRenderSettings.mapRotationMode = prefs.getUChar("mapRotMode", 0);
+  mapRenderSettings.zoomLevel = prefs.getUChar("zoomLevel", 4);
 
   prefs.end();
 

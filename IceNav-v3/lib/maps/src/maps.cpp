@@ -998,9 +998,19 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       // Define transform lambda once, outside the loop
       auto transformPoint = [&](Point16 p) -> Point16 {
         // 1. Convert from map coords to screen-space offset (Y inverted)
-        double dx = (double)(p.x - screen_center_mc.x) / zoom;
-        double dy = -(double)(p.y - screen_center_mc.y) /
-                    zoom; // Invert Y to screen space
+        // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
+        double dx, dy;
+        if (zoom == 0) {
+          dx = (double)(p.x - screen_center_mc.x) * 2.0;
+          dy = -(double)(p.y - screen_center_mc.y) * 2.0;
+        } else if (zoom == 1) {
+          dx = (double)(p.x - screen_center_mc.x) * 1.5;
+          dy = -(double)(p.y - screen_center_mc.y) * 1.5;
+        } else {
+          int divisor = zoom - 1;
+          dx = (double)(p.x - screen_center_mc.x) / divisor;
+          dy = -(double)(p.y - screen_center_mc.y) / divisor;
+        }
 
         // 2. Rotate in screen space (same as route overlay)
         double rx = dx * cosA - dy * sinA;
@@ -1096,9 +1106,19 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
         // Transform first point
         auto transformPoint = [&](Point16 p) -> Point16 {
           // Convert to screen-space offset (Y inverted), rotate, translate
-          double dx = (double)(p.x - screen_center_mc.x) / zoom;
-          double dy = -(double)(p.y - screen_center_mc.y) /
-                      zoom; // Invert Y to screen space
+          // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
+          double dx, dy;
+          if (zoom == 0) {
+            dx = (double)(p.x - screen_center_mc.x) * 2.0;
+            dy = -(double)(p.y - screen_center_mc.y) * 2.0;
+          } else if (zoom == 1) {
+            dx = (double)(p.x - screen_center_mc.x) * 1.5;
+            dy = -(double)(p.y - screen_center_mc.y) * 1.5;
+          } else {
+            int divisor = zoom - 1;
+            dx = (double)(p.x - screen_center_mc.x) / divisor;
+            dy = -(double)(p.y - screen_center_mc.y) / divisor;
+          }
           double rx = dx * cosA - dy * sinA;
           double ry = dx * sinA + dy * cosA;
           int16_t sx = round(rx) + halfW;
@@ -1405,11 +1425,15 @@ Maps::mapScrWidth - 75, 95, TFT_BLACK); Maps::mapSprite.setTextSize(1);
  * @param pcenter
  */
 void Maps::ViewPort::setCenter(Point32 pcenter) {
-  center = pcenter;
-  bbox.min.x = pcenter.x - Maps::tileWidth * zoom / 2;
-  bbox.min.y = pcenter.y - Maps::tileHeight * zoom / 2;
-  bbox.max.x = pcenter.x + Maps::tileWidth * zoom / 2;
-  bbox.max.y = pcenter.y + Maps::tileHeight * zoom / 2;
+  center = pcenter; // CRITICAL: Must assign center!
+  // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
+  double zoomScale = (zoom == 0)   ? 0.5
+                     : (zoom == 1) ? 0.667
+                                   : (double)(zoom - 1);
+  bbox.min.x = pcenter.x - Maps::tileWidth * zoomScale / 2;
+  bbox.min.y = pcenter.y - Maps::tileHeight * zoomScale / 2;
+  bbox.max.x = pcenter.x + Maps::tileWidth * zoomScale / 2;
+  bbox.max.y = pcenter.y + Maps::tileHeight * zoomScale / 2;
 }
 
 // Public section
@@ -1735,9 +1759,20 @@ void Maps::displayMap() {
 
       // Apply rotation to match map rendering
       // 1. Convert from map coords to screen-space offset (Y inverted)
-      double dx = (double)(gpsX - Maps::viewPort.center.x) / zoom;
-      double dy = -(double)(gpsY - Maps::viewPort.center.y) /
-                  zoom; // Invert Y to screen space
+      // 1. Convert from map coords to screen-space offset (Y inverted)
+      // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
+      double dx, dy;
+      if (zoom == 0) {
+        dx = (double)(gpsX - Maps::viewPort.center.x) * 2.0;
+        dy = -(double)(gpsY - Maps::viewPort.center.y) * 2.0;
+      } else if (zoom == 1) {
+        dx = (double)(gpsX - Maps::viewPort.center.x) * 1.5;
+        dy = -(double)(gpsY - Maps::viewPort.center.y) * 1.5;
+      } else {
+        int divisor = zoom - 1; // zoom 2->1, 3->2, 4->3, 5->4
+        dx = (double)(gpsX - Maps::viewPort.center.x) / divisor;
+        dy = -(double)(gpsY - Maps::viewPort.center.y) / divisor;
+      }
 
       // 2. Rotate in screen space
       double cosA = cos(rotationRad);
@@ -1903,14 +1938,18 @@ void Maps::scrollMap(int16_t dx, int16_t dy) {
   if (mapSet.vectorMap) {
     // For vector maps, directly update the geographic center point
     // Scale pixels to coordinates using the current zoom
-    Maps::point.x += (int32_t)(dx * zoom);
-    // Invert Y because Mercator Y is flipped: lower Y = North
-    // When user drags down (negative dy after negation), we want map to move
-    // down (show south) which means decreasing viewport center Y (since lower Y
-    // = north)
-    // CORRECTION: Drag UP (screen dy -ve) -> maps dy +ve. map moves UP. View
-    // moves SOUTH (Increase Y). So we need to ADD dy.
-    Maps::point.y -= (int32_t)(dy * zoom);
+    // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
+    if (zoom == 0) {
+      Maps::point.x += (int32_t)(dx / 2);
+      Maps::point.y -= (int32_t)(dy / 2);
+    } else if (zoom == 1) {
+      Maps::point.x += (int32_t)(dx / 1.5);
+      Maps::point.y -= (int32_t)(dy / 1.5);
+    } else {
+      int divisor = zoom - 1;
+      Maps::point.x += (int32_t)(dx * divisor);
+      Maps::point.y -= (int32_t)(dy * divisor);
+    }
     ESP_LOGI(TAG, "scrollMap (Vector): dx=%d dy=%d zoom=%d -> point(%d, %d)",
              dx, dy, zoom, Maps::point.x, Maps::point.y);
     Maps::isPosMoved = true;

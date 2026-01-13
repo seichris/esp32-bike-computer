@@ -678,4 +678,10 @@ void createMainScr() {
   }
   mapView.rotationRad = 0; // Reset rotation
   mapView.updateArrowColor();
+
+  // Sync zoom level from settings
+  extern uint8_t zoom;
+  if (mapRenderSettings.zoomLevel >= 0 && mapRenderSettings.zoomLevel <= 5) {
+    zoom = mapRenderSettings.zoomLevel;
+  }
 }

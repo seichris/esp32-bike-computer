@@ -93,9 +93,20 @@ int16_t RouteOverlay::geoToScreenX(int32_t lonMicro, int32_t centerMercatorX,
   double centerWorldX = (double)centerMercatorX;
 
   // Transform to screen space using the same logic as Maps::toScreenCoord
-  // Formula: round((worldX - centerWorldX) / zoom) + screenWidth / 2
-  int16_t screenX =
-      (int16_t)(round((worldX - centerWorldX) / zoom) + (screenWidth / 2.0));
+  // Transform to screen space using the same logic as Maps::toScreenCoord
+  // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
+  int16_t screenX;
+  if (zoom == 0) {
+    screenX =
+        (int16_t)(round((worldX - centerWorldX) * 2.0) + (screenWidth / 2.0));
+  } else if (zoom == 1) {
+    screenX =
+        (int16_t)(round((worldX - centerWorldX) * 1.5) + (screenWidth / 2.0));
+  } else {
+    int divisor = zoom - 1;
+    screenX = (int16_t)(round((worldX - centerWorldX) / divisor) +
+                        (screenWidth / 2.0));
+  }
 
   return screenX;
 }
@@ -111,12 +122,19 @@ int16_t RouteOverlay::geoToScreenY(int32_t latMicro, int32_t centerMercatorY,
   double worldY = log(tan(DEG2RAD(lat) / 2.0 + M_PI / 4.0)) * EARTH_RADIUS;
   double centerWorldY = (double)centerMercatorY;
 
-  // Match map's approach exactly:
-  // dy = -(worldY - centerWorldY) / zoom (Y inverted)
-  // sy = dy + screenHeight/2
-  // Combined: screenHeight/2 - (worldY - centerWorldY) / zoom
-  int16_t screenY =
-      (int16_t)(round(-(worldY - centerWorldY) / zoom) + (screenHeight / 2.0));
+  // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
+  int16_t screenY;
+  if (zoom == 0) {
+    screenY =
+        (int16_t)(round(-(worldY - centerWorldY) * 2.0) + (screenHeight / 2.0));
+  } else if (zoom == 1) {
+    screenY =
+        (int16_t)(round(-(worldY - centerWorldY) * 1.5) + (screenHeight / 2.0));
+  } else {
+    int divisor = zoom - 1;
+    screenY = (int16_t)(round(-(worldY - centerWorldY) / divisor) +
+                        (screenHeight / 2.0));
+  }
 
   return screenY;
 }
