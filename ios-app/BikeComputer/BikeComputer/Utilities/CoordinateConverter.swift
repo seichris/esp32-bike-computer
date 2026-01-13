@@ -21,7 +21,7 @@ class CoordinateConverter {
     private static let chinaLatMin: Double = 0.8293
     private static let chinaLatMax: Double = 55.8271
     private static let chinaLonMin: Double = 72.004
-    private static let chinaLonMax: Double = 137.8347
+    private static let chinaLonMax: Double = 135.5
     
     /// Check if a coordinate is within mainland China
     static func isInChina(lat: Double, lon: Double) -> Bool {

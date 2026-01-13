@@ -109,8 +109,8 @@ New environment `[env:WAVESHARE_AMOLED_175]`:
 -DUSE_ARDUINO_GFX        # Use Arduino_GFX instead of LovyanGFX
 ; -DDEFAULT_LAT=31.224     # Test coordinates (Shanghai)
 ; -DDEFAULT_LON=121.460
--DDEFAULT_LAT=49.6238773     # Test coordinates
--DDEFAULT_LON=7.5503425
+-DDEFAULT_LAT=35.16755     # Test coordinates (Hilton Nagoya)
+-DDEFAULT_LON=136.89451
 -DDISABLE_TOUCH=1        # GPIO conflict with SD card
 -DDISABLE_CLI=1          # Core 3.x compatibility
 -DDISABLE_COMPASS=1

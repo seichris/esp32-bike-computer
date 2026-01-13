@@ -634,6 +634,7 @@ void createMainScr() {
   lv_obj_set_size(mapTile, TFT_WIDTH, TFT_HEIGHT);
   lv_obj_set_pos(mapTile, 0, 0);
   lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_SCROLLABLE);
+  activeTile = MAP; // Ensure map logic runs in updateMainScreen
 
   // Set tilesScreen to same as mapTile for compatibility
   tilesScreen = mapTile;
