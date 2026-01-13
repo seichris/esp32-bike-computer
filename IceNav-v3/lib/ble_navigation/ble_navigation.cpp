@@ -27,6 +27,19 @@ struct NavigationData {
   char instruction[64];
 };
 
+/**
+ * @brief Map rendering settings (configurable via BLE from iOS app)
+ * Settings IDs: 1=minPolygonSize, 2=detailLevel, 3=routeLineWidth
+ */
+struct MapRenderSettings {
+  uint8_t minPolygonSize = 0; // 0-50: Skip polygons smaller than N pixels²
+  uint8_t detailLevel = 2;    // 0=Low, 1=Med, 2=High
+  uint8_t routeLineWidth = 4; // 2-8: Route overlay line width in pixels
+};
+
+// Global map render settings (accessible from maps.cpp)
+MapRenderSettings mapRenderSettings;
+
 // Global navigation data
 static NavigationData currentNavData = {0, 0, ""};
 static volatile bool navDataUpdated = false;
@@ -147,6 +160,50 @@ public:
   }
 };
 
+/**
+ * @brief Settings characteristic callback - receives runtime config from iOS
+ * app Format: [settingId:1][value:4] = 5 bytes Setting IDs: 1=minPolygonSize,
+ * 2=detailLevel, 3=routeLineWidth
+ */
+class MySettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
+public:
+  void onWrite(NimBLECharacteristic *pChar) override {
+    std::string value = pChar->getValue();
+    if (value.length() >= 5) {
+      uint8_t settingId = value[0];
+      int32_t settingValue;
+      memcpy(&settingValue, value.data() + 1, 4);
+
+      switch (settingId) {
+      case 1: // minPolygonSize
+        mapRenderSettings.minPolygonSize =
+            (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)50);
+        Serial.printf("BLE Settings: minPolygonSize = %d\n",
+                      mapRenderSettings.minPolygonSize);
+        break;
+      case 2: // detailLevel
+        mapRenderSettings.detailLevel =
+            (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)2);
+        Serial.printf("BLE Settings: detailLevel = %d\n",
+                      mapRenderSettings.detailLevel);
+        break;
+      case 3: // routeLineWidth
+        mapRenderSettings.routeLineWidth =
+            (uint8_t)std::min(std::max(settingValue, (int32_t)2), (int32_t)8);
+        Serial.printf("BLE Settings: routeLineWidth = %d\n",
+                      mapRenderSettings.routeLineWidth);
+        break;
+      default:
+        Serial.printf("BLE Settings: Unknown setting ID %d\n", settingId);
+        break;
+      }
+
+      // Trigger map redraw to apply new settings
+      triggerMapRedraw();
+    }
+  }
+};
+
 // ============================================================================
 // BLE Navigation Server Implementation
 // ============================================================================
@@ -187,6 +244,13 @@ void BLENavigationServer::init(const char *deviceName) {
   NimBLECharacteristic *pGPSCharacteristic =
       pService->createCharacteristic(GPS_CHAR_UUID, NIMBLE_PROPERTY::WRITE_NR);
   pGPSCharacteristic->setCallbacks(new MyGPSCharacteristicCallbacks());
+
+  // Create Settings Characteristic (UUID 2A73) for runtime configuration
+  NimBLECharacteristic *pSettingsCharacteristic =
+      pService->createCharacteristic(SETTINGS_CHAR_UUID,
+                                     NIMBLE_PROPERTY::WRITE_NR);
+  pSettingsCharacteristic->setCallbacks(
+      new MySettingsCharacteristicCallbacks());
 
   // Start service
   pService->start();

@@ -20,11 +20,17 @@ class BLEManager: NSObject, ObservableObject {
     @Published var peripheralName: String = ""
     @Published var signalStrength: Int = 0
     
+    // MARK: - Map Settings (persisted for UI display)
+    @Published var minPolygonSize: Double = 0
+    @Published var detailLevel: Int = 2
+    @Published var routeLineWidth: Double = 4
+    
     // MARK: - BLE UUIDs (matching ESP32)
     private let serviceUUID = CBUUID(string: "1819")           // Navigation Service
     private let characteristicUUID = CBUUID(string: "2A6E")    // Navigation Data Characteristic
     private let routeGeometryCharacteristicUUID = CBUUID(string: "2A6F")  // Route Geometry Characteristic
     private let gpsPositionCharacteristicUUID = CBUUID(string: "2A72")    // GPS Position Characteristic (Location and Speed)
+    private let settingsCharacteristicUUID = CBUUID(string: "2A73")       // Settings Characteristic (runtime configuration)
     
     // MARK: - Private Properties
     private var centralManager: CBCentralManager!
@@ -32,6 +38,7 @@ class BLEManager: NSObject, ObservableObject {
     private var navigationCharacteristic: CBCharacteristic?
     private var routeGeometryCharacteristic: CBCharacteristic?
     private var gpsPositionCharacteristic: CBCharacteristic?
+    private var settingsCharacteristic: CBCharacteristic?
     
     private var autoReconnect: Bool = true
     private var lastConnectedPeripheralIdentifier: UUID?
@@ -154,6 +161,25 @@ class BLEManager: NSObject, ObservableObject {
         withUnsafeBytes(of: headingDeg.littleEndian) { data.append(contentsOf: $0) }
         
         peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+    }
+    
+    /// Send a setting to ESP32 (runtime map configuration)
+    /// Format: [settingId:1][value:4] = 5 bytes
+    /// Setting IDs: 1=minPolygonSize (0-50), 2=detailLevel (0-2), 3=routeLineWidth (2-8)
+    func sendSetting(id: UInt8, value: Int32) {
+        guard let peripheral = connectedPeripheral,
+              let characteristic = settingsCharacteristic,
+              isConnected else {
+            print("Cannot send setting: not connected or characteristic not found")
+            return
+        }
+        
+        var data = Data()
+        data.append(id)
+        withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+        
+        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+        print("Sent setting: id=\(id), value=\(value)")
     }
     
     /// Attempt to reconnect to last known peripheral
@@ -339,7 +365,8 @@ extension BLEManager: CBPeripheralDelegate {
                 peripheral.discoverCharacteristics([
                     characteristicUUID, 
                     routeGeometryCharacteristicUUID,
-                    gpsPositionCharacteristicUUID
+                    gpsPositionCharacteristicUUID,
+                    settingsCharacteristicUUID
                 ], for: service)
             }
         }
@@ -383,6 +410,11 @@ extension BLEManager: CBPeripheralDelegate {
                 gpsPositionCharacteristic = characteristic
                 isGPSReady = true // Mark as ready to receive GPS
                 print("GPS Position characteristic ready!")
+            }
+            
+            if characteristic.uuid == settingsCharacteristicUUID {
+                settingsCharacteristic = characteristic
+                print("Settings characteristic ready!")
             }
         }
     }

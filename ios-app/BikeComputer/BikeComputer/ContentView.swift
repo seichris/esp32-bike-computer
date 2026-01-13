@@ -24,16 +24,26 @@ struct ContentView: View {
             return .walking
         }
     }()
+    @State private var showingSettings = false
     
     var body: some View {
         NavigationView {
             VStack(spacing: 15) {
-                // BLE Connection Status
-                ConnectionStatusView(
-                    isConnected: coordinator.isConnected,
-                    signalStrength: coordinator.signalStrength,
-                    onReconnect: { coordinator.disconnect() }
-                )
+                // BLE Connection Status + Settings
+                HStack {
+                    ConnectionStatusView(
+                        isConnected: coordinator.isConnected,
+                        signalStrength: coordinator.signalStrength,
+                        onReconnect: { coordinator.disconnect() }
+                    )
+                    
+                    Button(action: { showingSettings = true }) {
+                        Image(systemName: "gearshape.fill")
+                            .font(.title3)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.trailing, 30)
+                }
                 
                 // Main Content Views
                 if coordinator.isNavigating {
@@ -116,6 +126,10 @@ struct ContentView: View {
                 Button("OK", role: .cancel) { }
             } message: {
                 Text(coordinator.alert.message)
+            }
+            .sheet(isPresented: $showingSettings) {
+                SettingsView()
+                    .environmentObject(coordinator.bleManager)
             }
         }
         .onChange(of: coordinator.selectedView) { newValue in

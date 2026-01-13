@@ -18,7 +18,7 @@ class BikeComputerCoordinator: ObservableObject {
     
     // MARK: - Private Managers (Implementation Details)
     
-    private let bleManager = BLEManager()
+    let bleManager = BLEManager()  // Accessible for settings view
     private let navEngine = NavigationEngine()
     private let locationManager = CurrentLocationManager()
     private let healthKitManager = HealthKitManager()

@@ -18,6 +18,14 @@ const char *TAG PROGMEM = "Maps";
 #include "../../route_overlay/route_overlay.hpp"
 #include <esp_heap_caps.h>
 
+// BLE Settings - extern declaration for runtime map configuration
+struct MapRenderSettings {
+  uint8_t minPolygonSize;
+  uint8_t detailLevel;
+  uint8_t routeLineWidth;
+};
+extern MapRenderSettings mapRenderSettings;
+
 static void *bufMapTemp = nullptr;
 static void *bufMapIcon = nullptr;
 static void *bufArrow = nullptr;
@@ -1052,6 +1060,16 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             newPolygon.bbox.max.x = maxX;
             newPolygon.bbox.min.y = minY;
             newPolygon.bbox.max.y = maxY;
+
+            // Skip polygons smaller than minPolygonSize (configurable via BLE)
+            int16_t polyWidth = maxX - minX;
+            int16_t polyHeight = maxY - minY;
+            if (mapRenderSettings.minPolygonSize > 0 &&
+                polyWidth * polyHeight < mapRenderSettings.minPolygonSize *
+                                             mapRenderSettings.minPolygonSize) {
+              poly_drawn--; // Don't count as drawn
+              continue;
+            }
 
             Maps::fillPolygon(newPolygon, canvas);
           }

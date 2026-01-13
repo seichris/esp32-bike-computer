@@ -49,6 +49,8 @@ private:
   static constexpr const char *ROUTE_CHAR_UUID = "2A6F"; // Route geometry
   static constexpr const char *GPS_CHAR_UUID =
       "2A72"; // GPS Position (Location and Speed)
+  static constexpr const char *SETTINGS_CHAR_UUID =
+      "2A73"; // Map Settings (runtime configuration)
 
   NimBLEServer *pServer = nullptr;
   NimBLECharacteristic *pNavCharacteristic = nullptr;
