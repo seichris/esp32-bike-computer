@@ -50,10 +50,32 @@ class BLEManager: NSObject, ObservableObject {
     private var maxReconnectDelay: TimeInterval = 60.0 // Cap at 60 seconds
     private var reconnectTimer: Timer?
     
+    // MARK: - UserDefaults Keys
+    private enum SettingsKeys {
+        static let minPolygonSize = "mapSettings.minPolygonSize"
+        static let detailLevel = "mapSettings.detailLevel"
+        static let routeLineWidth = "mapSettings.routeLineWidth"
+    }
+    
     // MARK: - Initialization
     override init() {
         super.init()
         centralManager = CBCentralManager(delegate: self, queue: nil)
+        loadSettings()
+    }
+    
+    private func loadSettings() {
+        let defaults = UserDefaults.standard
+        minPolygonSize = defaults.double(forKey: SettingsKeys.minPolygonSize)
+        detailLevel = defaults.object(forKey: SettingsKeys.detailLevel) as? Int ?? 2
+        routeLineWidth = defaults.object(forKey: SettingsKeys.routeLineWidth) as? Double ?? 4.0
+    }
+    
+    func saveSettings() {
+        let defaults = UserDefaults.standard
+        defaults.set(minPolygonSize, forKey: SettingsKeys.minPolygonSize)
+        defaults.set(detailLevel, forKey: SettingsKeys.detailLevel)
+        defaults.set(routeLineWidth, forKey: SettingsKeys.routeLineWidth)
     }
     
     // MARK: - Public Methods
@@ -180,6 +202,9 @@ class BLEManager: NSObject, ObservableObject {
         
         peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
         print("Sent setting: id=\(id), value=\(value)")
+        
+        // Persist settings to UserDefaults
+        saveSettings()
     }
     
     /// Attempt to reconnect to last known peripheral

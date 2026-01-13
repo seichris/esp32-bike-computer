@@ -23,7 +23,6 @@ Can we add a setting in the app for this? It should be saved on the device, so i
 - rerouting logic in the iOS app (after taking a wrong path)
 also when starting a navigation, it should default to starting from the actual current gps location. Is that possible? vs right now it 'converts' our current location into a location name. And sometimes thats not accurately at our actual location. 
 
-- can we make the dragging more responsive? or is it limited by the device cpu, or what else would be the bottleneck? How could we measure?
 
 
 
