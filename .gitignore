@@ -43,4 +43,4 @@ OSM_Extract/__pycache__
 OSM_Extract/conf/test*
 
 # waveshare_demo/
-waveshare_demo/
+waveshare_demo//IceNav-v3/
