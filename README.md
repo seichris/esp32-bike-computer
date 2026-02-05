@@ -1,8 +1,9 @@
-# esp32-bike-computer
+# Open Source Bike Computer
 
-Open-source bike computer:
-- **Device**: ESP32-S3 + round AMOLED + touch (Waveshare ESP32-S3-Touch-AMOLED-1.75).
-- **iOS app**: route planning + workout metrics; sends navigation + telemetry to the device over BLE.
+Navigate your bike rides with a compact ESP32 display, for ~$30.
+
+- **Device**: [Waveshare ESP32-S3-Touch-AMOLED-1.75](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31262)
+- **iOS app**: Route planning + workout metrics; sends navigation + telemetry to the device over BLE.
 
 We used [IceNav-v3](https://github.com/jgauchia/IceNav-v3) as a reference for this project. If you want a **self-contained** ESP32 GPS navigator with **offline OSM maps** (no phone required), IceNav-v3 is highly recommended.
 
