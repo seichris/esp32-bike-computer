@@ -23,7 +23,7 @@ ios-app/BikeComputer.xcuserdata/
 .vscode/
 esp32-bike-computer.code-workspace
 
-# IceNav-v3/
+IceNav-v3/
 IceNav-v3/.pio
 IceNav-v3/.vscode/.browse.c_cpp.db*
 IceNav-v3/.vscode/c_cpp_properties.json

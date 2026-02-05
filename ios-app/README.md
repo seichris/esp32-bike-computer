@@ -21,16 +21,3 @@ On the testing iPhone:
 4. Click the **Run** (Play) button.
 5. Once installed, go to **Settings > General > VPN & Device Management**.
 6. Tap your developer account email and select **Trust**.
-
----
-
-## 👥 Sharing with Others
-
-### Personal Team (Free)
-- **Limit**: Up to 3 physical devices.
-- **Expiry**: The app will expire after 7 days, after which you must re-install it via Xcode.
-- **Process**: Connect their iPhone to your Mac, add it as a device in Xcode, and "Run" the app onto it.
-
-### Apple Developer Program (Paid)
-- **Ad Hoc**: Distribute to up to 100 registered devices (valid for 1 year).
-- **TestFlight**: Share with up to 10,000 testers via a public link or email invitation. No USB connection required.
