@@ -1,0 +1,159 @@
+# Assign color & width to each feature type.
+# APPLE MAPS STYLE - CUSTOM PALETTE
+#
+# Attributes: color, width (only line), maxzoom
+
+##### Lines #####
+lines:
+# Minor Paths (Hiking/Foot) - Light Grey/Brown
+- features:
+  - highway.path
+  - highway.footway
+  - highway.steps
+  color: apple_dark_gray
+  width: 1
+  maxzoom: 4
+
+# Dirt/Farm Tracks - Brownish
+- features:
+  - highway.track
+  color: apple_brown
+  width: 2
+
+# Residential Roads - Pure White (Classic Apple Look)
+- features:
+  - highway.residential
+  - highway.service
+  - highway.living_street
+  - highway.pedestrian
+  - highway.unclassified
+  color: white
+  width: 4
+  maxzoom: 5
+
+# Major Roads - Pale Yellow
+- features:
+  - highway.primary
+  - highway.secondary
+  - highway.secondary_link
+  - highway.tertiary
+  color: apple_yellow
+  width: 6
+
+# Highways/Motorways - Warm Orange
+- features:
+  - highway.motorway
+  - highway.motorway_link
+  - highway.trunk
+  color: apple_orange
+  width: 10
+
+# Catch-all for other roads
+- features:
+  - highway
+  color: white
+  width: 3
+
+# Water Lines (Rivers/Streams)
+- features:
+  - waterway.river
+  - waterway.stream
+  - waterway.drain
+  - waterway
+  color: apple_water
+  width: 2
+
+# Railways - Dark Gray
+- features:
+  - railway
+  color: apple_dark_gray
+  width: 2
+
+# Coastlines
+- features:
+  - natural.coastline
+  color: apple_water
+  width: 2
+
+
+##### Polygons #####
+polygons:
+# Buildings - Light Concrete Gray
+- features:
+  - building
+  color: apple_building
+  maxzoom: 3
+
+# Industrial/Brownfield - Slightly Darker Gray
+- features:
+  - landuse.brownfield
+  - landuse.cemetery
+  - landuse.quarry
+  - landuse.landfill
+  - amenity
+  color: apple_land_gray
+
+# Parks and Nature - Soft Pastel Green
+- features:
+  - landuse.grass
+  - landuse.meadow
+  - landuse.allotments
+  - leisure.park
+  - leisure.garden
+  - leisure.pitch
+  - leisure.golf_course
+  - natural.forest
+  - natural.wood
+  - landuse.forest
+  - landuse.wood
+  - natural
+  color: apple_park
+
+# Water Bodies - Soft Blue
+- features:
+  - natural.water
+  - waterway
+  - leisure.swimming_pool
+  - natural.beach
+  color: apple_water
+
+# Farms - Very Pale Green (Subtle difference from parks)
+- features:
+  - landuse.farmland
+  - landuse.farmyard
+  - landuse.orchard
+  color: apple_farm
+
+
+# Map to colors (RGB565 Format)
+# Calculated to mimic Apple Maps' soft pastel palette
+colors:
+  white:           '0xFFFF'  # Pure White (Roads)
+  black:           '0x0000'  # Black
+  
+  # Soft Blue (Water) - RGB(164, 221, 245)
+  apple_water:     '0xA6DE'
+  
+  # Soft Green (Parks) - RGB(185, 228, 158)
+  apple_park:      '0xB713'
+  
+  # Pale Green (Farms) - RGB(215, 235, 190)
+  apple_farm:      '0xD757'
+  
+  # Warm Orange (Highways) - RGB(251, 175, 63)
+  apple_orange:    '0xF567'
+  
+  # Pale Yellow (Major Roads) - RGB(254, 240, 179)
+  apple_yellow:    '0xFF36'
+  
+  # Light Gray (Buildings) - RGB(220, 220, 220)
+  apple_building:  '0xDED6'
+  
+  # Medium Gray (Industrial/Land) - RGB(200, 200, 200)
+  apple_land_gray: '0xC618'
+  
+  # Dark Gray (Railways/Paths) - RGB(100, 100, 100)
+  apple_dark_gray: '0x632C'
+  
+  # Earthy Brown (Tracks) - RGB(160, 130, 90)
+  apple_brown:     '0xA42B'

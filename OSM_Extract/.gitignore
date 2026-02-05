@@ -1,0 +1,5 @@
+maps/mymap
+pbf
+__pycache__
+conf/test*
+maps/test*
