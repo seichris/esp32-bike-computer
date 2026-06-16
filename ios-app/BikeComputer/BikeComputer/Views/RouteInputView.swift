@@ -52,7 +52,7 @@ struct RouteInputView: View {
     let currentAddress: String
     let currentLocation: CLLocation?  // User's exact GPS location for region-biased search
     
-    var onStartNavigation: (String, String, MKDirectionsTransportType, Bool) -> Void
+    var onStartNavigation: (RouteEndpoint, RouteEndpoint, MKDirectionsTransportType, Bool) -> Void
     
     @StateObject private var destinationCompleter = AddressSearchCompleter()
     @StateObject private var sourceCompleter = AddressSearchCompleter()
@@ -255,9 +255,8 @@ struct RouteInputView: View {
                 // Go button (only shown after destination is selected & NOT editing)
                 if hasSelectedDestination && !isEditingSource {
                     Button(action: {
-                        // Use sourceAddress if custom selected, else currentAddress
-                        let finalSource = hasSelectedSource ? sourceAddress : currentAddress
-                        onStartNavigation(finalSource, destinationAddress, selectedTransportType, isTestMode)
+                        let sourceEndpoint: RouteEndpoint = hasSelectedSource ? .query(sourceAddress) : .currentLocation
+                        onStartNavigation(sourceEndpoint, .query(destinationAddress), selectedTransportType, isTestMode)
                         dismiss()
                     }) {
                         Text(isTestMode ? "Go (Test)" : "Go")
@@ -362,4 +361,3 @@ struct TransportButton: View {
         }
     }
 }
-

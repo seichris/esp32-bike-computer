@@ -19,6 +19,7 @@ class HealthKitManager: NSObject, ObservableObject {
     @Published var heartRate: Double = 0
     @Published var currentSpeed: Double = 0 // m/s
     @Published var distanceTraveled: Double = 0 // meters
+    let isHealthKitAvailable = true
 
     private let healthStore = HKHealthStore()
     private var workoutTimer: Timer?
@@ -60,8 +61,7 @@ class HealthKitManager: NSObject, ObservableObject {
 
         let typesToWrite: Set<HKSampleType> = [
             HKObjectType.workoutType(),
-            HKObjectType.quantityType(forIdentifier: .distanceCycling)!,
-            HKObjectType.quantityType(forIdentifier: .activeEnergyBurned)!
+            HKObjectType.quantityType(forIdentifier: .distanceCycling)!
         ]
         
         let typesToRead: Set<HKObjectType> = [
@@ -70,14 +70,25 @@ class HealthKitManager: NSObject, ObservableObject {
 
         healthStore.requestAuthorization(toShare: typesToWrite, read: typesToRead) { [weak self] success, error in
             DispatchQueue.main.async {
-                if success {
-                    self?.isAuthorized = true
-                    print("HealthKit authorization granted")
-                } else {
+                guard success else {
                     self?.isAuthorized = false
                     if let error = error {
                         print("HealthKit authorization failed: \(error.localizedDescription)")
                     }
+                    return
+                }
+
+                let requiredShareTypes = typesToWrite
+                let hasRequiredShareAuthorization = requiredShareTypes.allSatisfy {
+                    self?.healthStore.authorizationStatus(for: $0) == .sharingAuthorized
+                }
+
+                if hasRequiredShareAuthorization {
+                    self?.isAuthorized = true
+                    print("HealthKit authorization granted")
+                } else {
+                    self?.isAuthorized = false
+                    print("HealthKit authorization incomplete")
                 }
             }
         }
@@ -240,6 +251,7 @@ class HealthKitManager: NSObject, ObservableObject {
     @Published var heartRate: Double = 0
     @Published var currentSpeed: Double = 0 // m/s
     @Published var distanceTraveled: Double = 0 // meters
+    let isHealthKitAvailable = false
 
     weak var locationManager: CurrentLocationManager?
 

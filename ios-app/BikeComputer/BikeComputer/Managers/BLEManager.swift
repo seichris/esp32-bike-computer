@@ -45,6 +45,7 @@ class BLEManager: NSObject, ObservableObject {
     private var navigationCharacteristic: CBCharacteristic?
     private var pendingNavigationWrites: [Data] = []
     private let maxQueuedNavigationWrites = 16
+    private var isConnecting: Bool = false
     
     private var autoReconnect: Bool = true
     private var lastConnectedPeripheralIdentifier: UUID?
@@ -55,6 +56,7 @@ class BLEManager: NSObject, ObservableObject {
     private var baseReconnectDelay: TimeInterval = 1.0 // Start with 1 second
     private var maxReconnectDelay: TimeInterval = 60.0 // Cap at 60 seconds
     private var reconnectTimer: Timer?
+    private var rssiTimer: Timer?
     
     // MARK: - UserDefaults Keys
     private enum SettingsKeys {
@@ -65,6 +67,7 @@ class BLEManager: NSObject, ObservableObject {
         static let showBuildings = "mapSettings.showBuildings"
         static let showNature = "mapSettings.showNature"
         static let showMinorRoads = "mapSettings.showMinorRoads"
+        static let lastPeripheralIdentifier = "ble.lastPeripheralIdentifier"
     }
     
     // MARK: - Initialization
@@ -72,6 +75,7 @@ class BLEManager: NSObject, ObservableObject {
         super.init()
         centralManager = CBCentralManager(delegate: self, queue: nil)
         loadSettings()
+        loadLastPeripheralIdentifier()
     }
     
     private func loadSettings() {
@@ -83,6 +87,11 @@ class BLEManager: NSObject, ObservableObject {
         showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
         showNature = defaults.object(forKey: SettingsKeys.showNature) as? Bool ?? true
         showMinorRoads = defaults.object(forKey: SettingsKeys.showMinorRoads) as? Bool ?? true
+    }
+
+    private func loadLastPeripheralIdentifier() {
+        guard let uuidString = UserDefaults.standard.string(forKey: SettingsKeys.lastPeripheralIdentifier) else { return }
+        lastConnectedPeripheralIdentifier = UUID(uuidString: uuidString)
     }
     
     func saveSettings() {
@@ -102,6 +111,14 @@ class BLEManager: NSObject, ObservableObject {
     func startScanning() {
         guard centralManager.state == .poweredOn else {
             print("Bluetooth not powered on")
+            return
+        }
+        guard !isConnected && !isConnecting else {
+            print("Skipping BLE scan: connection already active")
+            return
+        }
+        guard !isScanning else {
+            print("Skipping BLE scan: scan already active")
             return
         }
         
@@ -127,8 +144,15 @@ class BLEManager: NSObject, ObservableObject {
         guard let peripheral = connectedPeripheral else { return }
         
         autoReconnect = false
+        stopMonitoringRSSI()
         centralManager.cancelPeripheralConnection(peripheral)
         print("Disconnecting from peripheral")
+    }
+
+    func reconnect() {
+        autoReconnect = true
+        resetReconnectionState()
+        reconnectToLastDevice()
     }
     
     /// Send navigation data to ESP32
@@ -183,6 +207,15 @@ class BLEManager: NSObject, ObservableObject {
     
     /// Attempt to reconnect to last known peripheral
     func reconnectToLastDevice() {
+        guard centralManager.state == .poweredOn else {
+            print("Cannot reconnect: Bluetooth not powered on")
+            return
+        }
+        guard !isConnected && !isConnecting else {
+            print("Skipping reconnect: connection already active")
+            return
+        }
+
         guard let uuid = lastConnectedPeripheralIdentifier else {
             print("No last connected device")
             startScanning()
@@ -203,8 +236,15 @@ class BLEManager: NSObject, ObservableObject {
     // MARK: - Private Methods
     
     private func connectToPeripheral(_ peripheral: CBPeripheral) {
+        guard !isConnected && !isConnecting else {
+            print("Skipping connect: connection already active")
+            return
+        }
+
+        stopScanning()
         connectedPeripheral = peripheral
         peripheral.delegate = self
+        isConnecting = true
         centralManager.connect(peripheral, options: nil)
         print("Connecting to: \(peripheral.name ?? "Unknown")")
     }
@@ -270,6 +310,12 @@ extension BLEManager: CBCentralManagerDelegate {
             print("Bluetooth powered off")
             isConnected = false
             isScanning = false
+            isConnecting = false
+            connectedPeripheral = nil
+            navigationCharacteristic = nil
+            pendingNavigationWrites.removeAll()
+            resetReconnectionState()
+            stopMonitoringRSSI()
             
         case .resetting:
             print("Bluetooth resetting")
@@ -297,7 +343,6 @@ extension BLEManager: CBCentralManagerDelegate {
         
         // Auto-connect to first discovered device with our service
         // (In production, you might want to show a list and let user choose)
-        stopScanning()
         connectToPeripheral(peripheral)
         
         // Store signal strength
@@ -307,9 +352,12 @@ extension BLEManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         print("Connected to: \(peripheral.name ?? "Unknown")")
         
+        isConnecting = false
         isConnected = true
         peripheralName = peripheral.name ?? "BikeComputer"
         lastConnectedPeripheralIdentifier = peripheral.identifier
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: SettingsKeys.lastPeripheralIdentifier)
+        startMonitoringRSSI()
         
         // Reset reconnection state on successful connection (Optimization #14)
         resetReconnectionState()
@@ -328,12 +376,14 @@ extension BLEManager: CBCentralManagerDelegate {
         }
         
         isConnected = false
+        isConnecting = false
         isGPSReady = false
         isRouteReady = false
         supportsDeviceSettings = false
         connectedPeripheral = nil
         navigationCharacteristic = nil
         pendingNavigationWrites.removeAll()
+        stopMonitoringRSSI()
         
         // Auto-reconnect if enabled with exponential backoff
         if autoReconnect {
@@ -368,11 +418,17 @@ extension BLEManager: CBCentralManagerDelegate {
         reconnectTimer = nil
         reconnectAttempts = 0
     }
+
+    private func stopMonitoringRSSI() {
+        rssiTimer?.invalidate()
+        rssiTimer = nil
+    }
     
     func centralManager(_ central: CBCentralManager, 
                        didFailToConnect peripheral: CBPeripheral, 
                        error: Error?) {
         print("Failed to connect to: \(peripheral.name ?? "Unknown")")
+        isConnecting = false
         
         if let error = error {
             print("Connection error: \(error.localizedDescription)")
@@ -380,9 +436,7 @@ extension BLEManager: CBCentralManagerDelegate {
         
         // Retry after delay
         if autoReconnect {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                self?.startScanning()
-            }
+            scheduleReconnectWithBackoff()
         }
     }
 }
@@ -487,7 +541,8 @@ extension BLEManager {
     
     /// Read RSSI periodically to monitor connection strength
     func startMonitoringRSSI() {
-        Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        rssiTimer?.invalidate()
+        rssiTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             guard let self = self, let peripheral = self.connectedPeripheral, self.isConnected else {
                 return
             }

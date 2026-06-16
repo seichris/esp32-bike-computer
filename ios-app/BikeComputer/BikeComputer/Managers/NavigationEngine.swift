@@ -62,14 +62,35 @@ class NavigationEngine: NSObject, ObservableObject {
     /// Set the BLE manager for sending data to ESP32
     func setBLEManager(_ manager: BLEManager) {
         self.bleManager = manager
+        manager.$isRouteReady
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isReady in
+                guard let self = self, isReady else { return }
+                print("BLE Route Ready: Resetting route geometry state to force resend")
+                self.lastSentGeometryHash = 0
+                self.lastGeometrySendTime = Date.distantPast
+
+                if self.isNavigating, let route = self.currentRoute, route.polyline.pointCount > 0 {
+                    var startCoord = CLLocationCoordinate2D()
+                    route.polyline.getCoordinates(&startCoord, range: NSRange(location: 0, length: 1))
+                    let startLoc = CLLocation(latitude: startCoord.latitude, longitude: startCoord.longitude)
+                    self.sendRouteGeometryIfNeeded(currentLocation: startLoc)
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    func processExternalLocation(_ location: CLLocation) {
+        guard !isSimulationMode else { return }
+        processLocation(location)
     }
     
     /// Start navigation with a given route
     func startNavigation(with route: MKRoute, isTestMode: Bool = false) {
         currentRoute = route
         currentStepIndex = 0
-        isNavigating = true
         isSimulationMode = isTestMode
+        isNavigating = true
         
         // Reset tracking
         lastSentDistance = 0
@@ -81,8 +102,7 @@ class NavigationEngine: NSObject, ObservableObject {
         if isTestMode {
             startSimulation()
         } else {
-            // Start location updates
-            locationManager.startUpdatingLocation()
+            // Real location updates are supplied by CurrentLocationManager.
         }
     }
     
@@ -91,7 +111,6 @@ class NavigationEngine: NSObject, ObservableObject {
         isNavigating = false
         currentRoute = nil
         currentStepIndex = 0
-        locationManager.stopUpdatingLocation()
         stopSimulation()
         print("Navigation stopped")
     }
@@ -102,10 +121,6 @@ class NavigationEngine: NSObject, ObservableObject {
         print("Starting simulated navigation")
         simulationProgress = 0.0
         lastSimulationUpdate = Date()
-        
-        // Start location manager to keep app alive in background
-        // This ensures simulation continues even when phone is locked
-        locationManager.startUpdatingLocation()
         
         simulationTimer?.invalidate()
         simulationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -291,38 +306,13 @@ class NavigationEngine: NSObject, ObservableObject {
     // MARK: - Private Methods
     
     private func setupLocationManager() {
-        bleManager?.$isRouteReady
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] isReady in
-                if isReady {
-                    print("BLE Route Ready: Resetting route geometry state to force resend")
-                    self?.lastSentGeometryHash = 0
-                    self?.lastGeometrySendTime = Date.distantPast
-                    
-                    // Force immediate update if navigating
-                    if let self = self, self.isNavigating, let route = self.currentRoute {
-                         // Send initial geometry again
-                         if route.polyline.pointCount > 0 {
-                              var startCoord = CLLocationCoordinate2D()
-                              route.polyline.getCoordinates(&startCoord, range: NSRange(location: 0, length: 1))
-                              let startLoc = CLLocation(latitude: startCoord.latitude, longitude: startCoord.longitude)
-                              self.sendRouteGeometryIfNeeded(currentLocation: startLoc)
-                         }
-                    }
-                }
-            }
-            .store(in: &cancellables)
-            
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
         locationManager.distanceFilter = 5 // Update every 5 meters
         locationManager.activityType = .fitness
-        locationManager.allowsBackgroundLocationUpdates = true
+        locationManager.allowsBackgroundLocationUpdates = false
         locationManager.pausesLocationUpdatesAutomatically = false
-        locationManager.showsBackgroundLocationIndicator = true  // Show blue bar when in background
-        
-        // Request authorization
-        locationManager.requestAlwaysAuthorization()
+        locationManager.showsBackgroundLocationIndicator = false
     }
     
     /// Process location update and extract navigation data
@@ -337,10 +327,7 @@ class NavigationEngine: NSObject, ObservableObject {
         }
         
         let currentStep = route.steps[currentStepIndex]
-        let stepEndLocation = CLLocation(
-            latitude: currentStep.polyline.coordinate.latitude,
-            longitude: currentStep.polyline.coordinate.longitude
-        )
+        guard let stepEndLocation = endpointLocation(for: currentStep) else { return }
         
         // Calculate distance to end of current step
         let distanceRemaining = Int(location.distance(from: stepEndLocation))
@@ -357,10 +344,7 @@ class NavigationEngine: NSObject, ObservableObject {
         let newIconID = mapInstructionToIconID(newStep.instructions)
 
         // Recalculate distance to the new step's endpoint after advancement
-        let newStepEndLocation = CLLocation(
-            latitude: newStep.polyline.coordinate.latitude,
-            longitude: newStep.polyline.coordinate.longitude
-        )
+        guard let newStepEndLocation = endpointLocation(for: newStep) else { return }
         let newDistance = Int(location.distance(from: newStepEndLocation))
         
         // Update published properties
@@ -375,6 +359,15 @@ class NavigationEngine: NSObject, ObservableObject {
         
         // Send route geometry for map overlay (rate-limited internally)
         sendRouteGeometryIfNeeded(currentLocation: location)
+    }
+
+    private func endpointLocation(for step: MKRoute.Step) -> CLLocation? {
+        let pointCount = step.polyline.pointCount
+        guard pointCount > 0 else { return nil }
+
+        var coordinate = CLLocationCoordinate2D()
+        step.polyline.getCoordinates(&coordinate, range: NSRange(location: pointCount - 1, length: 1))
+        return CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
     }
     
     /// Extract clean instruction text from MKRoute.Step

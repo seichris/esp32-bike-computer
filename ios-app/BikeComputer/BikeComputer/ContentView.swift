@@ -34,7 +34,7 @@ struct ContentView: View {
                     ConnectionStatusView(
                         isConnected: coordinator.isConnected,
                         signalStrength: coordinator.signalStrength,
-                        onReconnect: { coordinator.disconnect() }
+                        onReconnect: { coordinator.reconnect() }
                     )
                     
                     Button(action: { showingSettings = true }) {
@@ -162,4 +162,3 @@ struct ContentView_Previews: PreviewProvider {
         ContentView()
     }
 }
-
