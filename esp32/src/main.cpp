@@ -17,6 +17,8 @@
 #include <Wire.h>
 #include <driver/gpio.h>
 #include <lvgl.h>
+#include <ctype.h>
+#include <stdlib.h>
 
 // Include SquareLine Studio generated UI
 extern "C" {
@@ -193,6 +195,8 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
 
 #define SERVICE_UUID "1819"        // Navigation Service
 #define CHARACTERISTIC_UUID "2A6E" // Navigation Data Characteristic
+static constexpr size_t NAV_PAYLOAD_MAX_LEN = 96;
+static constexpr size_t NAV_INSTRUCTION_MAX_LEN = 63;
 
 NimBLEServer *pServer = nullptr;
 NimBLECharacteristic *pCharacteristic = nullptr;
@@ -201,14 +205,21 @@ bool deviceConnected = false;
 // Navigation Data Structure
 struct NavigationData {
   uint8_t iconID;
-  uint16_t distance;
+  uint32_t distance;
   char instruction[64];
 };
 
-NavigationData navData = {0, 0, ""};
+NavigationData navData = {1, 0, ""};
 volatile bool uiUpdateNeeded = false;
 volatile bool bleConnectedState = false;
 volatile bool bleStateChanged = false;
+portMUX_TYPE navPayloadMux = portMUX_INITIALIZER_UNLOCKED;
+char pendingNavPayload[NAV_PAYLOAD_MAX_LEN + 1] = "";
+volatile bool navPayloadPending = false;
+
+bool isValidNavigationIcon(uint8_t iconID) {
+  return iconID >= 1 && iconID <= 4;
+}
 
 // BLE Callbacks
 class ServerCallbacks : public NimBLEServerCallbacks {
@@ -229,27 +240,111 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
 };
 
-// Parse incoming navigation data: "IconID|Distance|Instruction"
-void parseNavigationData(String data) {
-  int firstPipe = data.indexOf('|');
-  int secondPipe = data.indexOf('|', firstPipe + 1);
-
-  if (firstPipe == -1 || secondPipe == -1) {
-    Serial.println("Invalid data format");
+void queueNavigationPayload(const std::string &value) {
+  if (value.empty()) {
     return;
   }
 
-  // Extract components
-  navData.iconID = data.substring(0, firstPipe).toInt();
-  navData.distance = data.substring(firstPipe + 1, secondPipe).toInt();
+  if (value.length() > NAV_PAYLOAD_MAX_LEN) {
+    Serial.printf("Rejected navigation payload: %u bytes exceeds %u byte limit\n",
+                  (unsigned)value.length(), (unsigned)NAV_PAYLOAD_MAX_LEN);
+    return;
+  }
 
-  String instruction = data.substring(secondPipe + 1);
-  instruction.toCharArray(navData.instruction, sizeof(navData.instruction));
+  portENTER_CRITICAL(&navPayloadMux);
+  memcpy(pendingNavPayload, value.data(), value.length());
+  pendingNavPayload[value.length()] = '\0';
+  navPayloadPending = true;
+  portEXIT_CRITICAL(&navPayloadMux);
+}
 
-  Serial.printf("Parsed: Icon=%d, Distance=%dm, Instruction=%s\n",
-                navData.iconID, navData.distance, navData.instruction);
+bool parseUnsignedField(const char *start, const char *end, uint32_t maxValue, uint32_t *out) {
+  if (start == nullptr || end == nullptr || start >= end) {
+    return false;
+  }
 
-  // Flag for update in main loop
+  uint32_t value = 0;
+  for (const char *cursor = start; cursor < end; cursor++) {
+    if (!isdigit((unsigned char)*cursor)) {
+      return false;
+    }
+
+    uint32_t digit = (uint32_t)(*cursor - '0');
+    if (value > (maxValue - digit) / 10) {
+      return false;
+    }
+
+    value = (value * 10) + digit;
+  }
+
+  *out = value;
+  return true;
+}
+
+// Parse incoming navigation data: "IconID|Distance|Instruction"
+bool parseNavigationData(const char *payload, NavigationData *parsed) {
+  if (payload == nullptr || parsed == nullptr) {
+    Serial.println("Invalid navigation payload: empty");
+    return false;
+  }
+
+  const char *firstPipe = strchr(payload, '|');
+  const char *secondPipe = firstPipe == nullptr ? nullptr : strchr(firstPipe + 1, '|');
+  if (firstPipe == nullptr || secondPipe == nullptr || strchr(secondPipe + 1, '|') != nullptr) {
+    Serial.println("Invalid navigation payload: expected IconID|Distance|Instruction");
+    return false;
+  }
+
+  uint32_t iconValue = 0;
+  uint32_t distanceValue = 0;
+  if (!parseUnsignedField(payload, firstPipe, UINT8_MAX, &iconValue) ||
+      !parseUnsignedField(firstPipe + 1, secondPipe, UINT32_MAX, &distanceValue)) {
+    Serial.println("Invalid navigation payload: icon and distance must be unsigned integers");
+    return false;
+  }
+
+  if (!isValidNavigationIcon((uint8_t)iconValue)) {
+    Serial.printf("Invalid navigation icon ID: %lu\n", (unsigned long)iconValue);
+    return false;
+  }
+
+  const char *instruction = secondPipe + 1;
+  if (*instruction == '\0') {
+    Serial.println("Invalid navigation payload: instruction is empty");
+    return false;
+  }
+
+  parsed->iconID = (uint8_t)iconValue;
+  parsed->distance = (uint32_t)distanceValue;
+  strncpy(parsed->instruction, instruction, NAV_INSTRUCTION_MAX_LEN);
+  parsed->instruction[NAV_INSTRUCTION_MAX_LEN] = '\0';
+
+  return true;
+}
+
+void processPendingNavigationPayload() {
+  char payload[NAV_PAYLOAD_MAX_LEN + 1];
+
+  portENTER_CRITICAL(&navPayloadMux);
+  if (!navPayloadPending) {
+    portEXIT_CRITICAL(&navPayloadMux);
+    return;
+  }
+  strncpy(payload, pendingNavPayload, sizeof(payload));
+  payload[sizeof(payload) - 1] = '\0';
+  navPayloadPending = false;
+  portEXIT_CRITICAL(&navPayloadMux);
+
+  NavigationData parsed;
+  if (!parseNavigationData(payload, &parsed)) {
+    return;
+  }
+
+  navData = parsed;
+
+  Serial.printf("Parsed: Icon=%u, Distance=%lum, Instruction=%s\n",
+                navData.iconID, (unsigned long)navData.distance, navData.instruction);
+
   uiUpdateNeeded = true;
 }
 
@@ -276,7 +371,7 @@ void updateNavigationUI() {
     uiUpdateNeeded = false;
 
     if (ui_LabelDistance != NULL) {
-      lv_label_set_text_fmt(ui_LabelDistance, "%d m", navData.distance);
+      lv_label_set_text_fmt(ui_LabelDistance, "%lu m", (unsigned long)navData.distance);
     }
     if (ui_LabelInstruction != NULL) {
       lv_label_set_text(ui_LabelInstruction, navData.instruction);
@@ -303,8 +398,8 @@ void updateNavigationUI() {
         draw_u_turn_arrow(arrow_color);
         break;
       default:
-        arrow_color = lv_color_hex(0x2196F3); // Blue
-        draw_right_arrow(arrow_color);
+        arrow_color = lv_color_hex(0x4CAF50); // Green
+        draw_up_arrow(arrow_color);
         break;
       }
     }
@@ -315,9 +410,8 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *pCharacteristic) {
     std::string value = pCharacteristic->getValue();
     if (value.length() > 0) {
-      String data = String(value.c_str());
-      Serial.println("Received: " + data);
-      parseNavigationData(data);
+      Serial.printf("Received navigation payload: %u bytes\n", (unsigned)value.length());
+      queueNavigationPayload(value);
     }
   }
 };
@@ -771,6 +865,7 @@ void loop() {
   updateDeviceStats();
 
   // Update UI from Main Loop (Thread Safe)
+  processPendingNavigationPayload();
   updateNavigationUI();
 
   // Demo SD card file reading periodically

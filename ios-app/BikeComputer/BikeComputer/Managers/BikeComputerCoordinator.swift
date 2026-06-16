@@ -34,7 +34,7 @@ class BikeComputerCoordinator: ObservableObject {
     @Published var isNavigating: Bool = false
     @Published var currentInstruction: String = "Ready to Navigate"
     @Published var distanceToManeuver: Int = 0
-    @Published var currentIconID: Int = 0
+    @Published var currentIconID: Int = NavigationIconID.straight
     @Published var currentRoute: MKRoute?
     @Published var isSimulationMode: Bool = false
     @Published var simulatedPosition: CLLocationCoordinate2D?
@@ -437,4 +437,3 @@ extension BikeComputerCoordinator {
         }
     }
 }
-

@@ -19,3 +19,10 @@ struct AlertState {
     var message: String = ""
 }
 
+/// Navigation icon IDs shared with the ESP32 firmware.
+enum NavigationIconID {
+    static let straight = 1
+    static let left = 2
+    static let right = 3
+    static let uTurn = 4
+}

@@ -11,12 +11,14 @@ import Combine
 import CoreBluetooth
 
 class BLEManager: NSObject, ObservableObject {
+    private static let navigationProtocolMaxBytes = 96
     
     // MARK: - Published Properties
     @Published var isScanning: Bool = false
     @Published var isConnected: Bool = false
     @Published var isGPSReady: Bool = false // Ready to send GPS data
     @Published var isRouteReady: Bool = false // Ready to send Route data
+    @Published var supportsDeviceSettings: Bool = false
     @Published var peripheralName: String = ""
     @Published var signalStrength: Int = 0
     
@@ -36,17 +38,13 @@ class BLEManager: NSObject, ObservableObject {
     // MARK: - BLE UUIDs (matching ESP32)
     private let serviceUUID = CBUUID(string: "1819")           // Navigation Service
     private let characteristicUUID = CBUUID(string: "2A6E")    // Navigation Data Characteristic
-    private let routeGeometryCharacteristicUUID = CBUUID(string: "2A6F")  // Route Geometry Characteristic
-    private let gpsPositionCharacteristicUUID = CBUUID(string: "2A72")    // GPS Position Characteristic (Location and Speed)
-    private let settingsCharacteristicUUID = CBUUID(string: "2A73")       // Settings Characteristic (runtime configuration)
     
     // MARK: - Private Properties
     private var centralManager: CBCentralManager!
     private var connectedPeripheral: CBPeripheral?
     private var navigationCharacteristic: CBCharacteristic?
-    private var routeGeometryCharacteristic: CBCharacteristic?
-    private var gpsPositionCharacteristic: CBCharacteristic?
-    private var settingsCharacteristic: CBCharacteristic?
+    private var pendingNavigationWrites: [Data] = []
+    private let maxQueuedNavigationWrites = 16
     
     private var autoReconnect: Bool = true
     private var lastConnectedPeripheralIdentifier: UUID?
@@ -142,89 +140,34 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
         
-        guard let dataToSend = data.data(using: .utf8) else {
+        let maxLength = min(peripheral.maximumWriteValueLength(for: .withoutResponse), Self.navigationProtocolMaxBytes)
+        guard let dataToSend = navigationPacketData(from: data, maxLength: maxLength) else {
             print("Failed to encode data")
             return
         }
         
-        // Write without response for better performance
-        peripheral.writeValue(
-            dataToSend,
-            for: characteristic,
-            type: .withoutResponse
-        )
-        
-        print("Sent: \(data) (\(dataToSend.count) bytes)")
+        enqueueNavigationWrite(dataToSend, for: characteristic, on: peripheral)
+        print("Queued navigation packet: \(dataToSend.count) bytes")
     }
     
     /// Send route geometry data to ESP32 (binary format)
     func sendRouteGeometry(_ data: Data) {
-        guard let peripheral = connectedPeripheral,
-              let characteristic = routeGeometryCharacteristic,
-              isConnected else {
-            print("Cannot send geometry: not connected or characteristic not found")
-            return
-        }
-        
-        // Write without response for better performance
-        peripheral.writeValue(
-            data,
-            for: characteristic,
-            type: .withoutResponse
-        )
-        
-        print("Sent route geometry: \(data.count) bytes")
+        print("Route geometry BLE characteristic is not supported by the current ESP32 firmware; skipped \(data.count) bytes")
     }
     
     /// Send GPS position to ESP32
     /// Format: [Lat:4][Lon:4][Heading:2] = 10 bytes
     /// GPS coordinates are sent as-is (WGS-84) but with a calibration nudge for map alignment
     func sendGPSPosition(lat: Double, lon: Double, heading: Double = 0) {
-        guard let peripheral = connectedPeripheral,
-              let characteristic = gpsPositionCharacteristic,
-              isConnected else {
-            return
-        }
-        
-        // GPS coordinates arrive already converted from GCJ-02 to WGS-84 by NavigationEngine
-        // Do NOT apply additional calibration here - that would cause double offset
-        
-        // Format: [Lat:4][Lon:4][Heading:2] Int32 microdegrees + UInt16 degrees
-        var data = Data()
-        
-        let latInt = Int32(lat * 1_000_000)
-        let lonInt = Int32(lon * 1_000_000)
-        
-        // Heading: 0-359 degrees (UInt16), -1 means invalid
-        let headingDeg: UInt16 = heading >= 0 ? UInt16(min(heading, 359)) : 0
-        
-        withUnsafeBytes(of: latInt.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: lonInt.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: headingDeg.littleEndian) { data.append(contentsOf: $0) }
-        
-        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+        print("GPS BLE characteristic is not supported by the current ESP32 firmware; skipped lat=\(lat), lon=\(lon), heading=\(heading)")
     }
     
     /// Send a setting to ESP32 (runtime map configuration)
     /// Format: [settingId:1][value:4] = 5 bytes
     /// Setting IDs: 1=minPolygonSize (0-50), 2=detailLevel (0-2), 3=routeLineWidth (2-8)
     func sendSetting(id: UInt8, value: Int32) {
-        guard let peripheral = connectedPeripheral,
-              let characteristic = settingsCharacteristic,
-              isConnected else {
-            print("Cannot send setting: not connected or characteristic not found")
-            return
-        }
-        
-        var data = Data()
-        data.append(id)
-        withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
-        
-        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-        print("Sent setting: id=\(id), value=\(value)")
-        
-        // Persist settings to UserDefaults
         saveSettings()
+        print("Settings BLE characteristic is not supported by the current ESP32 firmware; saved local setting id=\(id), value=\(value)")
     }
     
     /// Send feature visibility bitmask
@@ -264,6 +207,47 @@ class BLEManager: NSObject, ObservableObject {
         peripheral.delegate = self
         centralManager.connect(peripheral, options: nil)
         print("Connecting to: \(peripheral.name ?? "Unknown")")
+    }
+
+    private func navigationPacketData(from packet: String, maxLength: Int) -> Data? {
+        guard maxLength > 0 else { return nil }
+
+        if let data = packet.data(using: .utf8), data.count <= maxLength {
+            return data
+        }
+
+        let parts = packet.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return nil }
+
+        let prefix = "\(parts[0])|\(parts[1])|"
+        guard let prefixData = prefix.data(using: .utf8), prefixData.count < maxLength else {
+            return nil
+        }
+
+        var instruction = String(parts[2])
+        while let data = "\(prefix)\(instruction)".data(using: .utf8), data.count > maxLength {
+            guard !instruction.isEmpty else { return nil }
+            instruction.removeLast()
+        }
+
+        return "\(prefix)\(instruction)".data(using: .utf8)
+    }
+
+    private func enqueueNavigationWrite(_ data: Data, for characteristic: CBCharacteristic, on peripheral: CBPeripheral) {
+        pendingNavigationWrites.append(data)
+        if pendingNavigationWrites.count > maxQueuedNavigationWrites {
+            pendingNavigationWrites.removeFirst(pendingNavigationWrites.count - maxQueuedNavigationWrites)
+        }
+
+        flushPendingNavigationWrites(for: characteristic, on: peripheral)
+    }
+
+    private func flushPendingNavigationWrites(for characteristic: CBCharacteristic, on peripheral: CBPeripheral) {
+        while !pendingNavigationWrites.isEmpty && peripheral.canSendWriteWithoutResponse {
+            let data = pendingNavigationWrites.removeFirst()
+            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+            print("Sent navigation packet: \(data.count) bytes")
+        }
     }
 }
 
@@ -346,8 +330,10 @@ extension BLEManager: CBCentralManagerDelegate {
         isConnected = false
         isGPSReady = false
         isRouteReady = false
+        supportsDeviceSettings = false
         connectedPeripheral = nil
         navigationCharacteristic = nil
+        pendingNavigationWrites.removeAll()
         
         // Auto-reconnect if enabled with exponential backoff
         if autoReconnect {
@@ -418,12 +404,7 @@ extension BLEManager: CBPeripheralDelegate {
             
             if service.uuid == serviceUUID {
                 // Discover characteristics for navigation service
-                peripheral.discoverCharacteristics([
-                    characteristicUUID, 
-                    routeGeometryCharacteristicUUID,
-                    gpsPositionCharacteristicUUID,
-                    settingsCharacteristicUUID
-                ], for: service)
+                peripheral.discoverCharacteristics([characteristicUUID], for: service)
             }
         }
     }
@@ -442,6 +423,11 @@ extension BLEManager: CBPeripheralDelegate {
             print("Discovered characteristic: \(characteristic.uuid)")
             
             if characteristic.uuid == characteristicUUID {
+                guard characteristic.properties.contains(.writeWithoutResponse) else {
+                    print("Navigation characteristic does not support write without response")
+                    continue
+                }
+
                 navigationCharacteristic = characteristic
                 print("Navigation characteristic ready!")
                 
@@ -450,29 +436,12 @@ extension BLEManager: CBPeripheralDelegate {
                     peripheral.setNotifyValue(true, for: characteristic)
                 }
             }
-            
-            if characteristic.uuid == routeGeometryCharacteristicUUID {
-                routeGeometryCharacteristic = characteristic
-                isRouteReady = true // Mark as ready to send Route data
-                print("Route Geometry characteristic ready!")
-            }
-            
-            if characteristic.uuid == gpsPositionCharacteristicUUID {
-                gpsPositionCharacteristic = characteristic
-                print("GPS Position characteristic ready!")
-            }
-            
-            if characteristic.uuid == gpsPositionCharacteristicUUID {
-                gpsPositionCharacteristic = characteristic
-                isGPSReady = true // Mark as ready to receive GPS
-                print("GPS Position characteristic ready!")
-            }
-            
-            if characteristic.uuid == settingsCharacteristicUUID {
-                settingsCharacteristic = characteristic
-                print("Settings characteristic ready!")
-            }
         }
+    }
+
+    func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        guard let characteristic = navigationCharacteristic else { return }
+        flushPendingNavigationWrites(for: characteristic, on: peripheral)
     }
     
     func peripheral(_ peripheral: CBPeripheral, 

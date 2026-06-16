@@ -16,7 +16,7 @@ class NavigationEngine: NSObject, ObservableObject {
     // MARK: - Published Properties
     @Published var currentInstruction: String = ""
     @Published var distanceToManeuver: Int = 0
-    @Published var currentIconID: Int = 0
+    @Published var currentIconID: Int = NavigationIconID.straight
     @Published var isNavigating: Bool = false
     @Published var isSimulationMode: Bool = false
     @Published var simulatedPosition: CLLocationCoordinate2D?
@@ -231,11 +231,11 @@ class NavigationEngine: NSObject, ObservableObject {
 
         // Test data packets with different navigation scenarios
         let testPackets = [
-            "2|150|Turn Left onto Main St",           // Turn left
-            "4|300|Slight Right onto Oak Ave",        // Slight right
-            "0|75|Continue straight for 75m",         // Continue straight
-            "5|0|Make U-turn",                        // U-turn
-            "8|25|Arrive at destination"              // Destination
+            "\(NavigationIconID.left)|150|Turn Left onto Main St",
+            "\(NavigationIconID.right)|300|Slight Right onto Oak Ave",
+            "\(NavigationIconID.straight)|75|Continue straight for 75m",
+            "\(NavigationIconID.uTurn)|0|Make U-turn",
+            "\(NavigationIconID.straight)|25|Arrive at destination"
         ]
 
         // Send test route geometry first
@@ -399,21 +399,14 @@ class NavigationEngine: NSObject, ObservableObject {
     private func mapInstructionToIconID(_ instruction: String) -> Int {
         let lower = instruction.lowercased()
         
-        // Icon ID mapping (customize based on your icon set)
-        if lower.contains("left") {
-            return lower.contains("slight") ? 1 : 2  // 1: slight left, 2: left
+        if lower.contains("u-turn") || lower.contains("uturn") {
+            return NavigationIconID.uTurn
+        } else if lower.contains("left") {
+            return NavigationIconID.left
         } else if lower.contains("right") {
-            return lower.contains("slight") ? 3 : 4  // 3: slight right, 4: right
-        } else if lower.contains("u-turn") {
-            return 5
-        } else if lower.contains("merge") {
-            return 6
-        } else if lower.contains("roundabout") || lower.contains("traffic circle") {
-            return 7
-        } else if lower.contains("arrive") || lower.contains("destination") {
-            return 8
+            return NavigationIconID.right
         } else {
-            return 0  // 0: straight/continue
+            return NavigationIconID.straight
         }
     }
     
