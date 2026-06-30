@@ -98,6 +98,15 @@ class BLEManager: NSObject, ObservableObject {
     private var isConnecting: Bool = false
     private var isPairingMode: Bool = false
     private var pendingAuthNonce: String?
+    private enum AuthWriteState {
+        case idle
+        case helloInFlight
+        case waitingForServer
+        case clientProofPending(Data)
+        case clientProofInFlight
+        case waitingForOK
+    }
+    private var authWriteState: AuthWriteState = .idle
     
     private var autoReconnect: Bool = true
     private var lastConnectedPeripheralIdentifier: UUID?
@@ -296,6 +305,7 @@ class BLEManager: NSObject, ObservableObject {
         navigationWriteEndpoint = nil
         isNavigationReady = false
         pendingAuthNonce = nil
+        authWriteState = .idle
         navigationWriteQueue.removeAll()
         peripheral.delegate = self
         isConnecting = true
@@ -323,6 +333,7 @@ class BLEManager: NSObject, ObservableObject {
         navigationWriteEndpoint = nil
         isNavigationReady = false
         pendingAuthNonce = nil
+        authWriteState = .idle
         navigationWriteQueue.removeAll()
         stopMonitoringRSSI()
     }
@@ -334,7 +345,8 @@ class BLEManager: NSObject, ObservableObject {
     private func beginAuthenticationIfReady(for peripheral: CBPeripheral) {
         guard navigationCharacteristic != nil,
               let authCharacteristic,
-              pendingAuthNonce == nil else {
+              pendingAuthNonce == nil,
+              case .idle = authWriteState else {
             return
         }
 
@@ -351,6 +363,7 @@ class BLEManager: NSObject, ObservableObject {
         let challenge = "HELLO|\(nonce)"
         guard let challengeData = challenge.data(using: .utf8) else { return }
         pendingAuthNonce = nonce
+        authWriteState = .helloInFlight
         peripheral.writeValue(challengeData, for: authCharacteristic, type: .withResponse)
         print("Sent BLE auth challenge")
     }
@@ -358,6 +371,11 @@ class BLEManager: NSObject, ObservableObject {
     private func handleAuthResponse(_ data: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {
         guard let message = String(data: data, encoding: .utf8) else {
             print("Received non-UTF8 BLE auth response")
+            return
+        }
+
+        if message == "LOCKED" {
+            print("Ignoring initial BLE auth state")
             return
         }
 
@@ -378,8 +396,7 @@ class BLEManager: NSObject, ObservableObject {
             let clientProof = BLEPairingAuthenticator.clientProof(nonce: nonce)
             let proofMessage = "CLIENT|\(nonce)|\(clientProof)"
             guard let proofData = proofMessage.data(using: .utf8) else { return }
-            peripheral.writeValue(proofData, for: characteristic, type: .withResponse)
-            print("Sent BLE client auth proof")
+            sendOrQueueClientProof(proofData, peripheral: peripheral, characteristic: characteristic)
             return
         }
 
@@ -409,11 +426,44 @@ class BLEManager: NSObject, ObservableObject {
         ))
 
         pendingAuthNonce = nil
+        authWriteState = .idle
         isPairingMode = false
         isNavigationReady = true
         lastConnectedPeripheralIdentifier = peripheral.identifier
         UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: SettingsKeys.lastPeripheralIdentifier)
         print("BLE peripheral authenticated")
+    }
+
+    private func sendOrQueueClientProof(_ proofData: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {
+        switch authWriteState {
+        case .helloInFlight:
+            authWriteState = .clientProofPending(proofData)
+            print("Queued BLE client auth proof until challenge write completes")
+        case .waitingForServer:
+            authWriteState = .clientProofPending(proofData)
+            print("Queued BLE client auth proof")
+            DispatchQueue.main.async { [weak self, weak peripheral, weak characteristic] in
+                guard let self, let peripheral, let characteristic else { return }
+                self.authWriteCompleted(for: peripheral, characteristic: characteristic)
+            }
+        default:
+            print("Ignoring duplicate BLE server auth response")
+        }
+    }
+
+    private func authWriteCompleted(for peripheral: CBPeripheral, characteristic: CBCharacteristic) {
+        switch authWriteState {
+        case .helloInFlight:
+            authWriteState = .waitingForServer
+        case .clientProofPending(let proofData):
+            authWriteState = .clientProofInFlight
+            peripheral.writeValue(proofData, for: characteristic, type: .withResponse)
+            print("Sent queued BLE client auth proof")
+        case .clientProofInFlight:
+            authWriteState = .waitingForOK
+        default:
+            break
+        }
     }
 
     private func enqueueNavigationWrite(_ data: Data, endpoint: NavigationWriteEndpoint) {
@@ -677,11 +727,17 @@ extension BLEManager: CBPeripheralDelegate {
                    error: Error?) {
         if let error = error {
             print("Error writing characteristic: \(error.localizedDescription)")
+            if characteristic.uuid == authCharacteristicUUID {
+                isPairingMode = false
+                clearConnectionState()
+                centralManager.cancelPeripheralConnection(peripheral)
+            }
             return
         }
-        
-        // Write successful (if using .withResponse type)
-        // print("Write successful")
+
+        if characteristic.uuid == authCharacteristicUUID {
+            authWriteCompleted(for: peripheral, characteristic: characteristic)
+        }
     }
     
     func peripheral(_ peripheral: CBPeripheral, 
