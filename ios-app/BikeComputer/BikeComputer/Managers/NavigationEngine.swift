@@ -89,6 +89,8 @@ class NavigationEngine: NSObject, ObservableObject {
         if isTestMode {
             startSimulation()
         } else if let initialLocation {
+            sendDeviceGpsPosition(initialLocation, convertFromMapKitRoute: true)
+            sendRouteGeometryIfNeeded(currentLocation: initialLocation)
             processLocation(initialLocation)
         }
     }
@@ -230,11 +232,17 @@ class NavigationEngine: NSObject, ObservableObject {
     /// Process location update and extract navigation data
     private func processLocation(_ location: CLLocation) {
         guard let route = currentRoute, isNavigating else { return }
+        sendRouteGeometryIfNeeded(currentLocation: location)
         
         // Check if we've completed all steps
         if currentStepIndex >= route.steps.count {
             print("Navigation complete!")
             stopNavigation()
+            return
+        }
+
+        guard advanceToNextNavigableStep(in: route) else {
+            print("Navigation route has no navigable steps")
             return
         }
         
@@ -247,13 +255,14 @@ class NavigationEngine: NSObject, ObservableObject {
         // Check if we should advance to next step (within 20m of step end)
         if distanceRemaining < 20 && currentStepIndex < route.steps.count - 1 {
             currentStepIndex += 1
+            _ = advanceToNextNavigableStep(in: route)
             print("Advanced to step \(currentStepIndex)")
         }
         
         // Update current navigation data
         let newStep = route.steps[currentStepIndex]
         let newInstruction = extractInstruction(from: newStep)
-        let newIconID = mapInstructionToIconID(newStep.instructions)
+        let newIconID = mapInstructionToIconID(newInstruction)
 
         // Recalculate distance to the new step's endpoint after advancement
         guard let newStepEndLocation = endpointLocation(for: newStep) else { return }
@@ -276,6 +285,16 @@ class NavigationEngine: NSObject, ObservableObject {
 
     private func endpointLocation(for step: MKRoute.Step) -> CLLocation? {
         RoutePolylineEndpoint.location(for: step.polyline)
+    }
+
+    private func advanceToNextNavigableStep(in route: MKRoute) -> Bool {
+        while currentStepIndex < route.steps.count,
+              endpointLocation(for: route.steps[currentStepIndex]) == nil {
+            print("Skipping route step without geometry at index \(currentStepIndex)")
+            currentStepIndex += 1
+        }
+
+        return currentStepIndex < route.steps.count
     }
 
     private func shouldAcceptLiveLocation(_ location: CLLocation) -> Bool {
@@ -318,6 +337,11 @@ class NavigationEngine: NSObject, ObservableObject {
         let cleaned = instructions
             .replacingOccurrences(of: "Continue on ", with: "")
             .replacingOccurrences(of: "Turn on ", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !cleaned.isEmpty else {
+            return "Continue"
+        }
         
         // Limit length for display
         let maxLength = 30
