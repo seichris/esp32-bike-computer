@@ -98,6 +98,8 @@ struct NavigationProtocolTests {
         testNavigationWriteQueue()
         testBLEPairingAuthenticator()
         testBLEManagerRequiresNavigationReadinessForWrites()
+        testBLEManagerSendsFallbackMapSettings()
+        testBLEManagerPersistsNewMapSettings()
         testNavigationSendTrackerReadinessRetry()
         testNavigationEngineResendsWhenBLEBecomesReady()
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
@@ -257,6 +259,49 @@ struct NavigationProtocolTests {
         manager.isNavigationReady = true
         assert(manager.sendNavigationData("2|120|Turn left"), "BLEManager should write after navigation characteristic readiness")
         assertEqual(sentPackets, ["2|120|Turn left"], "BLEManager writes encoded navigation packet")
+    }
+
+    static func testBLEManagerSendsFallbackMapSettings() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        manager.sendSetting(id: 8, value: 7)
+
+        assertEqual(sentPackets.count, 1, "settings without a dedicated characteristic should use fallback navigation writes")
+        let packet = sentPackets[0]
+        assertEqual(String(data: packet.prefix(4), encoding: .utf8), "MSET", "fallback settings packet uses MSET prefix")
+        assertEqual(packet[4], 8, "fallback settings packet includes setting id")
+        let valueBytes = Array(packet[5..<9])
+        let value = Int32(valueBytes[0])
+            | (Int32(valueBytes[1]) << 8)
+            | (Int32(valueBytes[2]) << 16)
+            | (Int32(valueBytes[3]) << 24)
+        assertEqual(value, 7, "fallback settings packet includes little-endian value")
+    }
+
+    static func testBLEManagerPersistsNewMapSettings() {
+        let defaults = UserDefaults.standard
+        let keys = ["mapSettings.mapRotationMode", "mapSettings.zoomLevel"]
+        keys.forEach { defaults.removeObject(forKey: $0) }
+
+        let manager = BLEManager()
+        manager.mapRotationMode = 1
+        manager.zoomLevel = 5
+        manager.saveSettings()
+
+        let reloaded = BLEManager()
+        assertEqual(reloaded.mapRotationMode, 1, "map rotation mode should persist across BLEManager reloads")
+        assertEqual(reloaded.zoomLevel, 5, "zoom level should persist across BLEManager reloads")
+
+        keys.forEach { defaults.removeObject(forKey: $0) }
     }
 
     static func testNavigationSendTrackerReadinessRetry() {

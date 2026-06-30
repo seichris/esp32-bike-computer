@@ -192,6 +192,8 @@ class BLEManager: NSObject, ObservableObject {
         static let detailLevel = "mapSettings.detailLevel"
         static let routeLineWidth = "mapSettings.routeLineWidth"
         static let displayRotation = "mapSettings.displayRotation"
+        static let mapRotationMode = "mapSettings.mapRotationMode"
+        static let zoomLevel = "mapSettings.zoomLevel"
         static let showBuildings = "mapSettings.showBuildings"
         static let showNature = "mapSettings.showNature"
         static let showMinorRoads = "mapSettings.showMinorRoads"
@@ -214,6 +216,8 @@ class BLEManager: NSObject, ObservableObject {
         detailLevel = defaults.object(forKey: SettingsKeys.detailLevel) as? Int ?? 2
         routeLineWidth = defaults.object(forKey: SettingsKeys.routeLineWidth) as? Double ?? 4.0
         displayRotation = defaults.object(forKey: SettingsKeys.displayRotation) as? Int ?? 0
+        mapRotationMode = defaults.object(forKey: SettingsKeys.mapRotationMode) as? Int ?? 0
+        zoomLevel = defaults.object(forKey: SettingsKeys.zoomLevel) as? Int ?? 2
         showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
         showNature = defaults.object(forKey: SettingsKeys.showNature) as? Bool ?? true
         showMinorRoads = defaults.object(forKey: SettingsKeys.showMinorRoads) as? Bool ?? true
@@ -231,6 +235,8 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(detailLevel, forKey: SettingsKeys.detailLevel)
         defaults.set(routeLineWidth, forKey: SettingsKeys.routeLineWidth)
         defaults.set(displayRotation, forKey: SettingsKeys.displayRotation)
+        defaults.set(mapRotationMode, forKey: SettingsKeys.mapRotationMode)
+        defaults.set(zoomLevel, forKey: SettingsKeys.zoomLevel)
         defaults.set(showBuildings, forKey: SettingsKeys.showBuildings)
         defaults.set(showNature, forKey: SettingsKeys.showNature)
         defaults.set(showMinorRoads, forKey: SettingsKeys.showMinorRoads)
@@ -386,9 +392,7 @@ class BLEManager: NSObject, ObservableObject {
     /// Persist and send a runtime map setting to ESP32 when supported.
     func sendSetting(id: UInt8, value: Int32) {
         saveSettings()
-        guard let peripheral = connectedPeripheral,
-              isConnected,
-              isNavigationReady else {
+        guard isConnected, isNavigationReady else {
             log("Settings characteristic unsupported; saved local setting id=\(id), value=\(value)")
             return
         }
@@ -397,7 +401,7 @@ class BLEManager: NSObject, ObservableObject {
         data.append(id)
         withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
 
-        if let characteristic = settingsCharacteristic {
+        if let peripheral = connectedPeripheral, let characteristic = settingsCharacteristic {
             peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
             log("Sent setting: id=\(id), value=\(value)")
             return
@@ -405,7 +409,7 @@ class BLEManager: NSObject, ObservableObject {
 
         var fallback = Data("MSET".utf8)
         fallback.append(data)
-        guard fallback.count <= peripheral.maximumWriteValueLength(for: .withoutResponse) else {
+        guard fallback.count <= (navigationWriteEndpoint?.maximumWriteLength ?? 0) else {
             log("Cannot send fallback setting: write limit exceeded")
             return
         }
@@ -747,7 +751,7 @@ class BLEManager: NSObject, ObservableObject {
         isPairingMode = false
         isConnected = true
         isNavigationReady = true
-        supportsDeviceSettings = settingsCharacteristic != nil
+        supportsDeviceSettings = true
         authRetryTimer?.invalidate()
         authRetryTimer = nil
         authTimeoutTimer?.invalidate()
