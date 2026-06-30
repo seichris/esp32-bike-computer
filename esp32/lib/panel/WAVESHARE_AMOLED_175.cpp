@@ -8,6 +8,7 @@
 
 #ifdef USE_ARDUINO_GFX
 
+#include <cstring>
 #include <Preferences.h>
 #include <Wire.h>
 
@@ -122,6 +123,9 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
 #define TCA9554_CONFIG_REG 0x03
 #define TCA9554_TOUCH_RST_BIT 0
 #define CST9217_INT_PIN 21
+#define CST9217_REG_DATA 0xD000
+#define CST9217_ACK 0xAB
+#define CST9217_DATA_LENGTH 10
 
 bool touchPressed = false;
 uint16_t touchX = 0, touchY = 0;
@@ -130,9 +134,65 @@ static uint32_t lastTouchInitAttemptMs = 0;
 static uint32_t lastTouchReadMs = 0;
 static uint32_t touchBackoffUntilMs = 0;
 static uint32_t lastTouchErrorLogMs = 0;
+static uint32_t lastTouchDebugLogMs = 0;
+static uint32_t lastTouchRawLogMs = 0;
+static uint32_t touchFastPollUntilMs = 0;
+static uint32_t lastValidTouchMs = 0;
 static uint8_t consecutiveTouchReadFailures = 0;
 static uint8_t tca9554OutputShadow = 0xFF;
 static uint8_t tca9554ConfigShadow = 0xFF;
+static bool lastTouchInterruptActive = false;
+static bool touchInterruptStateKnown = false;
+
+constexpr uint32_t TOUCH_ACTIVE_READ_INTERVAL_MS = 25;
+constexpr uint32_t TOUCH_FAST_FALLBACK_READ_INTERVAL_MS = 25;
+constexpr uint32_t TOUCH_IDLE_FALLBACK_READ_INTERVAL_MS = 250;
+constexpr uint32_t TOUCH_FAST_POLL_WINDOW_MS = 700;
+constexpr uint32_t TOUCH_ACTIVE_FAILURE_GRACE_MS = 250;
+
+static bool isValidTouchCoordinate(uint16_t x, uint16_t y) {
+  return x < 466 && y < 466;
+}
+
+static bool readCst9217Register(uint16_t reg, uint8_t *data, uint8_t len) {
+  Wire.beginTransmission(CST9217_ADDRESS);
+  Wire.write(reg >> 8);
+  Wire.write(reg & 0xFF);
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+
+  delay(2);
+  if (Wire.requestFrom(CST9217_ADDRESS, len, (uint8_t)true) != len) {
+    return false;
+  }
+
+  for (uint8_t i = 0; i < len; i++) {
+    data[i] = Wire.read();
+  }
+  return true;
+}
+
+static void logTouchPacket(const char *label, const uint8_t *data,
+                           uint8_t length, uint16_t rawX, uint16_t rawY,
+                           bool interruptActive, uint32_t now) {
+  bool isPoint = strncmp(label, "point", 5) == 0;
+  uint32_t minInterval = isPoint ? 1000 : 10000;
+  if (now - lastTouchRawLogMs <= minInterval) {
+    return;
+  }
+
+  Serial.printf("Touch raw: %s raw=(%u,%u) int=%s bytes=", label, rawX, rawY,
+                interruptActive ? "LOW(active)" : "HIGH(idle)");
+  for (uint8_t i = 0; i < length && i < 7; i++) {
+    Serial.printf("%02X", data[i]);
+    if (i + 1 < length && i < 6) {
+      Serial.print(" ");
+    }
+  }
+  Serial.println();
+  lastTouchRawLogMs = now;
+}
 
 static void setTouchPressed(bool pressed) {
   if (pressed != touchPressed) {
@@ -150,8 +210,20 @@ static bool isTouchInterruptActive() {
   return digitalRead(CST9217_INT_PIN) == LOW;
 }
 
+static void logTouchInterruptState(bool active, uint32_t now) {
+  bool changed = !touchInterruptStateKnown || active != lastTouchInterruptActive;
+  bool heartbeat = now - lastTouchDebugLogMs > 10000;
+
+  if (changed || heartbeat) {
+    Serial.printf("Touch debug: init=%d int=%s pressed=%d\n", touchInitialized,
+                  active ? "LOW(active)" : "HIGH(idle)", touchPressed);
+    lastTouchDebugLogMs = now;
+    lastTouchInterruptActive = active;
+    touchInterruptStateKnown = true;
+  }
+}
+
 static void noteTouchReadFailure(const char *reason, uint32_t now) {
-  setTouchPressed(false);
   consecutiveTouchReadFailures++;
 
   if (now - lastTouchErrorLogMs > 5000) {
@@ -160,9 +232,18 @@ static void noteTouchReadFailure(const char *reason, uint32_t now) {
     lastTouchErrorLogMs = now;
   }
 
-  touchInitialized = false;
-  touchBackoffUntilMs = now + 5000;
-  consecutiveTouchReadFailures = 0;
+  if (touchPressed && now - lastValidTouchMs < TOUCH_ACTIVE_FAILURE_GRACE_MS) {
+    touchBackoffUntilMs = now + TOUCH_ACTIVE_READ_INTERVAL_MS;
+    return;
+  }
+
+  setTouchPressed(false);
+  touchBackoffUntilMs = now + 1200;
+  if (consecutiveTouchReadFailures >= 5) {
+    touchInitialized = false;
+    touchBackoffUntilMs = now + 5000;
+    consecutiveTouchReadFailures = 0;
+  }
 }
 
 // TCA9554 helper functions
@@ -231,54 +312,72 @@ void readTouch() {
     }
   }
 
-  if (!isTouchInterruptActive()) {
-    setTouchPressed(false);
-    return;
-  }
-
-  if (now - lastTouchReadMs < 25) {
+  bool touchInterruptActive = isTouchInterruptActive();
+  logTouchInterruptState(touchInterruptActive, now);
+  // GPIO21 is useful when it works, but on some Waveshare units it stays idle
+  // even while CST9217 has touch data. Keep a slow polling fallback so touch
+  // remains usable without hammering the shared I2C bus.
+  uint32_t readInterval = touchInterruptActive ? TOUCH_ACTIVE_READ_INTERVAL_MS
+                               : (touchPressed || now < touchFastPollUntilMs)
+                                     ? TOUCH_FAST_FALLBACK_READ_INTERVAL_MS
+                                     : TOUCH_IDLE_FALLBACK_READ_INTERVAL_MS;
+  if (now - lastTouchReadMs < readInterval) {
     return;
   }
   lastTouchReadMs = now;
 
-  Wire.beginTransmission(CST9217_ADDRESS);
-  Wire.write(0x00);
-  if (Wire.endTransmission(true) != 0) {
-    noteTouchReadFailure("register select", now);
+  uint8_t data[CST9217_DATA_LENGTH] = {0};
+  if (!readCst9217Register(CST9217_REG_DATA, data, sizeof(data))) {
+    noteTouchReadFailure("data read", now);
     return;
   }
-
-  if (Wire.requestFrom(CST9217_ADDRESS, (uint8_t)7, (uint8_t)true) < 7) {
-    noteTouchReadFailure("short data read", now);
-    return;
-  }
-
-  uint8_t data[7];
-  Wire.readBytes(data, 7);
   consecutiveTouchReadFailures = 0;
 
-  // CST92xx format from SensorLib parseFingerData:
-  // data[0] = event/id, data[1..3] = X/Y packed 12-bit
-  uint8_t pressed = (data[0] & 0x0F);
-  if (pressed != 0x06) { // 0x06 = finger down
+  if (data[6] != CST9217_ACK) {
+    logTouchPacket("ignored-no-ack", data, sizeof(data), 0, 0,
+                   touchInterruptActive, now);
+    if (touchPressed && now - lastValidTouchMs < TOUCH_ACTIVE_FAILURE_GRACE_MS) {
+      touchBackoffUntilMs = now + TOUCH_ACTIVE_READ_INTERVAL_MS;
+      return;
+    }
     setTouchPressed(false);
     return;
   }
 
-  uint16_t rawX = ((data[1] << 4) | (data[3] >> 4));
-  uint16_t rawY = ((data[2] << 4) | (data[3] & 0x0F));
+  uint8_t points = data[5] & 0x7F;
+  if (points == 0) {
+    if (touchPressed && now - lastValidTouchMs < TOUCH_ACTIVE_FAILURE_GRACE_MS) {
+      touchBackoffUntilMs = now + TOUCH_ACTIVE_READ_INTERVAL_MS;
+      return;
+    }
+    setTouchPressed(false);
+    return;
+  }
 
-  // Apply coordinate mirroring (verified in waveshare_test)
-  touchX = 465 - rawX;
-  touchY = 465 - rawY;
+  uint8_t status = data[0] & 0x0F;
+  uint16_t rawX = (data[1] << 4) | (data[3] >> 4);
+  uint16_t rawY = (data[2] << 4) | (data[3] & 0x0F);
+  if (!isValidTouchCoordinate(rawX, rawY)) {
+    logTouchPacket("ignored-invalid", data, sizeof(data), rawX, rawY,
+                   touchInterruptActive, now);
+    setTouchPressed(false);
+    return;
+  }
+
+  touchX = rawX;
+  touchY = rawY;
+  lastValidTouchMs = now;
+  touchFastPollUntilMs = now + TOUCH_FAST_POLL_WINDOW_MS;
+  logTouchPacket(status == 0x06 ? "point" : "point-status0", data,
+                 sizeof(data), touchX, touchY, touchInterruptActive, now);
 
   // Clamp to screen bounds
   if (touchX >= 466)
-    touchX = 0;
+    touchX = 465;
   if (touchY >= 466)
-    touchY = 0;
+    touchY = 465;
 
-  setTouchPressed(touchX > 0 && touchY > 0 && touchX < 466 && touchY < 466);
+  setTouchPressed(true);
 }
 
 void my_touchpad_read(lv_indev_t *indev_driver, lv_indev_data_t *data) {

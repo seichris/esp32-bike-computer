@@ -178,8 +178,13 @@ class BLEManager: NSObject, ObservableObject {
     private var rssiTimer: Timer?
     private var navigationFlushRetryTimer: Timer?
     private var connectionTimeoutTimer: Timer?
+    private var authRetryTimer: Timer?
+    private var authTimeoutTimer: Timer?
     private var shouldPairAfterDisconnect: Bool = false
     private var suppressNextReconnect: Bool = false
+    private var hasActiveBLESession: Bool {
+        isConnected || isConnecting || connectedPeripheral != nil
+    }
     
     // MARK: - UserDefaults Keys
     private enum SettingsKeys {
@@ -239,7 +244,7 @@ class BLEManager: NSObject, ObservableObject {
             log("Bluetooth not powered on")
             return
         }
-        guard !isConnected && !isConnecting else {
+        guard !hasActiveBLESession else {
             log("Skipping BLE scan: connection already active")
             return
         }
@@ -451,7 +456,7 @@ class BLEManager: NSObject, ObservableObject {
             log("Cannot reconnect: Bluetooth not powered on")
             return
         }
-        guard !isConnected && !isConnecting else {
+        guard !hasActiveBLESession else {
             log("Skipping reconnect: connection already active")
             return
         }
@@ -476,7 +481,7 @@ class BLEManager: NSObject, ObservableObject {
     // MARK: - Private Methods
     
     private func connectToPeripheral(_ peripheral: CBPeripheral) {
-        guard !isConnected && !isConnecting else {
+        guard !hasActiveBLESession else {
             log("Skipping connect: connection already active")
             return
         }
@@ -493,6 +498,10 @@ class BLEManager: NSObject, ObservableObject {
         pendingAuthNonce = nil
         authWriteState = .idle
         navigationWriteQueue.removeAll()
+        authRetryTimer?.invalidate()
+        authRetryTimer = nil
+        authTimeoutTimer?.invalidate()
+        authTimeoutTimer = nil
         peripheral.delegate = self
         isConnecting = true
         centralManager.connect(peripheral, options: nil)
@@ -558,6 +567,10 @@ class BLEManager: NSObject, ObservableObject {
         navigationFlushRetryTimer = nil
         connectionTimeoutTimer?.invalidate()
         connectionTimeoutTimer = nil
+        authRetryTimer?.invalidate()
+        authRetryTimer = nil
+        authTimeoutTimer?.invalidate()
+        authTimeoutTimer = nil
         stopMonitoringRSSI()
     }
 
@@ -600,11 +613,42 @@ class BLEManager: NSObject, ObservableObject {
         navigationWriteEndpoint = endpoint
     }
 
-    private func beginAuthenticationIfReady(for peripheral: CBPeripheral) {
-        guard navigationCharacteristic != nil,
-              let authCharacteristic,
-              pendingAuthNonce == nil,
-              case .idle = authWriteState else {
+    private func scheduleAuthenticationRetry(for peripheral: CBPeripheral) {
+        authRetryTimer?.invalidate()
+        authRetryTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: false) { [weak self, weak peripheral] _ in
+            guard let self, let peripheral else { return }
+            self.beginAuthenticationIfReady(for: peripheral, source: "retry")
+        }
+    }
+
+    private func startAuthenticationTimeout(for peripheral: CBPeripheral) {
+        authTimeoutTimer?.invalidate()
+        authTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 12.0, repeats: false) { [weak self, weak peripheral] _ in
+            guard let self,
+                  let peripheral,
+                  self.connectedPeripheral?.identifier == peripheral.identifier,
+                  !self.isNavigationReady else {
+                return
+            }
+
+            self.log("BLE auth timed out; restarting fresh pairing scan")
+            self.clearConnectionState()
+            self.forgetTrustedPeripheralForFreshScan()
+            self.centralManager.cancelPeripheralConnection(peripheral)
+            self.beginPairing()
+        }
+    }
+
+    private func beginAuthenticationIfReady(for peripheral: CBPeripheral, source: String = "discovery") {
+        guard navigationCharacteristic != nil else {
+            log("BLE auth not ready from \(source): navigation characteristic missing")
+            return
+        }
+        guard let authCharacteristic else {
+            log("BLE auth not ready from \(source): auth characteristic missing")
+            return
+        }
+        guard pendingAuthNonce == nil, case .idle = authWriteState else {
             return
         }
 
@@ -701,8 +745,13 @@ class BLEManager: NSObject, ObservableObject {
         pendingAuthNonce = nil
         authWriteState = .idle
         isPairingMode = false
+        isConnected = true
         isNavigationReady = true
         supportsDeviceSettings = settingsCharacteristic != nil
+        authRetryTimer?.invalidate()
+        authRetryTimer = nil
+        authTimeoutTimer?.invalidate()
+        authTimeoutTimer = nil
         lastConnectedPeripheralIdentifier = peripheral.identifier
         UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: SettingsKeys.lastPeripheralIdentifier)
         updateTrustedPeripheralDescription()
@@ -892,10 +941,11 @@ extension BLEManager: CBCentralManagerDelegate {
         connectionTimeoutTimer?.invalidate()
         connectionTimeoutTimer = nil
         isConnecting = false
-        isConnected = true
+        isConnected = false
         isNavigationReady = false
         peripheralName = peripheral.name ?? "BikeComputer"
         startMonitoringRSSI()
+        startAuthenticationTimeout(for: peripheral)
         
         // Reset reconnection state on successful connection (Optimization #14)
         resetReconnectionState()
@@ -1042,15 +1092,18 @@ extension BLEManager: CBPeripheralDelegate {
                 }
 
                 navigationCharacteristic = characteristic
-                beginAuthenticationIfReady(for: peripheral)
+                beginAuthenticationIfReady(for: peripheral, source: "navigation characteristic")
+                scheduleAuthenticationRetry(for: peripheral)
             }
 
             if characteristic.uuid == authCharacteristicUUID {
                 authCharacteristic = characteristic
                 if characteristic.properties.contains(.notify) {
                     peripheral.setNotifyValue(true, for: characteristic)
+                    scheduleAuthenticationRetry(for: peripheral)
                 } else {
-                    beginAuthenticationIfReady(for: peripheral)
+                    beginAuthenticationIfReady(for: peripheral, source: "auth characteristic")
+                    scheduleAuthenticationRetry(for: peripheral)
                 }
             }
 
@@ -1090,7 +1143,7 @@ extension BLEManager: CBPeripheralDelegate {
         }
 
         if characteristic.uuid == authCharacteristicUUID {
-            beginAuthenticationIfReady(for: peripheral)
+            beginAuthenticationIfReady(for: peripheral, source: "notify enabled")
         }
     }
 

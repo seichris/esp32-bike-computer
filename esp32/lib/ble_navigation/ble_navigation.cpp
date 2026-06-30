@@ -40,6 +40,8 @@ static bool bleSessionAuthenticated = false;
 static char pendingAuthNonce[33] = "";
 static NimBLECharacteristic *authCharacteristic = nullptr;
 static BLEDebugStats bleDebugStats;
+static uint16_t activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
+static bool unauthTimeoutDisconnectRequested = false;
 
 // Route geometry debouncing - skip redundant parses
 static uint32_t lastRouteHash = 0;
@@ -437,8 +439,10 @@ public:
   MyBLEServerCallbacks(BLENavigationServer *srv) : server(srv) {}
 
   void onConnect(NimBLEServer *pServer) override {
+    activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
     server->connected = true;
     bleSessionAuthenticated = false;
+    unauthTimeoutDisconnectRequested = false;
     bleDebugStats.connected = true;
     bleDebugStats.authenticated = false;
     bleDebugStats.connectCount++;
@@ -449,9 +453,18 @@ public:
     NimBLEDevice::stopAdvertising();
   }
 
+  void onConnect(NimBLEServer *pServer, ble_gap_conn_desc *desc) override {
+    onConnect(pServer);
+    if (desc != nullptr) {
+      activeConnHandle = desc->conn_handle;
+    }
+  }
+
   void onDisconnect(NimBLEServer *pServer) override {
     server->connected = false;
     bleSessionAuthenticated = false;
+    unauthTimeoutDisconnectRequested = false;
+    activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
     bleDebugStats.connected = false;
     bleDebugStats.authenticated = false;
     bleDebugStats.disconnectCount++;
@@ -665,6 +678,16 @@ void BLENavigationServer::init(const char *deviceName) {
 
 void BLENavigationServer::process() {
   static uint32_t lastLog = 0;
+  if (connected && !bleSessionAuthenticated &&
+      !unauthTimeoutDisconnectRequested &&
+      millis() - bleDebugStats.lastConnectMs > 12000) {
+    Serial.println("BLE: Disconnecting unauthenticated client after timeout");
+    unauthTimeoutDisconnectRequested = true;
+    if (pServer != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
+      pServer->disconnect(activeConnHandle);
+    }
+  }
+
   if (millis() - lastLog > 5000) {
     lastLog = millis();
     bleDebugStats.initialized = initialized;
