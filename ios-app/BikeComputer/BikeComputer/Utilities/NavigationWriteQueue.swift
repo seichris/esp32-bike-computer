@@ -1,8 +1,13 @@
 import Foundation
 
+struct NavigationWrite {
+    let data: Data
+    let label: String
+}
+
 struct NavigationWriteQueue {
     let maxCount: Int
-    private var pendingWrites: [Data] = []
+    private var pendingWrites: [NavigationWrite] = []
 
     var count: Int {
         pendingWrites.count
@@ -13,8 +18,8 @@ struct NavigationWriteQueue {
     }
 
     @discardableResult
-    mutating func enqueue(_ data: Data) -> Bool {
-        pendingWrites.append(data)
+    mutating func enqueue(_ write: NavigationWrite) -> Bool {
+        pendingWrites.append(write)
         let overflowCount = pendingWrites.count - maxCount
         guard overflowCount > 0 else { return false }
 
@@ -26,7 +31,7 @@ struct NavigationWriteQueue {
         pendingWrites.removeAll()
     }
 
-    mutating func flush(canSend: () -> Bool, write: (Data) -> Void) {
+    mutating func flush(canSend: () -> Bool, write: (NavigationWrite) -> Void) {
         while !pendingWrites.isEmpty && canSend() {
             write(pendingWrites.removeFirst())
         }

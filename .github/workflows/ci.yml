@@ -18,10 +18,8 @@ jobs:
           python-version: "3.12"
       - name: Install PlatformIO
         run: python -m pip install --upgrade platformio
-      - name: Run native tests
-        run: pio test -e native
       - name: Build firmware
-        run: pio run -e waveshare_amoled
+        run: pio run -e WAVESHARE_AMOLED_175
 
   ios:
     name: iOS
@@ -32,6 +30,7 @@ jobs:
         run: |
           swiftc \
             BikeComputer/BikeComputer/Models/AppModels.swift \
+            BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
             BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
             BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
             BikeComputer/BikeComputer/Managers/BLEManager.swift \

@@ -69,12 +69,17 @@ enum NavigationPacketBuilder {
         let maxInstructionBytes = min(instructionMaxBytes, maxLength - prefixData.count)
         guard maxInstructionBytes > 0 else { return nil }
 
-        var instruction = String(parts[2])
+        var instruction = String(parts[2]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if instruction.isEmpty {
+            instruction = "Continue"
+        }
         while let instructionData = instruction.data(using: .utf8), instructionData.count > maxInstructionBytes {
             guard !instruction.isEmpty else { return nil }
             instruction.removeLast()
         }
-        guard !instruction.isEmpty else { return nil }
+        if instruction.isEmpty {
+            instruction = "Continue"
+        }
 
         return "\(prefix)\(instruction)".data(using: .utf8)
     }
