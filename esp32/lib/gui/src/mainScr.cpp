@@ -402,7 +402,36 @@ void scrollMapEvent(lv_event_t *event) {
     static uint32_t pressStartTime = 0;
     static bool longPressTriggered = false;
     static int pressStartX = 0, pressStartY = 0;
+    static int32_t pendingDx = 0, pendingDy = 0;
+    static uint32_t lastDragRedrawTime = 0;
     lv_point_t p;
+
+    auto flushDragMovement = [](bool force) {
+      if (pendingDx == 0 && pendingDy == 0)
+        return;
+
+      const uint32_t now = millis();
+      const uint32_t DRAG_REDRAW_INTERVAL_MS = 220;
+      const int32_t DRAG_REDRAW_MIN_DELTA = 36;
+      const int32_t totalDelta = abs(pendingDx) + abs(pendingDy);
+
+      if (!force && lastDragRedrawTime != 0 &&
+          now - lastDragRedrawTime < DRAG_REDRAW_INTERVAL_MS &&
+          totalDelta < DRAG_REDRAW_MIN_DELTA) {
+        return;
+      }
+
+      int16_t dx = pendingDx;
+      int16_t dy = pendingDy;
+      pendingDx = 0;
+      pendingDy = 0;
+      lastDragRedrawTime = now;
+
+      log_i("DRAG FLUSH: dx=%d dy=%d force=%d", dx, dy, force);
+      mapView.scrollMap(dx, dy);
+      mapView.redrawMap = true;
+      lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
+    };
 
     switch (code) {
     case LV_EVENT_PRESSED: {
@@ -421,6 +450,9 @@ void scrollMapEvent(lv_event_t *event) {
       pressStartTime = millis();
       isDragging = true;
       longPressTriggered = false;
+      pendingDx = 0;
+      pendingDy = 0;
+      lastDragRedrawTime = 0;
       isScrollingMap = true;
       log_i("PRESSED: x=%d y=%d", p.x, p.y);
       break;
@@ -455,7 +487,7 @@ void scrollMapEvent(lv_event_t *event) {
 
         if (totalMoveX < 20 && totalMoveY < 20) {
           // Finger hasn't moved much - check for long press
-          if (millis() - pressStartTime > 1000) {
+          if (millis() - pressStartTime > 1800) {
             // Long press detected! Re-enable GPS following
             log_i("LONG PRESS DETECTED: Re-enabling GPS following");
             mapView.followGps = true;
@@ -474,12 +506,12 @@ void scrollMapEvent(lv_event_t *event) {
       if (abs(dx) > SCROLL_THRESHOLD || abs(dy) > SCROLL_THRESHOLD) {
         log_i("PRESSING: p(%d,%d) last(%d,%d) -> dx=%d dy=%d", p.x, p.y, last_x,
               last_y, dx, dy);
-        mapView.scrollMap(-dx, -dy);
-        mapView.redrawMap = true; // Enable continuous redraw during drag
-        // FORCE UPDATE: Trigger map redraw immediately after scroll
-        lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
+        pendingDx += dx;
+        pendingDy += dy;
         last_x = p.x;
         last_y = p.y;
+        pressStartTime = 0;
+        flushDragMovement(false);
       }
       break;
     }
@@ -487,6 +519,19 @@ void scrollMapEvent(lv_event_t *event) {
     case LV_EVENT_RELEASED:
     case LV_EVENT_PRESS_LOST: {
       lv_indev_get_point(indev, &p);
+
+      if (isDragging) {
+        int dx = p.x - last_x;
+        int dy = p.y - last_y;
+        const int MAX_JUMP = 400;
+        const int SCROLL_THRESHOLD = 5;
+        if (abs(dx) <= MAX_JUMP && abs(dy) <= MAX_JUMP &&
+            (abs(dx) > SCROLL_THRESHOLD || abs(dy) > SCROLL_THRESHOLD)) {
+          pendingDx += dx;
+          pendingDy += dy;
+        }
+        flushDragMovement(true);
+      }
 
       // Detect short-tap on GPS indicator dot to toggle rotation mode
       // Short tap = released within 300ms with minimal movement

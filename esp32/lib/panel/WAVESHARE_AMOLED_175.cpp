@@ -148,7 +148,8 @@ constexpr uint32_t TOUCH_ACTIVE_READ_INTERVAL_MS = 25;
 constexpr uint32_t TOUCH_FAST_FALLBACK_READ_INTERVAL_MS = 25;
 constexpr uint32_t TOUCH_IDLE_FALLBACK_READ_INTERVAL_MS = 250;
 constexpr uint32_t TOUCH_FAST_POLL_WINDOW_MS = 700;
-constexpr uint32_t TOUCH_ACTIVE_FAILURE_GRACE_MS = 250;
+constexpr uint32_t TOUCH_ACTIVE_FAILURE_GRACE_MS = 600;
+constexpr uint32_t TOUCH_IDLE_FAILURE_RETRY_MS = 75;
 
 static bool isValidTouchCoordinate(uint16_t x, uint16_t y) {
   return x < 466 && y < 466;
@@ -237,11 +238,19 @@ static void noteTouchReadFailure(const char *reason, uint32_t now) {
     return;
   }
 
+  if (!touchPressed) {
+    touchBackoffUntilMs = now + TOUCH_IDLE_FAILURE_RETRY_MS;
+    if (consecutiveTouchReadFailures > 20) {
+      consecutiveTouchReadFailures = 0;
+    }
+    return;
+  }
+
   setTouchPressed(false);
-  touchBackoffUntilMs = now + 1200;
+  touchBackoffUntilMs = now + 250;
   if (consecutiveTouchReadFailures >= 5) {
     touchInitialized = false;
-    touchBackoffUntilMs = now + 5000;
+    touchBackoffUntilMs = now + 1200;
     consecutiveTouchReadFailures = 0;
   }
 }
@@ -299,6 +308,9 @@ void readTouch() {
   uint32_t now = millis();
 
   if (now < touchBackoffUntilMs) {
+    if (touchPressed && now - lastValidTouchMs < TOUCH_ACTIVE_FAILURE_GRACE_MS) {
+      return;
+    }
     setTouchPressed(false);
     return;
   }
@@ -357,6 +369,16 @@ void readTouch() {
   uint8_t status = data[0] & 0x0F;
   uint16_t rawX = (data[1] << 4) | (data[3] >> 4);
   uint16_t rawY = (data[2] << 4) | (data[3] & 0x0F);
+  if (status != 0x00 && status != 0x06) {
+    logTouchPacket("ignored-status", data, sizeof(data), rawX, rawY,
+                   touchInterruptActive, now);
+    if (touchPressed && now - lastValidTouchMs < TOUCH_ACTIVE_FAILURE_GRACE_MS) {
+      touchBackoffUntilMs = now + TOUCH_ACTIVE_READ_INTERVAL_MS;
+      return;
+    }
+    setTouchPressed(false);
+    return;
+  }
   if (!isValidTouchCoordinate(rawX, rawY)) {
     logTouchPacket("ignored-invalid", data, sizeof(data), rawX, rawY,
                    touchInterruptActive, now);
@@ -364,9 +386,24 @@ void readTouch() {
     return;
   }
 
+  bool moved = rawX != touchX || rawY != touchY;
+  if (status == 0x00 && !touchPressed) {
+    logTouchPacket("ignored-stale-start", data, sizeof(data), rawX, rawY,
+                   touchInterruptActive, now);
+    setTouchPressed(false);
+    return;
+  }
+  if (status == 0x00 && !moved &&
+      now - lastValidTouchMs >= TOUCH_ACTIVE_FAILURE_GRACE_MS) {
+    setTouchPressed(false);
+    return;
+  }
+
   touchX = rawX;
   touchY = rawY;
-  lastValidTouchMs = now;
+  if (status == 0x06 || moved) {
+    lastValidTouchMs = now;
+  }
   touchFastPollUntilMs = now + TOUCH_FAST_POLL_WINDOW_MS;
   logTouchPacket(status == 0x06 ? "point" : "point-status0", data,
                  sizeof(data), touchX, touchY, touchInterruptActive, now);
