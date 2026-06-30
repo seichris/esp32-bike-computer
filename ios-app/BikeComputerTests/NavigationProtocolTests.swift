@@ -96,6 +96,7 @@ struct NavigationProtocolTests {
         testRouteTransportTypes()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
+        testBLEPairingAuthenticator()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testNavigationSendTrackerReadinessRetry()
         testNavigationEngineResendsWhenBLEBecomesReady()
@@ -204,6 +205,27 @@ struct NavigationProtocolTests {
         queue.flush(canSend: { true }) { sent.append($0) }
         assertEqual(sent, [Data([2]), Data([3])], "queue flushes remaining packet")
         assertEqual(queue.count, 0, "queue is empty after flush")
+    }
+
+    static func testBLEPairingAuthenticator() {
+        let nonce = "00112233445566778899aabbccddeeff"
+        let serverProof = "a88fdf1fe1bc0381314cc68820d92cb8da4942cb49ba2062d7f7750cd1f7eb4b"
+        let clientProof = "e6b9765e3a076e348c7145a22b7496974233194b51c051cea3729468025649fd"
+
+        assert(
+            BLEPairingAuthenticator.isValidServerResponse("SERVER|\(nonce)|\(serverProof)", nonce: nonce),
+            "valid server proof should authenticate"
+        )
+        assert(
+            !BLEPairingAuthenticator.isValidServerResponse("SERVER|ffffffffffffffffffffffffffffffff|\(serverProof)", nonce: nonce),
+            "server proof with wrong nonce should fail"
+        )
+        assert(
+            !BLEPairingAuthenticator.isValidServerResponse("SERVER|\(nonce)|\(String(repeating: "0", count: 64))", nonce: nonce),
+            "server proof with wrong MAC should fail"
+        )
+        assertEqual(BLEPairingAuthenticator.clientProof(nonce: nonce), clientProof, "client proof matches firmware vector")
+        assertEqual(BLEPairingAuthenticator.makeNonce()?.count, 32, "generated nonce uses 16 random bytes encoded as hex")
     }
 
     static func testBLEManagerRequiresNavigationReadinessForWrites() {

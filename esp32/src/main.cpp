@@ -14,6 +14,7 @@
 #include <NimBLEDevice.h>
 #include "navigation_payload_queue.h"
 #include "navigation_protocol.h"
+#include <mbedtls/md.h>
 #include <SD.h>
 #include <SPI.h>
 #include <Wire.h>
@@ -202,10 +203,14 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
 
 #define SERVICE_UUID "1819"        // Navigation Service
 #define CHARACTERISTIC_UUID "2A6E" // Navigation Data Characteristic
+#define AUTH_CHARACTERISTIC_UUID "9d7b3f30-3f6a-4d1c-9f6d-1fbf0e8b1001"
 
 NimBLEServer *pServer = nullptr;
 NimBLECharacteristic *pCharacteristic = nullptr;
+NimBLECharacteristic *pAuthCharacteristic = nullptr;
 bool deviceConnected = false;
+bool bleSessionAuthenticated = false;
+char pendingAuthNonce[33] = "";
 
 NavigationData navData = {1, 0, ""};
 volatile bool uiUpdateNeeded = false;
@@ -218,6 +223,8 @@ NavigationPayloadQueue navPayloadQueue;
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *pServer) {
     deviceConnected = true;
+    bleSessionAuthenticated = false;
+    pendingAuthNonce[0] = '\0';
     bleConnectedState = true;
     bleStateChanged = true;
     Serial.println("BLE: Client connected");
@@ -225,6 +232,8 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
   void onDisconnect(NimBLEServer *pServer) {
     deviceConnected = false;
+    bleSessionAuthenticated = false;
+    pendingAuthNonce[0] = '\0';
     bleConnectedState = false;
     bleStateChanged = true;
     Serial.println("BLE: Client disconnected");
@@ -235,6 +244,11 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
 void queueNavigationPayload(const std::string &value) {
   if (value.empty()) {
+    return;
+  }
+
+  if (!bleSessionAuthenticated) {
+    Serial.println("Rejected navigation payload: BLE session is not authenticated");
     return;
   }
 
@@ -331,6 +345,142 @@ void updateNavigationUI() {
   }
 }
 
+bool isHexNonce(const char *nonce) {
+  if (nonce == nullptr || strlen(nonce) != 32) {
+    return false;
+  }
+
+  for (size_t i = 0; i < 32; i++) {
+    if (!isxdigit((unsigned char)nonce[i])) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool hmacSha256Hex(const char *message, char *outHex, size_t outHexSize) {
+  static const unsigned char authKey[] = "BikeComputer BLE v1 local pairing key";
+  unsigned char digest[32];
+  const mbedtls_md_info_t *mdInfo = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+
+  if (message == nullptr || outHex == nullptr || outHexSize < 65 || mdInfo == nullptr) {
+    return false;
+  }
+
+  int result = mbedtls_md_hmac(mdInfo, authKey, strlen((const char *)authKey),
+                               (const unsigned char *)message, strlen(message),
+                               digest);
+  if (result != 0) {
+    return false;
+  }
+
+  static const char hex[] = "0123456789abcdef";
+  for (size_t i = 0; i < sizeof(digest); i++) {
+    outHex[i * 2] = hex[(digest[i] >> 4) & 0x0F];
+    outHex[(i * 2) + 1] = hex[digest[i] & 0x0F];
+  }
+  outHex[64] = '\0';
+  return true;
+}
+
+bool constantTimeEquals(const char *a, const char *b) {
+  if (a == nullptr || b == nullptr) {
+    return false;
+  }
+
+  size_t aLen = strlen(a);
+  size_t bLen = strlen(b);
+  if (aLen != bLen) {
+    return false;
+  }
+
+  unsigned char diff = 0;
+  for (size_t i = 0; i < aLen; i++) {
+    diff |= (unsigned char)(a[i] ^ b[i]);
+  }
+  return diff == 0;
+}
+
+void notifyAuthResponse(const char *response) {
+  if (pAuthCharacteristic == nullptr || response == nullptr) {
+    return;
+  }
+
+  pAuthCharacteristic->setValue(response);
+  pAuthCharacteristic->notify();
+}
+
+void handleAuthPayload(const std::string &value) {
+  if (value.length() > 128) {
+    Serial.println("Rejected auth payload: too large");
+    return;
+  }
+
+  char payload[129];
+  memcpy(payload, value.data(), value.length());
+  payload[value.length()] = '\0';
+
+  char *command = strtok(payload, "|");
+  char *nonce = strtok(nullptr, "|");
+  char *proof = strtok(nullptr, "|");
+  char *extra = strtok(nullptr, "|");
+
+  if (command == nullptr || nonce == nullptr || extra != nullptr || !isHexNonce(nonce)) {
+    Serial.println("Rejected auth payload: invalid format");
+    return;
+  }
+
+  if (strcmp(command, "HELLO") == 0 && proof == nullptr) {
+    char message[48];
+    char mac[65];
+    char response[112];
+    bleSessionAuthenticated = false;
+    snprintf(message, sizeof(message), "server|%s", nonce);
+    if (!hmacSha256Hex(message, mac, sizeof(mac))) {
+      Serial.println("Failed to compute auth response");
+      return;
+    }
+
+    strncpy(pendingAuthNonce, nonce, sizeof(pendingAuthNonce));
+    pendingAuthNonce[sizeof(pendingAuthNonce) - 1] = '\0';
+    snprintf(response, sizeof(response), "SERVER|%s|%s", nonce, mac);
+    notifyAuthResponse(response);
+    Serial.println("BLE auth challenge answered");
+    return;
+  }
+
+  if (strcmp(command, "CLIENT") == 0 && proof != nullptr) {
+    char message[48];
+    char expected[65];
+    if (!constantTimeEquals(nonce, pendingAuthNonce)) {
+      Serial.println("Rejected auth proof: nonce mismatch");
+      return;
+    }
+
+    snprintf(message, sizeof(message), "client|%s", nonce);
+    if (!hmacSha256Hex(message, expected, sizeof(expected))) {
+      Serial.println("Failed to compute client auth proof");
+      return;
+    }
+
+    if (!constantTimeEquals(proof, expected)) {
+      Serial.println("Rejected auth proof: invalid MAC");
+      return;
+    }
+
+    bleSessionAuthenticated = true;
+    pendingAuthNonce[0] = '\0';
+    char response[40];
+    snprintf(response, sizeof(response), "OK|%s", nonce);
+    notifyAuthResponse(response);
+    Serial.println("BLE session authenticated");
+    return;
+  }
+
+  Serial.println("Rejected auth payload: unknown command");
+}
+
 class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *pCharacteristic) {
     std::string value = pCharacteristic->getValue();
@@ -341,11 +491,21 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
+class AuthCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic *pCharacteristic) {
+    std::string value = pCharacteristic->getValue();
+    if (!value.empty()) {
+      handleAuthPayload(value);
+    }
+  }
+};
+
 void setupBLE() {
   Serial.println("Initializing BLE...");
 
   NimBLEDevice::init("BikeComputer");
   NimBLEDevice::setPower(ESP_PWR_LVL_P9); // Maximum power
+  NimBLEDevice::setSecurityAuth(true, false, true);
 
   // Create BLE Server
   pServer = NimBLEDevice::createServer();
@@ -356,9 +516,17 @@ void setupBLE() {
 
   // Create Characteristic (WRITE WITHOUT RESPONSE for better performance)
   pCharacteristic = pService->createCharacteristic(CHARACTERISTIC_UUID,
-                                                   NIMBLE_PROPERTY::WRITE_NR);
+                                                   NIMBLE_PROPERTY::WRITE_NR |
+                                                       NIMBLE_PROPERTY::WRITE_ENC);
 
   pCharacteristic->setCallbacks(new CharacteristicCallbacks());
+
+  pAuthCharacteristic = pService->createCharacteristic(
+      AUTH_CHARACTERISTIC_UUID,
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY |
+          NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::WRITE_ENC);
+  pAuthCharacteristic->setCallbacks(new AuthCharacteristicCallbacks());
+  pAuthCharacteristic->setValue("LOCKED");
 
   // Start service
   pService->start();
