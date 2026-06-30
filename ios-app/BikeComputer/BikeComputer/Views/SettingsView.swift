@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct SettingsView: View {
     @EnvironmentObject var bleManager: BLEManager
@@ -135,6 +136,55 @@ struct SettingsView: View {
                         .foregroundColor(.blue)
                     }
                     .disabled(!bleManager.isConnected || !bleManager.supportsDeviceSettings)
+                }
+
+                Section(header: Text("BLE Debug")) {
+                    HStack {
+                        Text("Central")
+                        Spacer()
+                        Text(bleManager.centralStateDescription)
+                            .foregroundColor(.secondary)
+                    }
+                    HStack {
+                        Text("Navigation")
+                        Spacer()
+                        Text(bleManager.isNavigationReady ? "Ready" : "Not Ready")
+                            .foregroundColor(bleManager.isNavigationReady ? .green : .secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Trusted Device")
+                        Text(bleManager.trustedPeripheralDescription)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                    }
+
+                    Button(action: {
+                        bleManager.reconnect()
+                    }) {
+                        Label("Reconnect", systemImage: "antenna.radiowaves.left.and.right")
+                    }
+
+                    Button(role: .destructive, action: {
+                        bleManager.forgetTrustedPeripheral()
+                    }) {
+                        Label("Forget Device", systemImage: "trash")
+                    }
+
+                    Button(action: {
+                        UIPasteboard.general.string = bleManager.debugLogText
+                    }) {
+                        Label("Copy Debug Log", systemImage: "doc.on.doc")
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(bleManager.debugEvents.enumerated()), id: \.offset) { _, event in
+                            Text(event)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
                 }
             }
             .navigationTitle("Map Settings")
