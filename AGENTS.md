@@ -28,7 +28,8 @@ empty monitor.
 
 ## BLE contract
 
-Current firmware implements BLE service UUID `1819` in `esp32/lib/ble_navigation/`.
+Current firmware implements BLE service UUID
+`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800` in `esp32/lib/ble_navigation/`.
 The full protocol is documented in `docs/ble-protocol.md`.
 
 Core navigation characteristic:
@@ -39,7 +40,7 @@ Map-view characteristics:
 - Route geometry UUID `2A6F`
 - GPS position UUID `2A72`
 - Map settings UUID `2A73`
-- Auth UUID `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1001`
+- Auth UUID `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002`
 
 If you add/remove/rename BLE characteristics, update both:
 - `esp32/lib/ble_navigation/ble_navigation.cpp`
@@ -54,6 +55,7 @@ Highlights:
 - Display power must be enabled via **AXP2101** (I2C `0x34`) or the screen stays black.
 - Touch reset is via **TCA9554 P0** (I2C `0x20`) — do **not** toggle GPIO20 (USB D+).
 - SD card is SPI on `CS=41, MOSI=1, MISO=3, SCK=2` (firmware uses HSPI to avoid the display QSPI bus).
+- Touch input is interrupt-gated on CST9217 `INT=GPIO21`; do not return to rapid polling. Arduino Core 3.x `Wire.requestFrom()` failures against the CST9217 can crash the I2C ISR if reads are attempted while no touch data is ready.
 
 ## Offline maps (OSM_Extract)
 

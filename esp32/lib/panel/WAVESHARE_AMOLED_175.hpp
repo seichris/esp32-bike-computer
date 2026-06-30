@@ -20,6 +20,10 @@ extern Arduino_CO5300 *gfx;
 
 // LVGL 9 display buffer
 extern lv_display_t *display;
+extern volatile uint32_t displayFlushCount;
+extern volatile uint32_t lastDisplayFlushMs;
+extern volatile uint32_t lastDisplayFlushDurationUs;
+extern volatile uint32_t maxDisplayFlushDurationUs;
 
 // Touch handling (CST9217)
 #define CST9217_ADDRESS 0x5A

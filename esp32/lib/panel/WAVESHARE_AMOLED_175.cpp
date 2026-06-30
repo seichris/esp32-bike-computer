@@ -78,6 +78,10 @@ extern lv_display_t *display;
 static lv_color_t *disp_draw_buf = NULL;
 static uint8_t displayRotation =
     0; // Global rotation for touch coordinate transform
+volatile uint32_t displayFlushCount = 0;
+volatile uint32_t lastDisplayFlushMs = 0;
+volatile uint32_t lastDisplayFlushDurationUs = 0;
+volatile uint32_t maxDisplayFlushDurationUs = 0;
 
 // ============================================================================
 // LVGL 9 DISPLAY FLUSH CALLBACK
@@ -85,6 +89,7 @@ static uint8_t displayRotation =
 // ============================================================================
 
 void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
+  uint32_t startUs = micros();
   uint32_t w = (area->x2 - area->x1 + 1);
   uint32_t h = (area->y2 - area->y1 + 1);
 
@@ -97,6 +102,13 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
 
   // Inform LVGL 9 that flushing is complete
   lv_display_flush_ready(disp);
+  uint32_t durationUs = micros() - startUs;
+  displayFlushCount++;
+  lastDisplayFlushMs = millis();
+  lastDisplayFlushDurationUs = durationUs;
+  if (durationUs > maxDisplayFlushDurationUs) {
+    maxDisplayFlushDurationUs = durationUs;
+  }
 }
 
 // ============================================================================
@@ -109,41 +121,70 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
 #define TCA9554_OUTPUT_REG 0x01
 #define TCA9554_CONFIG_REG 0x03
 #define TCA9554_TOUCH_RST_BIT 0
+#define CST9217_INT_PIN 21
 
 bool touchPressed = false;
 uint16_t touchX = 0, touchY = 0;
 static bool touchInitialized = false;
+static uint32_t lastTouchInitAttemptMs = 0;
+static uint32_t lastTouchReadMs = 0;
+static uint32_t touchBackoffUntilMs = 0;
+static uint32_t lastTouchErrorLogMs = 0;
+static uint8_t consecutiveTouchReadFailures = 0;
+static uint8_t tca9554OutputShadow = 0xFF;
+static uint8_t tca9554ConfigShadow = 0xFF;
+
+static void setTouchPressed(bool pressed) {
+  if (pressed != touchPressed) {
+    if (pressed) {
+      Serial.printf("Touch: press x=%u y=%u\n", touchX, touchY);
+    } else {
+      Serial.println("Touch: release");
+    }
+  }
+  touchPressed = pressed;
+}
+
+static bool isTouchInterruptActive() {
+  // CST touch controllers use an active-low interrupt line.
+  return digitalRead(CST9217_INT_PIN) == LOW;
+}
+
+static void noteTouchReadFailure(const char *reason, uint32_t now) {
+  setTouchPressed(false);
+  consecutiveTouchReadFailures++;
+
+  if (now - lastTouchErrorLogMs > 5000) {
+    Serial.printf("Touch read failed: %s (failures=%u)\n", reason,
+                  consecutiveTouchReadFailures);
+    lastTouchErrorLogMs = now;
+  }
+
+  touchInitialized = false;
+  touchBackoffUntilMs = now + 5000;
+  consecutiveTouchReadFailures = 0;
+}
 
 // TCA9554 helper functions
 static void tca9554SetPin(uint8_t pin, bool level) {
-  Wire.beginTransmission(TCA9554_ADDR);
-  Wire.write(TCA9554_OUTPUT_REG);
-  Wire.endTransmission(false);
-  Wire.requestFrom(TCA9554_ADDR, (uint8_t)1);
-  uint8_t current = Wire.available() ? Wire.read() : 0xFF;
-
-  if (level)
-    current |= (1 << pin);
-  else
-    current &= ~(1 << pin);
+  if (level) {
+    tca9554OutputShadow |= (1 << pin);
+  } else {
+    tca9554OutputShadow &= ~(1 << pin);
+  }
 
   Wire.beginTransmission(TCA9554_ADDR);
   Wire.write(TCA9554_OUTPUT_REG);
-  Wire.write(current);
+  Wire.write(tca9554OutputShadow);
   Wire.endTransmission();
 }
 
 static void tca9554ConfigureOutput(uint8_t pin) {
-  Wire.beginTransmission(TCA9554_ADDR);
-  Wire.write(TCA9554_CONFIG_REG);
-  Wire.endTransmission(false);
-  Wire.requestFrom(TCA9554_ADDR, (uint8_t)1);
-  uint8_t current = Wire.available() ? Wire.read() : 0xFF;
-  current &= ~(1 << pin); // Clear bit = Output
+  tca9554ConfigShadow &= ~(1 << pin); // Clear bit = Output
 
   Wire.beginTransmission(TCA9554_ADDR);
   Wire.write(TCA9554_CONFIG_REG);
-  Wire.write(current);
+  Wire.write(tca9554ConfigShadow);
   Wire.endTransmission();
 }
 
@@ -151,10 +192,17 @@ void initTouchController() {
   if (touchInitialized)
     return;
 
+  uint32_t now = millis();
+  if (lastTouchInitAttemptMs != 0 && now - lastTouchInitAttemptMs < 5000) {
+    return;
+  }
+  lastTouchInitAttemptMs = now;
+
   // Check for TCA9554 and reset touch controller
   Wire.beginTransmission(TCA9554_ADDR);
   if (Wire.endTransmission() == 0) {
     Serial.println("✓ TCA9554 found - resetting touch controller");
+    pinMode(CST9217_INT_PIN, INPUT_PULLUP);
     tca9554ConfigureOutput(TCA9554_TOUCH_RST_BIT);
     tca9554SetPin(TCA9554_TOUCH_RST_BIT, false); // RST low
     delay(20);
@@ -167,31 +215,53 @@ void initTouchController() {
 }
 
 void readTouch() {
-  // Initialize touch on first read
-  if (!touchInitialized) {
-    initTouchController();
-  }
+  uint32_t now = millis();
 
-  Wire.beginTransmission(CST9217_ADDRESS);
-  Wire.write(0x00);
-  if (Wire.endTransmission(false) != 0) {
-    touchPressed = false;
+  if (now < touchBackoffUntilMs) {
+    setTouchPressed(false);
     return;
   }
 
-  if (Wire.requestFrom(CST9217_ADDRESS, (uint8_t)7) < 7) {
-    touchPressed = false;
+  // Initialize touch on first read
+  if (!touchInitialized) {
+    initTouchController();
+    if (!touchInitialized) {
+      setTouchPressed(false);
+      return;
+    }
+  }
+
+  if (!isTouchInterruptActive()) {
+    setTouchPressed(false);
+    return;
+  }
+
+  if (now - lastTouchReadMs < 25) {
+    return;
+  }
+  lastTouchReadMs = now;
+
+  Wire.beginTransmission(CST9217_ADDRESS);
+  Wire.write(0x00);
+  if (Wire.endTransmission(true) != 0) {
+    noteTouchReadFailure("register select", now);
+    return;
+  }
+
+  if (Wire.requestFrom(CST9217_ADDRESS, (uint8_t)7, (uint8_t)true) < 7) {
+    noteTouchReadFailure("short data read", now);
     return;
   }
 
   uint8_t data[7];
   Wire.readBytes(data, 7);
+  consecutiveTouchReadFailures = 0;
 
   // CST92xx format from SensorLib parseFingerData:
   // data[0] = event/id, data[1..3] = X/Y packed 12-bit
   uint8_t pressed = (data[0] & 0x0F);
   if (pressed != 0x06) { // 0x06 = finger down
-    touchPressed = false;
+    setTouchPressed(false);
     return;
   }
 
@@ -208,7 +278,7 @@ void readTouch() {
   if (touchY >= 466)
     touchY = 0;
 
-  touchPressed = (touchX > 0 && touchY > 0 && touchX < 466 && touchY < 466);
+  setTouchPressed(touchX > 0 && touchY > 0 && touchX < 466 && touchY < 466);
 }
 
 void my_touchpad_read(lv_indev_t *indev_driver, lv_indev_data_t *data) {

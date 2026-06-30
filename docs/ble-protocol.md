@@ -1,6 +1,7 @@
 # BLE Protocol
 
-The ESP32 advertises BLE service UUID `1819` as `BikeComputer`.
+The ESP32 advertises BLE service UUID
+`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800` as `BikeComputer`.
 
 All navigation/map writes require the authenticated session established through
 the auth characteristic. The iOS app completes auth before it marks the device as
@@ -11,7 +12,7 @@ navigation-ready.
 | UUID | Direction | Format | Purpose |
 | --- | --- | --- | --- |
 | `2A6E` | iOS -> ESP32 | UTF-8 `IconID|DistanceMeters|Instruction` | Current maneuver for the instruction view. |
-| `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1001` | bidirectional | UTF-8 auth messages | Local pairing/auth handshake. |
+| `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002` | bidirectional | UTF-8 auth messages | Local pairing/auth handshake. |
 | `2A6F` | iOS -> ESP32 | Binary route geometry | Upcoming route polyline for the device map view. |
 | `2A72` | iOS -> ESP32 | Binary GPS position | Current device position and heading for the map view. |
 | `2A73` | iOS -> ESP32 | Binary setting packet | Runtime map-renderer settings. |

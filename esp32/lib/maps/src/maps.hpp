@@ -52,7 +52,7 @@ private:
   };
   struct Polyline // Polyline struct
   {
-    std::vector<Point16> points;
+    std::vector<Point16, PsramAllocator<Point16>> points;
     BBox bbox;
     uint16_t color;
     uint8_t width;
@@ -62,7 +62,7 @@ private:
   };
   struct Polygon // Polygon struct
   {
-    std::vector<Point16> points;
+    std::vector<Point16, PsramAllocator<Point16>> points;
     BBox bbox;
     uint16_t color;
     uint8_t maxZoom;
@@ -79,12 +79,13 @@ private:
   {
     Point32 offset;
     bool inView = false;
-    std::vector<Polyline> polylines;
-    std::vector<Polygon> polygons;
+    std::vector<Polyline, PsramAllocator<Polyline>> polylines;
+    std::vector<Polygon, PsramAllocator<Polygon>> polygons;
 
     // Spatial grid for polygon culling: grid[cellIndex] = list of polygon
     // indices
-    std::vector<std::vector<uint16_t>> polygonGrid;
+    using PolygonGridCell = std::vector<uint16_t, PsramAllocator<uint16_t>>;
+    std::vector<PolygonGridCell, PsramAllocator<PolygonGridCell>> polygonGrid;
   };
   struct ViewPort // Vector map viewport structure
   {
@@ -114,7 +115,8 @@ private:
   uint32_t idx;
   int16_t parseInt16(char *file);
   void parseStrUntil(char *file, char terminator, char *str);
-  void parseCoords(char *file, std::vector<Point16> &points);
+  void parseCoords(char *file,
+                   std::vector<Point16, PsramAllocator<Point16>> &points);
   BBox parseBbox(String str);
   MapBlock *readMapBlock(String fileName);
   MapBlock *readMapBlockBinary(char *buffer, size_t fileSize);
@@ -209,4 +211,6 @@ public:
   double rotationRad = 0; // Current rotation in radians
   void toggleRotationMode();
   void updateArrowColor();
+  bool debugIsMapFound() const { return isMapFound; }
+  size_t debugCachedBlockCount() const { return memCache.blocks.size(); }
 };

@@ -323,7 +323,8 @@ void Maps::parseStrUntil(char *file, char terminator, char *str) {
  * @param file
  * @param points
  */
-void Maps::parseCoords(char *file, std::vector<Point16> &points) {
+void Maps::parseCoords(char *file,
+                       std::vector<Point16, PsramAllocator<Point16>> &points) {
   char str[30];
   assert(points.size() == 0);
   Point16 point;

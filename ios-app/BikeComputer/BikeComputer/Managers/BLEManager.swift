@@ -3,7 +3,7 @@
 //  BikeComputer
 //
 //  BLE Manager for connecting to ESP32 Bike Computer
-//  Service UUID: 1819 (Navigation Service)
+//  Service UUID: 9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800
 //
 
 import Foundation
@@ -93,6 +93,23 @@ private extension Data {
     }
 }
 
+private extension CBCharacteristicProperties {
+    var debugDescription: String {
+        var names: [String] = []
+        if contains(.broadcast) { names.append("broadcast") }
+        if contains(.read) { names.append("read") }
+        if contains(.writeWithoutResponse) { names.append("writeWithoutResponse") }
+        if contains(.write) { names.append("write") }
+        if contains(.notify) { names.append("notify") }
+        if contains(.indicate) { names.append("indicate") }
+        if contains(.authenticatedSignedWrites) { names.append("authenticatedSignedWrites") }
+        if contains(.extendedProperties) { names.append("extendedProperties") }
+        if contains(.notifyEncryptionRequired) { names.append("notifyEncryptionRequired") }
+        if contains(.indicateEncryptionRequired) { names.append("indicateEncryptionRequired") }
+        return names.isEmpty ? "none" : names.joined(separator: ",")
+    }
+}
+
 class BLEManager: NSObject, ObservableObject {
     // MARK: - Published Properties
     @Published var isScanning: Bool = false
@@ -119,9 +136,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published var showMinorRoads: Bool = true
     
     // MARK: - BLE UUIDs (matching ESP32)
-    private let serviceUUID = CBUUID(string: "1819")           // Navigation Service
+    private let serviceUUID = CBUUID(string: "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800")
     private let characteristicUUID = CBUUID(string: "2A6E")    // Navigation Data Characteristic
-    private let authCharacteristicUUID = CBUUID(string: "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1001")
+    private let authCharacteristicUUID = CBUUID(string: "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002")
     private let routeGeometryCharacteristicUUID = CBUUID(string: "2A6F")
     private let gpsPositionCharacteristicUUID = CBUUID(string: "2A72")
     private let settingsCharacteristicUUID = CBUUID(string: "2A73")
@@ -160,6 +177,9 @@ class BLEManager: NSObject, ObservableObject {
     private var reconnectTimer: Timer?
     private var rssiTimer: Timer?
     private var navigationFlushRetryTimer: Timer?
+    private var connectionTimeoutTimer: Timer?
+    private var shouldPairAfterDisconnect: Bool = false
+    private var suppressNextReconnect: Bool = false
     
     // MARK: - UserDefaults Keys
     private enum SettingsKeys {
@@ -266,17 +286,15 @@ class BLEManager: NSObject, ObservableObject {
         resetReconnectionState()
 
         if let peripheral = connectedPeripheral {
-            log("Restarting active BLE connection")
+            log("Restarting active BLE connection with fresh pairing scan")
+            shouldPairAfterDisconnect = true
             stopMonitoringRSSI()
             centralManager.cancelPeripheralConnection(peripheral)
             return
         }
 
-        if lastConnectedPeripheralIdentifier == nil {
-            beginPairing()
-        } else {
-            reconnectToLastDevice()
-        }
+        forgetTrustedPeripheralForFreshScan()
+        beginPairing()
     }
     
     /// Send navigation data to ESP32
@@ -479,6 +497,7 @@ class BLEManager: NSObject, ObservableObject {
         isConnecting = true
         centralManager.connect(peripheral, options: nil)
         log("Connecting to: \(peripheral.name ?? "Unknown")")
+        startConnectionTimeout(for: peripheral)
     }
 
     private func beginPairing() {
@@ -490,6 +509,34 @@ class BLEManager: NSObject, ObservableObject {
         isPairingMode = true
         log("Starting pairing scan")
         startScanning()
+    }
+
+    private func forgetTrustedPeripheralForFreshScan() {
+        if lastConnectedPeripheralIdentifier != nil {
+            log("Forgetting trusted BikeComputer peripheral for fresh scan")
+        }
+
+        lastConnectedPeripheralIdentifier = nil
+        UserDefaults.standard.removeObject(forKey: SettingsKeys.lastPeripheralIdentifier)
+        updateTrustedPeripheralDescription()
+    }
+
+    private func startConnectionTimeout(for peripheral: CBPeripheral) {
+        connectionTimeoutTimer?.invalidate()
+        connectionTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { [weak self, weak peripheral] _ in
+            guard let self,
+                  let peripheral,
+                  self.isConnecting,
+                  self.connectedPeripheral?.identifier == peripheral.identifier else {
+                return
+            }
+
+            self.log("BLE connection timed out; starting fresh pairing scan")
+            self.centralManager.cancelPeripheralConnection(peripheral)
+            self.clearConnectionState()
+            self.forgetTrustedPeripheralForFreshScan()
+            self.beginPairing()
+        }
     }
 
     private func clearConnectionState() {
@@ -509,6 +556,8 @@ class BLEManager: NSObject, ObservableObject {
         navigationWriteQueue.removeAll()
         navigationFlushRetryTimer?.invalidate()
         navigationFlushRetryTimer = nil
+        connectionTimeoutTimer?.invalidate()
+        connectionTimeoutTimer = nil
         stopMonitoringRSSI()
     }
 
@@ -559,8 +608,8 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
 
-        guard authCharacteristic.properties.contains(.write) else {
-            log("Auth characteristic does not support write")
+        guard let writeType = authWriteType(for: authCharacteristic) else {
+            log("Auth characteristic does not support writes; props=\(authCharacteristic.properties.debugDescription)")
             return
         }
 
@@ -572,9 +621,23 @@ class BLEManager: NSObject, ObservableObject {
         let challenge = "HELLO|\(nonce)"
         guard let challengeData = challenge.data(using: .utf8) else { return }
         pendingAuthNonce = nonce
-        authWriteState = .helloInFlight
-        peripheral.writeValue(challengeData, for: authCharacteristic, type: .withResponse)
-        log("Sent BLE auth challenge")
+        authWriteState = writeType == .withResponse ? .helloInFlight : .waitingForServer
+        peripheral.writeValue(challengeData, for: authCharacteristic, type: writeType)
+        log("Sent BLE auth challenge via \(authWriteLabel(writeType)); props=\(authCharacteristic.properties.debugDescription)")
+    }
+
+    private func authWriteType(for characteristic: CBCharacteristic) -> CBCharacteristicWriteType? {
+        if characteristic.properties.contains(.writeWithoutResponse) {
+            return .withoutResponse
+        }
+        if characteristic.properties.contains(.write) {
+            return .withResponse
+        }
+        return nil
+    }
+
+    private func authWriteLabel(_ type: CBCharacteristicWriteType) -> String {
+        type == .withResponse ? "withResponse" : "withoutResponse"
     }
 
     private func handleAuthResponse(_ data: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {
@@ -659,15 +722,24 @@ class BLEManager: NSObject, ObservableObject {
             authWriteState = .clientProofPending(proofData)
             log("Queued BLE client auth proof until challenge write completes")
         case .waitingForServer:
-            authWriteState = .clientProofPending(proofData)
-            log("Queued BLE client auth proof")
-            DispatchQueue.main.async { [weak self, weak peripheral, weak characteristic] in
-                guard let self, let peripheral, let characteristic else { return }
-                self.authWriteCompleted(for: peripheral, characteristic: characteristic)
-            }
+            writeClientAuthProof(proofData, peripheral: peripheral, characteristic: characteristic)
         default:
             log("Ignoring duplicate BLE server auth response")
         }
+    }
+
+    private func writeClientAuthProof(_ proofData: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {
+        guard let writeType = authWriteType(for: characteristic) else {
+            log("Cannot send BLE client auth proof: auth characteristic is not writable")
+            isPairingMode = false
+            clearConnectionState()
+            centralManager.cancelPeripheralConnection(peripheral)
+            return
+        }
+
+        authWriteState = writeType == .withResponse ? .clientProofInFlight : .waitingForOK
+        peripheral.writeValue(proofData, for: characteristic, type: writeType)
+        log("Sent BLE client auth proof via \(authWriteLabel(writeType))")
     }
 
     private func authWriteCompleted(for peripheral: CBPeripheral, characteristic: CBCharacteristic) {
@@ -675,9 +747,7 @@ class BLEManager: NSObject, ObservableObject {
         case .helloInFlight:
             authWriteState = .waitingForServer
         case .clientProofPending(let proofData):
-            authWriteState = .clientProofInFlight
-            peripheral.writeValue(proofData, for: characteristic, type: .withResponse)
-            log("Sent queued BLE client auth proof")
+            writeClientAuthProof(proofData, peripheral: peripheral, characteristic: characteristic)
         case .clientProofInFlight:
             authWriteState = .waitingForOK
         default:
@@ -819,6 +889,8 @@ extension BLEManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         log("Connected to: \(peripheral.name ?? "Unknown")")
         
+        connectionTimeoutTimer?.invalidate()
+        connectionTimeoutTimer = nil
         isConnecting = false
         isConnected = true
         isNavigationReady = false
@@ -855,7 +927,22 @@ extension BLEManager: CBCentralManagerDelegate {
         pendingAuthNonce = nil
         authWriteState = .idle
         navigationWriteQueue.removeAll()
+        connectionTimeoutTimer?.invalidate()
+        connectionTimeoutTimer = nil
         stopMonitoringRSSI()
+
+        if shouldPairAfterDisconnect {
+            shouldPairAfterDisconnect = false
+            forgetTrustedPeripheralForFreshScan()
+            beginPairing()
+            return
+        }
+
+        if suppressNextReconnect {
+            suppressNextReconnect = false
+            log("Suppressing reconnect after auth write failure")
+            return
+        }
         
         // Auto-reconnect if enabled with exponential backoff
         if autoReconnect {
@@ -929,14 +1016,8 @@ extension BLEManager: CBPeripheralDelegate {
             log("Discovered service: \(service.uuid)")
             
             if service.uuid == serviceUUID {
-                // Discover characteristics for navigation service
-                peripheral.discoverCharacteristics([
-                    characteristicUUID,
-                    authCharacteristicUUID,
-                    routeGeometryCharacteristicUUID,
-                    gpsPositionCharacteristicUUID,
-                    settingsCharacteristicUUID
-                ], for: service)
+                log("Discovering all BikeComputer service characteristics")
+                peripheral.discoverCharacteristics(nil, for: service)
             }
         }
     }
@@ -952,7 +1033,7 @@ extension BLEManager: CBPeripheralDelegate {
         guard let characteristics = service.characteristics else { return }
         
         for characteristic in characteristics {
-            log("Discovered characteristic: \(characteristic.uuid)")
+            log("Discovered characteristic: \(characteristic.uuid) props=\(characteristic.properties.debugDescription)")
             
             if characteristic.uuid == characteristicUUID {
                 guard characteristic.properties.contains(.writeWithoutResponse) else {
@@ -1022,8 +1103,9 @@ extension BLEManager: CBPeripheralDelegate {
                    didWriteValueFor characteristic: CBCharacteristic, 
                    error: Error?) {
         if let error = error {
-            log("Error writing characteristic: \(error.localizedDescription)")
+            log("Error writing characteristic \(characteristic.uuid): \(error.localizedDescription); props=\(characteristic.properties.debugDescription)")
             if characteristic.uuid == authCharacteristicUUID {
+                suppressNextReconnect = true
                 isPairingMode = false
                 clearConnectionState()
                 centralManager.cancelPeripheralConnection(peripheral)

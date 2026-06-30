@@ -12,6 +12,7 @@
 #include <Wire.h>
 #include <esp_bt.h>
 #include <esp_log.h>
+#include <esp_system.h>
 #include <esp_wifi.h>
 #include <stdint.h>
 #ifndef DISABLE_WEB_SERVER
@@ -61,7 +62,12 @@ extern xSemaphoreHandle gpsMutex;
 
 // BLE Navigation for iOS route overlay
 #include "ble_navigation.hpp"
+#include "mainScr.hpp"
+#include "route_overlay.hpp"
 #include "waitingScr.hpp"
+#ifdef WAVESHARE_AMOLED_175
+#include "WAVESHARE_AMOLED_175.hpp"
+#endif
 
 extern Storage storage;
 extern Battery battery;
@@ -79,6 +85,13 @@ std::vector<wayPoint> trackData;
  *
  */
 static double transit, sunrise, sunset;
+static uint32_t loopCount = 0;
+static uint32_t lastLoopMs = 0;
+static uint32_t maxLoopGapMs = 0;
+static uint32_t lvglHandlerCount = 0;
+static uint32_t lastLvglHandlerMs = 0;
+static uint32_t lastLvglHandlerDurationUs = 0;
+static uint32_t maxLvglHandlerDurationUs = 0;
 
 #include "lvglSetup.hpp"
 #include "settings.hpp"
@@ -104,6 +117,80 @@ void calculateSun() {
   log_i("Sunset: %s", gps.gpsData.sunsetHour);
 }
 
+static const char *debugTileName(uint8_t tile) {
+  switch (tile) {
+  case COMPASS:
+    return "COMPASS";
+  case MAP:
+    return "MAP";
+  case NAV:
+    return "NAV";
+  case SATTRACK:
+    return "SATTRACK";
+  default:
+    return "UNKNOWN";
+  }
+}
+
+static void logSystemDebugHeartbeat() {
+  static uint32_t lastLogMs = 0;
+  uint32_t now = millis();
+  if (now - lastLogMs < 5000) {
+    return;
+  }
+  lastLogMs = now;
+
+  BLEDebugStats bleStats = bleNavServer.getDebugStats();
+  const char *screenName = "unknown";
+  lv_obj_t *activeScreen = lv_scr_act();
+  if (activeScreen == waitingScreen) {
+    screenName = "waiting";
+  } else if (isMainScreen) {
+    screenName = "main";
+  }
+
+  Serial.printf("SYS: up=%lus heap=%lu psram=%lu screen=%s tile=%s "
+                "waitRefresh=%d gpsFromApp=%d pendingMap=%d lat=%.6f "
+                "lon=%.6f heading=%u routePts=%u mapFound=%d mapBlocks=%u "
+                "mapFlags[pos=%d redraw=%d follow=%d vector=%d zoom=%u] "
+                "ui[loop=%lu maxGapMs=%lu lvgl=%lu lastLvglMs=%lu "
+                "lvglUs=%lu/%lu flush=%lu lastFlushMs=%lu flushUs=%lu/%lu] "
+                "ble[conn=%d auth=%d nav=%lu route=%lu gps=%lu settings=%lu]\n",
+                (unsigned long)(now / 1000),
+                (unsigned long)ESP.getFreeHeap(),
+                (unsigned long)ESP.getFreePsram(), screenName,
+                debugTileName(activeTile), waitScreenRefresh,
+                gpsReceivedFromApp, pendingTransitionToMap,
+                gps.gpsData.latitude, gps.gpsData.longitude,
+                (unsigned)gps.gpsData.heading,
+                (unsigned)routeOverlay.getPointCount(),
+                mapView.debugIsMapFound(),
+                (unsigned)mapView.debugCachedBlockCount(), mapView.isPosMoved,
+                mapView.redrawMap, mapView.followGps, mapSet.vectorMap, zoom,
+#ifdef WAVESHARE_AMOLED_175
+                (unsigned long)loopCount, (unsigned long)maxLoopGapMs,
+                (unsigned long)lvglHandlerCount,
+                (unsigned long)lastLvglHandlerMs,
+                (unsigned long)lastLvglHandlerDurationUs,
+                (unsigned long)maxLvglHandlerDurationUs,
+                (unsigned long)displayFlushCount,
+                (unsigned long)lastDisplayFlushMs,
+                (unsigned long)lastDisplayFlushDurationUs,
+                (unsigned long)maxDisplayFlushDurationUs,
+#else
+                (unsigned long)loopCount, (unsigned long)maxLoopGapMs,
+                (unsigned long)lvglHandlerCount,
+                (unsigned long)lastLvglHandlerMs,
+                (unsigned long)lastLvglHandlerDurationUs,
+                (unsigned long)maxLvglHandlerDurationUs, 0UL, 0UL, 0UL, 0UL,
+#endif
+                bleStats.connected, bleStats.authenticated,
+                (unsigned long)bleStats.navPacketCount,
+                (unsigned long)bleStats.routePacketCount,
+                (unsigned long)bleStats.gpsPacketCount,
+                (unsigned long)bleStats.settingsPacketCount);
+}
+
 /**
  * @brief Setup
  *
@@ -118,6 +205,8 @@ void setup() {
   Serial.setTxTimeoutMs(0); // Prevent blocking if no host connected
   delay(2000);              // Give time for USB CDC to attach
   log_i("Starting Setup...");
+  Serial.printf("Reset reason: CPU0=%d CPU1=%d\n", esp_reset_reason(),
+                esp_reset_reason());
 
 #ifdef WAVESHARE_AMOLED_175
   // =========================================================
@@ -344,8 +433,25 @@ void setup() {
  *
  */
 void loop() {
+  uint32_t now = millis();
+  if (lastLoopMs != 0) {
+    uint32_t gap = now - lastLoopMs;
+    if (gap > maxLoopGapMs) {
+      maxLoopGapMs = gap;
+    }
+  }
+  lastLoopMs = now;
+  loopCount++;
+
   if (!waitScreenRefresh) {
+    uint32_t startUs = micros();
     lv_timer_handler();
+    lastLvglHandlerDurationUs = micros() - startUs;
+    if (lastLvglHandlerDurationUs > maxLvglHandlerDurationUs) {
+      maxLvglHandlerDurationUs = lastLvglHandlerDurationUs;
+    }
+    lvglHandlerCount++;
+    lastLvglHandlerMs = millis();
     vTaskDelay(pdMS_TO_TICKS(TASK_SLEEP_PERIOD_MS));
   }
 
@@ -354,6 +460,8 @@ void loop() {
 
   // Check if we need to transition from waiting screen to map
   checkPendingMapTransition();
+
+  logSystemDebugHeartbeat();
 
 #ifndef DISABLE_WEB_SERVER
   // Deleting recursive directories in webfile server

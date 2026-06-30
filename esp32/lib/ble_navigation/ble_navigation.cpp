@@ -39,6 +39,7 @@ static volatile bool navDataUpdated = false;
 static bool bleSessionAuthenticated = false;
 static char pendingAuthNonce[33] = "";
 static NimBLECharacteristic *authCharacteristic = nullptr;
+static BLEDebugStats bleDebugStats;
 
 // Route geometry debouncing - skip redundant parses
 static uint32_t lastRouteHash = 0;
@@ -77,6 +78,8 @@ static bool requireAuthenticated(const char *payloadName) {
     return true;
   }
 
+  bleDebugStats.rejectedUnauthenticatedCount++;
+  bleDebugStats.lastRejectedUnauthenticatedMs = millis();
   Serial.printf("BLE: Rejected %s: session is not authenticated\n",
                 payloadName == nullptr ? "payload" : payloadName);
   return false;
@@ -212,6 +215,8 @@ static void handleAuthPayload(const std::string &value) {
     pendingAuthNonce[sizeof(pendingAuthNonce) - 1] = '\0';
     snprintf(response, sizeof(response), "SERVER|%s|%s", nonce, mac);
     notifyAuthResponse(response);
+    bleDebugStats.authChallengeCount++;
+    bleDebugStats.lastAuthChallengeMs = millis();
     Serial.println("BLE: Auth challenge answered");
     return;
   }
@@ -236,6 +241,9 @@ static void handleAuthPayload(const std::string &value) {
     }
 
     bleSessionAuthenticated = true;
+    bleDebugStats.authenticated = true;
+    bleDebugStats.authSuccessCount++;
+    bleDebugStats.lastAuthSuccessMs = millis();
     pendingAuthNonce[0] = '\0';
     char response[40];
     snprintf(response, sizeof(response), "OK|%s", nonce);
@@ -274,6 +282,8 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
 
   Serial.printf("BLE: %s route geometry received: %u bytes\n",
                 source == nullptr ? "unknown" : source, (unsigned)len);
+  bleDebugStats.routePacketCount++;
+  bleDebugStats.lastRoutePacketMs = millis();
   routeOverlay.parseRouteData(data, len);
   triggerMapRedraw();
 }
@@ -305,6 +315,8 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
   Serial.printf("BLE: %s GPS position received: lat=%ld lon=%ld heading=%u\n",
                 source == nullptr ? "unknown" : source, (long)lat, (long)lon,
                 (unsigned)gps.gpsData.heading);
+  bleDebugStats.gpsPacketCount++;
+  bleDebugStats.lastGpsPacketMs = millis();
 
   if (!gpsReceivedFromApp) {
     gpsReceivedFromApp = true;
@@ -317,6 +329,9 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
 
 static void handleMapSetting(uint8_t settingId, int32_t settingValue,
                              const char *source) {
+  bleDebugStats.settingsPacketCount++;
+  bleDebugStats.lastSettingsPacketMs = millis();
+
   switch (settingId) {
   case 1:
     mapRenderSettings.minPolygonSize =
@@ -424,6 +439,10 @@ public:
   void onConnect(NimBLEServer *pServer) override {
     server->connected = true;
     bleSessionAuthenticated = false;
+    bleDebugStats.connected = true;
+    bleDebugStats.authenticated = false;
+    bleDebugStats.connectCount++;
+    bleDebugStats.lastConnectMs = millis();
     pendingAuthNonce[0] = '\0';
     Serial.println("BLE: iOS client connected!");
     // Stop advertising when connected
@@ -433,6 +452,10 @@ public:
   void onDisconnect(NimBLEServer *pServer) override {
     server->connected = false;
     bleSessionAuthenticated = false;
+    bleDebugStats.connected = false;
+    bleDebugStats.authenticated = false;
+    bleDebugStats.disconnectCount++;
+    bleDebugStats.lastDisconnectMs = millis();
     pendingAuthNonce[0] = '\0';
     Serial.println("BLE: iOS client disconnected");
     // Restart advertising
@@ -481,6 +504,8 @@ public:
     }
 
     Serial.printf("BLE Nav received: %u bytes\n", (unsigned)value.length());
+    bleDebugStats.navPacketCount++;
+    bleDebugStats.lastNavPacketMs = millis();
     parseNavigationData(value);
   }
 };
@@ -586,7 +611,7 @@ void BLENavigationServer::init(const char *deviceName) {
   pServer = NimBLEDevice::createServer();
   pServer->setCallbacks(new MyBLEServerCallbacks(this));
 
-  // Create Navigation Service (UUID 1819)
+  // Create BikeComputer Navigation Service.
   NimBLEService *pService = pServer->createService(SERVICE_UUID);
 
   // Create Navigation Instruction Characteristic (UUID 2A6E)
@@ -601,7 +626,7 @@ void BLENavigationServer::init(const char *deviceName) {
   // marks the device as navigation-ready.
   pAuthCharacteristic = pService->createCharacteristic(
       AUTH_CHAR_UUID,
-      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
+      NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::NOTIFY);
   pAuthCharacteristic->setCallbacks(new MyAuthCharacteristicCallbacks());
   pAuthCharacteristic->setValue("LOCKED");
   authCharacteristic = pAuthCharacteristic;
@@ -632,6 +657,9 @@ void BLENavigationServer::init(const char *deviceName) {
   pAdvertising->start();
 
   initialized = true;
+  bleDebugStats.initialized = true;
+  bleDebugStats.connected = connected;
+  bleDebugStats.authenticated = bleSessionAuthenticated;
   Serial.printf("BLE: Server started, advertising as '%s'\n", deviceName);
 }
 
@@ -639,6 +667,10 @@ void BLENavigationServer::process() {
   static uint32_t lastLog = 0;
   if (millis() - lastLog > 5000) {
     lastLog = millis();
+    bleDebugStats.initialized = initialized;
+    bleDebugStats.connected = connected;
+    bleDebugStats.authenticated = bleSessionAuthenticated;
+
     if (connected) {
       Serial.println("BLE Status: CONNECTED");
     } else {
@@ -647,7 +679,33 @@ void BLENavigationServer::process() {
       if (initialized)
         Serial.println("BLE Status: ADVERTISING (Waiting for connection...)");
     }
+
+    Serial.printf("BLE Debug: up=%lus init=%d conn=%d auth=%d connects=%lu "
+                  "disconnects=%lu authOK=%lu nav=%lu route=%lu gps=%lu "
+                  "settings=%lu rejectAuth=%lu lastMs[c=%lu a=%lu n=%lu r=%lu "
+                  "g=%lu s=%lu rej=%lu]\n",
+                  millis() / 1000, initialized, connected,
+                  bleSessionAuthenticated, bleDebugStats.connectCount,
+                  bleDebugStats.disconnectCount, bleDebugStats.authSuccessCount,
+                  bleDebugStats.navPacketCount, bleDebugStats.routePacketCount,
+                  bleDebugStats.gpsPacketCount,
+                  bleDebugStats.settingsPacketCount,
+                  bleDebugStats.rejectedUnauthenticatedCount,
+                  bleDebugStats.lastConnectMs, bleDebugStats.lastAuthSuccessMs,
+                  bleDebugStats.lastNavPacketMs,
+                  bleDebugStats.lastRoutePacketMs,
+                  bleDebugStats.lastGpsPacketMs,
+                  bleDebugStats.lastSettingsPacketMs,
+                  bleDebugStats.lastRejectedUnauthenticatedMs);
   }
+}
+
+BLEDebugStats BLENavigationServer::getDebugStats() const {
+  BLEDebugStats stats = bleDebugStats;
+  stats.initialized = initialized;
+  stats.connected = connected;
+  stats.authenticated = bleSessionAuthenticated;
+  return stats;
 }
 
 // ============================================================================
