@@ -225,9 +225,11 @@ volatile bool uiUpdateNeeded = false;
 volatile bool bleConnectedState = false;
 volatile bool bleStateChanged = false;
 volatile bool pendingNavDataReady = false;
+volatile bool pendingShowMap = false;
 portMUX_TYPE navPayloadMux = portMUX_INITIALIZER_UNLOCKED;
 
 bool ensureSDCardMounted();
+void setDeviceMapVisible(bool mapVisible);
 
 // BLE Callbacks
 class ServerCallbacks : public NimBLEServerCallbacks {
@@ -530,7 +532,7 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
                     (unsigned)(value.length() - 4));
       deviceMapRenderer.setRouteGeometry((const uint8_t *)value.data() + 4,
                                           value.length() - 4);
-      deviceMapRenderer.setVisible(true);
+      pendingShowMap = true;
       return;
     }
 
@@ -589,7 +591,7 @@ class RouteGeometryCharacteristicCallbacks : public NimBLECharacteristicCallback
     if (!value.empty()) {
       Serial.printf("Received route geometry: %u bytes\n", (unsigned)value.length());
       deviceMapRenderer.setRouteGeometry((const uint8_t *)value.data(), value.length());
-      deviceMapRenderer.setVisible(true);
+      pendingShowMap = true;
     }
   }
 };
@@ -697,24 +699,38 @@ void setupBLE() {
 
 extern "C" void handle_display_toggle_event(lv_event_t *event) {
   if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
-    deviceMapRenderer.toggleVisible();
-    bool mapVisible = deviceMapRenderer.isVisible();
-    if (mapVisible) {
-      ensureSDCardMounted();
+    setDeviceMapVisible(!deviceMapRenderer.isVisible());
+  }
+}
+
+void setDeviceMapVisible(bool mapVisible) {
+  deviceMapRenderer.setVisible(mapVisible);
+  if (mapVisible) {
+    ensureSDCardMounted();
+  }
+
+  lv_obj_t *navObjects[] = {ui_IconPlaceholder, ui_LabelDistance,
+                            ui_LabelInstruction};
+  for (lv_obj_t *object : navObjects) {
+    if (object == NULL) {
+      continue;
     }
-    lv_obj_t *navObjects[] = {ui_IconPlaceholder, ui_LabelDistance,
-                              ui_LabelInstruction};
-    for (lv_obj_t *object : navObjects) {
-      if (object == NULL) {
-        continue;
-      }
-      if (mapVisible) {
-        lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
-      } else {
-        lv_obj_clear_flag(object, LV_OBJ_FLAG_HIDDEN);
-      }
+    if (mapVisible) {
+      lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_clear_flag(object, LV_OBJ_FLAG_HIDDEN);
     }
   }
+}
+
+void processPendingDisplayRequests() {
+  if (!pendingShowMap) {
+    return;
+  }
+
+  pendingShowMap = false;
+  setDeviceMapVisible(true);
+  Serial.println("Map view shown from pending BLE route geometry");
 }
 
 // Global variable to track SD mode
@@ -1186,6 +1202,7 @@ void loop() {
   // Update UI from Main Loop (Thread Safe)
   processPendingNavigationPayload();
   updateNavigationUI();
+  processPendingDisplayRequests();
   deviceMapRenderer.update();
 
   // Demo SD card file reading periodically

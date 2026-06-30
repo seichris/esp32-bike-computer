@@ -258,6 +258,8 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     func reconnect() {
+        clearDebugEvents()
+        log("Debug log cleared for reconnect")
         autoReconnect = true
         resetReconnectionState()
 
@@ -291,7 +293,7 @@ class BLEManager: NSObject, ObservableObject {
             return false
         }
         
-        enqueueNavigationWrite(dataToSend, endpoint: endpoint)
+        enqueueNavigationWrite(dataToSend, endpoint: endpoint, label: "navigation")
         log("Queued navigation packet: \(dataToSend.count) bytes")
         return true
     }
@@ -524,6 +526,16 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    private func clearDebugEvents() {
+        if Thread.isMainThread {
+            debugEvents.removeAll()
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.debugEvents.removeAll()
+            }
+        }
+    }
+
     private func appendDebugEvent(_ line: String) {
         debugEvents.append(line)
         if debugEvents.count > 40 {
@@ -669,8 +681,8 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
-    private func enqueueNavigationWrite(_ data: Data, endpoint: NavigationWriteEndpoint) {
-        if navigationWriteQueue.enqueue(data) {
+    private func enqueueNavigationWrite(_ data: Data, endpoint: NavigationWriteEndpoint, label: String) {
+        if navigationWriteQueue.enqueue(NavigationWrite(data: data, label: label)) {
             log("Navigation write queue full; dropped oldest packet")
         }
 
@@ -685,14 +697,14 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
 
-        enqueueNavigationWrite(data, endpoint: endpoint)
+        enqueueNavigationWrite(data, endpoint: endpoint, label: "fallback \(label)")
         log("Queued fallback \(label): \(data.count) bytes")
     }
 
     private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
-        navigationWriteQueue.flush(canSend: endpoint.canSend) { data in
-            endpoint.write(data)
-            log("Sent navigation packet: \(data.count) bytes")
+        navigationWriteQueue.flush(canSend: endpoint.canSend) { write in
+            endpoint.write(write.data)
+            log("Sent \(write.label): \(write.data.count) bytes")
         }
     }
 }
