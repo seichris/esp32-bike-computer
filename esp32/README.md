@@ -1,8 +1,6 @@
 ![Static Badge](https://img.shields.io/badge/PlatformIO-PlatformIO?logo=platformio&labelColor=auto&color=white)
 [![PlatformIO](https://github.com/jgauchia/IceNav-v3/workflows/PlatformIO/badge.svg)](https://github.com/jgauchia/IceNav-v3/actions/) ![ViewCount](https://views.whatilearened.today/views/github/jgauchia/IceNav-v3.svg)
 
-![icenav_logo](images/icenav_logo.png)
-
 ESP32 Based GPS Navigator (LVGL - LovyanGFX).
 * Note: Under development (experimental features under devel branch)
 * There is the possibility to use two types of maps: Rendered Maps or Tiles (large files), and Vector Maps (small files).
