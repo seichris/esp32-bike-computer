@@ -21,6 +21,65 @@ For Python/pyserial captures on `/dev/cu.usbmodem*`, open at `115200` and set
 RTS/DTR asserted can reset or hold the ESP32-S3 USB serial path and produce an
 empty monitor.
 
+#### ESP32 on Chris's Mac over USB-C
+
+Observed working device/port:
+- ESP32-S3 USB CDC/JTAG enumerated as `/dev/cu.usbmodem2101`.
+- `pio device list` described it as `USB JTAG/serial debug unit` with VID:PID `303A:1001`.
+- Working upload shape: `cd esp32 && pio run -e WAVESHARE_AMOLED_175 -t upload --upload-port /dev/cu.usbmodem2101`.
+
+Local PlatformIO/Python gotcha seen on 2026-06-30:
+- The global `pio` at `/Library/Frameworks/Python.framework/Versions/3.11/bin/pio` hung because that Python 3.11 install was unhealthy.
+- The global `~/.platformio/penv` also pointed at that broken Python, which caused pioarduino dependency setup to hang.
+- Prefer a healthy Python in the pioarduino-supported range, currently Python 3.10-3.13 for the cached platform.
+- If only Python 3.14 is available, a temporary PlatformIO install plus temporary `PLATFORMIO_CORE_DIR` worked, reusing existing `~/.platformio` packages/platforms via symlinks. If the cached pioarduino platform rejects Python 3.14, temporarily widen `~/.platformio/platforms/espressif32/platform.py` from `< (3, 14)` to `< (3, 15)`, run build/upload, then restore that cached file.
+
+Temporary setup pattern:
+```sh
+rm -rf /tmp/esp32-bike-pio-314 /tmp/esp32-bike-pio-core-314
+/opt/homebrew/bin/python3.14 -m venv /tmp/esp32-bike-pio-314
+/tmp/esp32-bike-pio-314/bin/python -m pip install --upgrade pip setuptools wheel platformio
+mkdir -p /tmp/esp32-bike-pio-core-314
+ln -s ~/.platformio/packages /tmp/esp32-bike-pio-core-314/packages
+ln -s ~/.platformio/platforms /tmp/esp32-bike-pio-core-314/platforms
+ln -s ~/.platformio/.cache /tmp/esp32-bike-pio-core-314/.cache
+cd esp32
+PLATFORMIO_CORE_DIR=/tmp/esp32-bike-pio-core-314 /tmp/esp32-bike-pio-314/bin/pio run -e WAVESHARE_AMOLED_175
+PLATFORMIO_CORE_DIR=/tmp/esp32-bike-pio-core-314 /tmp/esp32-bike-pio-314/bin/pio run -e WAVESHARE_AMOLED_175 -t upload --upload-port /dev/cu.usbmodem2101
+```
+
+`pio device monitor` can fail inside non-interactive PTYs with
+`termios.error: (19, 'Operation not supported by device')`. Use pyserial
+instead. To capture from reset:
+```sh
+/tmp/esp32-bike-pio-314/bin/python - <<'PY'
+import serial, time, sys
+port = "/dev/cu.usbmodem2101"
+ser = serial.Serial(port, 115200, timeout=0.05)
+print(f"--- reset + serial capture {port} @ 115200 ---")
+ser.dtr = False
+ser.rts = True
+time.sleep(0.25)
+ser.rts = False
+start = time.time()
+while time.time() - start < 35:
+    data = ser.read(8192)
+    if data:
+        sys.stdout.write(data.decode("utf-8", errors="replace"))
+        sys.stdout.flush()
+ser.close()
+print("\n--- end serial capture ---")
+PY
+```
+
+Healthy boot log checkpoints from the Waveshare board:
+- AXP2101 found and display power enabled.
+- TCA9554 found and touch reset completed.
+- Display, LVGL, and UI initialized.
+- BLE host started and server advertising.
+- SD card initialized, or a clear SD init failure.
+- `Setup complete!` followed by `Waiting for iPhone connection...`.
+
 ### iOS
 
 - Open: `ios-app/BikeComputer/BikeComputer.xcodeproj`
