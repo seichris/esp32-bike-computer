@@ -16,6 +16,16 @@ navigation-ready.
 | `2A72` | iOS -> ESP32 | Binary GPS position | Current device position and heading for the map view. |
 | `2A73` | iOS -> ESP32 | Binary setting packet | Runtime map-renderer settings. |
 
+If iOS has cached an older GATT table and does not discover `2A6F`, `2A72`,
+or `2A73`, the app falls back to framed binary writes over authenticated `2A6E`.
+Fallback frame prefixes:
+
+| Prefix | Payload |
+| --- | --- |
+| `MAPR` | route geometry packet |
+| `GPSP` | GPS position packet |
+| `MSET` | map setting packet |
+
 ## Auth
 
 The shared local key is `BikeComputer BLE v1 local pairing key`.
@@ -94,4 +104,3 @@ Folder/block naming follows the OSM extract pipeline:
 - `4096 x 4096` meter blocks
 - `16 x 16` block folders
 - folder name format like `+0032+0008`
-

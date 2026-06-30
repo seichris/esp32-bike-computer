@@ -226,6 +226,8 @@ volatile bool bleStateChanged = false;
 portMUX_TYPE navPayloadMux = portMUX_INITIALIZER_UNLOCKED;
 NavigationPayloadQueue navPayloadQueue;
 
+bool ensureSDCardMounted();
+
 // BLE Callbacks
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *pServer) {
@@ -491,10 +493,56 @@ void handleAuthPayload(const std::string &value) {
 class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *pCharacteristic) {
     std::string value = pCharacteristic->getValue();
-    if (value.length() > 0) {
-      Serial.printf("Received navigation payload: %u bytes\n", (unsigned)value.length());
-      queueNavigationPayload(value);
+    if (value.empty()) {
+      return;
     }
+
+    if (value.length() >= 4 && memcmp(value.data(), "MAPR", 4) == 0) {
+      if (!bleSessionAuthenticated) {
+        Serial.println("Rejected fallback route geometry: BLE session is not authenticated");
+        return;
+      }
+      Serial.printf("Received fallback route geometry: %u bytes\n",
+                    (unsigned)(value.length() - 4));
+      deviceMapRenderer.setRouteGeometry((const uint8_t *)value.data() + 4,
+                                          value.length() - 4);
+      deviceMapRenderer.setVisible(true);
+      return;
+    }
+
+    if (value.length() >= 12 && memcmp(value.data(), "GPSP", 4) == 0) {
+      if (!bleSessionAuthenticated) {
+        Serial.println("Rejected fallback GPS position: BLE session is not authenticated");
+        return;
+      }
+      int32_t latMicro = 0;
+      int32_t lonMicro = 0;
+      uint16_t headingDeg = 0;
+      memcpy(&latMicro, value.data() + 4, sizeof(latMicro));
+      memcpy(&lonMicro, value.data() + 8, sizeof(lonMicro));
+      if (value.length() >= 14) {
+        memcpy(&headingDeg, value.data() + 12, sizeof(headingDeg));
+      }
+      deviceMapRenderer.setGpsPosition(latMicro, lonMicro, headingDeg);
+      return;
+    }
+
+    if (value.length() >= 9 && memcmp(value.data(), "MSET", 4) == 0) {
+      if (!bleSessionAuthenticated) {
+        Serial.println("Rejected fallback map setting: BLE session is not authenticated");
+        return;
+      }
+      uint8_t settingId = (uint8_t)value[4];
+      int32_t settingValue = 0;
+      memcpy(&settingValue, value.data() + 5, sizeof(settingValue));
+      deviceMapRenderer.setSetting(settingId, settingValue);
+      Serial.printf("Fallback map setting updated: id=%u value=%ld\n",
+                    settingId, (long)settingValue);
+      return;
+    }
+
+    Serial.printf("Received navigation payload: %u bytes\n", (unsigned)value.length());
+    queueNavigationPayload(value);
   }
 };
 
@@ -627,6 +675,9 @@ extern "C" void handle_display_toggle_event(lv_event_t *event) {
   if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
     deviceMapRenderer.toggleVisible();
     bool mapVisible = deviceMapRenderer.isVisible();
+    if (mapVisible) {
+      ensureSDCardMounted();
+    }
     lv_obj_t *navObjects[] = {ui_IconPlaceholder, ui_LabelDistance,
                               ui_LabelInstruction};
     for (lv_obj_t *object : navObjects) {
@@ -678,6 +729,18 @@ bool initSDCard() {
     currentSDMode = SD_NONE;
     return false;
   }
+}
+
+bool ensureSDCardMounted() {
+  if (currentSDMode == SD_SPI) {
+    deviceMapRenderer.setSdAvailable(true);
+    return true;
+  }
+
+  Serial.println("SD card not mounted; retrying before map draw...");
+  bool mounted = initSDCard();
+  deviceMapRenderer.setSdAvailable(mounted);
+  return mounted;
 }
 
 bool readFileFromSD(const char *filename) {

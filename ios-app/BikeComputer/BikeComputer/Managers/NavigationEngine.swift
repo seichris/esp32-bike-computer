@@ -436,5 +436,10 @@ extension NavigationEngine {
         bleManager.sendRouteGeometry(geometryData)
         lastGeometrySendTime = now
         lastSentGeometryHash = hash
+
+        if let currentSnapshot {
+            sendTracker.resetForReadinessRetry()
+            sendNavigationDataToESP32(currentSnapshot)
+        }
     }
 }

@@ -300,28 +300,38 @@ class BLEManager: NSObject, ObservableObject {
     /// Format: [StartLat:4][StartLon:4][DeltaLat:2][DeltaLon:2]...
     func sendRouteGeometry(_ data: Data) {
         guard let peripheral = connectedPeripheral,
-              let characteristic = routeGeometryCharacteristic,
               isConnected,
               isNavigationReady else {
-            log("Cannot send geometry: route characteristic not ready")
+            log("Cannot send geometry: BLE not ready")
             return
         }
 
         let maxLength = peripheral.maximumWriteValueLength(for: .withoutResponse)
-        guard data.count <= maxLength else {
+        if let characteristic = routeGeometryCharacteristic {
+            guard data.count <= maxLength else {
+                log("Cannot send geometry: \(data.count) bytes exceeds write limit \(maxLength)")
+                return
+            }
+
+            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+            log("Sent route geometry: \(data.count) bytes")
+            return
+        }
+
+        var fallback = Data("MAPR".utf8)
+        fallback.append(data)
+        guard fallback.count <= maxLength else {
             log("Cannot send geometry: \(data.count) bytes exceeds write limit \(maxLength)")
             return
         }
 
-        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-        log("Sent route geometry: \(data.count) bytes")
+        sendFallbackMapPacket(fallback, label: "route geometry")
     }
 
     /// Send GPS position to ESP32.
     /// Format: [Lat:4][Lon:4][Heading:2] with WGS-84 microdegrees.
     func sendGPSPosition(lat: Double, lon: Double, heading: Double = 0) {
         guard let peripheral = connectedPeripheral,
-              let characteristic = gpsPositionCharacteristic,
               isConnected,
               isNavigationReady else {
             return
@@ -334,14 +344,22 @@ class BLEManager: NSObject, ObservableObject {
         withUnsafeBytes(of: latInt.littleEndian) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: lonInt.littleEndian) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: headingDeg.littleEndian) { data.append(contentsOf: $0) }
-        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+
+        if let characteristic = gpsPositionCharacteristic {
+            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+            return
+        }
+
+        var fallback = Data("GPSP".utf8)
+        fallback.append(data)
+        guard fallback.count <= peripheral.maximumWriteValueLength(for: .withoutResponse) else { return }
+        sendFallbackMapPacket(fallback, label: "GPS position")
     }
 
     /// Persist and send a runtime map setting to ESP32 when supported.
     func sendSetting(id: UInt8, value: Int32) {
         saveSettings()
         guard let peripheral = connectedPeripheral,
-              let characteristic = settingsCharacteristic,
               isConnected,
               isNavigationReady else {
             log("Settings characteristic unsupported; saved local setting id=\(id), value=\(value)")
@@ -351,8 +369,20 @@ class BLEManager: NSObject, ObservableObject {
         var data = Data()
         data.append(id)
         withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
-        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-        log("Sent setting: id=\(id), value=\(value)")
+
+        if let characteristic = settingsCharacteristic {
+            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+            log("Sent setting: id=\(id), value=\(value)")
+            return
+        }
+
+        var fallback = Data("MSET".utf8)
+        fallback.append(data)
+        guard fallback.count <= peripheral.maximumWriteValueLength(for: .withoutResponse) else {
+            log("Cannot send fallback setting: write limit exceeded")
+            return
+        }
+        sendFallbackMapPacket(fallback, label: "setting id=\(id)")
     }
     
     /// Send feature visibility bitmask
@@ -645,6 +675,18 @@ class BLEManager: NSObject, ObservableObject {
         }
 
         flushPendingNavigationWrites(endpoint: endpoint)
+    }
+
+    private func sendFallbackMapPacket(_ data: Data, label: String) {
+        guard let endpoint = navigationWriteEndpoint,
+              isConnected,
+              isNavigationReady else {
+            log("Cannot send fallback \(label): navigation endpoint not ready")
+            return
+        }
+
+        enqueueNavigationWrite(data, endpoint: endpoint)
+        log("Queued fallback \(label): \(data.count) bytes")
     }
 
     private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {

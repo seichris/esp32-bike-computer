@@ -180,7 +180,7 @@ void DeviceMapRenderer::draw() {
   lv_canvas_fill_bg(canvas, lv_color_hex(0xF4F1E8), LV_OPA_COVER);
 
   if (!hasCenter) {
-    drawNoMapMessage();
+    drawStatusMessage("Waiting for route/GPS data");
     return;
   }
 
@@ -188,10 +188,10 @@ void DeviceMapRenderer::draw() {
   int32_t centerY = latToMercatorY(center.latMicro);
   double mpp = metersPerPixel();
 
-  if (sdAvailable) {
-    drawMapBlocks(centerX, centerY, mpp);
-  } else {
-    drawNoMapMessage();
+  if (!sdAvailable) {
+    drawStatusMessage("SD map not mounted\nroute/GPS overlay active");
+  } else if (!drawMapBlocks(centerX, centerY, mpp)) {
+    drawStatusMessage("No matching map blocks\nroute/GPS overlay active");
   }
 
   drawRouteOverlay(centerX, centerY, mpp);
@@ -199,7 +199,7 @@ void DeviceMapRenderer::draw() {
   lv_obj_invalidate(canvas);
 }
 
-void DeviceMapRenderer::drawNoMapMessage() {
+void DeviceMapRenderer::drawStatusMessage(const char *message) {
   lv_draw_label_dsc_t label;
   lv_draw_label_dsc_init(&label);
   label.color = lv_color_hex(0x555555);
@@ -208,11 +208,12 @@ void DeviceMapRenderer::drawNoMapMessage() {
                     static_cast<lv_coord_t>(canvasWidth - 20),
                     static_cast<lv_coord_t>(canvasHeight / 2 + 40)};
   lv_canvas_draw_text(canvas, area.x1, area.y1, area.x2 - area.x1,
-                      &label, "No map blocks on SD\nroute/GPS overlay active");
+                      &label, message);
 }
 
-void DeviceMapRenderer::drawMapBlocks(int32_t centerX, int32_t centerY,
+bool DeviceMapRenderer::drawMapBlocks(int32_t centerX, int32_t centerY,
                                       double mpp) {
+  bool drewAnyBlock = false;
   int32_t halfSpanX = static_cast<int32_t>((canvasWidth * mpp) / 2.0) + MAPBLOCK_SIZE;
   int32_t halfSpanY = static_cast<int32_t>((canvasHeight * mpp) / 2.0) + MAPBLOCK_SIZE;
   int32_t minBlockX = (centerX - halfSpanX) & ~MAPBLOCK_MASK;
@@ -225,9 +226,15 @@ void DeviceMapRenderer::drawMapBlocks(int32_t centerX, int32_t centerY,
       char path[96];
       if (findBlockPath(blockX, blockY, path, sizeof(path))) {
         drawBinaryMapBlock(path, blockX, blockY, centerX, centerY, mpp);
+        drewAnyBlock = true;
       }
     }
   }
+  if (!drewAnyBlock) {
+    Serial.printf("Map renderer: no .fmb blocks near mercator center x=%ld y=%ld\n",
+                  (long)centerX, (long)centerY);
+  }
+  return drewAnyBlock;
 }
 
 void DeviceMapRenderer::drawBinaryMapBlock(const char *path, int32_t blockMinX,

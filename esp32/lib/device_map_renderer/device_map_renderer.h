@@ -59,8 +59,8 @@ private:
   uint16_t gpsHeadingDeg = 0;
 
   void draw();
-  void drawNoMapMessage();
-  void drawMapBlocks(int32_t centerX, int32_t centerY, double metersPerPixel);
+  void drawStatusMessage(const char *message);
+  bool drawMapBlocks(int32_t centerX, int32_t centerY, double metersPerPixel);
   void drawBinaryMapBlock(const char *path, int32_t blockMinX, int32_t blockMinY,
                           int32_t centerX, int32_t centerY,
                           double metersPerPixel);
@@ -83,4 +83,3 @@ private:
 };
 
 extern DeviceMapRenderer deviceMapRenderer;
-
