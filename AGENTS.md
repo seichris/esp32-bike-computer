@@ -1,11 +1,10 @@
 # Agent Notes (esp32-bike-computer)
 
 This repo contains:
-- `esp32/`: ESP32-S3 firmware (PlatformIO + Arduino + LVGL + NimBLE).
+- `esp32/`: ESP32-S3 firmware (PlatformIO + Arduino + LVGL + NimBLE), currently based on the local IceNav-v3 map-renderer snapshot.
 - `ios-app/`: iOS companion app (SwiftUI + MapKit + CoreBluetooth + HealthKit).
 - `OSM_Extract/`: offline vector-map build pipeline (Docker-based).
 - `waveshare_test/`: hardware bring-up sketches for the Waveshare board.
-- `IceNav-v3/`: vendored upstream reference project (treat as read-only unless explicitly asked to modify).
 
 ## Quick commands
 
@@ -29,7 +28,7 @@ empty monitor.
 
 ## BLE contract
 
-Current firmware (`esp32/src/main.cpp`) implements BLE service UUID `1819`.
+Current firmware implements BLE service UUID `1819` in `esp32/lib/ble_navigation/`.
 The full protocol is documented in `docs/ble-protocol.md`.
 
 Core navigation characteristic:
@@ -43,7 +42,8 @@ Map-view characteristics:
 - Auth UUID `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1001`
 
 If you add/remove/rename BLE characteristics, update both:
-- `esp32/src/main.cpp`
+- `esp32/lib/ble_navigation/ble_navigation.cpp`
+- `esp32/lib/ble_navigation/ble_navigation.hpp`
 - `ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift`
 
 ## Hardware gotchas (Waveshare ESP32-S3-Touch-AMOLED-1.75)
@@ -68,5 +68,5 @@ Config:
 ## Change hygiene
 
 - Keep edits focused: avoid sweeping refactors/reformatting.
-- Treat `IceNav-v3/` as a reference snapshot unless a task explicitly targets it.
+- Keep the restored IceNav-derived renderer architecture intact unless a task explicitly targets a refactor.
 - When touching LVGL/display code, preserve the “full screen buffer + full_refresh” strategy unless you have a measured reason to change it (it was chosen to avoid partial-update corruption on this AMOLED panel).
