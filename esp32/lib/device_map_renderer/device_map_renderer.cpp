@@ -12,6 +12,11 @@ extern "C" void handle_display_toggle_event(lv_event_t *event);
 namespace {
 constexpr double kPi = 3.14159265358979323846264338327950288;
 constexpr double EARTH_RADIUS = 6378137.0;
+constexpr uint16_t MAX_POLYGON_POINTS = 80;
+constexpr uint16_t MAX_POLYLINE_POINTS = 128;
+constexpr uint16_t MAX_DRAWN_POLYGONS_PER_BLOCK = 300;
+constexpr uint16_t MAX_DRAWN_POLYLINES_PER_BLOCK = 500;
+constexpr unsigned long MAX_BLOCK_DRAW_MS = 220;
 
 void drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2, int16_t y2,
               lv_color_t color, uint8_t width) {
@@ -174,6 +179,7 @@ void DeviceMapRenderer::update() {
 }
 
 void DeviceMapRenderer::draw() {
+  unsigned long drawStart = millis();
   GeoPoint center;
   bool hasCenter = false;
   DeviceMapSettings localSettings;
@@ -209,6 +215,8 @@ void DeviceMapRenderer::draw() {
   int32_t centerX = lonToMercatorX(center.lonMicro);
   int32_t centerY = latToMercatorY(center.latMicro);
   double mpp = metersPerPixel();
+  Serial.printf("Map renderer: draw start center x=%ld y=%ld mpp=%.2f sd=%u\n",
+                (long)centerX, (long)centerY, mpp, sdAvailable ? 1 : 0);
 
   if (!sdAvailable) {
     drawStatusMessage("SD map not mounted\nroute/GPS overlay active");
@@ -219,6 +227,7 @@ void DeviceMapRenderer::draw() {
   drawRouteOverlay(centerX, centerY, mpp);
   drawGpsMarker(centerX, centerY, mpp);
   lv_obj_invalidate(canvas);
+  Serial.printf("Map renderer: draw end in %lums\n", millis() - drawStart);
 }
 
 void DeviceMapRenderer::drawStatusMessage(const char *message) {
@@ -234,38 +243,44 @@ void DeviceMapRenderer::drawStatusMessage(const char *message) {
 }
 
 bool DeviceMapRenderer::drawMapBlocks(int32_t centerX, int32_t centerY,
-                                      double mpp) {
-  bool drewAnyBlock = false;
-  int32_t halfSpanX = static_cast<int32_t>((canvasWidth * mpp) / 2.0) + MAPBLOCK_SIZE;
-  int32_t halfSpanY = static_cast<int32_t>((canvasHeight * mpp) / 2.0) + MAPBLOCK_SIZE;
-  int32_t minBlockX = (centerX - halfSpanX) & ~MAPBLOCK_MASK;
-  int32_t maxBlockX = (centerX + halfSpanX) & ~MAPBLOCK_MASK;
-  int32_t minBlockY = (centerY - halfSpanY) & ~MAPBLOCK_MASK;
-  int32_t maxBlockY = (centerY + halfSpanY) & ~MAPBLOCK_MASK;
+                                       double mpp) {
+  int32_t centerBlockX = centerX & ~MAPBLOCK_MASK;
+  int32_t centerBlockY = centerY & ~MAPBLOCK_MASK;
+  char path[96];
+  if (findBlockPath(centerBlockX, centerBlockY, path, sizeof(path))) {
+    drawBinaryMapBlock(path, centerBlockX, centerBlockY, centerX, centerY, mpp);
+    return true;
+  }
 
-  for (int32_t blockY = minBlockY; blockY <= maxBlockY; blockY += MAPBLOCK_SIZE) {
-    for (int32_t blockX = minBlockX; blockX <= maxBlockX; blockX += MAPBLOCK_SIZE) {
-      char path[96];
+  for (int8_t dy = -1; dy <= 1; dy++) {
+    for (int8_t dx = -1; dx <= 1; dx++) {
+      if (dx == 0 && dy == 0) {
+        continue;
+      }
+      int32_t blockX = centerBlockX + static_cast<int32_t>(dx) * MAPBLOCK_SIZE;
+      int32_t blockY = centerBlockY + static_cast<int32_t>(dy) * MAPBLOCK_SIZE;
       if (findBlockPath(blockX, blockY, path, sizeof(path))) {
         drawBinaryMapBlock(path, blockX, blockY, centerX, centerY, mpp);
-        drewAnyBlock = true;
+        return true;
       }
     }
   }
-  if (!drewAnyBlock) {
-    Serial.printf("Map renderer: no .fmb blocks near mercator center x=%ld y=%ld\n",
-                  (long)centerX, (long)centerY);
-  }
-  return drewAnyBlock;
+
+  Serial.printf("Map renderer: no .fmb blocks near mercator center x=%ld y=%ld\n",
+                (long)centerX, (long)centerY);
+  return false;
 }
 
 void DeviceMapRenderer::drawBinaryMapBlock(const char *path, int32_t blockMinX,
                                            int32_t blockMinY, int32_t centerX,
                                            int32_t centerY, double mpp) {
+  unsigned long blockStart = millis();
   File file = SD.open(path, FILE_READ);
   if (!file) {
     return;
   }
+  Serial.printf("Map renderer: drawing block %s (%u bytes)\n", path,
+                static_cast<unsigned>(file.size()));
 
   char magic[4];
   if (file.readBytes(magic, 4) != 4 || magic[0] != 'F' || magic[1] != 'M' ||
@@ -279,8 +294,18 @@ void DeviceMapRenderer::drawBinaryMapBlock(const char *path, int32_t blockMinX,
     file.close();
     return;
   }
+  bool drawPolygons = polygonCount <= MAX_DRAWN_POLYGONS_PER_BLOCK;
+  if (!drawPolygons) {
+    Serial.printf("Map renderer: skipping dense polygon layer in %s (%u polygons)\n",
+                  path, polygonCount);
+  }
 
   for (uint16_t i = 0; i < polygonCount; i++) {
+    if (drawPolygons && millis() - blockStart > MAX_BLOCK_DRAW_MS) {
+      Serial.printf("Map renderer: block %s polygon budget exceeded\n", path);
+      file.close();
+      return;
+    }
     uint16_t color = 0;
     uint8_t maxZoom = 0;
     uint8_t typeId = 0;
@@ -300,12 +325,13 @@ void DeviceMapRenderer::drawBinaryMapBlock(const char *path, int32_t blockMinX,
       break;
     }
 
-    if (!featureVisible(typeId) || pointCount < 3 || pointCount > 80) {
+    if (!drawPolygons || !featureVisible(typeId) || pointCount < 3 ||
+        pointCount > MAX_POLYGON_POINTS) {
       skipBinaryFeature(file, pointCount);
       continue;
     }
 
-    lv_point_t points[80];
+    lv_point_t points[MAX_POLYGON_POINTS];
     for (uint16_t p = 0; p < pointCount; p++) {
       int16_t x = 0;
       int16_t y = 0;
@@ -331,8 +357,14 @@ void DeviceMapRenderer::drawBinaryMapBlock(const char *path, int32_t blockMinX,
     file.close();
     return;
   }
+  uint16_t drawnPolylines = 0;
 
   for (uint16_t i = 0; i < polylineCount; i++) {
+    if (millis() - blockStart > MAX_BLOCK_DRAW_MS) {
+      Serial.printf("Map renderer: block %s polyline budget exceeded\n", path);
+      file.close();
+      return;
+    }
     uint16_t color = 0;
     uint8_t width = 1;
     uint8_t maxZoom = 0;
@@ -353,7 +385,9 @@ void DeviceMapRenderer::drawBinaryMapBlock(const char *path, int32_t blockMinX,
       break;
     }
 
-    if (!featureVisible(typeId) || pointCount < 2) {
+    if (drawnPolylines >= MAX_DRAWN_POLYLINES_PER_BLOCK ||
+        !featureVisible(typeId) || pointCount < 2 ||
+        pointCount > MAX_POLYLINE_POINTS) {
       skipBinaryFeature(file, pointCount);
       continue;
     }
@@ -377,9 +411,12 @@ void DeviceMapRenderer::drawBinaryMapBlock(const char *path, int32_t blockMinX,
       prevX = sx;
       prevY = sy;
     }
+    drawnPolylines++;
   }
 
   file.close();
+  Serial.printf("Map renderer: finished block %s in %lums\n", path,
+                millis() - blockStart);
 }
 
 void DeviceMapRenderer::skipBinaryFeature(File &file, uint16_t pointCount) {

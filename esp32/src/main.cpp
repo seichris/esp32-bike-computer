@@ -232,6 +232,35 @@ volatile uint32_t gpsPacketsAccepted = 0;
 volatile uint32_t navUiApplies = 0;
 portMUX_TYPE navPayloadMux = portMUX_INITIALIZER_UNLOCKED;
 
+static constexpr size_t ROUTE_PAYLOAD_MAX_LEN = 768;
+static constexpr size_t PENDING_SETTING_MAX_COUNT = 16;
+
+struct PendingRoutePayload {
+  uint8_t data[ROUTE_PAYLOAD_MAX_LEN];
+  size_t len = 0;
+  bool ready = false;
+};
+
+struct PendingGpsPayload {
+  int32_t latMicro = 0;
+  int32_t lonMicro = 0;
+  uint16_t headingDeg = 0;
+  bool ready = false;
+};
+
+struct PendingMapSetting {
+  uint8_t id = 0;
+  int32_t value = 0;
+};
+
+PendingRoutePayload pendingRoutePayload;
+PendingGpsPayload pendingGpsPayload;
+PendingMapSetting pendingMapSettings[PENDING_SETTING_MAX_COUNT];
+size_t pendingMapSettingCount = 0;
+char pendingStatusDetail[96] = "";
+volatile bool pendingStatusDetailReady = false;
+portMUX_TYPE mapPayloadMux = portMUX_INITIALIZER_UNLOCKED;
+
 bool ensureSDCardMounted();
 void setDeviceMapVisible(bool mapVisible);
 void updateDeviceDebugStatus(const char *reason);
@@ -269,11 +298,14 @@ void updateDeviceDebugStatus(const char *reason) {
            (unsigned long)routePacketsAccepted,
            (unsigned long)gpsPacketsAccepted,
            (unsigned long)navUiApplies);
-  deviceMapRenderer.setStatusDetail(detail);
-  Serial.printf("Device state [%s]: %s pendingNav=%u pendingMap=%u map=%u\n",
+  portENTER_CRITICAL(&mapPayloadMux);
+  strncpy(pendingStatusDetail, detail, sizeof(pendingStatusDetail));
+  pendingStatusDetail[sizeof(pendingStatusDetail) - 1] = '\0';
+  pendingStatusDetailReady = true;
+  portEXIT_CRITICAL(&mapPayloadMux);
+  Serial.printf("Device state [%s]: %s pendingNav=%u pendingMap=%u\n",
                 reason == nullptr ? "unknown" : reason, detail,
-                pendingNavDataReady ? 1 : 0, pendingShowMap ? 1 : 0,
-                deviceMapRenderer.isVisible() ? 1 : 0);
+                pendingNavDataReady ? 1 : 0, pendingShowMap ? 1 : 0);
 }
 
 void queueNavigationPayload(const std::string &value) {
@@ -335,6 +367,128 @@ void processPendingNavigationPayload() {
   updateDeviceDebugStatus("nav applying");
 
   uiUpdateNeeded = true;
+}
+
+bool queueRouteGeometryPayload(const uint8_t *data, size_t len,
+                               const char *source) {
+  if (data == nullptr || len == 0) {
+    Serial.printf("Rejected %s route geometry: empty payload\n",
+                  source == nullptr ? "unknown" : source);
+    return false;
+  }
+  if (len > ROUTE_PAYLOAD_MAX_LEN) {
+    Serial.printf("Rejected %s route geometry: %u bytes exceeds %u byte limit\n",
+                  source == nullptr ? "unknown" : source, (unsigned)len,
+                  (unsigned)ROUTE_PAYLOAD_MAX_LEN);
+    return false;
+  }
+
+  portENTER_CRITICAL(&mapPayloadMux);
+  memcpy(pendingRoutePayload.data, data, len);
+  pendingRoutePayload.len = len;
+  pendingRoutePayload.ready = true;
+  routePacketsAccepted++;
+  pendingShowMap = true;
+  portEXIT_CRITICAL(&mapPayloadMux);
+
+  Serial.printf("Queued %s route geometry: %u bytes\n",
+                source == nullptr ? "unknown" : source, (unsigned)len);
+  updateDeviceDebugStatus(source == nullptr ? "route queued" : source);
+  return true;
+}
+
+void queueGpsPositionPayload(int32_t latMicro, int32_t lonMicro,
+                             uint16_t headingDeg, const char *source) {
+  portENTER_CRITICAL(&mapPayloadMux);
+  pendingGpsPayload.latMicro = latMicro;
+  pendingGpsPayload.lonMicro = lonMicro;
+  pendingGpsPayload.headingDeg = headingDeg;
+  pendingGpsPayload.ready = true;
+  gpsPacketsAccepted++;
+  portEXIT_CRITICAL(&mapPayloadMux);
+
+  Serial.printf("Queued %s GPS position: lat=%ld lon=%ld heading=%u\n",
+                source == nullptr ? "unknown" : source, (long)latMicro,
+                (long)lonMicro, headingDeg);
+  updateDeviceDebugStatus(source == nullptr ? "gps queued" : source);
+}
+
+void queueMapSettingPayload(uint8_t settingId, int32_t settingValue,
+                            const char *source) {
+  bool queued = false;
+
+  portENTER_CRITICAL(&mapPayloadMux);
+  if (pendingMapSettingCount < PENDING_SETTING_MAX_COUNT) {
+    pendingMapSettings[pendingMapSettingCount++] = {settingId, settingValue};
+    queued = true;
+  }
+  portEXIT_CRITICAL(&mapPayloadMux);
+
+  if (queued) {
+    Serial.printf("Queued %s map setting: id=%u value=%ld\n",
+                  source == nullptr ? "unknown" : source, settingId,
+                  (long)settingValue);
+  } else {
+    Serial.printf("Dropped %s map setting: pending queue full\n",
+                  source == nullptr ? "unknown" : source);
+  }
+}
+
+void processPendingMapPayloads() {
+  uint8_t routeData[ROUTE_PAYLOAD_MAX_LEN];
+  size_t routeLen = 0;
+  bool hasRoute = false;
+  PendingGpsPayload gpsPayload;
+  bool hasGps = false;
+  PendingMapSetting settings[PENDING_SETTING_MAX_COUNT];
+  size_t settingCount = 0;
+  char statusDetail[96];
+  bool hasStatusDetail = false;
+
+  portENTER_CRITICAL(&mapPayloadMux);
+  if (pendingRoutePayload.ready) {
+    routeLen = pendingRoutePayload.len;
+    memcpy(routeData, pendingRoutePayload.data, routeLen);
+    pendingRoutePayload.ready = false;
+    hasRoute = true;
+  }
+  if (pendingGpsPayload.ready) {
+    gpsPayload = pendingGpsPayload;
+    pendingGpsPayload.ready = false;
+    hasGps = true;
+  }
+  settingCount = pendingMapSettingCount;
+  for (size_t i = 0; i < settingCount; i++) {
+    settings[i] = pendingMapSettings[i];
+  }
+  pendingMapSettingCount = 0;
+  if (pendingStatusDetailReady) {
+    strncpy(statusDetail, pendingStatusDetail, sizeof(statusDetail));
+    statusDetail[sizeof(statusDetail) - 1] = '\0';
+    pendingStatusDetailReady = false;
+    hasStatusDetail = true;
+  }
+  portEXIT_CRITICAL(&mapPayloadMux);
+
+  for (size_t i = 0; i < settingCount; i++) {
+    deviceMapRenderer.setSetting(settings[i].id, settings[i].value);
+    Serial.printf("Applied map setting: id=%u value=%ld\n", settings[i].id,
+                  (long)settings[i].value);
+  }
+  if (hasRoute) {
+    Serial.printf("Applying route geometry: %u bytes\n", (unsigned)routeLen);
+    deviceMapRenderer.setRouteGeometry(routeData, routeLen);
+  }
+  if (hasGps) {
+    Serial.printf("Applying GPS position: lat=%ld lon=%ld heading=%u\n",
+                  (long)gpsPayload.latMicro, (long)gpsPayload.lonMicro,
+                  gpsPayload.headingDeg);
+    deviceMapRenderer.setGpsPosition(gpsPayload.latMicro, gpsPayload.lonMicro,
+                                     gpsPayload.headingDeg);
+  }
+  if (hasStatusDetail) {
+    deviceMapRenderer.setStatusDetail(statusDetail);
+  }
 }
 
 // Update UI safely from main loop
@@ -557,11 +711,8 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
       }
       Serial.printf("Received fallback route geometry: %u bytes\n",
                     (unsigned)(value.length() - 4));
-      deviceMapRenderer.setRouteGeometry((const uint8_t *)value.data() + 4,
-                                          value.length() - 4);
-      routePacketsAccepted++;
-      pendingShowMap = true;
-      updateDeviceDebugStatus("fallback route");
+      queueRouteGeometryPayload((const uint8_t *)value.data() + 4,
+                                value.length() - 4, "fallback route");
       return;
     }
 
@@ -578,9 +729,7 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
       if (value.length() >= 14) {
         memcpy(&headingDeg, value.data() + 12, sizeof(headingDeg));
       }
-      deviceMapRenderer.setGpsPosition(latMicro, lonMicro, headingDeg);
-      gpsPacketsAccepted++;
-      updateDeviceDebugStatus("fallback gps");
+      queueGpsPositionPayload(latMicro, lonMicro, headingDeg, "fallback gps");
       return;
     }
 
@@ -592,9 +741,7 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
       uint8_t settingId = (uint8_t)value[4];
       int32_t settingValue = 0;
       memcpy(&settingValue, value.data() + 5, sizeof(settingValue));
-      deviceMapRenderer.setSetting(settingId, settingValue);
-      Serial.printf("Fallback map setting updated: id=%u value=%ld\n",
-                    settingId, (long)settingValue);
+      queueMapSettingPayload(settingId, settingValue, "fallback");
       return;
     }
 
@@ -621,10 +768,8 @@ class RouteGeometryCharacteristicCallbacks : public NimBLECharacteristicCallback
     }
     if (!value.empty()) {
       Serial.printf("Received route geometry: %u bytes\n", (unsigned)value.length());
-      deviceMapRenderer.setRouteGeometry((const uint8_t *)value.data(), value.length());
-      routePacketsAccepted++;
-      pendingShowMap = true;
-      updateDeviceDebugStatus("route");
+      queueRouteGeometryPayload((const uint8_t *)value.data(), value.length(),
+                                "route");
     }
   }
 };
@@ -650,9 +795,7 @@ class GpsPositionCharacteristicCallbacks : public NimBLECharacteristicCallbacks 
       memcpy(&headingDeg, value.data() + 8, sizeof(headingDeg));
     }
 
-    deviceMapRenderer.setGpsPosition(latMicro, lonMicro, headingDeg);
-    gpsPacketsAccepted++;
-    updateDeviceDebugStatus("gps");
+    queueGpsPositionPayload(latMicro, lonMicro, headingDeg, "gps");
   }
 };
 
@@ -671,9 +814,7 @@ class MapSettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks 
     uint8_t settingId = (uint8_t)value[0];
     int32_t settingValue = 0;
     memcpy(&settingValue, value.data() + 1, sizeof(settingValue));
-    deviceMapRenderer.setSetting(settingId, settingValue);
-    Serial.printf("Map setting updated: id=%u value=%ld\n", settingId,
-                  (long)settingValue);
+    queueMapSettingPayload(settingId, settingValue, "setting");
   }
 };
 
@@ -1112,6 +1253,8 @@ const unsigned long STATS_UPDATE_INTERVAL =
 unsigned long lastDisplayKeepAlive = 0;
 const unsigned long DISPLAY_KEEPALIVE_INTERVAL =
     30000; // Refresh display every 30 seconds
+unsigned long lastBleDebugHeartbeat = 0;
+const unsigned long BLE_DEBUG_HEARTBEAT_INTERVAL = 5000;
 
 void keepDisplayAlive() {
   unsigned long now = millis();
@@ -1122,6 +1265,22 @@ void keepDisplayAlive() {
     // Ensure display stays on
     gfx->displayOn();
   }
+}
+
+void logBleDebugHeartbeat() {
+  unsigned long now = millis();
+  if (now - lastBleDebugHeartbeat < BLE_DEBUG_HEARTBEAT_INTERVAL) {
+    return;
+  }
+
+  lastBleDebugHeartbeat = now;
+  Serial.printf("BLE heartbeat: connected=%u auth=%u nav=%lu route=%lu gps=%lu ui=%lu pendingNav=%u pendingMap=%u\n",
+                deviceConnected ? 1 : 0, bleSessionAuthenticated ? 1 : 0,
+                (unsigned long)navPacketsAccepted,
+                (unsigned long)routePacketsAccepted,
+                (unsigned long)gpsPacketsAccepted,
+                (unsigned long)navUiApplies, pendingNavDataReady ? 1 : 0,
+                pendingShowMap ? 1 : 0);
 }
 
 void updateDeviceStats() {
@@ -1236,9 +1395,11 @@ void loop() {
 
   // Update UI from Main Loop (Thread Safe)
   processPendingNavigationPayload();
+  processPendingMapPayloads();
   updateNavigationUI();
   processPendingDisplayRequests();
   deviceMapRenderer.update();
+  logBleDebugHeartbeat();
 
   // Demo SD card file reading periodically
   demoSDCardReading();

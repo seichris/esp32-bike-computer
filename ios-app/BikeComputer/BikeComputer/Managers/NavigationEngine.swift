@@ -27,6 +27,7 @@ class NavigationEngine: NSObject, ObservableObject {
     private var currentSnapshot: NavigationManeuverSnapshot?
     private var sendTracker = NavigationSendTracker(distanceThreshold: 10)
     private var initialNavigationLocation: CLLocation?
+    private var lastDeviceGpsLocation: (location: CLLocation, convertFromMapKitRoute: Bool)?
     private var hasAcceptedLiveLocation = false
     private var lastSentGeometryHash: Int = 0
     private var geometrySendInterval: TimeInterval = 2.0
@@ -56,6 +57,7 @@ class NavigationEngine: NSObject, ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isReady in
                 guard isReady else { return }
+                self?.resendCurrentDeviceGpsPosition()
                 self?.resendCurrentNavigationState()
                 self?.resendCurrentRouteGeometry()
             }
@@ -103,6 +105,7 @@ class NavigationEngine: NSObject, ObservableObject {
         currentSnapshot = nil
         sendTracker.reset()
         initialNavigationLocation = nil
+        lastDeviceGpsLocation = nil
         hasAcceptedLiveLocation = false
         stopSimulation()
         print("Navigation stopped")
@@ -328,6 +331,13 @@ class NavigationEngine: NSObject, ObservableObject {
         sendRouteGeometryIfNeeded(currentLocation: CLLocation(latitude: startCoordinate.latitude,
                                                               longitude: startCoordinate.longitude))
     }
+
+    private func resendCurrentDeviceGpsPosition() {
+        guard isNavigating, let lastDeviceGpsLocation else { return }
+
+        sendDeviceGpsPosition(lastDeviceGpsLocation.location,
+                              convertFromMapKitRoute: lastDeviceGpsLocation.convertFromMapKitRoute)
+    }
     
     /// Extract clean instruction text from MKRoute.Step
     private func extractInstruction(from step: MKRoute.Step) -> String {
@@ -375,6 +385,7 @@ class NavigationEngine: NSObject, ObservableObject {
     }
 
     private func sendDeviceGpsPosition(_ location: CLLocation, convertFromMapKitRoute: Bool) {
+        lastDeviceGpsLocation = (location, convertFromMapKitRoute)
         let wgsCoordinate = convertFromMapKitRoute
             ? CoordinateConverter.gcj02ToWGS84(coordinate: location.coordinate)
             : location.coordinate

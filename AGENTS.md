@@ -17,6 +17,10 @@ This repo contains:
 - List ports (macOS): `pio device list` or `ls /dev/cu.usbmodem*`
 
 Bootloader mode: if upload fails, hold **BOOT (GPIO0)** while re-plugging USB.
+For Python/pyserial captures on `/dev/cu.usbmodem*`, open at `115200` and set
+`ser.dtr = False` plus `ser.rts = False` immediately after opening. Leaving
+RTS/DTR asserted can reset or hold the ESP32-S3 USB serial path and produce an
+empty monitor.
 
 ### iOS
 
