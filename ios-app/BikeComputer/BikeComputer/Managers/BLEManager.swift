@@ -217,6 +217,14 @@ class BLEManager: NSObject, ObservableObject {
     func reconnect() {
         autoReconnect = true
         resetReconnectionState()
+
+        if let peripheral = connectedPeripheral {
+            print("Restarting active BLE connection")
+            stopMonitoringRSSI()
+            centralManager.cancelPeripheralConnection(peripheral)
+            return
+        }
+
         if lastConnectedPeripheralIdentifier == nil {
             beginPairing()
         } else {
@@ -587,8 +595,10 @@ extension BLEManager: CBCentralManagerDelegate {
         connectedPeripheral = nil
         navigationCharacteristic = nil
         authCharacteristic = nil
+        navigationWriteEndpoint = nil
         isNavigationReady = false
         pendingAuthNonce = nil
+        authWriteState = .idle
         navigationWriteQueue.removeAll()
         stopMonitoringRSSI()
         
