@@ -220,11 +220,12 @@ bool bleSessionAuthenticated = false;
 char pendingAuthNonce[33] = "";
 
 NavigationData navData = {1, 0, ""};
+NavigationData pendingNavData = {1, 0, ""};
 volatile bool uiUpdateNeeded = false;
 volatile bool bleConnectedState = false;
 volatile bool bleStateChanged = false;
+volatile bool pendingNavDataReady = false;
 portMUX_TYPE navPayloadMux = portMUX_INITIALIZER_UNLOCKED;
-NavigationPayloadQueue navPayloadQueue;
 
 bool ensureSDCardMounted();
 
@@ -267,20 +268,9 @@ void queueNavigationPayload(const std::string &value) {
     return;
   }
 
-  portENTER_CRITICAL(&navPayloadMux);
-  navPayloadQueue.enqueue(value);
-  portEXIT_CRITICAL(&navPayloadMux);
-}
-
-void processPendingNavigationPayload() {
   char payload[NAV_PAYLOAD_MAX_LEN + 1];
-
-  portENTER_CRITICAL(&navPayloadMux);
-  bool hasPayload = navPayloadQueue.dequeue(payload, sizeof(payload));
-  portEXIT_CRITICAL(&navPayloadMux);
-  if (!hasPayload) {
-    return;
-  }
+  memcpy(payload, value.data(), value.length());
+  payload[value.length()] = '\0';
 
   NavigationData parsed;
   if (!parseNavigationData(payload, &parsed)) {
@@ -288,9 +278,32 @@ void processPendingNavigationPayload() {
     return;
   }
 
+  portENTER_CRITICAL(&navPayloadMux);
+  pendingNavData = parsed;
+  pendingNavDataReady = true;
+  portEXIT_CRITICAL(&navPayloadMux);
+
+  Serial.printf("Accepted navigation payload: Icon=%u, Distance=%lum, Instruction=%s\n",
+                parsed.iconID, (unsigned long)parsed.distance, parsed.instruction);
+}
+
+void processPendingNavigationPayload() {
+  NavigationData parsed;
+
+  portENTER_CRITICAL(&navPayloadMux);
+  bool hasPayload = pendingNavDataReady;
+  if (hasPayload) {
+    parsed = pendingNavData;
+    pendingNavDataReady = false;
+  }
+  portEXIT_CRITICAL(&navPayloadMux);
+  if (!hasPayload) {
+    return;
+  }
+
   navData = parsed;
 
-  Serial.printf("Parsed: Icon=%u, Distance=%lum, Instruction=%s\n",
+  Serial.printf("Applying navigation payload: Icon=%u, Distance=%lum, Instruction=%s\n",
                 navData.iconID, (unsigned long)navData.distance, navData.instruction);
 
   uiUpdateNeeded = true;
@@ -324,6 +337,15 @@ void updateNavigationUI() {
     if (ui_LabelInstruction != NULL) {
       lv_label_set_text(ui_LabelInstruction, navData.instruction);
     }
+    if (!deviceMapRenderer.isVisible()) {
+      lv_obj_t *navObjects[] = {ui_IconPlaceholder, ui_LabelDistance,
+                                ui_LabelInstruction};
+      for (lv_obj_t *object : navObjects) {
+        if (object != NULL) {
+          lv_obj_clear_flag(object, LV_OBJ_FLAG_HIDDEN);
+        }
+      }
+    }
     if (ui_IconPlaceholder != NULL) {
       // Draw arrow shapes based on iconID
       lv_color_t arrow_color;
@@ -351,6 +373,8 @@ void updateNavigationUI() {
         break;
       }
     }
+    Serial.printf("Navigation UI updated: %lu m | %s\n",
+                  (unsigned long)navData.distance, navData.instruction);
   }
 }
 
