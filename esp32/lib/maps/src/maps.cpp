@@ -30,10 +30,32 @@ struct MapRenderSettings {
 };
 extern MapRenderSettings mapRenderSettings;
 
-// Helper: Check if a typeId is visible based on visibilityMask
-// Bit 0 = buildings (100-149), Bit 1 = nature (150-199), Bit 2 = minor roads
-// (50-99)
-static inline bool isTypeVisible(uint8_t typeId, uint32_t visMask) {
+static inline bool isVisibleForDetailLevel(uint8_t typeId,
+                                           uint8_t detailLevel) {
+  if (typeId == 0 || detailLevel >= 2)
+    return true;
+
+  if (detailLevel == 1)
+    return !(typeId >= 100 && typeId < 150);
+
+  if (typeId >= 50 && typeId < 100)
+    return false; // Paths
+  if (typeId >= 100 && typeId < 150)
+    return false; // Buildings
+  if (typeId >= 150 && typeId < 200)
+    return false; // Nature/landuse
+
+  return true;
+}
+
+// Helper: Check if a typeId is visible based on detail level and visibilityMask.
+// Bit 0 = buildings (100-149), Bit 1 = nature (150-199), Bit 2 = paths (50-99).
+static inline bool isTypeVisible(uint8_t typeId,
+                                 const MapRenderSettings &settings) {
+  if (!isVisibleForDetailLevel(typeId, settings.detailLevel))
+    return false;
+
+  uint32_t visMask = settings.visibilityMask;
   if (typeId == 0)
     return true; // Unknown types always visible
   if (typeId >= 100 && typeId < 150)
@@ -1092,8 +1114,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             }
 
             // Skip if type is hidden by visibility mask
-            if (!isTypeVisible(polygon.typeId,
-                               mapRenderSettings.visibilityMask)) {
+            if (!isTypeVisible(polygon.typeId, mapRenderSettings)) {
               continue;
             }
 
@@ -1153,7 +1174,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           continue;
 
         // Skip if type is hidden by visibility mask
-        if (!isTypeVisible(line.typeId, mapRenderSettings.visibilityMask))
+        if (!isTypeVisible(line.typeId, mapRenderSettings))
           continue;
 
         uint16_t color_swapped = line.color; // Use color directly (RGB565)

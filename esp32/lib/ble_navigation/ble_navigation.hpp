@@ -42,7 +42,7 @@ struct MapRenderSettings {
   uint8_t mapRotationMode = 0; // 0=North Up, 1=Course Up
   uint8_t zoomLevel = 2;       // 0-5: Zoom level (0=super, 2=default)
   uint32_t visibilityMask =
-      0xFFFFFFFF; // Bitmask: bit0=buildings, bit1=nature, bit2=minorRoads
+      0xFFFFFFFF; // Bitmask: bit0=buildings, bit1=nature, bit2=paths
 };
 
 extern MapRenderSettings mapRenderSettings;

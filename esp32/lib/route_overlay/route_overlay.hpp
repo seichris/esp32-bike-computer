@@ -77,8 +77,6 @@ public:
 private:
   std::vector<GeoPoint, PsramAllocator<GeoPoint>> points;
 
-  // Route rendering settings
-  static constexpr int16_t ROUTE_LINE_WIDTH = 6;
   static constexpr uint16_t ROUTE_COLOR =
       0x1F9F; // Bright blue (RGB565, byte-swapped for LVGL)
 

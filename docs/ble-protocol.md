@@ -80,12 +80,16 @@ Current setting IDs:
 | ID | Meaning | Range |
 | --- | --- | --- |
 | `1` | Minimum polygon size | `0...50` |
-| `2` | Detail level | `0...2` |
+| `2` | Detail level | `0` low, `1` medium, `2` high |
 | `3` | Route line width | `2...8` |
 | `4` | Display rotation | `0...3` |
 | `6` | Map rotation mode | `0` north-up, `1` course-up |
 | `7` | Zoom level | `0...5` |
-| `8` | Visibility mask | bit 0 buildings, bit 1 nature, bit 2 minor roads |
+| `8` | Visibility mask | bit 0 buildings, bit 1 nature/landuse, bit 2 paths |
+
+Detail level is applied before the visibility mask. High keeps all feature
+classes enabled, medium hides building footprints, and low hides buildings,
+nature/landuse, and path-level detail.
 
 ## OSM Map Blocks
 

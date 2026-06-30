@@ -120,7 +120,7 @@ struct SettingsView: View {
                         .onChange(of: bleManager.showBuildings) { _ in bleManager.sendVisibilityMask() }
                     Toggle("Parks & Nature", isOn: $bleManager.showNature)
                         .onChange(of: bleManager.showNature) { _ in bleManager.sendVisibilityMask() }
-                    Toggle("Minor Roads", isOn: $bleManager.showMinorRoads)
+                    Toggle("Paths", isOn: $bleManager.showMinorRoads)
                         .onChange(of: bleManager.showMinorRoads) { _ in bleManager.sendVisibilityMask() }
                 }
                 .disabled(!bleManager.supportsDeviceSettings)
