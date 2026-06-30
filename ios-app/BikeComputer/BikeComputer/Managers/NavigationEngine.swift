@@ -58,8 +58,8 @@ class NavigationEngine: NSObject, ObservableObject {
             .sink { [weak self] isReady in
                 guard isReady else { return }
                 self?.resendCurrentDeviceGpsPosition()
-                self?.resendCurrentNavigationState()
                 self?.resendCurrentRouteGeometry()
+                self?.resendCurrentNavigationState()
             }
             .store(in: &cancellables)
     }
@@ -471,10 +471,5 @@ extension NavigationEngine {
         bleManager.sendRouteGeometry(geometryData)
         lastGeometrySendTime = now
         lastSentGeometryHash = hash
-
-        if let currentSnapshot {
-            sendTracker.resetForReadinessRetry()
-            sendNavigationDataToESP32(currentSnapshot)
-        }
     }
 }

@@ -184,26 +184,36 @@ struct NavigationProtocolTests {
 
         assert(NavigationPacketBuilder.data(from: "not-a-packet", maxLength: 8) == nil, "malformed packets fail when truncation is needed")
         assert(NavigationPacketBuilder.data(from: "1|4294967295|Turn", maxLength: 4) == nil, "oversized prefix fails")
-        assert(NavigationPacketBuilder.data(from: "1|100|", maxLength: NavigationPacketBuilder.protocolMaxBytes) == nil, "empty instruction fails")
+        let fallbackData = NavigationPacketBuilder.data(from: "1|100|", maxLength: NavigationPacketBuilder.protocolMaxBytes)
+        assertEqual(String(data: fallbackData ?? Data(), encoding: .utf8), "1|100|Continue", "empty instruction falls back to continue")
     }
 
     static func testNavigationWriteQueue() {
         var queue = NavigationWriteQueue(maxCount: 2)
-        queue.enqueue(Data([1]))
-        queue.enqueue(Data([2]))
+        queue.enqueue(NavigationWrite(data: Data([1]), label: "first"))
+        queue.enqueue(NavigationWrite(data: Data([2]), label: "second"))
         assertEqual(queue.count, 2, "queue stores pending writes")
 
-        let didDrop = queue.enqueue(Data([3]))
+        let didDrop = queue.enqueue(NavigationWrite(data: Data([3]), label: "third"))
         assert(didDrop, "queue reports overflow")
         assertEqual(queue.count, 2, "queue caps pending writes")
 
         var sent: [Data] = []
-        queue.flush(canSend: { sent.count < 1 }) { sent.append($0) }
+        var labels: [String] = []
+        queue.flush(canSend: { sent.count < 1 }) {
+            sent.append($0.data)
+            labels.append($0.label)
+        }
         assertEqual(sent, [Data([2])], "queue drops oldest packet first")
+        assertEqual(labels, ["second"], "queue preserves write metadata")
         assertEqual(queue.count, 1, "queue retains unsent packet under backpressure")
 
-        queue.flush(canSend: { true }) { sent.append($0) }
+        queue.flush(canSend: { true }) {
+            sent.append($0.data)
+            labels.append($0.label)
+        }
         assertEqual(sent, [Data([2]), Data([3])], "queue flushes remaining packet")
+        assertEqual(labels, ["second", "third"], "queue flushes write metadata in order")
         assertEqual(queue.count, 0, "queue is empty after flush")
     }
 
