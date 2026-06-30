@@ -307,7 +307,18 @@ class BLEManager: NSObject, ObservableObject {
         sendSetting(id: 8, value: mask)
     }
 
+    func sendDebugNavigationPacket() {
+        let packet = "\(NavigationIconID.left)|123|Debug turn left"
+        guard sendNavigationData(packet) else {
+            log("Debug navigation packet was not sent")
+            return
+        }
+
+        log("Sent debug navigation packet")
+    }
+
     func forgetTrustedPeripheral() {
+        autoReconnect = false
         lastConnectedPeripheralIdentifier = nil
         UserDefaults.standard.removeObject(forKey: SettingsKeys.lastPeripheralIdentifier)
         updateTrustedPeripheralDescription()

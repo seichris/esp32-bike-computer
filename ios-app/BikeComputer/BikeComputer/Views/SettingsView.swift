@@ -165,6 +165,13 @@ struct SettingsView: View {
                         Label("Reconnect", systemImage: "antenna.radiowaves.left.and.right")
                     }
 
+                    Button(action: {
+                        bleManager.sendDebugNavigationPacket()
+                    }) {
+                        Label("Send Test Navigation", systemImage: "arrow.turn.up.left")
+                    }
+                    .disabled(!bleManager.isNavigationReady)
+
                     Button(role: .destructive, action: {
                         bleManager.forgetTrustedPeripheral()
                     }) {
