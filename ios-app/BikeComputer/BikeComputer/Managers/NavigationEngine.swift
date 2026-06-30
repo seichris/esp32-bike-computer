@@ -59,8 +59,9 @@ class NavigationEngine: NSObject, ObservableObject {
 
     func processExternalLocation(_ location: CLLocation) {
         guard !isSimulationMode else { return }
-        guard shouldAcceptLiveLocation(location) else { return }
-        processLocation(location)
+        let routeLocation = CoordinateConverter.mapKitRouteLocation(fromGPSLocation: location)
+        guard shouldAcceptLiveLocation(routeLocation) else { return }
+        processLocation(routeLocation)
     }
     
     /// Start navigation with a given route

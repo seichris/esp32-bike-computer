@@ -206,13 +206,14 @@ class BikeComputerCoordinator: ObservableObject {
     }
 
     func handleDestinationSelection(coordinate: CLLocationCoordinate2D, mapLocation: CLLocation?) {
-        guard let sourceLocation = mapLocation ?? currentLocation else {
+        guard let sourceLocation = currentLocation ?? mapLocation else {
             alert.message = "Unable to determine your current location. Please enable location services."
             alert.isShowing = true
             return
         }
 
-        let source = MKMapItem(placemark: MKPlacemark(coordinate: sourceLocation.coordinate))
+        let routeSourceLocation = CoordinateConverter.mapKitRouteLocation(fromGPSLocation: sourceLocation)
+        let source = MKMapItem(placemark: MKPlacemark(coordinate: routeSourceLocation.coordinate))
         source.name = "Current Location"
 
         let destination = MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
@@ -285,9 +286,10 @@ extension BikeComputerCoordinator {
                 return
             }
 
-            let item = MKMapItem(placemark: MKPlacemark(coordinate: currentLoc.coordinate))
+            let routeLocation = CoordinateConverter.mapKitRouteLocation(fromGPSLocation: currentLoc)
+            let item = MKMapItem(placemark: MKPlacemark(coordinate: routeLocation.coordinate))
             item.name = "Current Location"
-            print("Using current location: \(currentLoc.coordinate.latitude), \(currentLoc.coordinate.longitude)")
+            print("Using current location: \(routeLocation.coordinate.latitude), \(routeLocation.coordinate.longitude)")
             completion(item)
 
         case .mapItem(let item):
@@ -298,8 +300,9 @@ extension BikeComputerCoordinator {
             let searchRequest = MKLocalSearch.Request()
             searchRequest.naturalLanguageQuery = query
             if let currentLocation {
+                let routeLocation = CoordinateConverter.mapKitRouteLocation(fromGPSLocation: currentLocation)
                 searchRequest.region = MKCoordinateRegion(
-                    center: currentLocation.coordinate,
+                    center: routeLocation.coordinate,
                     latitudinalMeters: 50000,
                     longitudinalMeters: 50000
                 )
