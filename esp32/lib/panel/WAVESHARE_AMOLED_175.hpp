@@ -9,7 +9,6 @@
 // Use Arduino_GFX for CO5300 AMOLED (like working esp32 project)
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
-#include "waveshare_board.hpp"
 
 // Display dimensions
 #define SCREEN_WIDTH  466
@@ -27,7 +26,6 @@ extern volatile uint32_t lastDisplayFlushDurationUs;
 extern volatile uint32_t maxDisplayFlushDurationUs;
 
 // Touch handling (CST9217)
-constexpr uint8_t CST9217_ADDRESS = waveshare_board::CST9217_ADDR;
 extern bool touchPressed;
 extern uint16_t touchX, touchY;
 
@@ -97,13 +95,13 @@ class LGFX : public lgfx::LGFX_Device {
        cfg.y_min      = 0;
        cfg.y_max      = 465;  // 466px height
        cfg.pin_int    = 21;
-       cfg.pin_rst    = 20;
+       cfg.pin_rst    = -1; // Reset is TCA9554 P0; never drive GPIO20.
        cfg.bus_shared = true;
        cfg.i2c_port   = 0; // I2C Port 0
        cfg.i2c_addr   = 0x5A;  // CST9217 address (not CST816S)
        cfg.pin_sda    = 15;
-       cfg.pin_scl    = 16;
-       cfg.freq       = 400000;
+       cfg.pin_scl    = 14;
+       cfg.freq       = 100000;
 
        _touch_instance.config(cfg);
        _panel_instance.setTouch(&_touch_instance);

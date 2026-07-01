@@ -495,6 +495,57 @@ Acceptance criteria:
 Goal: reduce shared I2C load while preserving the PR #6/PR #7 finding that
 GPIO21 is a useful active-low hint, not a perfect sole source of truth.
 
+Implementation status:
+
+- Implemented on branch `touch-hint-fallback-optimization` in PR 12, based on
+  merged PR 11.
+- Added `esp32/lib/waveshare_board/touch.hpp` for CST9217/TCA9554 registers,
+  dimensions, GPIO21 hint pin, and touch polling/backoff timing constants.
+- Panel touch code now tracks GPIO21 active-low hint level and edges without
+  doing I2C work from an ISR.
+- Active hint edges can bypass current backoff and trigger an immediate read;
+  active/recent hints keep a fast read cadence.
+- Idle fallback polling is still present for boards or states where GPIO21
+  remains high despite available CST9217 data, but the idle cadence is slower
+  than PR 11 to reduce shared I2C load.
+- Repeated idle I2C failures now use a bounded increasing retry backoff.
+- Dormant non-Arduino_GFX touch config no longer points reset at GPIO20 and uses
+  the correct shared I2C SCL pin.
+
+Device validation on 2026-07-01:
+
+- Built and flashed successfully to the connected Waveshare board on
+  `/dev/cu.usbmodem2101`.
+- Boot stayed healthy after flash: AXP2101 display power, Arduino_GFX display,
+  SD card, LVGL, BLE advertising, and TCA9554 touch reset all initialized.
+- 45-second no-touch serial capture stayed up without reboot or I2C wedge.
+  CST9217 reads still intermittently returned `ESP_ERR_INVALID_STATE`, but PR 11
+  I2C recovery kept the bus usable. The latest periodic `SYS` line during that
+  capture showed `i2c[fail=5 recover=5 recovered=5]`, followed by two additional
+  read errors before the capture ended.
+- Tap, drag, and long-press testing produced valid CST9217 touch packets and
+  `Touch: press`/`Touch: release` events on the device.
+- During tap, drag, and long-press testing, GPIO21 remained `HIGH(idle)`.
+  Therefore this hardware/firmware state must keep fallback reads; GPIO21 cannot
+  be used as the sole touch readiness source on this unit.
+- The fallback path read valid points such as `(204,297)` and `(285,279)` while
+  the hint line stayed idle, confirming the fallback path remains necessary and
+  functional.
+- 10-minute no-touch idle summary capture stayed alive to `SYS: up=599s` with
+  zero touch press/release events and zero GPIO21 `LOW(active)` observations.
+  The capture saw 76 Arduino Wire `ESP_ERR_INVALID_STATE` lines, but no runtime
+  reboot, phantom touch, or visible bus wedge. The only reset lines were the
+  expected USB serial reset banner from opening the capture.
+- Integrated iPhone navigation smoke test passed. The iPhone connected over BLE,
+  sent settings, GPS, route geometry, and navigation instructions; the ESP32
+  transitioned to the main map screen with route overlay active. Touch tap/drag
+  activity continued to produce valid CST9217 press/release packets while the map
+  redrew and BLE stayed connected/authenticated. GPIO21 still remained
+  `HIGH(idle)`, so the fallback path remains required under navigation load too.
+  The final heartbeat stayed on `screen=main` with `routePts=25`,
+  `ble[conn=1 auth=1 nav=2 route=1 gps=1 settings=7]`, and recovering I2C
+  counters (`i2c[fail=11 recover=11 recovered=10 missing=0]`).
+
 Scope:
 
 - Move CST9217/TCA9554 constants out of the panel implementation into board or
