@@ -536,6 +536,15 @@ Device validation on 2026-07-01:
   The capture saw 76 Arduino Wire `ESP_ERR_INVALID_STATE` lines, but no runtime
   reboot, phantom touch, or visible bus wedge. The only reset lines were the
   expected USB serial reset banner from opening the capture.
+- Integrated iPhone navigation smoke test passed. The iPhone connected over BLE,
+  sent settings, GPS, route geometry, and navigation instructions; the ESP32
+  transitioned to the main map screen with route overlay active. Touch tap/drag
+  activity continued to produce valid CST9217 press/release packets while the map
+  redrew and BLE stayed connected/authenticated. GPIO21 still remained
+  `HIGH(idle)`, so the fallback path remains required under navigation load too.
+  The final heartbeat stayed on `screen=main` with `routePts=25`,
+  `ble[conn=1 auth=1 nav=2 route=1 gps=1 settings=7]`, and recovering I2C
+  counters (`i2c[fail=11 recover=11 recovered=10 missing=0]`).
 
 Scope:
 
