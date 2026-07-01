@@ -251,7 +251,7 @@ Implementation status:
 Implications:
 
 - The PR #6/PR #7 touch/I2C conclusions remain current on the connected device.
-- PR 8 can proceed without more hardware discovery, as long as it preserves
+- PR 11 can proceed without more hardware discovery, as long as it preserves
   boot behavior.
 - PR 11 should include a post-boot I2C recovery path, retry policy, and counters
   because TCA9554 can be missed during early touch init and later become
@@ -412,6 +412,41 @@ Acceptance criteria:
 Goal: make the known I2C instability manageable for all devices on the shared
 bus, not just touch.
 
+Implementation status:
+
+- In progress on branch `shared-i2c-resilience`, based on merged PR 10 commit
+  `b853488`.
+- Added a Waveshare-only shared I2C helper with explicit `100 kHz` default
+  clock, `50 ms` transaction timeout, retry wrappers, post-boot bus recovery,
+  optional probe/debug-scan helpers, and counters for failed transactions,
+  recovery attempts, recovered transactions, and missing devices.
+- Migrated current Waveshare AXP2101, TCA9554, and CST9217 register access to
+  the shared helper.
+- PCF85063 and QMI8658 do not yet have production accessors in the firmware;
+  they should use the shared helper when PR 14 and PR 15 add RTC/IMU drivers,
+  rather than adding unused reads in PR 11.
+- Local build passed on 2026-07-01:
+  `PLATFORMIO_CORE_DIR=/tmp/esp32-bike-pio-core-313 /tmp/esp32-bike-pio-313/bin/pio run -e WAVESHARE_AMOLED_175`.
+- Connected-device upload passed four times on 2026-07-01 without manually
+  entering BOOT/download mode:
+  `PLATFORMIO_CORE_DIR=/tmp/esp32-bike-pio-core-313 /tmp/esp32-bike-pio-313/bin/pio run -e WAVESHARE_AMOLED_175 -t upload --upload-port /dev/cu.usbmodem2101`.
+- First passive serial capture after PR 11 boot showed AXP2101, display, SD,
+  LVGL, BLE advertising, and TCA9554 touch reset initialized successfully
+  through a 30-second idle run. It also showed recurring Arduino Core
+  `ESP_ERR_INVALID_STATE` touch-read failures while the firmware kept running;
+  those failures are now measurable through the PR 11 I2C counters.
+- A later passive serial capture saw the USB CDC device re-enumerate/drop with
+  `Device not configured`. Treat serial-capture resets as a local USB CDC
+  testing caveat, and use plain unplug/replug visual boot confirmation as the
+  final practical check before merging.
+- Final connected-device check after unplug/replug and reflashing the review-loop
+  build passed on 2026-07-01. The device reached the waiting screen and stayed
+  running through a 35-second passive serial capture. The `SYS:` heartbeat now
+  reports I2C counters on the same line, ending at
+  `i2c[fail=8 recover=8 recovered=8 missing=0]`; this confirms the known
+  Arduino Core touch-read failures are counted and the bus recovers during
+  normal idle operation.
+
 Scope:
 
 - Add a shared I2C helper for Waveshare:
@@ -420,8 +455,9 @@ Scope:
   - transaction timeout handling
   - optional device probe
   - optional debug scan
-- Use helper functions for AXP2101, TCA9554, CST9217, PCF85063, and QMI8658
-  access.
+- Use helper functions for current AXP2101, TCA9554, and CST9217 access.
+- Keep PCF85063 and QMI8658 on the same helper path when their RTC/IMU drivers
+  are added.
 - Keep polling/logging rate limited to avoid making bus contention worse.
 - Add counters for:
   - recovery attempts
