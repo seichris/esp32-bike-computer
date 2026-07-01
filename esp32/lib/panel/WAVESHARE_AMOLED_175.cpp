@@ -14,6 +14,7 @@
 // Include HAL for pin definitions
 #include "../../include/hal.hpp"
 #include "i2c_bus.hpp"
+#include "touch.hpp"
 #include "waveshare_board.hpp"
 
 // Define Global Variables declared extern in hal.hpp
@@ -86,18 +87,10 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
 // See WAVESHARE_HARDWARE.md.
 // ============================================================================
 
-constexpr uint8_t TCA9554_ADDR = waveshare_board::TCA9554_ADDR;
-#define TCA9554_OUTPUT_REG 0x01
-#define TCA9554_CONFIG_REG 0x03
-#define TCA9554_TOUCH_RST_BIT 0
-constexpr uint8_t CST9217_INT_PIN = TCH_I2C_INT;
-#define CST9217_REG_DATA 0xD000
-#define CST9217_ACK 0xAB
-#define CST9217_DATA_LENGTH 10
-
 bool touchPressed = false;
 uint16_t touchX = 0, touchY = 0;
 static bool touchInitialized = false;
+static bool touchHintConfigured = false;
 static uint32_t lastTouchInitAttemptMs = 0;
 static uint32_t lastTouchReadMs = 0;
 static uint32_t touchBackoffUntilMs = 0;
@@ -106,26 +99,22 @@ static uint32_t lastTouchDebugLogMs = 0;
 static uint32_t lastTouchRawLogMs = 0;
 static uint32_t touchFastPollUntilMs = 0;
 static uint32_t lastValidTouchMs = 0;
+static uint32_t lastTouchHintActiveMs = 0;
+static uint32_t lastTouchHintChangeMs = 0;
 static uint8_t consecutiveTouchReadFailures = 0;
 static uint8_t tca9554OutputShadow = 0xFF;
 static uint8_t tca9554ConfigShadow = 0xFF;
-static bool lastTouchInterruptActive = false;
-static bool touchInterruptStateKnown = false;
-
-constexpr uint32_t TOUCH_ACTIVE_READ_INTERVAL_MS = 25;
-constexpr uint32_t TOUCH_FAST_FALLBACK_READ_INTERVAL_MS = 25;
-constexpr uint32_t TOUCH_IDLE_FALLBACK_READ_INTERVAL_MS = 250;
-constexpr uint32_t TOUCH_FAST_POLL_WINDOW_MS = 700;
-constexpr uint32_t TOUCH_ACTIVE_FAILURE_GRACE_MS = 600;
-constexpr uint32_t TOUCH_IDLE_FAILURE_RETRY_MS = 75;
+static bool lastTouchHintActive = false;
+static bool touchHintStateKnown = false;
 
 static bool isValidTouchCoordinate(uint16_t x, uint16_t y) {
-  return x < 466 && y < 466;
+  return x < waveshare_board::touch::ACTIVE_WIDTH &&
+         y < waveshare_board::touch::ACTIVE_HEIGHT;
 }
 
 static bool readCst9217Register(uint16_t reg, uint8_t *data, uint8_t len) {
-  return waveshare_board::i2c::readRegister16(CST9217_ADDRESS, reg, data, len,
-                                              "CST9217");
+  return waveshare_board::i2c::readRegister16(
+      waveshare_board::touch::CST9217_ADDR, reg, data, len, "CST9217");
 }
 
 static void logTouchPacket(const char *label, const uint8_t *data,
@@ -160,22 +149,80 @@ static void setTouchPressed(bool pressed) {
   touchPressed = pressed;
 }
 
-static bool isTouchInterruptActive() {
-  // CST touch controllers use an active-low interrupt line.
-  return digitalRead(CST9217_INT_PIN) == LOW;
+static void configureTouchHintPin() {
+  if (touchHintConfigured) {
+    return;
+  }
+
+  pinMode(waveshare_board::touch::CST9217_INT_PIN, INPUT_PULLUP);
+  touchHintConfigured = true;
 }
 
-static void logTouchInterruptState(bool active, uint32_t now) {
-  bool changed = !touchInterruptStateKnown || active != lastTouchInterruptActive;
+static bool isTouchHintActive() {
+  configureTouchHintPin();
+  return digitalRead(waveshare_board::touch::CST9217_INT_PIN) == LOW;
+}
+
+static bool updateTouchHintState(bool active, uint32_t now) {
+  bool changed = !touchHintStateKnown || active != lastTouchHintActive;
   bool heartbeat = now - lastTouchDebugLogMs > 10000;
 
-  if (changed || heartbeat) {
-    Serial.printf("Touch debug: init=%d int=%s pressed=%d\n", touchInitialized,
-                  active ? "LOW(active)" : "HIGH(idle)", touchPressed);
-    lastTouchDebugLogMs = now;
-    lastTouchInterruptActive = active;
-    touchInterruptStateKnown = true;
+  if (active) {
+    lastTouchHintActiveMs = now;
   }
+  if (changed) {
+    lastTouchHintChangeMs = now;
+    if (active) {
+      touchFastPollUntilMs =
+          now + waveshare_board::touch::HINT_FAST_POLL_WINDOW_MS;
+    }
+  }
+
+  if (changed || heartbeat) {
+    uint32_t msSinceHintChange =
+        lastTouchHintChangeMs == 0 ? 0 : now - lastTouchHintChangeMs;
+    Serial.printf("Touch debug: init=%d int=%s pressed=%d hint_age_ms=%lu\n",
+                  touchInitialized, active ? "LOW(active)" : "HIGH(idle)",
+                  touchPressed, static_cast<unsigned long>(msSinceHintChange));
+    lastTouchDebugLogMs = now;
+    lastTouchHintActive = active;
+    touchHintStateKnown = true;
+  }
+
+  return changed;
+}
+
+static uint32_t idleFailureRetryMs() {
+  uint32_t retryMs = waveshare_board::touch::IDLE_FAILURE_BASE_RETRY_MS;
+  if (consecutiveTouchReadFailures > 1) {
+    retryMs += static_cast<uint32_t>(consecutiveTouchReadFailures - 1) * 75;
+  }
+  if (retryMs > waveshare_board::touch::IDLE_FAILURE_MAX_RETRY_MS) {
+    retryMs = waveshare_board::touch::IDLE_FAILURE_MAX_RETRY_MS;
+  }
+  return retryMs;
+}
+
+static uint32_t touchReadInterval(bool hintActive, bool hintChanged,
+                                  uint32_t now) {
+  if (hintChanged && hintActive) {
+    return 0;
+  }
+  if (hintActive) {
+    return waveshare_board::touch::HINT_ACTIVE_READ_INTERVAL_MS;
+  }
+  if (touchPressed) {
+    return waveshare_board::touch::ACTIVE_READ_INTERVAL_MS;
+  }
+  if (lastTouchHintActiveMs != 0 &&
+      now - lastTouchHintActiveMs <
+          waveshare_board::touch::HINT_FAST_POLL_WINDOW_MS) {
+    return waveshare_board::touch::RECENT_HINT_READ_INTERVAL_MS;
+  }
+  if (now < touchFastPollUntilMs) {
+    return waveshare_board::touch::FAST_FALLBACK_READ_INTERVAL_MS;
+  }
+  return waveshare_board::touch::IDLE_FALLBACK_READ_INTERVAL_MS;
 }
 
 static void noteTouchReadFailure(const char *reason, uint32_t now) {
@@ -187,13 +234,15 @@ static void noteTouchReadFailure(const char *reason, uint32_t now) {
     lastTouchErrorLogMs = now;
   }
 
-  if (touchPressed && now - lastValidTouchMs < TOUCH_ACTIVE_FAILURE_GRACE_MS) {
-    touchBackoffUntilMs = now + TOUCH_ACTIVE_READ_INTERVAL_MS;
+  if (touchPressed &&
+      now - lastValidTouchMs < waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
+    touchBackoffUntilMs =
+        now + waveshare_board::touch::ACTIVE_READ_INTERVAL_MS;
     return;
   }
 
   if (!touchPressed) {
-    touchBackoffUntilMs = now + TOUCH_IDLE_FAILURE_RETRY_MS;
+    touchBackoffUntilMs = now + idleFailureRetryMs();
     if (consecutiveTouchReadFailures > 20) {
       consecutiveTouchReadFailures = 0;
     }
@@ -204,7 +253,7 @@ static void noteTouchReadFailure(const char *reason, uint32_t now) {
   touchBackoffUntilMs = now + 250;
   if (consecutiveTouchReadFailures >= 5) {
     touchInitialized = false;
-    touchBackoffUntilMs = now + 1200;
+    touchBackoffUntilMs = now + waveshare_board::touch::REINIT_BACKOFF_MS;
     consecutiveTouchReadFailures = 0;
   }
 }
@@ -218,14 +267,16 @@ static bool tca9554SetPin(uint8_t pin, bool level) {
   }
 
   return waveshare_board::i2c::writeRegister8(
-      TCA9554_ADDR, TCA9554_OUTPUT_REG, tca9554OutputShadow, "TCA9554");
+      waveshare_board::TCA9554_ADDR, waveshare_board::touch::TCA9554_OUTPUT_REG,
+      tca9554OutputShadow, "TCA9554");
 }
 
 static bool tca9554ConfigureOutput(uint8_t pin) {
   tca9554ConfigShadow &= ~(1 << pin); // Clear bit = Output
 
   return waveshare_board::i2c::writeRegister8(
-      TCA9554_ADDR, TCA9554_CONFIG_REG, tca9554ConfigShadow, "TCA9554");
+      waveshare_board::TCA9554_ADDR, waveshare_board::touch::TCA9554_CONFIG_REG,
+      tca9554ConfigShadow, "TCA9554");
 }
 
 void initTouchController() {
@@ -237,15 +288,20 @@ void initTouchController() {
     return;
   }
   lastTouchInitAttemptMs = now;
+  configureTouchHintPin();
 
   // Check for TCA9554 and reset touch controller
-  if (waveshare_board::i2c::probe(TCA9554_ADDR, "TCA9554")) {
+  if (waveshare_board::i2c::probe(waveshare_board::TCA9554_ADDR, "TCA9554")) {
     Serial.println("✓ TCA9554 found - resetting touch controller");
-    pinMode(CST9217_INT_PIN, INPUT_PULLUP);
-    bool resetOk = tca9554ConfigureOutput(TCA9554_TOUCH_RST_BIT);
-    resetOk = tca9554SetPin(TCA9554_TOUCH_RST_BIT, false) && resetOk; // RST low
+    bool resetOk =
+        tca9554ConfigureOutput(waveshare_board::touch::TCA9554_TOUCH_RST_BIT);
+    resetOk =
+        tca9554SetPin(waveshare_board::touch::TCA9554_TOUCH_RST_BIT, false) &&
+        resetOk; // RST low
     delay(20);
-    resetOk = tca9554SetPin(TCA9554_TOUCH_RST_BIT, true) && resetOk; // RST high
+    resetOk =
+        tca9554SetPin(waveshare_board::touch::TCA9554_TOUCH_RST_BIT, true) &&
+        resetOk; // RST high
     delay(100); // Wait for touch controller to boot
     touchInitialized = resetOk;
     if (!resetOk) {
@@ -258,9 +314,12 @@ void initTouchController() {
 
 void readTouch() {
   uint32_t now = millis();
+  bool touchHintActive = isTouchHintActive();
+  bool touchHintChanged = updateTouchHintState(touchHintActive, now);
 
-  if (now < touchBackoffUntilMs) {
-    if (touchPressed && now - lastValidTouchMs < TOUCH_ACTIVE_FAILURE_GRACE_MS) {
+  if (now < touchBackoffUntilMs && !(touchHintChanged && touchHintActive)) {
+    if (touchPressed && now - lastValidTouchMs <
+                            waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
       return;
     }
     setTouchPressed(false);
@@ -276,32 +335,28 @@ void readTouch() {
     }
   }
 
-  bool touchInterruptActive = isTouchInterruptActive();
-  logTouchInterruptState(touchInterruptActive, now);
-  // GPIO21 is useful when it works, but on some Waveshare units it stays idle
-  // even while CST9217 has touch data. Keep a slow polling fallback so touch
-  // remains usable without hammering the shared I2C bus.
-  uint32_t readInterval = touchInterruptActive ? TOUCH_ACTIVE_READ_INTERVAL_MS
-                               : (touchPressed || now < touchFastPollUntilMs)
-                                     ? TOUCH_FAST_FALLBACK_READ_INTERVAL_MS
-                                     : TOUCH_IDLE_FALLBACK_READ_INTERVAL_MS;
+  uint32_t readInterval =
+      touchReadInterval(touchHintActive, touchHintChanged, now);
   if (now - lastTouchReadMs < readInterval) {
     return;
   }
   lastTouchReadMs = now;
 
-  uint8_t data[CST9217_DATA_LENGTH] = {0};
-  if (!readCst9217Register(CST9217_REG_DATA, data, sizeof(data))) {
+  uint8_t data[waveshare_board::touch::CST9217_DATA_LENGTH] = {0};
+  if (!readCst9217Register(waveshare_board::touch::CST9217_DATA_REG, data,
+                           sizeof(data))) {
     noteTouchReadFailure("data read", now);
     return;
   }
   consecutiveTouchReadFailures = 0;
 
-  if (data[6] != CST9217_ACK) {
+  if (data[6] != waveshare_board::touch::CST9217_ACK) {
     logTouchPacket("ignored-no-ack", data, sizeof(data), 0, 0,
-                   touchInterruptActive, now);
-    if (touchPressed && now - lastValidTouchMs < TOUCH_ACTIVE_FAILURE_GRACE_MS) {
-      touchBackoffUntilMs = now + TOUCH_ACTIVE_READ_INTERVAL_MS;
+                   touchHintActive, now);
+    if (touchPressed && now - lastValidTouchMs <
+                            waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
+      touchBackoffUntilMs =
+          now + waveshare_board::touch::ACTIVE_READ_INTERVAL_MS;
       return;
     }
     setTouchPressed(false);
@@ -310,8 +365,10 @@ void readTouch() {
 
   uint8_t points = data[5] & 0x7F;
   if (points == 0) {
-    if (touchPressed && now - lastValidTouchMs < TOUCH_ACTIVE_FAILURE_GRACE_MS) {
-      touchBackoffUntilMs = now + TOUCH_ACTIVE_READ_INTERVAL_MS;
+    if (touchPressed && now - lastValidTouchMs <
+                            waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
+      touchBackoffUntilMs =
+          now + waveshare_board::touch::ACTIVE_READ_INTERVAL_MS;
       return;
     }
     setTouchPressed(false);
@@ -323,9 +380,11 @@ void readTouch() {
   uint16_t rawY = (data[2] << 4) | (data[3] & 0x0F);
   if (status != 0x00 && status != 0x06) {
     logTouchPacket("ignored-status", data, sizeof(data), rawX, rawY,
-                   touchInterruptActive, now);
-    if (touchPressed && now - lastValidTouchMs < TOUCH_ACTIVE_FAILURE_GRACE_MS) {
-      touchBackoffUntilMs = now + TOUCH_ACTIVE_READ_INTERVAL_MS;
+                   touchHintActive, now);
+    if (touchPressed && now - lastValidTouchMs <
+                            waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
+      touchBackoffUntilMs =
+          now + waveshare_board::touch::ACTIVE_READ_INTERVAL_MS;
       return;
     }
     setTouchPressed(false);
@@ -333,7 +392,7 @@ void readTouch() {
   }
   if (!isValidTouchCoordinate(rawX, rawY)) {
     logTouchPacket("ignored-invalid", data, sizeof(data), rawX, rawY,
-                   touchInterruptActive, now);
+                   touchHintActive, now);
     setTouchPressed(false);
     return;
   }
@@ -341,12 +400,12 @@ void readTouch() {
   bool moved = rawX != touchX || rawY != touchY;
   if (status == 0x00 && !touchPressed) {
     logTouchPacket("ignored-stale-start", data, sizeof(data), rawX, rawY,
-                   touchInterruptActive, now);
+                   touchHintActive, now);
     setTouchPressed(false);
     return;
   }
   if (status == 0x00 && !moved &&
-      now - lastValidTouchMs >= TOUCH_ACTIVE_FAILURE_GRACE_MS) {
+      now - lastValidTouchMs >= waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
     setTouchPressed(false);
     return;
   }
@@ -356,15 +415,16 @@ void readTouch() {
   if (status == 0x06 || moved) {
     lastValidTouchMs = now;
   }
-  touchFastPollUntilMs = now + TOUCH_FAST_POLL_WINDOW_MS;
+  touchFastPollUntilMs =
+      now + waveshare_board::touch::TOUCH_FAST_POLL_WINDOW_MS;
   logTouchPacket(status == 0x06 ? "point" : "point-status0", data,
-                 sizeof(data), touchX, touchY, touchInterruptActive, now);
+                 sizeof(data), touchX, touchY, touchHintActive, now);
 
   // Clamp to screen bounds
-  if (touchX >= 466)
-    touchX = 465;
-  if (touchY >= 466)
-    touchY = 465;
+  if (touchX >= waveshare_board::touch::ACTIVE_WIDTH)
+    touchX = waveshare_board::touch::MAX_X;
+  if (touchY >= waveshare_board::touch::ACTIVE_HEIGHT)
+    touchY = waveshare_board::touch::MAX_Y;
 
   setTouchPressed(true);
 }
@@ -380,14 +440,14 @@ void my_touchpad_read(lv_indev_t *indev_driver, lv_indev_data_t *data) {
     switch (displayRotation) {
     case 1: // 90° CCW: swap X/Y and flip new X
       rotatedX = touchY;
-      rotatedY = 465 - touchX;
+      rotatedY = waveshare_board::touch::MAX_Y - touchX;
       break;
     case 2: // 180°: flip both
-      rotatedX = 465 - touchX;
-      rotatedY = 465 - touchY;
+      rotatedX = waveshare_board::touch::MAX_X - touchX;
+      rotatedY = waveshare_board::touch::MAX_Y - touchY;
       break;
     case 3: // 270° CCW: swap X/Y and flip new Y
-      rotatedX = 465 - touchY;
+      rotatedX = waveshare_board::touch::MAX_X - touchY;
       rotatedY = touchX;
       break;
     }
