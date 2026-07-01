@@ -8,6 +8,10 @@
 
 #include "power.hpp"
 
+#ifdef WAVESHARE_AMOLED_175
+#include "axp2101.hpp"
+#endif
+
 extern const uint8_t BOARD_BOOT_PIN;
 
 /**
@@ -87,6 +91,10 @@ void Power::powerOffPeripherals() {
     gfx->fillScreen(0x0000);
   }
 #endif
+#ifdef WAVESHARE_AMOLED_175
+  waveshare_board::axp2101::setDisplayPower(false);
+  waveshare_board::axp2101::setPeripheralPower(false);
+#endif
   SPI.end();
   Wire.end();
 }
@@ -108,7 +116,14 @@ void Power::deviceSuspend() {
   lv_refr_now(display);
   if (gfx)
     gfx->displayOff();
+#ifdef WAVESHARE_AMOLED_175
+  waveshare_board::axp2101::setDisplayPower(false);
+#endif
   powerLightSleep();
+#ifdef WAVESHARE_AMOLED_175
+  waveshare_board::axp2101::setDisplayPower(true);
+  delay(50);
+#endif
   if (gfx) {
     gfx->displayOn();
     gfx->setBrightness(255);

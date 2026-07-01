@@ -1,0 +1,213 @@
+/**
+ * @file axp2101.cpp
+ * @brief AXP2101 PMU helpers for the Waveshare ESP32-S3 Touch AMOLED 1.75.
+ */
+
+#include "axp2101.hpp"
+
+#ifdef WAVESHARE_AMOLED_175
+
+#include "waveshare_board.hpp"
+#include <Wire.h>
+
+namespace waveshare_board::axp2101 {
+
+namespace {
+
+bool pmuAvailable = false;
+
+constexpr uint8_t AXP2101_STATUS1_REG = 0x00;
+constexpr uint8_t AXP2101_STATUS2_REG = 0x01;
+constexpr uint8_t AXP2101_VBUS_GOOD_MASK = 0x20;
+constexpr uint8_t AXP2101_BATTERY_PRESENT_MASK = 0x08;
+constexpr uint8_t AXP2101_BATTERY_CURRENT_DIRECTION_SHIFT = 5;
+constexpr uint8_t AXP2101_BATTERY_CURRENT_DIRECTION_MASK = 0x03;
+constexpr uint8_t AXP2101_SYSTEM_ON_MASK = 0x10;
+constexpr uint8_t AXP2101_VINDPM_ACTIVE_MASK = 0x08;
+constexpr uint8_t AXP2101_CHARGING_STATUS_MASK = 0x07;
+
+constexpr uint8_t peripheralRailRegs[] = {
+    AXP2101_ALDO1_VOLTAGE_REG, AXP2101_ALDO2_VOLTAGE_REG,
+    AXP2101_ALDO3_VOLTAGE_REG, AXP2101_ALDO4_VOLTAGE_REG,
+    AXP2101_BLDO1_VOLTAGE_REG, AXP2101_BLDO2_VOLTAGE_REG};
+
+bool writeRegisterChecked(const char *label, uint8_t reg, uint8_t value,
+                          uint8_t readbackMask = 0xFF) {
+  uint8_t readback = 0;
+  for (uint8_t attempt = 0; attempt < 2; attempt++) {
+    if (!writeRegister(reg, value)) {
+      Serial.printf("AXP2101: %s write failed reg=0x%02X value=0x%02X\n",
+                    label, reg, value);
+      return false;
+    }
+
+    delay(5);
+    if (!readRegister(reg, readback)) {
+      Serial.printf("AXP2101: %s readback failed reg=0x%02X expected=0x%02X\n",
+                    label, reg, value);
+      continue;
+    }
+
+    bool ok = (readback & readbackMask) == (value & readbackMask);
+    Serial.printf("AXP2101: %s reg=0x%02X value=0x%02X read=0x%02X mask=0x%02X %s\n",
+                  label, reg, value, readback, readbackMask,
+                  ok ? "ok" : "mismatch");
+    if (ok) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+uint8_t currentLdoEnableValue(uint8_t fallback) {
+  uint8_t value = fallback;
+  readRegister(AXP2101_LDO_ENABLE_REG, value);
+  return value;
+}
+
+} // namespace
+
+bool begin() {
+  Wire.beginTransmission(AXP2101_ADDR);
+  pmuAvailable = Wire.endTransmission() == 0;
+  return pmuAvailable;
+}
+
+bool isAvailable() { return pmuAvailable; }
+
+bool readRegister(uint8_t reg, uint8_t &value) {
+  for (uint8_t attempt = 0; attempt < 3; attempt++) {
+    Wire.beginTransmission(AXP2101_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission() != 0) {
+      delay(2);
+      continue;
+    }
+
+    if (Wire.requestFrom(AXP2101_ADDR, static_cast<uint8_t>(1)) == 1) {
+      value = Wire.read();
+      return true;
+    }
+    delay(2);
+  }
+
+  return false;
+}
+
+bool writeRegister(uint8_t reg, uint8_t value) {
+  for (uint8_t attempt = 0; attempt < 2; attempt++) {
+    Wire.beginTransmission(AXP2101_ADDR);
+    Wire.write(reg);
+    Wire.write(value);
+    if (Wire.endTransmission() == 0) {
+      return true;
+    }
+    delay(2);
+  }
+  return false;
+}
+
+bool readPowerStatus(PowerStatus &status) {
+  if (!readRegister(AXP2101_STATUS1_REG, status.status1) ||
+      !readRegister(AXP2101_STATUS2_REG, status.status2)) {
+    return false;
+  }
+
+  status.vbusGood = (status.status1 & AXP2101_VBUS_GOOD_MASK) != 0;
+  status.batteryPresent =
+      (status.status1 & AXP2101_BATTERY_PRESENT_MASK) != 0;
+  status.batteryCurrentDirection =
+      (status.status2 >> AXP2101_BATTERY_CURRENT_DIRECTION_SHIFT) &
+      AXP2101_BATTERY_CURRENT_DIRECTION_MASK;
+  status.systemOn = (status.status2 & AXP2101_SYSTEM_ON_MASK) != 0;
+  status.vindpmActive = (status.status2 & AXP2101_VINDPM_ACTIVE_MASK) != 0;
+  status.chargingStatus = status.status2 & AXP2101_CHARGING_STATUS_MASK;
+  return true;
+}
+
+bool setDisplayPower(bool enabled) {
+  uint8_t value = currentLdoEnableValue(AXP2101_KNOWN_GOOD_LDO_ENABLES);
+  if (enabled) {
+    value |= AXP2101_DISPLAY_ENABLE_MASK;
+  } else {
+    value &= ~AXP2101_DISPLAY_ENABLE_MASK;
+  }
+  return writeRegisterChecked(enabled ? "display on" : "display off",
+                              AXP2101_LDO_ENABLE_REG, value);
+}
+
+bool enableDisplayRails() { return setDisplayPower(true); }
+
+bool setPeripheralPower(bool enabled) {
+  uint8_t value = currentLdoEnableValue(
+      enabled ? AXP2101_KNOWN_GOOD_LDO_ENABLES
+              : AXP2101_MANAGED_PERIPHERAL_ENABLE_MASK);
+  if (enabled) {
+    value |= AXP2101_MANAGED_PERIPHERAL_ENABLE_MASK;
+  } else {
+    value &= ~AXP2101_MANAGED_PERIPHERAL_ENABLE_MASK;
+  }
+  return writeRegisterChecked(enabled ? "peripheral on" : "peripheral off",
+                              AXP2101_LDO_ENABLE_REG, value);
+}
+
+bool enablePeripheralRails() {
+  bool voltageOk = true;
+  for (uint8_t reg : peripheralRailRegs) {
+    voltageOk = writeRegisterChecked("peripheral 3v3", reg,
+                                     AXP2101_LDO_VOLTAGE_3V3,
+                                     AXP2101_LDO_VOLTAGE_MASK) &&
+                voltageOk;
+  }
+
+  if (!voltageOk) {
+    Serial.println("AXP2101: peripheral voltage readback warning");
+  }
+
+  return writeRegisterChecked("peripheral on", AXP2101_LDO_ENABLE_REG,
+                              AXP2101_KNOWN_GOOD_LDO_ENABLES);
+}
+
+bool restoreDefaultRails() {
+  Serial.println("Enabling display power via AXP2101...");
+  if (!begin()) {
+    Serial.println("AXP2101 not found - display may not work!");
+    return false;
+  }
+
+  Serial.println("AXP2101 found!");
+
+  bool ok = writeRegisterChecked("ldo baseline reset", AXP2101_LDO_ENABLE_REG,
+                                 AXP2101_KNOWN_GOOD_LDO_RESET);
+  ok = writeRegisterChecked("ldo baseline on", AXP2101_LDO_ENABLE_REG,
+                            AXP2101_KNOWN_GOOD_LDO_ENABLES) &&
+       ok;
+
+  PowerStatus status;
+  if (readPowerStatus(status)) {
+    Serial.printf("AXP2101: status1=0x%02X status2=0x%02X vbus=%s battery=%s "
+                  "currentDir=%u charge=%u\n",
+                  status.status1, status.status2,
+                  status.vbusGood ? "good" : "not-good",
+                  status.batteryPresent ? "present" : "absent",
+                  status.batteryCurrentDirection, status.chargingStatus);
+  } else {
+    Serial.println("AXP2101: status read failed");
+  }
+
+  Serial.println("Configuring Peripheral Power...");
+  ok = enablePeripheralRails() && ok;
+
+  delay(500);
+  if (ok) {
+    Serial.println("AXP2101 display power enabled");
+  } else {
+    Serial.println("! AXP2101 rail setup completed with readback errors");
+  }
+  return ok;
+}
+
+} // namespace waveshare_board::axp2101
+
+#endif // WAVESHARE_AMOLED_175
