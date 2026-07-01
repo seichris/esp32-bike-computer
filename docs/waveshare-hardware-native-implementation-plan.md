@@ -497,8 +497,8 @@ GPIO21 is a useful active-low hint, not a perfect sole source of truth.
 
 Implementation status:
 
-- In progress on branch `touch-hint-fallback-optimization`, based on merged
-  PR 11.
+- Implemented on branch `touch-hint-fallback-optimization` in PR 12, based on
+  merged PR 11.
 - Added `esp32/lib/waveshare_board/touch.hpp` for CST9217/TCA9554 registers,
   dimensions, GPIO21 hint pin, and touch polling/backoff timing constants.
 - Panel touch code now tracks GPIO21 active-low hint level and edges without
