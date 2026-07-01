@@ -67,6 +67,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "waitingScr.hpp"
 #ifdef WAVESHARE_AMOLED_175
 #include "WAVESHARE_AMOLED_175.hpp"
+#include "i2c_bus.hpp"
 #include "waveshare_board.hpp"
 #endif
 
@@ -142,6 +143,9 @@ static void logSystemDebugHeartbeat() {
   lastLogMs = now;
 
   BLEDebugStats bleStats = bleNavServer.getDebugStats();
+#ifdef WAVESHARE_AMOLED_175
+  const waveshare_board::i2c::Stats &i2cStats = waveshare_board::i2c::stats();
+#endif
   const char *screenName = "unknown";
   lv_obj_t *activeScreen = lv_scr_act();
   if (activeScreen == waitingScreen) {
@@ -150,6 +154,45 @@ static void logSystemDebugHeartbeat() {
     screenName = "main";
   }
 
+#ifdef WAVESHARE_AMOLED_175
+  Serial.printf("SYS: up=%lus heap=%lu psram=%lu screen=%s tile=%s "
+                "waitRefresh=%d gpsFromApp=%d pendingMap=%d lat=%.6f "
+                "lon=%.6f heading=%u routePts=%u mapFound=%d mapBlocks=%u "
+                "mapFlags[pos=%d redraw=%d follow=%d vector=%d zoom=%u] "
+                "ui[loop=%lu maxGapMs=%lu lvgl=%lu lastLvglMs=%lu "
+                "lvglUs=%lu/%lu flush=%lu lastFlushMs=%lu flushUs=%lu/%lu] "
+                "ble[conn=%d auth=%d nav=%lu route=%lu gps=%lu settings=%lu] "
+                "i2c[fail=%lu recover=%lu recovered=%lu missing=%lu]\n",
+                (unsigned long)(now / 1000),
+                (unsigned long)ESP.getFreeHeap(),
+                (unsigned long)ESP.getFreePsram(), screenName,
+                debugTileName(activeTile), waitScreenRefresh,
+                gpsReceivedFromApp, pendingTransitionToMap,
+                gps.gpsData.latitude, gps.gpsData.longitude,
+                (unsigned)gps.gpsData.heading,
+                (unsigned)routeOverlay.getPointCount(),
+                mapView.debugIsMapFound(),
+                (unsigned)mapView.debugCachedBlockCount(), mapView.isPosMoved,
+                mapView.redrawMap, mapView.followGps, mapSet.vectorMap, zoom,
+                (unsigned long)loopCount, (unsigned long)maxLoopGapMs,
+                (unsigned long)lvglHandlerCount,
+                (unsigned long)lastLvglHandlerMs,
+                (unsigned long)lastLvglHandlerDurationUs,
+                (unsigned long)maxLvglHandlerDurationUs,
+                (unsigned long)displayFlushCount,
+                (unsigned long)lastDisplayFlushMs,
+                (unsigned long)lastDisplayFlushDurationUs,
+                (unsigned long)maxDisplayFlushDurationUs,
+                bleStats.connected, bleStats.authenticated,
+                (unsigned long)bleStats.navPacketCount,
+                (unsigned long)bleStats.routePacketCount,
+                (unsigned long)bleStats.gpsPacketCount,
+                (unsigned long)bleStats.settingsPacketCount,
+                (unsigned long)i2cStats.failedTransactions,
+                (unsigned long)i2cStats.recoveryAttempts,
+                (unsigned long)i2cStats.recoveredTransactions,
+                (unsigned long)i2cStats.missingDevices);
+#else
   Serial.printf("SYS: up=%lus heap=%lu psram=%lu screen=%s tile=%s "
                 "waitRefresh=%d gpsFromApp=%d pendingMap=%d lat=%.6f "
                 "lon=%.6f heading=%u routePts=%u mapFound=%d mapBlocks=%u "
@@ -168,28 +211,17 @@ static void logSystemDebugHeartbeat() {
                 mapView.debugIsMapFound(),
                 (unsigned)mapView.debugCachedBlockCount(), mapView.isPosMoved,
                 mapView.redrawMap, mapView.followGps, mapSet.vectorMap, zoom,
-#ifdef WAVESHARE_AMOLED_175
-                (unsigned long)loopCount, (unsigned long)maxLoopGapMs,
-                (unsigned long)lvglHandlerCount,
-                (unsigned long)lastLvglHandlerMs,
-                (unsigned long)lastLvglHandlerDurationUs,
-                (unsigned long)maxLvglHandlerDurationUs,
-                (unsigned long)displayFlushCount,
-                (unsigned long)lastDisplayFlushMs,
-                (unsigned long)lastDisplayFlushDurationUs,
-                (unsigned long)maxDisplayFlushDurationUs,
-#else
                 (unsigned long)loopCount, (unsigned long)maxLoopGapMs,
                 (unsigned long)lvglHandlerCount,
                 (unsigned long)lastLvglHandlerMs,
                 (unsigned long)lastLvglHandlerDurationUs,
                 (unsigned long)maxLvglHandlerDurationUs, 0UL, 0UL, 0UL, 0UL,
-#endif
                 bleStats.connected, bleStats.authenticated,
                 (unsigned long)bleStats.navPacketCount,
                 (unsigned long)bleStats.routePacketCount,
                 (unsigned long)bleStats.gpsPacketCount,
                 (unsigned long)bleStats.settingsPacketCount);
+#endif
 }
 
 /**
@@ -240,8 +272,12 @@ void setup() {
   digitalWrite(SD_CS, HIGH);
 #endif
 
+#ifdef WAVESHARE_AMOLED_175
+  waveshare_board::i2c::configureBus();
+#else
   Wire.setPins(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.begin();
+#endif
 
 #ifdef WAVESHARE_AMOLED_175
   waveshare_board::enablePowerRails();

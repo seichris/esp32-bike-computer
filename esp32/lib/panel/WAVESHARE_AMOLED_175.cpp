@@ -10,10 +10,10 @@
 
 #include <cstring>
 #include <Preferences.h>
-#include <Wire.h>
 
 // Include HAL for pin definitions
 #include "../../include/hal.hpp"
+#include "i2c_bus.hpp"
 #include "waveshare_board.hpp"
 
 // Define Global Variables declared extern in hal.hpp
@@ -124,22 +124,8 @@ static bool isValidTouchCoordinate(uint16_t x, uint16_t y) {
 }
 
 static bool readCst9217Register(uint16_t reg, uint8_t *data, uint8_t len) {
-  Wire.beginTransmission(CST9217_ADDRESS);
-  Wire.write(reg >> 8);
-  Wire.write(reg & 0xFF);
-  if (Wire.endTransmission(false) != 0) {
-    return false;
-  }
-
-  delay(2);
-  if (Wire.requestFrom(CST9217_ADDRESS, len, (uint8_t)true) != len) {
-    return false;
-  }
-
-  for (uint8_t i = 0; i < len; i++) {
-    data[i] = Wire.read();
-  }
-  return true;
+  return waveshare_board::i2c::readRegister16(CST9217_ADDRESS, reg, data, len,
+                                              "CST9217");
 }
 
 static void logTouchPacket(const char *label, const uint8_t *data,
@@ -224,26 +210,22 @@ static void noteTouchReadFailure(const char *reason, uint32_t now) {
 }
 
 // TCA9554 helper functions
-static void tca9554SetPin(uint8_t pin, bool level) {
+static bool tca9554SetPin(uint8_t pin, bool level) {
   if (level) {
     tca9554OutputShadow |= (1 << pin);
   } else {
     tca9554OutputShadow &= ~(1 << pin);
   }
 
-  Wire.beginTransmission(TCA9554_ADDR);
-  Wire.write(TCA9554_OUTPUT_REG);
-  Wire.write(tca9554OutputShadow);
-  Wire.endTransmission();
+  return waveshare_board::i2c::writeRegister8(
+      TCA9554_ADDR, TCA9554_OUTPUT_REG, tca9554OutputShadow, "TCA9554");
 }
 
-static void tca9554ConfigureOutput(uint8_t pin) {
+static bool tca9554ConfigureOutput(uint8_t pin) {
   tca9554ConfigShadow &= ~(1 << pin); // Clear bit = Output
 
-  Wire.beginTransmission(TCA9554_ADDR);
-  Wire.write(TCA9554_CONFIG_REG);
-  Wire.write(tca9554ConfigShadow);
-  Wire.endTransmission();
+  return waveshare_board::i2c::writeRegister8(
+      TCA9554_ADDR, TCA9554_CONFIG_REG, tca9554ConfigShadow, "TCA9554");
 }
 
 void initTouchController() {
@@ -257,16 +239,18 @@ void initTouchController() {
   lastTouchInitAttemptMs = now;
 
   // Check for TCA9554 and reset touch controller
-  Wire.beginTransmission(TCA9554_ADDR);
-  if (Wire.endTransmission() == 0) {
+  if (waveshare_board::i2c::probe(TCA9554_ADDR, "TCA9554")) {
     Serial.println("✓ TCA9554 found - resetting touch controller");
     pinMode(CST9217_INT_PIN, INPUT_PULLUP);
-    tca9554ConfigureOutput(TCA9554_TOUCH_RST_BIT);
-    tca9554SetPin(TCA9554_TOUCH_RST_BIT, false); // RST low
+    bool resetOk = tca9554ConfigureOutput(TCA9554_TOUCH_RST_BIT);
+    resetOk = tca9554SetPin(TCA9554_TOUCH_RST_BIT, false) && resetOk; // RST low
     delay(20);
-    tca9554SetPin(TCA9554_TOUCH_RST_BIT, true); // RST high
+    resetOk = tca9554SetPin(TCA9554_TOUCH_RST_BIT, true) && resetOk; // RST high
     delay(100); // Wait for touch controller to boot
-    touchInitialized = true;
+    touchInitialized = resetOk;
+    if (!resetOk) {
+      Serial.println("Touch reset failed through TCA9554");
+    }
   } else {
     Serial.println("✗ TCA9554 not found - touch may not work");
   }

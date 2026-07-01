@@ -7,8 +7,8 @@
 
 #ifdef WAVESHARE_AMOLED_175
 
+#include "i2c_bus.hpp"
 #include "waveshare_board.hpp"
-#include <Wire.h>
 
 namespace waveshare_board::axp2101 {
 
@@ -69,43 +69,18 @@ uint8_t currentLdoEnableValue(uint8_t fallback) {
 } // namespace
 
 bool begin() {
-  Wire.beginTransmission(AXP2101_ADDR);
-  pmuAvailable = Wire.endTransmission() == 0;
+  pmuAvailable = i2c::probe(AXP2101_ADDR, "AXP2101");
   return pmuAvailable;
 }
 
 bool isAvailable() { return pmuAvailable; }
 
 bool readRegister(uint8_t reg, uint8_t &value) {
-  for (uint8_t attempt = 0; attempt < 3; attempt++) {
-    Wire.beginTransmission(AXP2101_ADDR);
-    Wire.write(reg);
-    if (Wire.endTransmission() != 0) {
-      delay(2);
-      continue;
-    }
-
-    if (Wire.requestFrom(AXP2101_ADDR, static_cast<uint8_t>(1)) == 1) {
-      value = Wire.read();
-      return true;
-    }
-    delay(2);
-  }
-
-  return false;
+  return i2c::readRegister8(AXP2101_ADDR, reg, value, "AXP2101");
 }
 
 bool writeRegister(uint8_t reg, uint8_t value) {
-  for (uint8_t attempt = 0; attempt < 2; attempt++) {
-    Wire.beginTransmission(AXP2101_ADDR);
-    Wire.write(reg);
-    Wire.write(value);
-    if (Wire.endTransmission() == 0) {
-      return true;
-    }
-    delay(2);
-  }
-  return false;
+  return i2c::writeRegister8(AXP2101_ADDR, reg, value, "AXP2101");
 }
 
 bool readPowerStatus(PowerStatus &status) {
