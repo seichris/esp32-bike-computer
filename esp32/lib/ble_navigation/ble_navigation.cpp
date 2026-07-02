@@ -426,6 +426,21 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
                 source == nullptr ? "unknown" : source, (unsigned)len);
   bleDebugStats.routePacketCount++;
   bleDebugStats.lastRoutePacketMs = millis();
+
+  if (!gpsReceivedFromApp && len >= 8) {
+    int32_t routeStartLat = 0;
+    int32_t routeStartLon = 0;
+    memcpy(&routeStartLat, data, sizeof(routeStartLat));
+    memcpy(&routeStartLon, data + sizeof(routeStartLon), sizeof(routeStartLon));
+    gps.gpsData.latitude = (double)routeStartLat / 1000000.0;
+    gps.gpsData.longitude = (double)routeStartLon / 1000000.0;
+    gpsReceivedFromApp = true;
+    pendingTransitionToMap = true;
+    Serial.printf(
+        "BLE route geometry: seeded map start %.6f,%.6f; transitioning to map\n",
+        gps.gpsData.latitude, gps.gpsData.longitude);
+  }
+
   routeOverlay.parseRouteData(data, len);
   triggerMapRedraw();
 }

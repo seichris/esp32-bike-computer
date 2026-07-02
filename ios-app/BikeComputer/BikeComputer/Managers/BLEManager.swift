@@ -408,6 +408,7 @@ class BLEManager: NSObject, ObservableObject {
         guard let peripheral = connectedPeripheral,
               isConnected,
               isNavigationReady else {
+            log("Cannot send GPS position: BLE not ready")
             return
         }
 
@@ -423,12 +424,16 @@ class BLEManager: NSObject, ObservableObject {
 
         if let characteristic = gpsPositionCharacteristic {
             peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+            log(String(format: "Sent GPS position: %.6f, %.6f heading=%.0f", lat, lon, heading))
             return
         }
 
         var fallback = Data("GPSP".utf8)
         fallback.append(data)
-        guard fallback.count <= peripheral.maximumWriteValueLength(for: .withoutResponse) else { return }
+        guard fallback.count <= peripheral.maximumWriteValueLength(for: .withoutResponse) else {
+            log("Cannot send GPS position fallback: write limit exceeded")
+            return
+        }
         sendFallbackMapPacket(fallback, label: "GPS position")
     }
 

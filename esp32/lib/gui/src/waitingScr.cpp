@@ -20,9 +20,14 @@ void loadMainScreen();
  */
 void checkPendingMapTransition() {
   if (pendingTransitionToMap) {
+    const uint32_t startMs = millis();
     pendingTransitionToMap = false;
+    Serial.printf("UI: pending map transition noticed at %lu ms\n",
+                  (unsigned long)startMs);
     log_i("Transitioning from waiting screen to map...");
     loadMainScreen();
+    Serial.printf("UI: loadMainScreen completed in %lu ms\n",
+                  (unsigned long)(millis() - startMs));
   }
 }
 

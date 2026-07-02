@@ -158,6 +158,15 @@ class BikeComputerCoordinator: ObservableObject {
             }
             .store(in: &cancellables)
 
+        bleManager.$isNavigationReady
+            .removeDuplicates()
+            .filter { $0 }
+            .sink { [weak self] _ in
+                guard let self, let location = self.locationManager.currentLocation else { return }
+                self.navEngine.processExternalLocation(location)
+            }
+            .store(in: &cancellables)
+
         locationManager.$currentAddress
             .assign(to: &$currentAddress)
 
