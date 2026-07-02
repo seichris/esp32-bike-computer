@@ -75,6 +75,16 @@ public:
    */
   size_t getPointCount() const { return points.size(); }
 
+  /**
+   * @brief Estimate route bearing near a current GPS position.
+   *
+   * @param lat Current latitude in degrees
+   * @param lon Current longitude in degrees
+   * @param headingDeg Output route segment bearing in degrees, 0-359
+   * @return true when a usable route segment was found
+   */
+  bool headingNear(double lat, double lon, uint16_t &headingDeg) const;
+
 private:
   std::vector<GeoPoint, PsramAllocator<GeoPoint>> points;
 
