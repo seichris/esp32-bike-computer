@@ -12,14 +12,14 @@ Official links:
 
 | Component | IC | Bus | Address / Notes |
 |---|---|---|---|
-| Power Management | AXP2101 | I2C | 0x34 (Controls bus power) |
-| Touch Controller | CST9217 | I2C | 0x5A (Verified working) |
-| I/O Expander | TCA9554 | I2C | 0x20 (Controls Touch Reset) |
-| RTC | PCF85063 | I2C | 0x51 (Battery backed via AXP2101) |
-| Audio Codec | ES8311 | I2C/I2S | 0x18 (I2C Ctrl) + I2S Data |
-| IMU | QMI8658 | I2C | 0x6A or 0x6B |
-| Display Driver | CO5300 | QSPI | N/A |
-| SD Card Slot | SD1 | SPI | N/A |
+| Power Management | AXP2101 | I2C | 0x34; controls display/peripheral/RTC rails |
+| Touch Controller | CST9217 | I2C | 0x5A; interrupt on GPIO21 is a hint, not sole trigger |
+| I/O Expander | TCA9554 | I2C | 0x20; controls CST9217 reset on P0 |
+| RTC | PCF85063 | I2C | 0x51; on AXP2101 RTC rail, but no full power-removal retention on the tested board |
+| Audio Codec | ES8311 | I2C/I2S | Schematic shows codec nets; not detected in current firmware scan |
+| IMU | QMI8658 | I2C | 0x6B primary, 0x6A fallback |
+| Display Driver | CO5300 | QSPI | 466x466 active AMOLED window |
+| SD Card Slot | SD1 | SPI | Dedicated HSPI bus in firmware |
 
 ---
 
@@ -64,12 +64,16 @@ Official links:
 
 > **IMPORTANT:** There is NO pin conflict between SD Card (SPI) and Touch (I2C). They use completely separate GPIO sets.
 
-### GPS (UART)
+### GPS (UART Pads / Not Populated On This Model)
 
 | Signal | GPIO |
 |---|---|
 | TXD | GPIO 43 |
 | RXD | GPIO 44 |
+
+This Waveshare model should be treated as no-GPS hardware. Do not add or debug
+a UART GPS feature for this target unless a different assembled variant is
+confirmed.
 
 ### Audio (I2S) - TO BE VERIFIED
 
@@ -124,12 +128,119 @@ Wire.endTransmission();
 
 If the screen is black, it is likely an AXP2101 configuration issue, not a pinout error.
 
+Verified firmware behavior:
+- AXP2101 is found at `0x34`.
+- Enable register `0x90` should read back `0x9C` after display/peripheral
+  rails are enabled.
+- Voltage register readback can be noisy on this shared I2C bus; treat final
+  enable-register readback and successful peripheral initialization as the
+  stronger boot signal.
+- On USB, observed PMU status reports VBUS present and `battery=absent`.
+- `POWER_SAVE` is intentionally not enabled for `WAVESHARE_AMOLED_175`.
+  Temporary test builds with `POWER_SAVE` reproduced Bluetooth/IPC instability,
+  and BOOT-button short/long presses did not produce reliable sleep/shutdown
+  transitions on the waiting screen.
+
 ### 3. Touch Coordinate Mirroring
 
 The CST9217 reports coordinates in native panel orientation. Depending on physical mounting, you may need to apply:
 - `x = 465 - x` (Mirror X)
 - `y = 465 - y` (Mirror Y)
 - Or swap X/Y if rotated 90°
+
+Current firmware keeps GPIO21 as an active-low touch hint and uses throttled
+fallback polling. Do not make GPIO21 the only touch trigger: connected-device
+tests showed idle/no-ACK touch reads and intermittent Arduino Core 3.x
+`ESP_ERR_INVALID_STATE` failures, while the hint-plus-fallback policy kept tap,
+drag, and long-press usable.
+
+### 4. Display Window / Rotation (CO5300)
+
+Use Waveshare's vendor geometry as the baseline:
+- logical size: `466x466`
+- active window: `466x466`
+- constructor gap: `(6, 0, 0, 0)`
+- normal firmware rotation: `0`
+
+The diagnostic red/green/blue fill test no longer clips with this geometry.
+Do not reintroduce 90-degree hardware rotation by default: earlier rotation
+experiments showed green-edge/window artifacts. The slight clockwise angular
+skew seen against the USB connector is also present in PR10, PR11, PR12, PR13,
+and Waveshare's factory image, so it is treated as physical panel/lens/case
+alignment rather than a firmware regression.
+
+### 5. Shared I2C Bus Policy
+
+All AXP2101, TCA9554, CST9217, PCF85063, and QMI8658 access shares `Wire` on
+GPIO15/GPIO14. Keep the bus conservative:
+- `100 kHz` is the known-good baseline.
+- Use the Waveshare shared I2C helper for new board devices.
+- Keep the FreeRTOS mutex around shared transactions; BLE callbacks can sync
+  RTC time while LVGL/touch code is polling.
+- Use retries, short timeouts, counters, and bus recovery rather than rapid
+  unchecked polling.
+- Avoid large burst reads on this bus unless tested on the connected board.
+
+### 6. RTC (PCF85063)
+
+The PCF85063 is detected at `0x51` and can restore system time across warm
+reset after BLE/iOS sync. Firmware must reject invalid time when the
+voltage-low flag is set.
+
+Full USB power-removal/replug was tested on the current board. On replug,
+AXP2101 reported `battery=absent`, the PCF85063 voltage-low flag was set, and
+the RTC time was correctly rejected and later resynced from iOS over BLE. Do
+not rely on RTC retention across full power removal on this assembled board
+unless a backup source is confirmed.
+
+### 7. IMU (QMI8658)
+
+QMI8658 identifies at primary address `0x6B` with `WHO_AM_I=0x05` after the
+SensorLib-style reset-before-ID sequence. Keep `0x6A` only as a fallback probe.
+
+Stable diagnostic configuration from PR15:
+- accelerometer: `8g @ 125 Hz`
+- gyroscope: `512 dps @ 112 Hz`
+- enable accel + gyro via `CTRL7`
+- read accel and gyro as separate 6-byte repeated-start reads at low rate
+
+Avoid the earlier 17-byte timestamp/temp/accel/gyro burst read path: it caused
+frequent I2C recovery on the connected board. The IMU is currently diagnostic
+only; navigation, heading, wake, and ride-state behavior must not depend on it
+until separately validated.
+
+Observed axis signs:
+- face-down: mostly `-Z`
+- face-up: mostly `+Z`
+- right-edge-up: mostly `+X`
+- left-edge-up: mostly `-X`
+- USB-up: mostly `+Y`
+- USB-down: mostly `-Y`
+
+### 8. SD Card / Map I/O
+
+The SD card uses a dedicated HSPI bus, not the display QSPI bus. Verified pins
+are `CS=41`, `MOSI=1`, `MISO=3`, `SCK=2`.
+
+Firmware defaults:
+- `WAVESHARE_SD_SPI_FREQ_HZ` default: `4000000`
+- `WAVESHARE_SD_LIST_ROOT` disabled by default
+- `WAVESHARE_MAPIO_TIMING_LOG` disabled by default
+
+Bench measurements on the known-good 32 GB SDHC card showed faster SPI can
+improve map block read time, but source still keeps 4 MHz until more cards and
+cold boots are tested:
+
+| SPI Frequency | Mount | Map Read | Block Load | First Generation |
+|---|---:|---:|---:|---:|
+| 4 MHz | 19 ms | 395 ms | 476-477 ms | 507-513 ms |
+| 8 MHz | 18 ms | 213 ms | 292 ms | 321 ms |
+| 12 MHz | 17 ms | 159 ms | 237 ms | 265 ms |
+| 16 MHz | 16 ms | 123 ms | 200-209 ms | 229-237 ms |
+
+`SDIO:` mount timing is low volume and always visible. `MAPIO:` timing is
+verbose and must remain opt-in because redraw logging can add USB CDC pressure
+during normal app-driven map use.
 
 ---
 
@@ -147,18 +258,18 @@ When scanning the I2C bus, you should find:
 
 ---
 
-## Status (Verified 2024-12-20)
+## Status (Verified 2026-07-02)
 
 | Feature | Status | Notes |
 |---|---|---|
-| Display | ✅ Working | CO5300 QSPI via Arduino_GFX |
-| Touch | ✅ Working | CST9217 @ 0x5A, TCA9554 reset, coordinate mirroring |
-| SD Card | ✅ Working | **Pins verified: CS=41, MOSI=1, MISO=3, SCK=2** (32GB SDHC tested); PR16 keeps 4 MHz default and adds mount/map I/O timings plus configurable frequency testing |
-| RTC | ✅ Integrated | PCF85063 @ 0x51; PR14 driver added, BLE sync + warm-reset restore verified; full USB power removal loses RTC on current board (`battery=absent`) |
-| IMU | ✅ Diagnostic | QMI8658 @ 0x6B primary / 0x6A fallback; PR15 detects/configures it and samples accel/gyro for diagnostics only |
-| I/O Expander | ✅ Working | TCA9554 @ 0x20 (controls touch reset) |
-| Audio | ⏳ Untested | ES8311 not detected in scan |
-| GPS | ⏳ Untested | UART on 43/44 |
+| Display | ✅ Working | CO5300 QSPI via Arduino_GFX; vendor 466x466 + 6px X gap; 90-degree hardware rotation disabled |
+| Touch | ✅ Working | CST9217 @ 0x5A, TCA9554 P0 reset, GPIO21 hint + throttled fallback polling |
+| SD Card | ✅ Working | Pins verified: CS=41, MOSI=1, MISO=3, SCK=2; 32 GB SDHC tested; 4 MHz default |
+| RTC | ✅ Integrated | PCF85063 @ 0x51; BLE sync + warm-reset restore verified; full USB power removal loses RTC on current board |
+| IMU | ✅ Diagnostic | QMI8658 @ 0x6B primary / 0x6A fallback; low-rate diagnostic accel/gyro sampling only |
+| I/O Expander | ✅ Working | TCA9554 @ 0x20 controls touch reset; can be missed early but recovered by shared I2C retry/recovery |
+| Audio | ⏳ Untested | ES8311 not detected in scan; treat as separate future bring-up |
+| GPS | ❌ Not populated | This board model should be treated as no-GPS hardware despite UART pads |
 
 ## Known Issue: I2C Bus Instability
 
@@ -171,4 +282,8 @@ The I2C bus occasionally enters an invalid state (`ESP_ERR_INVALID_STATE`), caus
 2. I2C clock stretching issues at 100kHz
 3. Bus contention during rapid polling
 
-**Workaround:** The touch driver silently ignores failed reads, so touch still works functionally despite the errors.
+**Workaround:** Use the shared Waveshare I2C helper, retry/recovery counters,
+short transaction timeouts, and conservative `100 kHz` bus speed. Touch reads
+must be interrupt-hinted and throttled rather than rapid-polled. New RTC/IMU
+drivers should use the same shared helper and mutex instead of direct raw
+`Wire` access.
