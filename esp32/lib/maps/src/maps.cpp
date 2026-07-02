@@ -60,6 +60,77 @@ static inline bool isVisibleForDetailLevel(uint8_t typeId,
   return true;
 }
 
+enum class VisibilityClass : uint8_t {
+  Always,
+  Building,
+  Nature,
+  Path,
+};
+
+static inline bool isClassVisible(VisibilityClass visibilityClass,
+                                  const MapRenderSettings &settings) {
+  if (visibilityClass == VisibilityClass::Always)
+    return true;
+
+  if (settings.detailLevel == 0)
+    return false;
+  if (settings.detailLevel == 1 &&
+      visibilityClass == VisibilityClass::Building)
+    return false;
+
+  uint32_t visMask = settings.visibilityMask;
+  switch (visibilityClass) {
+  case VisibilityClass::Building:
+    return (visMask & (1 << 0)) != 0;
+  case VisibilityClass::Nature:
+    return (visMask & (1 << 1)) != 0;
+  case VisibilityClass::Path:
+    return (visMask & (1 << 2)) != 0;
+  case VisibilityClass::Always:
+  default:
+    return true;
+  }
+}
+
+static inline VisibilityClass visibilityClassForTypeId(uint8_t typeId) {
+  if (typeId >= 100 && typeId < 150)
+    return VisibilityClass::Building;
+  if (typeId >= 150 && typeId < 200)
+    return VisibilityClass::Nature;
+  if (typeId >= 50 && typeId < 100)
+    return VisibilityClass::Path;
+  return VisibilityClass::Always;
+}
+
+static inline VisibilityClass legacyPolygonVisibilityClass(uint16_t color) {
+  switch (color) {
+  case 0xAD55: // grayclear
+  case 0xDED6: // apple_building
+    return VisibilityClass::Building;
+  case 0x9F93: // greenclear
+  case 0xCF6E: // greenclear2
+  case 0x76EE: // green
+  case 0x6D3E: // blueclear
+  case 0x227E: // blue
+  case 0xFFF1: // yellow/beach
+  case 0xB713: // apple_park
+  case 0xD757: // apple_farm
+  case 0xA6DE: // apple_water
+    return VisibilityClass::Nature;
+  default:
+    return VisibilityClass::Always;
+  }
+}
+
+static inline VisibilityClass legacyLineVisibilityClass(uint16_t color,
+                                                        uint8_t width) {
+  if (color == 0xFA45 || color == 0xAB00 || color == 0xA42B)
+    return VisibilityClass::Path;
+  if ((color == 0xFCC2 || color == 0xF567) && width <= 3)
+    return VisibilityClass::Path;
+  return VisibilityClass::Always;
+}
+
 // Helper: Check if a typeId is visible based on detail level and visibilityMask.
 // Bit 0 = buildings (100-149), Bit 1 = nature (150-199), Bit 2 = paths (50-99).
 static inline bool isTypeVisible(uint8_t typeId,
@@ -67,16 +138,23 @@ static inline bool isTypeVisible(uint8_t typeId,
   if (!isVisibleForDetailLevel(typeId, settings.detailLevel))
     return false;
 
-  uint32_t visMask = settings.visibilityMask;
   if (typeId == 0)
     return true; // Unknown types always visible
-  if (typeId >= 100 && typeId < 150)
-    return (visMask & (1 << 0)) != 0; // Buildings
-  if (typeId >= 150 && typeId < 200)
-    return (visMask & (1 << 1)) != 0; // Nature
-  if (typeId >= 50 && typeId < 100)
-    return (visMask & (1 << 2)) != 0; // Minor roads
-  return true; // Major roads (1-49) and others always visible
+  return isClassVisible(visibilityClassForTypeId(typeId), settings);
+}
+
+static inline bool isPolygonVisible(uint8_t typeId, uint16_t color,
+                                    const MapRenderSettings &settings) {
+  if (typeId != 0)
+    return isTypeVisible(typeId, settings);
+  return isClassVisible(legacyPolygonVisibilityClass(color), settings);
+}
+
+static inline bool isLineVisible(uint8_t typeId, uint16_t color, uint8_t width,
+                                 const MapRenderSettings &settings) {
+  if (typeId != 0)
+    return isTypeVisible(typeId, settings);
+  return isClassVisible(legacyLineVisibilityClass(color, width), settings);
 }
 
 static inline bool shouldBoostLineWidth(uint8_t typeId, uint8_t styleWidth) {
@@ -1254,7 +1332,8 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             }
 
             // Skip if type is hidden by visibility mask
-            if (!isTypeVisible(polygon.typeId, mapRenderSettings)) {
+            if (!isPolygonVisible(polygon.typeId, polygon.color,
+                                  mapRenderSettings)) {
               continue;
             }
 
@@ -1315,7 +1394,8 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           continue;
 
         // Skip if type is hidden by visibility mask
-        if (!isTypeVisible(line.typeId, mapRenderSettings))
+        if (!isLineVisible(line.typeId, line.color, line.width,
+                           mapRenderSettings))
           continue;
 
         uint16_t color_swapped = line.color; // Use color directly (RGB565)
