@@ -89,7 +89,7 @@ Current setting IDs:
 | --- | --- | --- |
 | `1` | Minimum polygon size | `0...50` |
 | `2` | Detail level | `0` low, `1` medium, `2` high |
-| `3` | Route line width | `2...24` |
+| `3` | Route line width | `2...48` |
 | `4` | Display rotation | `0...3` |
 | `6` | Map rotation mode | `0` north-up, `1` course-up |
 | `7` | Zoom level | `0...5` |

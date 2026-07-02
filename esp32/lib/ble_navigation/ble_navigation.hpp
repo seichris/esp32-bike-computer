@@ -37,7 +37,7 @@ struct NavigationData {
 struct MapRenderSettings {
   uint8_t minPolygonSize = 0; // 0-50: Skip polygons smaller than N pixels²
   uint8_t detailLevel = 2;    // 0=Low, 1=Med, 2=High
-  uint8_t routeLineWidth = 4; // 2-24: Route overlay line width in pixels
+  uint8_t routeLineWidth = 4; // 2-48: Route overlay line width in pixels
   uint8_t streetLineWidthBoost = 0; // 0-24: Extra map street width in pixels
   uint8_t displayRotation =
       0; // 0-3: Display rotation (0=0°, 1=90°, 2=180°, 3=270°)

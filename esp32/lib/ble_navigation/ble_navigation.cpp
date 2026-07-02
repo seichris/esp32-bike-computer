@@ -522,7 +522,7 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     break;
   case 3:
     mapRenderSettings.routeLineWidth =
-        (uint8_t)std::min(std::max(settingValue, (int32_t)2), (int32_t)24);
+        (uint8_t)std::min(std::max(settingValue, (int32_t)2), (int32_t)48);
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar("routeWidth", mapRenderSettings.routeLineWidth);
     settingsPrefs.end();
