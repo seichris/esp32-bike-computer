@@ -331,12 +331,22 @@ class NavigationEngine: NSObject, ObservableObject {
     private func resendCurrentRouteGeometry() {
         guard isNavigating, let route = currentRoute, route.polyline.pointCount > 0 else { return }
 
-        var startCoordinate = CLLocationCoordinate2D()
-        route.polyline.getCoordinates(&startCoordinate, range: NSRange(location: 0, length: 1))
         lastSentGeometryHash = 0
         lastGeometrySendTime = .distantPast
-        sendRouteGeometryIfNeeded(currentLocation: CLLocation(latitude: startCoordinate.latitude,
-                                                              longitude: startCoordinate.longitude))
+        sendRouteGeometryIfNeeded(currentLocation: routeGeometryResendLocation(for: route))
+    }
+
+    private func routeGeometryResendLocation(for route: MKRoute) -> CLLocation {
+        if let lastDeviceGpsLocation {
+            if lastDeviceGpsLocation.convertFromMapKitRoute {
+                return lastDeviceGpsLocation.location
+            }
+            return CoordinateConverter.mapKitRouteLocation(fromGPSLocation: lastDeviceGpsLocation.location)
+        }
+
+        var startCoordinate = CLLocationCoordinate2D()
+        route.polyline.getCoordinates(&startCoordinate, range: NSRange(location: 0, length: 1))
+        return CLLocation(latitude: startCoordinate.latitude, longitude: startCoordinate.longitude)
     }
 
     private func resendCurrentDeviceGpsPosition() {
