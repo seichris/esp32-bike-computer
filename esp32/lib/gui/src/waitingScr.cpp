@@ -37,7 +37,7 @@ void createWaitingScr() {
 
   // Title: "Bike Computer"
   lv_obj_t *title = lv_label_create(waitingScreen);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_38, 0);
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_42, 0);
   lv_obj_set_style_text_color(title, lv_color_white(), 0);
   lv_label_set_text(title, "Bike Computer");
   lv_obj_set_align(title, LV_ALIGN_CENTER);
@@ -51,7 +51,7 @@ void createWaitingScr() {
 
   // Message: "Start the app to start navigation."
   lv_obj_t *message = lv_label_create(waitingScreen);
-  lv_obj_set_style_text_font(message, &lv_font_montserrat_38, 0);
+  lv_obj_set_style_text_font(message, &lv_font_montserrat_42, 0);
   lv_obj_set_style_text_color(message, lv_color_hex(0xAAAAAA), 0);
   lv_obj_set_style_text_align(message, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_text(message, "Start the app\nto start navigation.");
