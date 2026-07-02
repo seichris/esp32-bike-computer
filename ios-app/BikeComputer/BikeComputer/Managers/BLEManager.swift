@@ -402,9 +402,18 @@ class BLEManager: NSObject, ObservableObject {
         sendRouteGeometry(Data())
     }
 
-    /// Send GPS position to ESP32.
-    /// Format: [Lat:4][Lon:4][Heading:2][UnixTime:4] with WGS-84 microdegrees.
-    func sendGPSPosition(lat: Double, lon: Double, heading: Double = 0) {
+    /// Send GPS position and optional ride telemetry to ESP32.
+    /// Format: [Lat:4][Lon:4][Heading:2][UnixTime:4][SpeedCmps:2][Altitude:2][Distance:4][Elapsed:4][RouteRemaining:4].
+    func sendGPSPosition(
+        lat: Double,
+        lon: Double,
+        heading: Double = 0,
+        speedMetersPerSecond: Double? = nil,
+        altitudeMeters: Double? = nil,
+        distanceTraveledMeters: Double? = nil,
+        elapsedSeconds: TimeInterval? = nil,
+        routeRemainingMeters: Double? = nil
+    ) {
         guard let peripheral = connectedPeripheral,
               isConnected,
               isNavigationReady else {
@@ -416,10 +425,30 @@ class BLEManager: NSObject, ObservableObject {
         let lonInt = Int32(lon * 1_000_000)
         let headingDeg: UInt16 = heading >= 0 ? UInt16(min(heading, 359)) : 0
         let unixTime = UInt32(Date().timeIntervalSince1970)
+        let speedCmps: UInt16 = {
+            guard let speedMetersPerSecond, speedMetersPerSecond >= 0 else {
+                return UInt16.max
+            }
+            return UInt16(min((speedMetersPerSecond * 100).rounded(), Double(UInt16.max - 1)))
+        }()
+        let altitudeInt = Int16(max(min((altitudeMeters ?? 0).rounded(), Double(Int16.max)), Double(Int16.min)))
+        let distanceInt = UInt32(max(min((distanceTraveledMeters ?? 0).rounded(), Double(UInt32.max)), 0))
+        let elapsedInt = UInt32(max(min((elapsedSeconds ?? 0).rounded(), Double(UInt32.max)), 0))
+        let routeRemainingInt: UInt32 = {
+            guard let routeRemainingMeters, routeRemainingMeters >= 0 else {
+                return UInt32.max
+            }
+            return UInt32(max(min(routeRemainingMeters.rounded(), Double(UInt32.max - 1)), 0))
+        }()
         withUnsafeBytes(of: latInt.littleEndian) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: lonInt.littleEndian) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: headingDeg.littleEndian) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: unixTime.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: speedCmps.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: altitudeInt.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: distanceInt.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: elapsedInt.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: routeRemainingInt.littleEndian) { data.append(contentsOf: $0) }
 
         if let characteristic = gpsPositionCharacteristic {
             peripheral.writeValue(data, for: characteristic, type: .withoutResponse)

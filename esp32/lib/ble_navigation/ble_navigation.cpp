@@ -454,6 +454,41 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
     gps.gpsData.heading = headingVal;
   }
 
+  if (len >= 16) {
+    uint16_t speedCmps;
+    memcpy(&speedCmps, data + 14, sizeof(speedCmps));
+    if (speedCmps != 0xFFFF) {
+      gps.gpsData.speed = (uint16_t)((speedCmps * 36U + 500U) / 1000U);
+    }
+  }
+
+  if (len >= 18) {
+    int16_t altitudeMeters;
+    memcpy(&altitudeMeters, data + 16, sizeof(altitudeMeters));
+    gps.gpsData.altitude = altitudeMeters;
+  }
+
+  if (len >= 22) {
+    uint32_t distanceMeters;
+    memcpy(&distanceMeters, data + 18, sizeof(distanceMeters));
+    gps.gpsData.distanceTraveled = distanceMeters;
+  }
+
+  if (len >= 26) {
+    uint32_t elapsedSeconds;
+    memcpy(&elapsedSeconds, data + 22, sizeof(elapsedSeconds));
+    gps.gpsData.elapsedSeconds = elapsedSeconds;
+  }
+
+  if (len >= 30) {
+    uint32_t routeRemainingMeters;
+    memcpy(&routeRemainingMeters, data + 26, sizeof(routeRemainingMeters));
+    gps.gpsData.hasRouteRemaining = routeRemainingMeters != 0xFFFFFFFF;
+    if (gps.gpsData.hasRouteRemaining) {
+      gps.gpsData.routeRemaining = routeRemainingMeters;
+    }
+  }
+
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   bool rtcTimestampSynced = false;
   if (len >= 14) {

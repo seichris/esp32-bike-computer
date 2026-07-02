@@ -110,7 +110,7 @@ static void processWaveshareBootButton() {
 
   const uint32_t pressDurationMs = now - pressStartMs;
   if (pressDurationMs > 0 && pressDurationMs <= SHORT_PRESS_MAX_MS) {
-    log_i("Waveshare BOOT short press: toggling navigation screen");
+    log_i("Waveshare BOOT short press: cycling main screen");
     toggleNavigationScreen();
   }
 }
@@ -169,6 +169,8 @@ static const char *debugTileName(uint8_t tile) {
     return "NAV";
   case SATTRACK:
     return "SATTRACK";
+  case RIDESTATS:
+    return "RIDESTATS";
   default:
     return "UNKNOWN";
   }

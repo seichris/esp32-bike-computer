@@ -46,6 +46,7 @@ static void positionMapToolbarButtons(uint16_t mapHeight) {
 lv_obj_t *tilesScreen;
 lv_obj_t *compassTile;
 lv_obj_t *navTile;
+lv_obj_t *rideStatsTile;
 lv_obj_t *mapTile;
 lv_obj_t *satTrackTile;
 lv_obj_t *btnFullScreen;
@@ -286,6 +287,10 @@ void updateMainScreen(lv_timer_t *t) {
 
     case NAV:
       lv_obj_send_event(navTile, LV_EVENT_VALUE_CHANGED, NULL);
+      break;
+
+    case RIDESTATS:
+      lv_obj_send_event(rideStatsTile, LV_EVENT_VALUE_CHANGED, NULL);
       break;
 
     case SATTRACK:
@@ -722,35 +727,60 @@ void updateNavEvent(lv_event_t *event) {
   lv_img_set_angle(arrowNav, arrowAngle);
 }
 
-static void showNavigationScreen(bool showNavigation) {
-  if (!mapTile || !navTile) {
+static void showMainTile(tileName tile) {
+  if (!mapTile || !navTile || !rideStatsTile) {
     return;
   }
 
-  if (showNavigation) {
-    activeTile = NAV;
-    canScrollMap = false;
-    lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
+
+  activeTile = tile;
+  canScrollMap = tile == MAP;
+
+  switch (tile) {
+  case NAV:
     lv_obj_clear_flag(navTile, LV_OBJ_FLAG_HIDDEN);
     lv_obj_send_event(navTile, LV_EVENT_VALUE_CHANGED, NULL);
     log_i("UI: switched to navigation instruction screen");
-  } else {
-    activeTile = MAP;
-    canScrollMap = true;
-    lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
+    break;
+  case RIDESTATS:
+    lv_obj_clear_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_send_event(rideStatsTile, LV_EVENT_VALUE_CHANGED, NULL);
+    log_i("UI: switched to ride telemetry screen");
+    break;
+  case MAP:
+  default:
     lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
     mapView.redrawMap = true;
     lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
     log_i("UI: switched to map screen");
+    break;
+  }
+}
+
+void showNextMainScreen() {
+  switch (activeTile) {
+  case MAP:
+    showMainTile(NAV);
+    break;
+  case NAV:
+    showMainTile(RIDESTATS);
+    break;
+  case RIDESTATS:
+  default:
+    showMainTile(MAP);
+    break;
   }
 }
 
 void toggleNavigationScreen() {
-  if (!isMainScreen || !mainScreen || !mapTile || !navTile) {
+  if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile) {
     return;
   }
 
-  showNavigationScreen(activeTile == MAP);
+  showNextMainScreen();
 }
 
 /**
@@ -777,6 +807,16 @@ void createMainScr() {
   navigationScr(navTile);
   lv_obj_add_event_cb(navTile, updateNavEvent, LV_EVENT_VALUE_CHANGED, NULL);
   lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
+
+  rideStatsTile = lv_obj_create(mainScreen);
+  lv_obj_remove_style_all(rideStatsTile);
+  lv_obj_set_size(rideStatsTile, TFT_WIDTH, TFT_HEIGHT);
+  lv_obj_set_pos(rideStatsTile, 0, 0);
+  lv_obj_clear_flag(rideStatsTile, LV_OBJ_FLAG_SCROLLABLE);
+  rideTelemetryScr(rideStatsTile);
+  lv_obj_add_event_cb(rideStatsTile, updateRideTelemetryEvent,
+                      LV_EVENT_VALUE_CHANGED, NULL);
+  lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
 
   // Set tilesScreen to same as mapTile for compatibility
   tilesScreen = mapTile;
