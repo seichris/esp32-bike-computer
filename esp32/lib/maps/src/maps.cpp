@@ -62,9 +62,14 @@ static inline bool isVisibleForDetailLevel(uint8_t typeId,
 
 enum class VisibilityClass : uint8_t {
   Always,
+  MajorRoad,
+  LocalStreet,
   Building,
-  Nature,
+  GreenSpace,
+  Water,
   Path,
+  Rail,
+  OtherArea,
 };
 
 static inline bool isClassVisible(VisibilityClass visibilityClass,
@@ -72,7 +77,12 @@ static inline bool isClassVisible(VisibilityClass visibilityClass,
   if (visibilityClass == VisibilityClass::Always)
     return true;
 
-  if (settings.detailLevel == 0)
+  if (settings.detailLevel == 0 &&
+      (visibilityClass == VisibilityClass::Building ||
+       visibilityClass == VisibilityClass::GreenSpace ||
+       visibilityClass == VisibilityClass::Water ||
+       visibilityClass == VisibilityClass::Path ||
+       visibilityClass == VisibilityClass::OtherArea))
     return false;
   if (settings.detailLevel == 1 &&
       visibilityClass == VisibilityClass::Building)
@@ -80,12 +90,22 @@ static inline bool isClassVisible(VisibilityClass visibilityClass,
 
   uint32_t visMask = settings.visibilityMask;
   switch (visibilityClass) {
+  case VisibilityClass::MajorRoad:
+    return (visMask & (1 << 3)) != 0;
+  case VisibilityClass::LocalStreet:
+    return (visMask & (1 << 4)) != 0;
   case VisibilityClass::Building:
     return (visMask & (1 << 0)) != 0;
-  case VisibilityClass::Nature:
+  case VisibilityClass::GreenSpace:
     return (visMask & (1 << 1)) != 0;
+  case VisibilityClass::Water:
+    return (visMask & (1 << 5)) != 0;
   case VisibilityClass::Path:
     return (visMask & (1 << 2)) != 0;
+  case VisibilityClass::Rail:
+    return (visMask & (1 << 6)) != 0;
+  case VisibilityClass::OtherArea:
+    return (visMask & (1 << 7)) != 0;
   case VisibilityClass::Always:
   default:
     return true;
@@ -93,12 +113,22 @@ static inline bool isClassVisible(VisibilityClass visibilityClass,
 }
 
 static inline VisibilityClass visibilityClassForTypeId(uint8_t typeId) {
-  if (typeId >= 100 && typeId < 150)
-    return VisibilityClass::Building;
-  if (typeId >= 150 && typeId < 200)
-    return VisibilityClass::Nature;
+  if (typeId >= 1 && typeId <= 5)
+    return VisibilityClass::MajorRoad;
+  if (typeId >= 6 && typeId < 50)
+    return VisibilityClass::LocalStreet;
   if (typeId >= 50 && typeId < 100)
     return VisibilityClass::Path;
+  if (typeId >= 100 && typeId < 150)
+    return VisibilityClass::Building;
+  if (typeId == 152 || typeId == 153)
+    return VisibilityClass::Water;
+  if (typeId >= 150 && typeId < 200)
+    return VisibilityClass::GreenSpace;
+  if (typeId == 210)
+    return VisibilityClass::Rail;
+  if (typeId >= 200)
+    return VisibilityClass::OtherArea;
   return VisibilityClass::Always;
 }
 
@@ -110,13 +140,17 @@ static inline VisibilityClass legacyPolygonVisibilityClass(uint16_t color) {
   case 0x9F93: // greenclear
   case 0xCF6E: // greenclear2
   case 0x76EE: // green
+  case 0xB713: // apple_park
+  case 0xD757: // apple_farm
+    return VisibilityClass::GreenSpace;
   case 0x6D3E: // blueclear
   case 0x227E: // blue
   case 0xFFF1: // yellow/beach
-  case 0xB713: // apple_park
-  case 0xD757: // apple_farm
   case 0xA6DE: // apple_water
-    return VisibilityClass::Nature;
+    return VisibilityClass::Water;
+  case 0xD69A: // grayclear2
+  case 0xC618: // apple_land_gray
+    return VisibilityClass::OtherArea;
   default:
     return VisibilityClass::Always;
   }
@@ -126,13 +160,26 @@ static inline VisibilityClass legacyLineVisibilityClass(uint16_t color,
                                                         uint8_t width) {
   if (color == 0xFA45 || color == 0xAB00 || color == 0xA42B)
     return VisibilityClass::Path;
+  if (color == 0x632C && width <= 1)
+    return VisibilityClass::Path;
+  if ((color == 0xAA1F || color == 0xA6DE) && width <= 2)
+    return VisibilityClass::Water;
+  if (color == 0x0000 || (color == 0x632C && width >= 2))
+    return VisibilityClass::Rail;
+  if ((color == 0xFFF1 || color == 0xFF36 || color == 0xFCC2 ||
+       color == 0xF567) &&
+      width >= 5)
+    return VisibilityClass::MajorRoad;
+  if (color == 0xFFFF && width >= 3)
+    return VisibilityClass::LocalStreet;
   if ((color == 0xFCC2 || color == 0xF567) && width <= 3)
     return VisibilityClass::Path;
   return VisibilityClass::Always;
 }
 
 // Helper: Check if a typeId is visible based on detail level and visibilityMask.
-// Bit 0 = buildings (100-149), Bit 1 = nature (150-199), Bit 2 = paths (50-99).
+// Bits: 0 buildings, 1 green space, 2 paths, 3 major roads, 4 local streets,
+// 5 water, 6 rail, 7 other areas.
 static inline bool isTypeVisible(uint8_t typeId,
                                  const MapRenderSettings &settings) {
   if (!isVisibleForDetailLevel(typeId, settings.detailLevel))
@@ -155,6 +202,14 @@ static inline bool isLineVisible(uint8_t typeId, uint16_t color, uint8_t width,
   if (typeId != 0)
     return isTypeVisible(typeId, settings);
   return isClassVisible(legacyLineVisibilityClass(color, width), settings);
+}
+
+static inline bool isRouteOverlayVisible(const MapRenderSettings &settings) {
+  return (settings.visibilityMask & (1 << 8)) != 0;
+}
+
+static inline bool isCurrentPositionVisible(const MapRenderSettings &settings) {
+  return (settings.visibilityMask & (1 << 9)) != 0;
 }
 
 static inline bool shouldBoostLineWidth(uint8_t typeId, uint8_t styleWidth) {
@@ -2117,6 +2172,12 @@ void Maps::displayMap() {
 
   // Update Arrow Position
   if (Maps::canvasArrow) {
+    if (!isCurrentPositionVisible(mapRenderSettings)) {
+      lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
+      MAPIO_LOG("MAPIO: current-position marker hidden by visibility mask\n");
+      return;
+    }
+
     uint16_t h = mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
     const int16_t anchorX = mapAnchorXForWidth(Maps::mapScrWidth);
     const int16_t anchorY = mapAnchorYForHeight(h);
@@ -2246,7 +2307,7 @@ void Maps::generateVectorMap(uint8_t zoom) {
   const uint32_t routeStartMs = MAPIO_TIME_MS();
   ESP_LOGI(TAG, "Checking for route overlay: hasRoute=%d",
            routeOverlay.hasRoute());
-  if (routeOverlay.hasRoute()) {
+  if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
     ESP_LOGI(TAG,
              "Drawing route overlay: centerMerc=(%d,%d) "
              "zoom=%d points=%d",
@@ -2264,6 +2325,8 @@ void Maps::generateVectorMap(uint8_t zoom) {
                            mapAnchorYForHeight(canvasHeight));
     ESP_LOGI(TAG, "Route overlay draw complete (rotation=%.2f rad, canvasH=%d)",
              rotationRad, canvasHeight);
+  } else if (routeOverlay.hasRoute()) {
+    ESP_LOGI(TAG, "Route overlay hidden by visibility mask");
   } else {
     ESP_LOGI(TAG, "No route overlay to draw (no route data)");
   }

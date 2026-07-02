@@ -93,12 +93,14 @@ Current setting IDs:
 | `4` | Display rotation | `0...3` |
 | `6` | Map rotation mode | `0` north-up, `1` course-up |
 | `7` | Zoom level | `0...5` |
-| `8` | Visibility mask | bit 0 buildings, bit 1 nature/landuse, bit 2 paths |
+| `8` | Visibility mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/tracks, bit 3 major roads, bit 4 local streets, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker |
 | `9` | Street line width boost | `0...24` px added to known road/path line style widths; legacy unknown lines are boosted when their stored style width is at least 3px; final rendered width is capped at 24px |
 
 Detail level is applied before the visibility mask. High keeps all feature
-classes enabled, medium hides building footprints, and low hides buildings,
-nature/landuse, and path-level detail.
+classes available, medium hides building footprints, and low hides buildings,
+parks/green space, water, paths/tracks, and other low-priority areas. Roads,
+railways, the route overlay, and the current-position marker remain controlled
+by their visibility bits at every detail level.
 
 ## OSM Map Blocks
 

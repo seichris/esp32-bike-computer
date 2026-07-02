@@ -133,8 +133,15 @@ class BLEManager: NSObject, ObservableObject {
     
     // Feature Visibility
     @Published var showBuildings: Bool = true
-    @Published var showNature: Bool = true
-    @Published var showMinorRoads: Bool = true
+    @Published var showGreenSpace: Bool = true
+    @Published var showPaths: Bool = true
+    @Published var showMajorRoads: Bool = true
+    @Published var showLocalStreets: Bool = true
+    @Published var showWater: Bool = true
+    @Published var showRailways: Bool = true
+    @Published var showOtherAreas: Bool = true
+    @Published var showRouteOverlay: Bool = true
+    @Published var showCurrentPosition: Bool = true
     
     // MARK: - BLE UUIDs (matching ESP32)
     private let serviceUUID = CBUUID(string: "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800")
@@ -197,8 +204,17 @@ class BLEManager: NSObject, ObservableObject {
         static let mapRotationMode = "mapSettings.mapRotationMode"
         static let zoomLevel = "mapSettings.zoomLevel"
         static let showBuildings = "mapSettings.showBuildings"
-        static let showNature = "mapSettings.showNature"
-        static let showMinorRoads = "mapSettings.showMinorRoads"
+        static let showGreenSpace = "mapSettings.showGreenSpace"
+        static let showPaths = "mapSettings.showPaths"
+        static let showMajorRoads = "mapSettings.showMajorRoads"
+        static let showLocalStreets = "mapSettings.showLocalStreets"
+        static let showWater = "mapSettings.showWater"
+        static let showRailways = "mapSettings.showRailways"
+        static let showOtherAreas = "mapSettings.showOtherAreas"
+        static let showRouteOverlay = "mapSettings.showRouteOverlay"
+        static let showCurrentPosition = "mapSettings.showCurrentPosition"
+        static let legacyShowNature = "mapSettings.showNature"
+        static let legacyShowMinorRoads = "mapSettings.showMinorRoads"
         static let lastPeripheralIdentifier = "ble.lastPeripheralIdentifier"
     }
     
@@ -222,8 +238,17 @@ class BLEManager: NSObject, ObservableObject {
         mapRotationMode = defaults.object(forKey: SettingsKeys.mapRotationMode) as? Int ?? 0
         zoomLevel = defaults.object(forKey: SettingsKeys.zoomLevel) as? Int ?? 2
         showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
-        showNature = defaults.object(forKey: SettingsKeys.showNature) as? Bool ?? true
-        showMinorRoads = defaults.object(forKey: SettingsKeys.showMinorRoads) as? Bool ?? true
+        let legacyNature = defaults.object(forKey: SettingsKeys.legacyShowNature) as? Bool ?? true
+        let legacyMinorRoads = defaults.object(forKey: SettingsKeys.legacyShowMinorRoads) as? Bool ?? true
+        showGreenSpace = defaults.object(forKey: SettingsKeys.showGreenSpace) as? Bool ?? legacyNature
+        showPaths = defaults.object(forKey: SettingsKeys.showPaths) as? Bool ?? legacyMinorRoads
+        showMajorRoads = defaults.object(forKey: SettingsKeys.showMajorRoads) as? Bool ?? true
+        showLocalStreets = defaults.object(forKey: SettingsKeys.showLocalStreets) as? Bool ?? true
+        showWater = defaults.object(forKey: SettingsKeys.showWater) as? Bool ?? legacyNature
+        showRailways = defaults.object(forKey: SettingsKeys.showRailways) as? Bool ?? true
+        showOtherAreas = defaults.object(forKey: SettingsKeys.showOtherAreas) as? Bool ?? true
+        showRouteOverlay = defaults.object(forKey: SettingsKeys.showRouteOverlay) as? Bool ?? true
+        showCurrentPosition = defaults.object(forKey: SettingsKeys.showCurrentPosition) as? Bool ?? true
     }
 
     private func loadLastPeripheralIdentifier() {
@@ -242,8 +267,15 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(mapRotationMode, forKey: SettingsKeys.mapRotationMode)
         defaults.set(zoomLevel, forKey: SettingsKeys.zoomLevel)
         defaults.set(showBuildings, forKey: SettingsKeys.showBuildings)
-        defaults.set(showNature, forKey: SettingsKeys.showNature)
-        defaults.set(showMinorRoads, forKey: SettingsKeys.showMinorRoads)
+        defaults.set(showGreenSpace, forKey: SettingsKeys.showGreenSpace)
+        defaults.set(showPaths, forKey: SettingsKeys.showPaths)
+        defaults.set(showMajorRoads, forKey: SettingsKeys.showMajorRoads)
+        defaults.set(showLocalStreets, forKey: SettingsKeys.showLocalStreets)
+        defaults.set(showWater, forKey: SettingsKeys.showWater)
+        defaults.set(showRailways, forKey: SettingsKeys.showRailways)
+        defaults.set(showOtherAreas, forKey: SettingsKeys.showOtherAreas)
+        defaults.set(showRouteOverlay, forKey: SettingsKeys.showRouteOverlay)
+        defaults.set(showCurrentPosition, forKey: SettingsKeys.showCurrentPosition)
     }
     
     // MARK: - Public Methods
@@ -431,9 +463,15 @@ class BLEManager: NSObject, ObservableObject {
     func sendVisibilityMask() {
         var mask: Int32 = 0
         if showBuildings { mask |= (1 << 0) }
-        if showNature { mask |= (1 << 1) }
-        if showMinorRoads { mask |= (1 << 2) }
-        // Bits 3-31 are unused for now (0)
+        if showGreenSpace { mask |= (1 << 1) }
+        if showPaths { mask |= (1 << 2) }
+        if showMajorRoads { mask |= (1 << 3) }
+        if showLocalStreets { mask |= (1 << 4) }
+        if showWater { mask |= (1 << 5) }
+        if showRailways { mask |= (1 << 6) }
+        if showOtherAreas { mask |= (1 << 7) }
+        if showRouteOverlay { mask |= (1 << 8) }
+        if showCurrentPosition { mask |= (1 << 9) }
         
         sendSetting(id: 8, value: mask)
     }
