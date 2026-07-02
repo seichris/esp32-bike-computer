@@ -89,11 +89,12 @@ Current setting IDs:
 | --- | --- | --- |
 | `1` | Minimum polygon size | `0...50` |
 | `2` | Detail level | `0` low, `1` medium, `2` high |
-| `3` | Route line width | `2...8` |
+| `3` | Route line width | `2...24` |
 | `4` | Display rotation | `0...3` |
 | `6` | Map rotation mode | `0` north-up, `1` course-up |
 | `7` | Zoom level | `0...5` |
 | `8` | Visibility mask | bit 0 buildings, bit 1 nature/landuse, bit 2 paths |
+| `9` | Street line width boost | `0...24` px added to known road/path line style widths; legacy unknown lines are boosted when their stored style width is at least 3px; final rendered width is capped at 24px |
 
 Detail level is applied before the visibility mask. High keeps all feature
 classes enabled, medium hides building footprints, and low hides buildings,

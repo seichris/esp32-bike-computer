@@ -66,9 +66,25 @@ struct SettingsView: View {
                             Text("\(Int(bleManager.routeLineWidth)) px")
                                 .foregroundColor(.secondary)
                         }
-                        Slider(value: $bleManager.routeLineWidth, in: 2...8, step: 1)
+                        Slider(value: $bleManager.routeLineWidth, in: 2...24, step: 1)
                             .onChange(of: bleManager.routeLineWidth) { newValue in
                                 bleManager.sendSetting(id: 3, value: Int32(newValue))
+                        }
+                    }
+                }
+                .disabled(!bleManager.supportsDeviceSettings)
+
+                Section(header: Text("Map Streets")) {
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text("Street Width Boost")
+                            Spacer()
+                            Text("+\(Int(bleManager.streetLineWidthBoost)) px")
+                                .foregroundColor(.secondary)
+                        }
+                        Slider(value: $bleManager.streetLineWidthBoost, in: 0...24, step: 1)
+                            .onChange(of: bleManager.streetLineWidthBoost) { newValue in
+                                bleManager.sendSetting(id: 9, value: Int32(newValue))
                         }
                     }
                 }

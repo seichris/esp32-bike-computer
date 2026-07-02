@@ -126,6 +126,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var minPolygonSize: Double = 0
     @Published var detailLevel: Int = 2
     @Published var routeLineWidth: Double = 4
+    @Published var streetLineWidthBoost: Double = 0
     @Published var displayRotation: Int = 0 
     @Published var mapRotationMode: Int = 0 // 0=North Up, 1=Course Up  // 0-3: 0°, 90°, 180°, 270°
     @Published var zoomLevel: Int = 2 // 0-4: 0=super-zoom, 1=closest, 4=farthest
@@ -191,6 +192,7 @@ class BLEManager: NSObject, ObservableObject {
         static let minPolygonSize = "mapSettings.minPolygonSize"
         static let detailLevel = "mapSettings.detailLevel"
         static let routeLineWidth = "mapSettings.routeLineWidth"
+        static let streetLineWidthBoost = "mapSettings.streetLineWidthBoost"
         static let displayRotation = "mapSettings.displayRotation"
         static let mapRotationMode = "mapSettings.mapRotationMode"
         static let zoomLevel = "mapSettings.zoomLevel"
@@ -215,6 +217,7 @@ class BLEManager: NSObject, ObservableObject {
         minPolygonSize = defaults.double(forKey: SettingsKeys.minPolygonSize)
         detailLevel = defaults.object(forKey: SettingsKeys.detailLevel) as? Int ?? 2
         routeLineWidth = defaults.object(forKey: SettingsKeys.routeLineWidth) as? Double ?? 4.0
+        streetLineWidthBoost = defaults.object(forKey: SettingsKeys.streetLineWidthBoost) as? Double ?? 0.0
         displayRotation = defaults.object(forKey: SettingsKeys.displayRotation) as? Int ?? 0
         mapRotationMode = defaults.object(forKey: SettingsKeys.mapRotationMode) as? Int ?? 0
         zoomLevel = defaults.object(forKey: SettingsKeys.zoomLevel) as? Int ?? 2
@@ -234,6 +237,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(minPolygonSize, forKey: SettingsKeys.minPolygonSize)
         defaults.set(detailLevel, forKey: SettingsKeys.detailLevel)
         defaults.set(routeLineWidth, forKey: SettingsKeys.routeLineWidth)
+        defaults.set(streetLineWidthBoost, forKey: SettingsKeys.streetLineWidthBoost)
         defaults.set(displayRotation, forKey: SettingsKeys.displayRotation)
         defaults.set(mapRotationMode, forKey: SettingsKeys.mapRotationMode)
         defaults.set(zoomLevel, forKey: SettingsKeys.zoomLevel)
@@ -771,6 +775,7 @@ class BLEManager: NSObject, ObservableObject {
         sendSetting(id: 1, value: Int32(minPolygonSize))
         sendSetting(id: 2, value: Int32(detailLevel))
         sendSetting(id: 3, value: Int32(routeLineWidth))
+        sendSetting(id: 9, value: Int32(streetLineWidthBoost))
         sendSetting(id: 4, value: Int32(displayRotation))
         sendSetting(id: 6, value: Int32(mapRotationMode))
         sendSetting(id: 7, value: Int32(zoomLevel))

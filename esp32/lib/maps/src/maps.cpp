@@ -34,6 +34,7 @@ struct MapRenderSettings {
   uint8_t minPolygonSize;
   uint8_t detailLevel;
   uint8_t routeLineWidth;
+  uint8_t streetLineWidthBoost;
   uint8_t displayRotation;
   uint8_t mapRotationMode;
   uint8_t zoomLevel;
@@ -76,6 +77,15 @@ static inline bool isTypeVisible(uint8_t typeId,
   if (typeId >= 50 && typeId < 100)
     return (visMask & (1 << 2)) != 0; // Minor roads
   return true; // Major roads (1-49) and others always visible
+}
+
+static inline bool shouldBoostLineWidth(uint8_t typeId, uint8_t styleWidth) {
+  if (typeId >= 1 && typeId < 100)
+    return true;
+
+  // Older/unknown map blocks may not carry type IDs. In our styles, ordinary
+  // roads are 3px or wider, while waterways/rail/coastline are normally 1-2px.
+  return typeId == 0 && styleWidth >= 3;
 }
 
 static void *bufMapTemp = nullptr;
@@ -921,7 +931,7 @@ void Maps::fillPolygon(const Polygon &p,
  * @param color (Already swapped for RGB565 if needed)
  */
 void Maps::drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
-                    int16_t y2, uint16_t color) {
+                    int16_t y2, uint16_t color, uint8_t width) {
   lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
   if (draw_buf == NULL)
     return;
@@ -930,6 +940,39 @@ void Maps::drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
   int32_t buf_h = draw_buf->header.h;
   uint32_t stride_pixels = draw_buf->header.stride / 2;
 
+  if (width < 2) {
+    drawLineSegment(buf, buf_w, buf_h, stride_pixels, x1, y1, x2, y2, color);
+    return;
+  }
+
+  float dx = x2 - x1;
+  float dy = y2 - y1;
+  float len = sqrtf(dx * dx + dy * dy);
+  if (len < 1.0f) {
+    if (x1 >= 0 && x1 < buf_w && y1 >= 0 && y1 < buf_h) {
+      buf[y1 * stride_pixels + x1] = color;
+    }
+    return;
+  }
+
+  dx /= len;
+  dy /= len;
+  float px = -dy;
+  float py = dx;
+
+  int16_t start = -((int16_t)width - 1) / 2;
+  int16_t end = (int16_t)width / 2;
+  for (int16_t t = start; t <= end; t++) {
+    int16_t ox = (int16_t)roundf(px * t);
+    int16_t oy = (int16_t)roundf(py * t);
+    drawLineSegment(buf, buf_w, buf_h, stride_pixels, x1 + ox, y1 + oy,
+                    x2 + ox, y2 + oy, color);
+  }
+}
+
+void Maps::drawLineSegment(uint16_t *buf, int32_t buf_w, int32_t buf_h,
+                           uint32_t stride_pixels, int16_t x1, int16_t y1,
+                           int16_t x2, int16_t y2, uint16_t color) {
   // Bresenham's Line Algorithm
   int dx = abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
   int dy = -abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
@@ -1301,10 +1344,16 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
         };
 
         Point16 p1 = transformPoint(line.points[0]);
+        int32_t streetBoost = shouldBoostLineWidth(line.typeId, line.width)
+                                  ? mapRenderSettings.streetLineWidthBoost
+                                  : 0;
+        uint8_t lineWidth = (uint8_t)std::min<int32_t>(
+            std::max<int32_t>(line.width, 1) + streetBoost, 24);
 
         for (int i = 0; i < (int)line.points.size() - 1; i++) {
           Point16 p2 = transformPoint(line.points[i + 1]);
-          Maps::drawLine(canvas, p1.x, p1.y, p2.x, p2.y, color_swapped);
+          Maps::drawLine(canvas, p1.x, p1.y, p2.x, p2.y, color_swapped,
+                         lineWidth);
           p1 = p2;
         }
       }
