@@ -47,19 +47,7 @@ class CoordinateConverter {
             wgsLon += (lon - gcj.lon)
         }
         
-        // Apply manual calibration
-        return applyCalibration(lat: wgsLat, lon: wgsLon)
-    }
-    
-    /// Apply manual calibration nudge to WGS-84 coordinates
-    /// Used to correct specific map tile offsets (e.g. ~50m offset in Shanghai)
-    static func applyCalibration(lat: Double, lon: Double) -> (lat: Double, lon: Double) {
-        if !isInChina(lat: lat, lon: lon) {
-             return (lat, lon)
-        }
-        // Standard calibration: +80m North, 0m East/West (China only)
-        // User confirmed this provides correct alignment in North-Up mode.
-        return (lat + 0.00080, lon + 0.0)
+        return (wgsLat, wgsLon)
     }
     
     /// Convert CLLocationCoordinate2D from GCJ-02 to WGS-84

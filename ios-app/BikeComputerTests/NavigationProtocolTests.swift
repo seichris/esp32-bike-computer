@@ -91,6 +91,7 @@ struct NavigationProtocolTests {
     static func main() {
         testIconMapping()
         testRouteEndpointExtraction()
+        testChinaRouteCoordinatesRoundTripWithoutCalibrationNudge()
         testSourceEndpointSelection()
         testRouteInitialLocationUsesResolvedSource()
         testRouteTransportTypes()
@@ -132,6 +133,18 @@ struct NavigationProtocolTests {
 
         let emptyPolyline = MKPolyline()
         assert(RoutePolylineEndpoint.location(for: emptyPolyline) == nil, "empty polyline has no endpoint")
+    }
+
+    static func testChinaRouteCoordinatesRoundTripWithoutCalibrationNudge() {
+        let wgs = CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737)
+        let gcj = CoordinateConverter.wgs84ToGCJ02(coordinate: wgs)
+        let converted = CoordinateConverter.gcj02ToWGS84(coordinate: gcj)
+
+        assert(
+            CLLocation(latitude: converted.latitude, longitude: converted.longitude)
+                .distance(from: CLLocation(latitude: wgs.latitude, longitude: wgs.longitude)) < 2,
+            "GCJ route inverse should return WGS without a fixed calibration offset"
+        )
     }
 
     static func testSourceEndpointSelection() {
