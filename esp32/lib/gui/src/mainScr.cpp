@@ -514,8 +514,8 @@ void scrollMapEvent(lv_event_t *event) {
       if (abs(dx) > SCROLL_THRESHOLD || abs(dy) > SCROLL_THRESHOLD) {
         log_i("PRESSING: p(%d,%d) last(%d,%d) -> dx=%d dy=%d", p.x, p.y, last_x,
               last_y, dx, dy);
-        pendingDx += dx;
-        pendingDy += dy;
+        pendingDx += gui_layout::mapDragDelta(dx);
+        pendingDy += gui_layout::mapDragDelta(dy);
         last_x = p.x;
         last_y = p.y;
         pressStartTime = 0;
@@ -535,8 +535,8 @@ void scrollMapEvent(lv_event_t *event) {
         const int SCROLL_THRESHOLD = 5;
         if (abs(dx) <= MAX_JUMP && abs(dy) <= MAX_JUMP &&
             (abs(dx) > SCROLL_THRESHOLD || abs(dy) > SCROLL_THRESHOLD)) {
-          pendingDx += dx;
-          pendingDy += dy;
+          pendingDx += gui_layout::mapDragDelta(dx);
+          pendingDy += gui_layout::mapDragDelta(dy);
         }
         flushDragMovement(true);
       }
