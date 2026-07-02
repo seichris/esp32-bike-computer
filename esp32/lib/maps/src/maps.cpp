@@ -2014,8 +2014,21 @@ void Maps::generateVectorMap(uint8_t zoom) {
   // CRITICAL: Update Rotation ONCE per generation frame to ensure map and route
   // align
   if (rotationMode == ROT_COURSE_UP) {
-    // Use negative heading to rotate map so heading points UP
-    rotationRad = -DEG2RAD(gps.gpsData.heading);
+    uint16_t courseUpHeading = gps.gpsData.heading;
+    const char *courseUpSource = "gps";
+    uint16_t routeHeading = 0;
+    if (routeOverlay.headingNear(gps.gpsData.latitude, gps.gpsData.longitude,
+                                 routeHeading)) {
+      courseUpHeading = routeHeading;
+      courseUpSource = "route";
+    }
+
+    // Use negative heading to rotate map so the selected navigation/course
+    // direction points up.
+    rotationRad = -DEG2RAD(courseUpHeading);
+    ESP_LOGI(TAG, "Course-Up: heading=%u source=%s gpsHeading=%u",
+             (unsigned)courseUpHeading, courseUpSource,
+             (unsigned)gps.gpsData.heading);
   } else {
     rotationRad = 0;
   }

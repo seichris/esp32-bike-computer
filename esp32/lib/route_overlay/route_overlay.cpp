@@ -11,6 +11,7 @@
 #include "../../utils/src/gpsMath.hpp"
 #include <Arduino.h>
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 
@@ -78,6 +79,57 @@ void RouteOverlay::parseRouteData(const uint8_t *data, size_t len) {
 void RouteOverlay::clear() {
   points.clear();
   Serial.println("Route overlay cleared");
+}
+
+bool RouteOverlay::headingNear(double lat, double lon,
+                               uint16_t &headingDeg) const {
+  if (points.size() < 2) {
+    return false;
+  }
+
+  const double cosLat = cos(DEG2RAD(lat));
+  double bestDistanceSq = DBL_MAX;
+  size_t bestSegment = 0;
+
+  for (size_t i = 0; i + 1 < points.size(); i++) {
+    const double lat1 = points[i].lat / 1000000.0;
+    const double lon1 = points[i].lon / 1000000.0;
+    const double lat2 = points[i + 1].lat / 1000000.0;
+    const double lon2 = points[i + 1].lon / 1000000.0;
+
+    const double x1 = (lon1 - lon) * cosLat;
+    const double y1 = lat1 - lat;
+    const double x2 = (lon2 - lon) * cosLat;
+    const double y2 = lat2 - lat;
+    const double segX = x2 - x1;
+    const double segY = y2 - y1;
+    const double segLenSq = (segX * segX) + (segY * segY);
+    if (segLenSq <= 0.0) {
+      continue;
+    }
+
+    double t = -((x1 * segX) + (y1 * segY)) / segLenSq;
+    t = std::max(0.0, std::min(1.0, t));
+    const double closestX = x1 + (segX * t);
+    const double closestY = y1 + (segY * t);
+    const double distanceSq = (closestX * closestX) + (closestY * closestY);
+    if (distanceSq < bestDistanceSq) {
+      bestDistanceSq = distanceSq;
+      bestSegment = i;
+    }
+  }
+
+  if (bestDistanceSq == DBL_MAX) {
+    return false;
+  }
+
+  const double segmentHeading =
+      calcCourse(points[bestSegment].lat / 1000000.0,
+                 points[bestSegment].lon / 1000000.0,
+                 points[bestSegment + 1].lat / 1000000.0,
+                 points[bestSegment + 1].lon / 1000000.0);
+  headingDeg = static_cast<uint16_t>(round(segmentHeading)) % 360;
+  return true;
 }
 
 #ifndef DEG2RAD

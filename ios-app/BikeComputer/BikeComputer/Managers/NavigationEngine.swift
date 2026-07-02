@@ -56,10 +56,14 @@ class NavigationEngine: NSObject, ObservableObject {
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isReady in
-                guard isReady else { return }
-                self?.resendCurrentDeviceGpsPosition()
-                self?.resendCurrentRouteGeometry()
-                self?.resendCurrentNavigationState()
+                guard isReady, let self else { return }
+                guard self.isNavigating else {
+                    self.bleManager?.clearRouteGeometry()
+                    return
+                }
+                self.resendCurrentDeviceGpsPosition()
+                self.resendCurrentRouteGeometry()
+                self.resendCurrentNavigationState()
             }
             .store(in: &cancellables)
     }
@@ -99,6 +103,7 @@ class NavigationEngine: NSObject, ObservableObject {
     
     /// Stop navigation
     func stopNavigation() {
+        bleManager?.clearRouteGeometry()
         isNavigating = false
         currentRoute = nil
         currentStepIndex = 0
@@ -107,6 +112,8 @@ class NavigationEngine: NSObject, ObservableObject {
         initialNavigationLocation = nil
         lastDeviceGpsLocation = nil
         hasAcceptedLiveLocation = false
+        lastSentGeometryHash = 0
+        lastGeometrySendTime = .distantPast
         stopSimulation()
         print("Navigation stopped")
     }
@@ -324,12 +331,22 @@ class NavigationEngine: NSObject, ObservableObject {
     private func resendCurrentRouteGeometry() {
         guard isNavigating, let route = currentRoute, route.polyline.pointCount > 0 else { return }
 
-        var startCoordinate = CLLocationCoordinate2D()
-        route.polyline.getCoordinates(&startCoordinate, range: NSRange(location: 0, length: 1))
         lastSentGeometryHash = 0
         lastGeometrySendTime = .distantPast
-        sendRouteGeometryIfNeeded(currentLocation: CLLocation(latitude: startCoordinate.latitude,
-                                                              longitude: startCoordinate.longitude))
+        sendRouteGeometryIfNeeded(currentLocation: routeGeometryResendLocation(for: route))
+    }
+
+    private func routeGeometryResendLocation(for route: MKRoute) -> CLLocation {
+        if let lastDeviceGpsLocation {
+            if lastDeviceGpsLocation.convertFromMapKitRoute {
+                return lastDeviceGpsLocation.location
+            }
+            return CoordinateConverter.mapKitRouteLocation(fromGPSLocation: lastDeviceGpsLocation.location)
+        }
+
+        var startCoordinate = CLLocationCoordinate2D()
+        route.polyline.getCoordinates(&startCoordinate, range: NSRange(location: 0, length: 1))
+        return CLLocation(latitude: startCoordinate.latitude, longitude: startCoordinate.longitude)
     }
 
     private func resendCurrentDeviceGpsPosition() {

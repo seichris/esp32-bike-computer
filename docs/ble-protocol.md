@@ -53,6 +53,10 @@ DeltaLon: Int16 microdegrees
 Coordinates are WGS-84. The iOS app converts Apple Maps route coordinates from
 GCJ-02 to WGS-84 before writing route geometry so it aligns with OSM map blocks.
 
+A zero-length route geometry packet clears the route overlay on the ESP32. The
+iOS app sends this when navigation stops so stale route geometry is not used for
+route-overlay rendering or Course Up rotation.
+
 ## GPS Position (`2A72`)
 
 Little-endian binary packet:

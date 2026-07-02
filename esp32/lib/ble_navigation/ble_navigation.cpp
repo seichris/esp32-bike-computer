@@ -386,8 +386,20 @@ static bool hasPrefix(const std::string &value, const char *prefix) {
 
 static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
                                        const char *source) {
-  if (data == nullptr || len == 0) {
-    Serial.printf("BLE: Rejected %s route geometry: empty payload\n",
+  if (len == 0) {
+    lastRouteHash = 0;
+    lastRouteLen = 0;
+    Serial.printf("BLE: %s route geometry cleared\n",
+                  source == nullptr ? "unknown" : source);
+    bleDebugStats.routePacketCount++;
+    bleDebugStats.lastRoutePacketMs = millis();
+    routeOverlay.clear();
+    triggerMapRedraw();
+    return;
+  }
+
+  if (data == nullptr) {
+    Serial.printf("BLE: Rejected %s route geometry: null payload\n",
                   source == nullptr ? "unknown" : source);
     return;
   }

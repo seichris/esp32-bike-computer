@@ -361,6 +361,11 @@ class BLEManager: NSObject, ObservableObject {
         sendFallbackMapPacket(fallback, label: "route geometry")
     }
 
+    /// Clear route geometry on ESP32.
+    func clearRouteGeometry() {
+        sendRouteGeometry(Data())
+    }
+
     /// Send GPS position to ESP32.
     /// Format: [Lat:4][Lon:4][Heading:2][UnixTime:4] with WGS-84 microdegrees.
     func sendGPSPosition(lat: Double, lon: Double, heading: Double = 0) {

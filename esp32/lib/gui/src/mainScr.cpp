@@ -8,6 +8,7 @@
 
 #include "mainScr.hpp"
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
+#include "../../route_overlay/route_overlay.hpp"
 #include "guiLayout.hpp"
 // #include "../../compass/compass.hpp"
 
@@ -61,6 +62,15 @@ static int16_t mapInteractionAnchorY() {
   const uint16_t mapHeight =
       mapSet.mapFullScreen ? mapView.mapScrFull : mapView.mapScrHeight;
   return gui_layout::mapAnchorY(mapHeight);
+}
+
+static uint16_t currentCourseUpHeading() {
+  uint16_t routeHeading = 0;
+  if (routeOverlay.headingNear(gps.gpsData.latitude, gps.gpsData.longitude,
+                               routeHeading)) {
+    return routeHeading;
+  }
+  return gps.gpsData.heading;
 }
 
 /**
@@ -228,7 +238,7 @@ void updateMainScreen(lv_timer_t *t) {
 #endif
       // Track last heading for Course-Up auto-rotation
       static uint16_t lastHeading = 0;
-      uint16_t currentHeading = gps.gpsData.heading;
+      uint16_t currentHeading = currentCourseUpHeading();
 
       // In Course-Up mode, redraw map when heading changes significantly (> 5
       // degrees)

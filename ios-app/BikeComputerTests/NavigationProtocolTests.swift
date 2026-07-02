@@ -26,6 +26,7 @@ func assertCoordinate(
 
 final class TestBLEManager: BLEManager {
     var sentPackets: [String] = []
+    var sentRouteGeometry: [Data] = []
 
     override func centralManagerDidUpdateState(_ central: CBCentralManager) {
         // Keep CoreBluetooth startup callbacks from changing test-controlled state.
@@ -38,6 +39,14 @@ final class TestBLEManager: BLEManager {
 
         sentPackets.append(data)
         return true
+    }
+
+    override func sendRouteGeometry(_ data: Data) {
+        guard isConnected, isNavigationReady else {
+            return
+        }
+
+        sentRouteGeometry.append(data)
     }
 }
 
@@ -91,6 +100,8 @@ struct NavigationProtocolTests {
     static func main() {
         testIconMapping()
         testRouteEndpointExtraction()
+        testChinaRouteCoordinatesRoundTripWithoutCalibrationNudge()
+        testNonChinaCoordinatesPassThroughUnchanged()
         testSourceEndpointSelection()
         testRouteInitialLocationUsesResolvedSource()
         testRouteTransportTypes()
@@ -102,6 +113,9 @@ struct NavigationProtocolTests {
         testBLEManagerPersistsNewMapSettings()
         testNavigationSendTrackerReadinessRetry()
         testNavigationEngineResendsWhenBLEBecomesReady()
+        testNavigationEngineResendsRouteGeometryNearLastLocation()
+        testNavigationEngineClearsRouteGeometryOnStop()
+        testNavigationEngineClearsRouteGeometryWhenReadyAndIdle()
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         print("NavigationProtocolTests passed")
     }
@@ -132,6 +146,31 @@ struct NavigationProtocolTests {
 
         let emptyPolyline = MKPolyline()
         assert(RoutePolylineEndpoint.location(for: emptyPolyline) == nil, "empty polyline has no endpoint")
+    }
+
+    static func testChinaRouteCoordinatesRoundTripWithoutCalibrationNudge() {
+        let wgs = CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737)
+        let gcj = CoordinateConverter.wgs84ToGCJ02(coordinate: wgs)
+        let converted = CoordinateConverter.gcj02ToWGS84(coordinate: gcj)
+
+        assert(
+            CLLocation(latitude: converted.latitude, longitude: converted.longitude)
+                .distance(from: CLLocation(latitude: wgs.latitude, longitude: wgs.longitude)) < 2,
+            "GCJ route inverse should return WGS without a fixed calibration offset"
+        )
+    }
+
+    static func testNonChinaCoordinatesPassThroughUnchanged() {
+        let coordinate = CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194)
+
+        assertCoordinate(CoordinateConverter.wgs84ToGCJ02(coordinate: coordinate),
+                         latitude: coordinate.latitude,
+                         longitude: coordinate.longitude,
+                         "non-China WGS->GCJ should pass through")
+        assertCoordinate(CoordinateConverter.gcj02ToWGS84(coordinate: coordinate),
+                         latitude: coordinate.latitude,
+                         longitude: coordinate.longitude,
+                         "non-China GCJ->WGS should pass through")
     }
 
     static func testSourceEndpointSelection() {
@@ -348,6 +387,76 @@ struct NavigationProtocolTests {
         assertEqual(String(fields[2]), "Turn left onto Test Road", "resent packet keeps current instruction")
     }
 
+    static func testNavigationEngineResendsRouteGeometryNearLastLocation() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+
+        let coordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0020, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0030, longitude: -122.0000)
+        ]
+        let route = TestRoute(instructions: "Continue", coordinates: coordinates)
+        engine.startNavigation(with: route)
+        engine.processExternalLocation(CLLocation(latitude: coordinates[2].latitude,
+                                                  longitude: coordinates[2].longitude))
+        manager.sentRouteGeometry.removeAll()
+
+        manager.isNavigationReady = false
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        manager.isNavigationReady = true
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+        assertEqual(manager.sentRouteGeometry.count, 1, "navigation readiness should resend route geometry")
+        guard let firstCoordinate = routeStartCoordinate(from: manager.sentRouteGeometry[0]) else {
+            assert(false, "route geometry should include a start coordinate")
+            return
+        }
+        assertCoordinate(firstCoordinate,
+                         latitude: coordinates[2].latitude,
+                         longitude: coordinates[2].longitude,
+                         "route geometry resend should use the latest device location window")
+    }
+
+    static func testNavigationEngineClearsRouteGeometryOnStop() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+
+        let coordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000)
+        ]
+        let route = TestRoute(instructions: "Continue", coordinates: coordinates)
+        engine.startNavigation(with: route)
+        manager.sentRouteGeometry.removeAll()
+
+        engine.stopNavigation()
+
+        assertEqual(manager.sentRouteGeometry, [Data()], "stop navigation should clear route geometry")
+    }
+
+    static func testNavigationEngineClearsRouteGeometryWhenReadyAndIdle() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+
+        manager.isNavigationReady = true
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+        assertEqual(manager.sentRouteGeometry, [Data()], "idle readiness should clear route geometry")
+    }
+
     static func testNavigationEngineIgnoresLiveLocationFarFromRouteStart() {
         let manager = TestBLEManager()
         manager.isConnected = true
@@ -370,5 +479,23 @@ struct NavigationProtocolTests {
         engine.processExternalLocation(unrelatedDeviceLocation)
 
         assertEqual(manager.sentPackets.count, 1, "far live GPS should not overwrite a route started from another source")
+    }
+
+    static func routeStartCoordinate(from data: Data) -> CLLocationCoordinate2D? {
+        guard data.count >= 8 else { return nil }
+
+        let latBits = UInt32(data[0]) |
+            (UInt32(data[1]) << 8) |
+            (UInt32(data[2]) << 16) |
+            (UInt32(data[3]) << 24)
+        let lonBits = UInt32(data[4]) |
+            (UInt32(data[5]) << 8) |
+            (UInt32(data[6]) << 16) |
+            (UInt32(data[7]) << 24)
+        let lat = Int32(bitPattern: latBits)
+        let lon = Int32(bitPattern: lonBits)
+
+        return CLLocationCoordinate2D(latitude: Double(lat) / 1_000_000,
+                                      longitude: Double(lon) / 1_000_000)
     }
 }
