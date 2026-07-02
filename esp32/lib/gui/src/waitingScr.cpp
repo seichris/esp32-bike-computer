@@ -37,11 +37,11 @@ void createWaitingScr() {
 
   // Title: "Bike Computer"
   lv_obj_t *title = lv_label_create(waitingScreen);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_38, 0);
   lv_obj_set_style_text_color(title, lv_color_white(), 0);
   lv_label_set_text(title, "Bike Computer");
   lv_obj_set_align(title, LV_ALIGN_CENTER);
-  lv_obj_set_y(title, -80);
+  lv_obj_set_y(title, -105);
 
   // Spinner (animated loading indicator)
   lv_obj_t *spinner = lv_spinner_create(waitingScreen);
@@ -51,13 +51,13 @@ void createWaitingScr() {
 
   // Message: "Start the app to start navigation."
   lv_obj_t *message = lv_label_create(waitingScreen);
-  lv_obj_set_style_text_font(message, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_font(message, &lv_font_montserrat_38, 0);
   lv_obj_set_style_text_color(message, lv_color_hex(0xAAAAAA), 0);
   lv_obj_set_style_text_align(message, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_text(message, "Start the app\nto start navigation.");
-  lv_obj_set_width(message, TFT_WIDTH - 40);
+  lv_obj_set_width(message, TFT_WIDTH - 24);
   lv_obj_set_align(message, LV_ALIGN_CENTER);
-  lv_obj_set_y(message, 100);
+  lv_obj_set_y(message, 125);
 
   log_i("waitingScreen created at 0x%p", waitingScreen);
 }

@@ -7,12 +7,31 @@
  */
 
 #include "navScr.hpp"
+#include <cstdio>
+#include <cstring>
 
 lv_obj_t *nameNav;
 lv_obj_t *latNav;
 lv_obj_t *lonNav;
 lv_obj_t *distNav;
 lv_obj_t *arrowNav;
+
+void formatNavigationInstruction(const char *instruction, char *buffer,
+                                 size_t bufferSize) {
+  if (!instruction || bufferSize == 0) {
+    return;
+  }
+
+  const char *onto = strstr(instruction, " onto ");
+  if (onto) {
+    const size_t actionLen = onto - instruction;
+    snprintf(buffer, bufferSize, "%.*s\nonto\n%s", static_cast<int>(actionLen),
+             instruction, onto + 6);
+    return;
+  }
+
+  snprintf(buffer, bufferSize, "%s", instruction);
+}
 
 /**
  * @brief Navigation screen
@@ -24,21 +43,14 @@ void navigationScr(_lv_obj_t *screen) {
   lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
   lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
-  lv_obj_t * label;
-  label = lv_label_create(screen);
-  lv_obj_set_style_text_font(label, fontOptions, 0);
-  lv_obj_set_style_text_color(label, lv_color_hex(0xAAAAAA), 0);
-  lv_label_set_text_static(label, "Next maneuver");
-  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
-
   nameNav = lv_label_create(screen);
-  lv_obj_set_style_text_font(nameNav, fontLargeMedium, 0);
+  lv_obj_set_style_text_font(nameNav, fontVeryLarge, 0);
   lv_obj_set_style_text_color(nameNav, lv_color_white(), 0);
   lv_obj_set_style_text_align(nameNav, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_long_mode(nameNav, LV_LABEL_LONG_WRAP);
-  lv_obj_set_width(nameNav, TFT_WIDTH - 32);
+  lv_obj_set_width(nameNav, TFT_WIDTH - 24);
   lv_label_set_text_static(nameNav, "Waiting for instruction");
-  lv_obj_align(nameNav, LV_ALIGN_TOP_MID, 0, 55);
+  lv_obj_align(nameNav, LV_ALIGN_TOP_MID, 0, 24);
 
   latNav = lv_label_create(screen);
   lv_obj_set_style_text_font(latNav, fontOptions, 0);
@@ -54,12 +66,12 @@ void navigationScr(_lv_obj_t *screen) {
   lv_obj_set_style_text_font(distNav, fontVeryLarge, 0);
   lv_obj_set_style_text_color(distNav, lv_color_white(), 0);
   lv_label_set_text_static(distNav, "--");
-  lv_obj_align(distNav, LV_ALIGN_CENTER, 0, -35);
+  lv_obj_align(distNav, LV_ALIGN_CENTER, 0, 60);
 
   arrowNav = lv_img_create(screen);
   lv_img_set_zoom(arrowNav, iconScale);
   lv_obj_update_layout(arrowNav);
-  lv_obj_align(arrowNav, LV_ALIGN_CENTER, 0, 95);
+  lv_obj_align(arrowNav, LV_ALIGN_BOTTOM_MID, 0, -28);
 
   LV_IMG_DECLARE(navup);
   lv_img_set_src(arrowNav, &navup);

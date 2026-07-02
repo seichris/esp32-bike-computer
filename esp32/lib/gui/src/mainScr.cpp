@@ -693,7 +693,10 @@ void updateNavEvent(lv_event_t *event) {
   }
 
   NavigationData navData = getCurrentNavigationData();
-  lv_label_set_text(nameNav, navData.instruction);
+  char formattedInstruction[160];
+  formatNavigationInstruction(navData.instruction, formattedInstruction,
+                              sizeof(formattedInstruction));
+  lv_label_set_text(nameNav, formattedInstruction);
   if (navData.distance >= 1000) {
     lv_label_set_text_fmt(distNav, "%.1f km", navData.distance / 1000.0f);
   } else {
