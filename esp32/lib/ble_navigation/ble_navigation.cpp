@@ -9,6 +9,9 @@
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
 #include "../route_overlay/route_overlay.hpp"
+#ifdef WAVESHARE_AMOLED_175
+#include "../waveshare_board/display.hpp"
+#endif
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <algorithm>
@@ -46,6 +49,28 @@ static bool unauthTimeoutDisconnectRequested = false;
 // Route geometry debouncing - skip redundant parses
 static uint32_t lastRouteHash = 0;
 static size_t lastRouteLen = 0;
+
+static uint8_t sanitizeMapDisplayRotation(uint8_t requestedRotation,
+                                          const char *source) {
+#ifdef WAVESHARE_AMOLED_175
+  if (requestedRotation > waveshare_board::display::MAX_SUPPORTED_ROTATION) {
+    Serial.printf("BLE Settings: %s displayRotation %u unsupported, clamping "
+                  "to 0\n",
+                  source, requestedRotation);
+    return waveshare_board::display::ROTATION_0;
+  }
+  if (requestedRotation == waveshare_board::display::ROTATION_90 &&
+      !waveshare_board::display::EXPERIMENTAL_90_ROTATION_ENABLED) {
+    Serial.printf("BLE Settings: %s displayRotation 1 disabled on Waveshare "
+                  "until CO5300 window is verified; using 0\n",
+                  source);
+    return waveshare_board::display::ROTATION_0;
+  }
+#else
+  (void)source;
+#endif
+  return requestedRotation;
+}
 
 /**
  * @brief Parse navigation instruction data
@@ -365,6 +390,8 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
   case 4:
     mapRenderSettings.displayRotation =
         (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)3);
+    mapRenderSettings.displayRotation =
+        sanitizeMapDisplayRotation(mapRenderSettings.displayRotation, "write");
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar("rotation", mapRenderSettings.displayRotation);
     settingsPrefs.end();
@@ -590,7 +617,8 @@ static void loadSettingsFromNVS() {
   mapRenderSettings.minPolygonSize = prefs.getUChar("minPolySize", 0);
   mapRenderSettings.detailLevel = prefs.getUChar("detailLevel", 2);
   mapRenderSettings.routeLineWidth = prefs.getUChar("routeWidth", 4);
-  mapRenderSettings.displayRotation = prefs.getUChar("rotation", 0);
+  mapRenderSettings.displayRotation =
+      sanitizeMapDisplayRotation(prefs.getUChar("rotation", 0), "NVS");
   mapRenderSettings.mapRotationMode = prefs.getUChar("mapRotMode", 0);
   mapRenderSettings.zoomLevel = prefs.getUChar("zoomLevel", 4);
   mapRenderSettings.visibilityMask = prefs.getUInt("visMask", 0xFFFFFFFF);

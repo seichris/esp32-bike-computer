@@ -13,6 +13,7 @@
 
 // Include HAL for pin definitions
 #include "../../include/hal.hpp"
+#include "display.hpp"
 #include "i2c_bus.hpp"
 #include "touch.hpp"
 #include "waveshare_board.hpp"
@@ -34,12 +35,23 @@ Arduino_ESP32QSPI *bus = new Arduino_ESP32QSPI(12, // CS
                                                7   // D3
 );
 
-// CO5300 Display Driver - Use minimal constructor (works for 0° mode)
-// Note: Explicit offsets caused green edges, so use defaults
+// CO5300 Display Driver. Match Waveshare's Arduino demos and ESP-IDF BSP:
+// the exposed panel is 466x466 with a 6 px column gap.
 Arduino_CO5300 *gfx = new Arduino_CO5300(bus,
                                          39, // RST
-                                         0   // Rotation
-);
+                                         0,  // Rotation
+                                         waveshare_board::display::
+                                             LOGICAL_WIDTH,
+                                         waveshare_board::display::
+                                             LOGICAL_HEIGHT,
+                                         waveshare_board::display::
+                                             ARDUINO_CO5300_COL_OFFSET1,
+                                         waveshare_board::display::
+                                             ARDUINO_CO5300_ROW_OFFSET1,
+                                         waveshare_board::display::
+                                             ARDUINO_CO5300_COL_OFFSET2,
+                                         waveshare_board::display::
+                                             ARDUINO_CO5300_ROW_OFFSET2);
 
 // ============================================================================
 // LVGL 9 DISPLAY BUFFER
@@ -53,6 +65,100 @@ volatile uint32_t displayFlushCount = 0;
 volatile uint32_t lastDisplayFlushMs = 0;
 volatile uint32_t lastDisplayFlushDurationUs = 0;
 volatile uint32_t maxDisplayFlushDurationUs = 0;
+
+static uint8_t sanitizeDisplayRotation(uint8_t requestedRotation) {
+  using namespace waveshare_board::display;
+
+  if (requestedRotation > MAX_SUPPORTED_ROTATION) {
+    Serial.printf("CO5300: unsupported display rotation %u, using 0\n",
+                  requestedRotation);
+    return ROTATION_0;
+  }
+
+  if (requestedRotation == ROTATION_90 && !EXPERIMENTAL_90_ROTATION_ENABLED) {
+    Serial.println("CO5300: 90-degree display rotation disabled until the "
+                   "active window is verified; using 0");
+    return ROTATION_0;
+  }
+
+  return requestedRotation;
+}
+
+static void writeCo5300Madctl(uint8_t madctl) {
+  gfx->startWrite();
+  bus->writeC8D8(waveshare_board::display::CO5300_MADCTL, madctl);
+  gfx->endWrite();
+}
+
+static void applyCo5300Rotation(uint8_t rotation) {
+  using namespace waveshare_board::display;
+
+  Serial.printf("CO5300: logical=%ux%u active=%ux%u constructorGap=(%u,%u,%u,%u) "
+                "rotation=%u experimental90=%d\n",
+                LOGICAL_WIDTH, LOGICAL_HEIGHT, ACTIVE_WIDTH, ACTIVE_HEIGHT,
+                ARDUINO_CO5300_COL_OFFSET1, ARDUINO_CO5300_ROW_OFFSET1,
+                ARDUINO_CO5300_COL_OFFSET2, ARDUINO_CO5300_ROW_OFFSET2,
+                rotation, EXPERIMENTAL_90_ROTATION_ENABLED ? 1 : 0);
+
+  switch (rotation) {
+  case ROTATION_90:
+    Serial.printf("CO5300: applying experimental MADCTL 0x%02X for 90-degree "
+                  "rotation\n",
+                  CO5300_MADCTL_ROTATION_90);
+    writeCo5300Madctl(CO5300_MADCTL_ROTATION_90);
+    break;
+  case ROTATION_0:
+  default:
+    gfx->setRotation(0);
+    break;
+  }
+}
+
+#ifdef WAVESHARE_DISPLAY_TEST
+static void drawVendorWindowMarker(uint8_t rotation, uint16_t fillColor,
+                                   uint16_t borderColor) {
+  using namespace waveshare_board::display;
+
+  gfx->fillScreen(0x0000);
+  gfx->fillRect(0, 0, ACTIVE_WIDTH, ACTIVE_HEIGHT, fillColor);
+  gfx->drawRect(0, 0, ACTIVE_WIDTH, ACTIVE_HEIGHT, borderColor);
+  gfx->drawRect(1, 1, ACTIVE_WIDTH - 2, ACTIVE_HEIGHT - 2, borderColor);
+  gfx->drawFastHLine(0, ACTIVE_HEIGHT / 2, ACTIVE_WIDTH, 0x8410);
+  gfx->drawFastVLine(ACTIVE_WIDTH / 2, 0, ACTIVE_HEIGHT, 0x8410);
+  gfx->fillRect(0, 0, 24, 24, 0xF800);
+  gfx->fillRect(ACTIVE_WIDTH - 24, 0, 24, 24, 0x07E0);
+  gfx->fillRect(0, ACTIVE_HEIGHT - 24, 24, 24, 0x001F);
+  gfx->fillRect(ACTIVE_WIDTH - 24, ACTIVE_HEIGHT - 24, 24, 24, 0xFFE0);
+  Serial.printf("CO5300 display test: rotation=%u vendorGap=(%u,%u,%u,%u) "
+                "active=%ux%u fill=0x%04X\n",
+                rotation, ARDUINO_CO5300_COL_OFFSET1,
+                ARDUINO_CO5300_ROW_OFFSET1, ARDUINO_CO5300_COL_OFFSET2,
+                ARDUINO_CO5300_ROW_OFFSET2, ACTIVE_WIDTH, ACTIVE_HEIGHT,
+                fillColor);
+}
+
+static void drawDisplayTestPatternForRotation(uint8_t rotation) {
+  using namespace waveshare_board::display;
+
+  applyCo5300Rotation(rotation);
+  const uint16_t fills[] = {0x0000, 0xFFFF, 0xF800, 0x07E0, 0x001F};
+  for (uint16_t fill : fills) {
+    drawVendorWindowMarker(rotation, fill, 0xFFFF);
+    delay(2500);
+  }
+}
+
+static void drawDisplayTestPatterns(uint8_t appliedRotation) {
+  using namespace waveshare_board::display;
+
+  drawDisplayTestPatternForRotation(ROTATION_0);
+  if (EXPERIMENTAL_90_ROTATION_ENABLED) {
+    drawDisplayTestPatternForRotation(ROTATION_90);
+  }
+  applyCo5300Rotation(appliedRotation);
+  gfx->fillScreen(0x0000);
+}
+#endif
 
 // ============================================================================
 // LVGL 9 DISPLAY FLUSH CALLBACK
@@ -472,10 +578,12 @@ void setupDisplay() {
   // Load rotation from NVS (default to 0 if not set)
   Preferences prefs;
   prefs.begin("mapSettings", true); // read-only
-  uint8_t rotation = prefs.getUChar("rotation", 0);
+  uint8_t requestedRotation = prefs.getUChar("rotation", 0);
   prefs.end();
+  uint8_t rotation = sanitizeDisplayRotation(requestedRotation);
   displayRotation = rotation; // Store globally for touch coordinate rotation
-  Serial.printf("Loaded rotation from NVS: %d\n", rotation);
+  Serial.printf("Loaded rotation from NVS: requested=%u applied=%u\n",
+                requestedRotation, rotation);
 
   // ============================================================================
   // DISPLAY ROTATION VIA RAW MADCTL COMMAND
@@ -484,8 +592,10 @@ void setupDisplay() {
   // - Standard panels use: 0x80=MY, 0x40=MX, 0x20=MV (row/col exchange)
   // - CO5300 uses different bits: 0x02=X_FLIP, 0x05=Y_FLIP, 0x20=MV
   //
-  // IMPORTANT: CO5300 hardware only supports 0° and 90° rotation!
-  // 180° and 270° attempts all resulted in mirroring or wrong direction.
+  // IMPORTANT: current board bring-up only verified 0° for normal firmware.
+  // A 90° MADCTL path exists behind WAVESHARE_ENABLE_EXPERIMENTAL_90_ROTATION
+  // for hardware testing. 180° and 270° attempts all resulted in mirroring or
+  // wrong direction.
   //
   // === 180° ROTATION ATTEMPTS (all failed): ===
   // - 0x07 (X_FLIP + Y_FLIP): shows 0° mirrored
@@ -502,45 +612,40 @@ void setupDisplay() {
   // ============================================================================
   // KNOWN ISSUE: 90° ROTATION HAS GREEN EDGE AT BOTTOM
   // ============================================================================
-  // When 90° rotation is enabled, a thin green strip appears at the bottom
-  // of the display. The map and touch work correctly, but this visual artifact
-  // persists during all map operations.
+  // When 90° rotation is enabled experimentally, a thin green strip appears at
+  // the bottom of the display. The map and touch work correctly, but this visual
+  // artifact persists during all map operations.
   //
   // === WHAT WE TRIED TO FIX THE GREEN EDGE (all failed): ===
   // 1. fillScreen(BLACK) after MADCTL - still shows green
   // 2. fillScreen(BLACK) after rotation in LVGL setup - still shows green
   // 3. Explicit constructor with 466x466 dimensions and 7px offsets
-  //    (center in 480x480 panel) - made it worse, added green to 0° mode too
+  //    (a rejected centered-window guess) - made the artifact move around
   // 4. Various MADCTL bit combinations - didn't help
+  // 5. Full-screen diagnostic fills with guessed 0/7/14 offsets - remained
+  //    clipped/skewed in user photos
   //
-  // === POSSIBLE ROOT CAUSES (for future investigation): ===
-  // - CO5300 panel is 480x480, we use 466x466 window
+  // === CURRENT BASELINE AND FUTURE INVESTIGATION: ===
+  // - Waveshare's Arduino examples use 466x466 with constructor gap 6,0,0,0.
+  // - Waveshare's ESP-IDF BSP applies esp_lcd_panel_set_gap(..., 0x06, 0).
   // - When MV (row/col swap) is set, the address window offsets may not
   //   adjust correctly in the Arduino_CO5300 driver
-  // - The driver's writeAddrWindow() adds _xStart/_yStart offsets which
-  //   may not be correct for rotated mode
-  // - LVGL or map buffer may not be fully covering the rotated display area
+  // - LVGL software rotation may be a better follow-up than raw MADCTL.
   //
   // === POTENTIAL FIXES TO TRY IN FUTURE: ===
-  // - Modify Arduino_CO5300 driver to handle rotation offsets properly
-  // - Send custom CASET/PASET commands after MADCTL to adjust window
   // - Use LVGL's software rotation (lv_display_set_rotation) with proper
   //   render mode configuration
-  // - Investigate if the green is from uninitialized PSRAM buffer
+  // - Modify Arduino_CO5300 driver only if software rotation is too slow.
   //
-  // For now, the iOS app still offers 90° rotation option with this known
-  // visual artifact (green strip at bottom). Touch and map work correctly.
+  // For now, normal Waveshare firmware clamps 90° requests back to 0° so the
+  // shipped build does not expose the known artifact. Use
+  // WAVESHARE_AMOLED_175_DISPLAY_TEST to inspect 0° and the experimental 90°
+  // path on hardware before enabling it in normal firmware.
   // ============================================================================
   //
-  if (rotation == 1) {
-    // 90° CCW - MV + X_FLIP (rotation works, touch works, but green edge issue)
-    uint8_t madctl = 0x20 | 0x02; // MV + X_FLIP = 0x22
-    Serial.printf("Sending raw MADCTL: 0x%02X for 90° rotation\n", madctl);
-    gfx->startWrite();
-    bus->writeC8D8(0x36, madctl);
-    gfx->endWrite();
-    // Clear display RAM with new rotation coordinate system
-    gfx->fillScreen(0x0000); // BLACK - important to clear after rotation!
+  applyCo5300Rotation(rotation);
+  if (rotation == waveshare_board::display::ROTATION_90) {
+    gfx->fillScreen(0x0000); // Clear with the experimental rotation applied.
   }
   // Note: rotation values 2 (180°) and 3 (270°) are not supported by CO5300
   // The iOS app only offers 0° and 90° options
@@ -551,6 +656,10 @@ void setupDisplay() {
   delay(50);
   gfx->setBrightness(255); // Maximum brightness 0-255
   delay(50);
+
+#ifdef WAVESHARE_DISPLAY_TEST
+  drawDisplayTestPatterns(rotation);
+#endif
 
   // Clear screen for LVGL
   gfx->fillScreen(0x0000); // BLACK
