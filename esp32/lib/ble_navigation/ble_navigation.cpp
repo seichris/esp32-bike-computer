@@ -459,6 +459,8 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
     memcpy(&speedCmps, data + 14, sizeof(speedCmps));
     if (speedCmps != 0xFFFF) {
       gps.gpsData.speed = (uint16_t)((speedCmps * 36U + 500U) / 1000U);
+    } else {
+      gps.gpsData.speed = 0;
     }
   }
 

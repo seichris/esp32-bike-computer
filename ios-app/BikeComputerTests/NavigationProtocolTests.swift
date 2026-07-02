@@ -14,6 +14,25 @@ func assertEqual<T: Equatable>(_ actual: T, _ expected: T, _ message: String) {
     assert(actual == expected, "\(message): expected \(expected), got \(actual)")
 }
 
+func readUInt16LE(_ data: Data, offset: Int) -> UInt16 {
+    UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
+}
+
+func readInt16LE(_ data: Data, offset: Int) -> Int16 {
+    Int16(bitPattern: readUInt16LE(data, offset: offset))
+}
+
+func readUInt32LE(_ data: Data, offset: Int) -> UInt32 {
+    UInt32(data[offset]) |
+        (UInt32(data[offset + 1]) << 8) |
+        (UInt32(data[offset + 2]) << 16) |
+        (UInt32(data[offset + 3]) << 24)
+}
+
+func readInt32LE(_ data: Data, offset: Int) -> Int32 {
+    Int32(bitPattern: readUInt32LE(data, offset: offset))
+}
+
 func assertCoordinate(
     _ actual: CLLocationCoordinate2D,
     latitude expectedLatitude: CLLocationDegrees,
@@ -77,8 +96,10 @@ final class TestRoute: MKRoute {
     init(instructions: String, coordinates: [CLLocationCoordinate2D]) {
         self.storedSteps = [TestRouteStep(instructions: instructions, coordinates: coordinates)]
         self.storedPolyline = MKPolyline(coordinates: coordinates, count: coordinates.count)
-        self.storedDistance = CLLocation(latitude: coordinates[0].latitude, longitude: coordinates[0].longitude)
-            .distance(from: CLLocation(latitude: coordinates[1].latitude, longitude: coordinates[1].longitude))
+        self.storedDistance = zip(coordinates, coordinates.dropFirst()).reduce(0) { distance, pair in
+            distance + CLLocation(latitude: pair.0.latitude, longitude: pair.0.longitude)
+                .distance(from: CLLocation(latitude: pair.1.latitude, longitude: pair.1.longitude))
+        }
         super.init()
     }
 
@@ -100,11 +121,13 @@ struct NavigationProtocolTests {
     static func main() {
         testIconMapping()
         testRouteEndpointExtraction()
+        testRouteRemainingDistance()
         testChinaRouteCoordinatesRoundTripWithoutCalibrationNudge()
         testNonChinaCoordinatesPassThroughUnchanged()
         testSourceEndpointSelection()
         testRouteInitialLocationUsesResolvedSource()
         testRouteTransportTypes()
+        testDeviceGPSPacketBuilder()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
         testBLEPairingAuthenticator()
@@ -146,6 +169,27 @@ struct NavigationProtocolTests {
 
         let emptyPolyline = MKPolyline()
         assert(RoutePolylineEndpoint.location(for: emptyPolyline) == nil, "empty polyline has no endpoint")
+    }
+
+    static func testRouteRemainingDistance() {
+        let coordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0020, longitude: -122.0000)
+        ]
+        let route = TestRoute(instructions: "Continue", coordinates: coordinates)
+        let totalDistance = route.distance
+
+        let start = CLLocation(latitude: coordinates[0].latitude, longitude: coordinates[0].longitude)
+        let halfway = CLLocation(latitude: 37.0010, longitude: -122.0000)
+        let finish = CLLocation(latitude: coordinates[2].latitude, longitude: coordinates[2].longitude)
+
+        assert(abs((RouteProgress.remainingDistance(from: start, in: route) ?? -1) - totalDistance) < 1, "route remaining starts at full route distance")
+        assert(abs((RouteProgress.remainingDistance(from: halfway, in: route) ?? -1) - totalDistance / 2) < 2, "route remaining tracks progress along route")
+        assert(abs(RouteProgress.remainingDistance(from: finish, in: route) ?? -1) < 1, "route remaining reaches zero at route end")
+
+        let offRouteNearHalfway = CLLocation(latitude: 37.0010, longitude: -122.0005)
+        assert(abs((RouteProgress.remainingDistance(from: offRouteNearHalfway, in: route) ?? -1) - totalDistance / 2) < 2, "route remaining projects nearby locations onto closest segment")
     }
 
     static func testChinaRouteCoordinatesRoundTripWithoutCalibrationNudge() {
@@ -197,6 +241,35 @@ struct NavigationProtocolTests {
 
     static func testRouteTransportTypes() {
         assertEqual(RouteTransportTypes.cycling.rawValue, 8, "cycling transport uses MapKit raw option")
+    }
+
+    static func testDeviceGPSPacketBuilder() {
+        let data = DeviceGPSPacketBuilder.data(
+            lat: 37.123456,
+            lon: -122.654321,
+            heading: 361,
+            unixTime: 1_234_567_890,
+            speedMetersPerSecond: 5.55,
+            altitudeMeters: 42.4,
+            distanceTraveledMeters: 1234.4,
+            elapsedSeconds: 65.2,
+            routeRemainingMeters: 9876.5
+        )
+
+        assertEqual(data.count, 30, "extended GPS packet has expected byte length")
+        assertEqual(readInt32LE(data, offset: 0), 37_123_456, "GPS packet stores latitude microdegrees")
+        assertEqual(readInt32LE(data, offset: 4), -122_654_321, "GPS packet stores longitude microdegrees")
+        assertEqual(readUInt16LE(data, offset: 8), 359, "GPS packet clamps heading")
+        assertEqual(readUInt32LE(data, offset: 10), 1_234_567_890, "GPS packet stores Unix time")
+        assertEqual(readUInt16LE(data, offset: 14), 555, "GPS packet stores speed in centimeters per second")
+        assertEqual(readInt16LE(data, offset: 16), 42, "GPS packet stores altitude in meters")
+        assertEqual(readUInt32LE(data, offset: 18), 1234, "GPS packet stores distance traveled in meters")
+        assertEqual(readUInt32LE(data, offset: 22), 65, "GPS packet stores elapsed seconds")
+        assertEqual(readUInt32LE(data, offset: 26), 9877, "GPS packet stores rounded route remaining meters")
+
+        let invalidData = DeviceGPSPacketBuilder.data(lat: 0, lon: 0, unixTime: 0)
+        assertEqual(readUInt16LE(invalidData, offset: 14), DeviceGPSPacketBuilder.invalidSpeedCmps, "missing speed uses invalid sentinel")
+        assertEqual(readUInt32LE(invalidData, offset: 26), DeviceGPSPacketBuilder.invalidRouteRemainingMeters, "missing route remaining uses invalid sentinel")
     }
 
     static func testNavigationPacketBuilder() {

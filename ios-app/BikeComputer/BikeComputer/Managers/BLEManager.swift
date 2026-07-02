@@ -420,35 +420,16 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
 
-        var data = Data()
-        let latInt = Int32(lat * 1_000_000)
-        let lonInt = Int32(lon * 1_000_000)
-        let headingDeg: UInt16 = heading >= 0 ? UInt16(min(heading, 359)) : 0
-        let unixTime = UInt32(Date().timeIntervalSince1970)
-        let speedCmps: UInt16 = {
-            guard let speedMetersPerSecond, speedMetersPerSecond >= 0 else {
-                return UInt16.max
-            }
-            return UInt16(min((speedMetersPerSecond * 100).rounded(), Double(UInt16.max - 1)))
-        }()
-        let altitudeInt = Int16(max(min((altitudeMeters ?? 0).rounded(), Double(Int16.max)), Double(Int16.min)))
-        let distanceInt = UInt32(max(min((distanceTraveledMeters ?? 0).rounded(), Double(UInt32.max)), 0))
-        let elapsedInt = UInt32(max(min((elapsedSeconds ?? 0).rounded(), Double(UInt32.max)), 0))
-        let routeRemainingInt: UInt32 = {
-            guard let routeRemainingMeters, routeRemainingMeters >= 0 else {
-                return UInt32.max
-            }
-            return UInt32(max(min(routeRemainingMeters.rounded(), Double(UInt32.max - 1)), 0))
-        }()
-        withUnsafeBytes(of: latInt.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: lonInt.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: headingDeg.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: unixTime.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: speedCmps.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: altitudeInt.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: distanceInt.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: elapsedInt.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: routeRemainingInt.littleEndian) { data.append(contentsOf: $0) }
+        let data = DeviceGPSPacketBuilder.data(
+            lat: lat,
+            lon: lon,
+            heading: heading,
+            speedMetersPerSecond: speedMetersPerSecond,
+            altitudeMeters: altitudeMeters,
+            distanceTraveledMeters: distanceTraveledMeters,
+            elapsedSeconds: elapsedSeconds,
+            routeRemainingMeters: routeRemainingMeters
+        )
 
         if let characteristic = gpsPositionCharacteristic {
             peripheral.writeValue(data, for: characteristic, type: .withoutResponse)

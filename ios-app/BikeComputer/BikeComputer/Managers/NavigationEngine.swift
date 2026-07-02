@@ -399,50 +399,10 @@ class NavigationEngine: NSObject, ObservableObject {
         lastRideLocation = gpsLocation
 
         if isNavigating, let route = currentRoute, let routeLocation {
-            lastRouteRemainingMeters = routeRemainingDistance(from: routeLocation, in: route)
+            lastRouteRemainingMeters = RouteProgress.remainingDistance(from: routeLocation, in: route)
         } else {
             lastRouteRemainingMeters = nil
         }
-    }
-
-    private func routeRemainingDistance(from location: CLLocation, in route: MKRoute) -> CLLocationDistance? {
-        let polyline = route.polyline
-        let pointCount = polyline.pointCount
-        guard pointCount > 1 else { return nil }
-
-        let routePoints = polyline.points()
-        let target = MKMapPoint(location.coordinate)
-        var totalDistance: CLLocationDistance = 0
-        var closestDistance = Double.greatestFiniteMagnitude
-        var closestDistanceAlongRoute: CLLocationDistance = 0
-
-        for index in 0..<(pointCount - 1) {
-            let start = routePoints[index]
-            let end = routePoints[index + 1]
-            let dx = end.x - start.x
-            let dy = end.y - start.y
-            let segmentLengthSquared = dx * dx + dy * dy
-            let segmentLength = start.distance(to: end)
-
-            if segmentLengthSquared > 0 {
-                let rawProjection = ((target.x - start.x) * dx + (target.y - start.y) * dy) / segmentLengthSquared
-                let projection = min(max(rawProjection, 0), 1)
-                let projected = MKMapPoint(x: start.x + projection * dx, y: start.y + projection * dy)
-                let distanceToSegment = target.distance(to: projected)
-                if distanceToSegment < closestDistance {
-                    closestDistance = distanceToSegment
-                    closestDistanceAlongRoute = totalDistance + start.distance(to: projected)
-                }
-            }
-
-            totalDistance += segmentLength
-        }
-
-        guard totalDistance > 0 else { return nil }
-
-        let routeDistance = route.distance > 0 ? route.distance : totalDistance
-        let scaledDistanceAlongRoute = (closestDistanceAlongRoute / totalDistance) * routeDistance
-        return max(routeDistance - scaledDistanceAlongRoute, 0)
     }
     
     /// Extract clean instruction text from MKRoute.Step
