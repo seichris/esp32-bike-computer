@@ -499,6 +499,7 @@ Implementation status:
 
 - Implemented on branch `touch-hint-fallback-optimization` in PR 12, based on
   merged PR 11.
+- Merged into `main` on 2026-07-01 before starting PR 13.
 - Added `esp32/lib/waveshare_board/touch.hpp` for CST9217/TCA9554 registers,
   dimensions, GPIO21 hint pin, and touch polling/backoff timing constants.
 - Panel touch code now tracks GPIO21 active-low hint level and edges without
@@ -590,15 +591,126 @@ Acceptance criteria:
 Goal: resolve the 90-degree green-edge artifact and make the 466x466 active
 window explicit.
 
+Implementation status:
+
+- In progress on branch `co5300-window-rotation-fix`, based on merged PR 12.
+- Re-read `WAVESHARE_HARDWARE.md` and followed its official links. The Waveshare
+  wiki confirms this model is a 466x466 CO5300 AMOLED.
+- Researched the official Waveshare demo repository. Every Arduino display/LVGL
+  demo instantiates `Arduino_CO5300` as `466x466` with constructor offsets
+  `6,0,0,0`.
+- Researched the official Waveshare ESP-IDF BSP. It applies the same effective
+  gap with `esp_lcd_panel_set_gap(panel_handle, 0x06, 0)`.
+- Found an ESPHome report for this exact 466x466 CO5300 Waveshare model where a
+  missing 6-pixel gap produced a green-line/wrap artifact. That matches our
+  symptoms better than the earlier centered-window hypothesis.
+- Rejected the earlier `480x480` controller plus centered `466x466` active
+  window assumption. The board-local constants now model the vendor baseline:
+  logical/active `466x466`, constructor gap `6,0,0,0`, and named MADCTL
+  constants for the still-experimental hardware-rotation path.
+- Updated the normal CO5300 constructor to match Waveshare's Arduino demos:
+  `Arduino_CO5300(..., 466, 466, 6, 0, 0, 0)`.
+- Normal Waveshare firmware now clamps unsupported display rotations to `0`.
+  Rotation `1`/90-degree requests are also clamped to `0` unless the build sets
+  `WAVESHARE_ENABLE_EXPERIMENTAL_90_ROTATION`, because the last verified 90
+  degree path had a green-edge artifact.
+- BLE map-setting writes and startup NVS loads apply the same Waveshare rotation
+  clamp, so an iPhone setting or stale saved value cannot leave normal firmware
+  using the known-bad 90-degree display path.
+- Added `WAVESHARE_AMOLED_175_DISPLAY_TEST`, which now draws vendor-baseline
+  black/white/red/green/blue fills plus a `466x466` border and corner markers at
+  0 degrees before LVGL starts. The default diagnostic no longer enables the raw
+  90-degree path.
+- Preserved the full-screen LVGL PSRAM buffer/full render strategy.
+
+Device validation on 2026-07-01 and 2026-07-02:
+
+- Earlier pre-vendor diagnostic display-test build/upload to
+  `/dev/cu.usbmodem2101` passed. That diagnostic exercised guessed offsets and
+  raw 90-degree MADCTL rotation before we found the official 6-pixel gap.
+- User-provided photos `/Users/chris/Downloads/IMG_8885.jpg` and
+  `/Users/chris/Downloads/IMG_8886.jpg` show solid green and blue fill passes
+  without an obvious thin green-edge band or stale-pixel strip. The square
+  active area remains visibly clipped by the round lens/bezel, which is expected
+  for a `466x466` active window under the circular cover.
+- The same photos show the visible black margin is not symmetric: the green
+  fill has the margin mostly on the left, while the blue/rotated state shows
+  margins at the top and bottom. That suggests the current MADCTL-only rotation
+  changes the coordinate scan direction without applying the matching
+  per-rotation CASET/PASET active-window offsets.
+- User-provided photos `/Users/chris/Downloads/IMG_8892.jpg`,
+  `/Users/chris/Downloads/IMG_8893.jpg`, and
+  `/Users/chris/Downloads/IMG_8894.jpg` show that the guessed-offset diagnostic
+  remained slightly rotated/clipped in different positions. Combined with the
+  vendor research, this confirms the guessed `0/7/14` offset test was the wrong
+  direction.
+- The square active area also appeared slightly rotated clockwise relative to
+  the USB-C connector/case during the experimental diagnostic. Later regression
+  checks showed the same slight clockwise skew on older project firmware and on
+  Waveshare's official factory firmware, so this is treated as physical
+  panel/lens/case alignment rather than a PR 13 firmware regression.
+- After the vendor-baseline patch, `git diff --check` passed.
+- After the vendor-baseline patch, normal firmware build passed:
+  `PLATFORMIO_CORE_DIR=/tmp/esp32-bike-pio-core-313 /tmp/esp32-bike-pio-313/bin/pio run -e WAVESHARE_AMOLED_175`.
+- After the vendor-baseline patch, display-test build passed:
+  `PLATFORMIO_CORE_DIR=/tmp/esp32-bike-pio-core-313 /tmp/esp32-bike-pio-313/bin/pio run -e WAVESHARE_AMOLED_175_DISPLAY_TEST`.
+- Normal vendor-baseline firmware upload to `/dev/cu.usbmodem2101` passed:
+  `PLATFORMIO_CORE_DIR=/tmp/esp32-bike-pio-core-313 /tmp/esp32-bike-pio-313/bin/pio run -e WAVESHARE_AMOLED_175 -t upload --upload-port /dev/cu.usbmodem2101`.
+- Serial reset capture confirmed the normal firmware logs
+  `CO5300: logical=466x466 active=466x466 constructorGap=(6,0,0,0) rotation=0
+  experimental90=0`.
+- First post-upload serial reset capture hit one BLE startup reboot:
+  `Stack canary watchpoint triggered (ipc0)` while ESP-IDF Bluetooth interrupt
+  allocation was running. The decoded backtrace pointed into ESP-IDF/BT
+  interrupt allocation (`btdm_intr_alloc`/`esp_intr_alloc`) and not display,
+  LVGL, or the new constructor path. The automatic reboot then reached BLE
+  advertising and heartbeat logs.
+- A second 25-second reset capture did not reproduce the BLE reboot. It reached
+  SD init, LVGL init, touch reset, BLE advertising, waiting screen, and repeated
+  heartbeat logs with the vendor display geometry.
+- Exact historical firmware checks:
+  - PR 12 merge commit `d52cb85` was flashed from a detached temp worktree and
+    still showed the slight clockwise skew.
+  - PR 11 merge commit `3fb1f6a` was flashed from a detached temp worktree and
+    still showed the slight clockwise skew. Device readback of the app partition
+    matched the PR 11 firmware SHA-256 exactly:
+    `393f093daaa3982231634c4d9cdd7ce6a91a4f3f3fe4680edb79019f64b55305`.
+  - PR 10 merge commit `b853488` was flashed from a detached temp worktree and
+    still showed the slight clockwise skew.
+- Waveshare's official factory image
+  `/tmp/waveshare-esp32-s3-touch-amoled-175/Firmware/ESP32-S3-Touch-AMOLED-1.75-FactoryOnly.bin`
+  was flashed at `0x0` and verified by esptool. The factory UI also showed the
+  same slight clockwise skew. This confirms the angular skew is not caused by
+  PR 13, PR 12, PR 11, or PR 10.
+- Reflashing PR 13 normal firmware after the factory image confirmed the vendor
+  display geometry in serial logs:
+  `CO5300: logical=466x466 active=466x466 constructorGap=(6,0,0,0) rotation=0
+  experimental90=0`. A physical unplug/replug restored stable PMU/touch-expander
+  detection after the factory-image test.
+- PR 13 `WAVESHARE_AMOLED_175_DISPLAY_TEST` was flashed again on 2026-07-02.
+  The user confirmed the red/green/blue color-rotation diagnostic no longer
+  showed clipping. That is the final display-window validation: the vendor
+  `466x466` geometry plus 6-pixel X gap removes the observed address-window
+  clipping/wrap issue. The remaining slight angular skew is hardware alignment.
+- Normal PR 13 firmware was restored after the display-test run on 2026-07-02.
+  Upload completed with esptool hash verification. A reset serial capture
+  reached AXP2101 power setup, CO5300 vendor-window init, SD mount, LVGL init,
+  BLE advertising, TCA9554 touch reset, and waiting-screen heartbeats. The
+  final capture showed the known recoverable Arduino I2C touch-read failure once
+  after startup (`i2c[fail=1 recover=1 recovered=1 missing=0]`), with no reboot
+  or display regression.
+- PR 13 should keep 90-degree hardware rotation disabled and leave software
+  rotation as a later, separate experiment if the product still needs a rotated
+  UI.
+
 Scope:
 
 - Isolate CO5300 panel setup behind a small board-local wrapper.
-- Preserve the current Arduino_CO5300 constructor defaults as the baseline,
-  because explicit constructor offsets made the 90-degree green-edge artifact
-  worse during PR #6/PR #7 bring-up.
-- Test whether the physical controller address space is 480x480 with a centered
-  466x466 active area.
-- Experiment with CASET/PASET offsets per rotation rather than raw MADCTL alone.
+- Use Waveshare's official Arduino/ESP-IDF display geometry as the baseline:
+  466x466 with a 6-pixel X gap.
+- Keep raw 90-degree MADCTL rotation behind an explicit experimental build flag.
+- Defer software rotation as a follow-up if the product still needs portrait or
+  landscape switching after the baseline is stable.
 - Add a hardware test mode or simple helper that draws:
   - full black
   - full white
@@ -617,10 +729,10 @@ Out of scope:
 Validation:
 
 - 0-degree fill tests.
-- 90-degree fill tests.
+- 90-degree fill tests only in an explicit experimental build.
 - LVGL full-screen invalidation.
-- Map render in both supported orientations.
-- Touch coordinate alignment in both supported orientations.
+- Map render in the normal supported orientation.
+- Touch coordinate alignment in the normal supported orientation.
 - No green strip or stale pixels after repeated redraws.
 
 Acceptance criteria:
