@@ -87,7 +87,7 @@ and a 3.7 V lithium battery header.
 | QSPI D3 / `LCD_SDIO3` / `QSPI_SI3` | GPIO 7 | Vendor `pin_config.h` |
 | Reset / `LCD_RESET` | GPIO 8 | Direct GPIO reset; differs from 1.75" GPIO39 |
 | TE / `LCD_TE` | GPIO 13 | Schematic net; not required by HelloWorld |
-| Panel power enable / `DSI_PWR_EN` | GPIO 39 | Schematic net; needs app integration testing |
+| Panel power enable / `DSI_PWR_EN` | GPIO 39 | Schematic net; current Arduino_GFX app path works without driving it directly |
 
 Vendor Arduino constructor baseline:
 
@@ -105,17 +105,18 @@ constructor gap `(22,0,0,0)`, rotation `0`.
 Connected-device display findings on 2026-07-02:
 - The board enumerated as ESP32-S3 USB CDC/JTAG on `/dev/cu.usbmodem2101`
   with VID:PID `303A:1001`.
-- A full app-linked display probe booted and wrote fills but the display stayed
-  black, even after preserving the AXP rails and forcing the suspected display
-  enable bit.
 - A standalone vendor-shaped HelloWorld test using registry Arduino_GFX `1.6.6`
   reported `gfx->begin() ok` and wrote continuous color fills.
 - A second standalone test using Waveshare's bundled Arduino_GFX `1.6.0`
   also reported `gfx->begin() ok`; after full USB/battery power removal and
   USB-only replug, the physical display visibly cycled colors.
-- Therefore the 2.06 panel, QSPI pinout, reset pin, and baseline Arduino_GFX
-  constructor are confirmed. The remaining black-screen issue is in this repo's
-  app integration path, not in the hardware baseline.
+- The full app-linked display probe now visibly cycles white/red/green/blue
+  after matching the vendor init order: bring up CO5300 display first, then
+  configure the shared I2C/PMU stack.
+- The full bike firmware boots on 2.06, initializes LVGL, advertises BLE,
+  connects to the iPhone app, renders the SD-card map, and supports map drag.
+- Therefore the 2.06 panel, QSPI pinout, reset pin, baseline Arduino_GFX
+  constructor, and current repo app integration path are confirmed.
 
 ### Touch (FT3168)
 
@@ -131,6 +132,13 @@ The vendor Arduino LVGL examples use `Arduino_DriveBus` and construct
 `Arduino_FT3x68` at `FT3168_DEVICE_ADDRESS`; our firmware should treat this as
 an FT3168/FT3x68 family I2C touch controller rather than CST9217.
 
+Connected-device touch findings:
+- Direct GPIO9 reset and FT3168 I2C address `0x38` are confirmed.
+- Idle FT3168 reads can produce Arduino Core 3.x I2C invalid-state errors.
+  The app path gates normal reads on the GPIO38 touch interrupt and observed
+  `i2c[fail=0 recover=0]` over idle serial captures.
+- Map dragging works in the full bike firmware on the 2.06 board.
+
 ### SD Card
 
 | Signal | GPIO | Notes |
@@ -143,6 +151,12 @@ an FT3168/FT3x68 family I2C touch controller rather than CST9217.
 The vendor macro names look SDMMC-like, but the published Arduino examples use
 these as explicit card pins and the schematic labels the nets `MOSI`, `MISO`,
 `SCK`, and `SDCS`.
+
+Connected-device SD findings:
+- The full bike firmware reads the SD card on `CS=17, MOSI=1, MISO=3, SCK=2`
+  and renders the offline map on the 2.06 board.
+- Keep the SD bus isolated on HSPI, as on the 1.75 board, because the display
+  uses its own QSPI bus.
 
 ### RTC And IMU
 
@@ -214,13 +228,13 @@ card, and factory firmware.
 | Feature | Status | Notes |
 |---|---|---|
 | Standalone display baseline | Verified | Vendor-shaped HelloWorld and color-cycle tests work after full power removal/replug |
-| App display integration | In progress | App-linked probe writes fills but can leave panel black; isolate differences from standalone baseline |
-| Touch | Pinout/address known | FT3168 pins known; expected address `0x38`; app behavior still needs connected-device validation |
-| SD Card | Pinout known | CS differs from 1.75"; card mount/read still needs device validation |
-| RTC | Pinout/address known | PCF85063 expected at `0x51`; retention behavior needs board/battery validation |
-| IMU | Pinout/address known | QMI8658 expected at `0x6B`; axis/sign tests need validation on 2.06 |
+| App display integration | Verified | Full app boots after display-first init, BLE advertises/connects, LVGL flushes normally |
+| Touch | Verified | FT3168 direct reset/address confirmed; map dragging works; idle reads are interrupt-gated |
+| SD Card | Verified | SD map renders from `CS=17, MOSI=1, MISO=3, SCK=2` |
+| RTC | Partially verified | PCF85063 found at `0x51`; retention behavior still needs battery-backed power-removal validation |
+| IMU | Partially verified | QMI8658 found at `0x6B` and reports motion; axis/sign tests still need validation on 2.06 |
 | Audio | Vendor demo exists | ES8311/ES7210/I2S pins known; repo audio support not implemented |
-| Power / Battery | PMU present | AXP2101 status readable; exact display/panel power integration still under investigation |
+| Power / Battery | Partially verified | AXP2101 status readable; current app preserves rails during boot; deeper sleep/rail shutdown still needs testing |
 
 ## 2.06 Bring-up Rules
 

@@ -61,11 +61,10 @@ Storage::Storage() : isSdLoaded(false), card(nullptr) {}
 esp_err_t Storage::initSD() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   const uint32_t mountStartMs = millis();
-  // Waveshare 1.75" AMOLED: Use DEDICATED HSPI bus to avoid conflict with
+  // Waveshare AMOLED boards: use dedicated HSPI to avoid conflict with the
   // QSPI display. The default SPI (FSPI) shares resources with the display.
   // NOTE: Use HSPI constant, not SPI3_HOST (which fails with "out of range")
-  // See WAVESHARE_HARDWARE.md.
-  // Verified working pins: CS=41, MOSI=1, MISO=3, SCK=2
+  // See WAVESHARE_HARDWARE.md for variant-specific CS pins.
 
   Serial.printf("SDIO: init bus=HSPI freq=%luHz pins[cs=%d mosi=%d miso=%d "
                 "sck=%d]\n",
