@@ -235,7 +235,7 @@ static void *ensureArrowBuffer() {
   bufArrow = heap_caps_malloc(arrowSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   const char *source = "internal";
   if (bufArrow == nullptr) {
-    bufArrow = heap_caps_malloc(arrowSize, MALLOC_CAP_SPIRAM);
+    bufArrow = heap_caps_malloc(arrowSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     source = "psram";
   }
   ESP_LOGI(TAG, "MapBuff: arrow ARGB stride=%u size=%u ptr=%p source=%s",
