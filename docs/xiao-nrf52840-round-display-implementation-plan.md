@@ -134,7 +134,13 @@ Current repo checkpoint:
   packets through the same parser/update path for bench-side simulated rides
   when iOS BLE or XIAO hardware is not yet available.
   `xiao-nrf52840/tools/serial_sim_ride.py` generates deterministic 60-minute
-  command streams for repeatable parser/UI soak traffic over that console.
+  command streams for repeatable parser/UI soak traffic over that console. The
+  console also supports `DIAG`/`STATUS` for immediate diagnostics snapshots, and
+  the generator emits `DIAG` at deterministic intervals by default so soak logs
+  capture heap, BLE, route, power, RTC, idle, and map-lite counters.
+  `xiao-nrf52840/tools/serial_log_check.py` validates captured serial evidence,
+  including the strict `--profile serial-soak-60` profile for 60-minute
+  firmware-side soak runs.
 - Touch interrupt page switching is enabled during standalone bring-up before
   setting ID `11` arrives; after iOS sends that setting, the tap-to-switch value
   controls whether touch interrupt taps cycle pages. Repo-side gesture handling
@@ -142,8 +148,10 @@ Current repo checkpoint:
   swipes change pages, center tap toggles ride data density, long press opens
   settings, center tap in settings toggles north-up/course-up map orientation,
   up/down swipes adjust brightness on the settings page, and a repeated long
-  press in settings schedules the existing delayed reboot command. Real
-  coordinate/duration decoding remains gated on touch-controller hardware
+  press in settings disconnects the current BLE client and clears peripheral
+  bonds to force a reconnect/pairing reset. The existing authenticated
+  `id=5,value=1` settings command remains the delayed software reboot path.
+  Real coordinate/duration decoding remains gated on touch-controller hardware
   bring-up.
 - Repo-side Milestone 5 power support is started: battery ADC sampling,
   estimated battery percentage, low-battery state, manual target brightness,
@@ -171,17 +179,17 @@ Current repo checkpoint:
   4096 m map block changes, with throttling for simulated jumps. Runtime
   diagnostics include SD readiness, probe count, last block, open/scan timing,
   candidate point count, and the provisional decision, and the serial simulator
-  has a direct `MAPPROBE` command for hardware SD-card block checks. The Route
-  page also has a bounded preview renderer that reopens the last probed block,
-  skips polygon bodies, streams candidate polylines, and draws at most 160 line
-  segments through the XIAO display primitive API; the current display backend
-  counts/logs those primitives until the Seeed LCD driver is validated on
-  hardware. Map-lite core math and decision thresholds now have native tests
-  covering Mercator conversion, negative block/folder path formatting,
-  candidate feature classification, screen mapping, and go/no-go decisions. The
-  Route page also draws a bounded route breadcrumb overlay centered on the
-  current GPS fix, or the route start before GPS arrives, through the same
-  display primitive API.
+  has direct `SDLS` and `MAPPROBE` commands for hardware SD-card directory and
+  block checks. The Route page also has a bounded preview renderer that reopens
+  the last probed block, skips polygon bodies, streams candidate polylines, and
+  draws at most 160 line segments through the XIAO display primitive API; the
+  current display backend counts/logs those primitives until the Seeed LCD
+  driver is validated on hardware. Map-lite core math and decision thresholds
+  now have native tests covering Mercator conversion, negative block/folder path
+  formatting, candidate feature classification, screen mapping, and go/no-go
+  decisions. The Route page also draws a bounded route breadcrumb overlay
+  centered on the current GPS fix, or the route start before GPS arrives,
+  through the same display primitive API.
 - The XIAO target exposes BLE Device Information Service metadata, and the iOS
   app reads/surfaces the hardware model label when present while keeping scan
   and navigation writes on the existing BikeComputer service/characteristics.
@@ -446,7 +454,10 @@ Exit criteria:
   USB serial, but it does not satisfy the iOS BLE/reconnect portion of this
   exit criterion.
   Use `tools/serial_sim_ride.py --duration 3600 --interval 1` to produce a
-  repeatable serial soak profile for firmware-side parser/UI checks.
+  repeatable serial soak profile for firmware-side parser/UI checks. The stream
+  emits `DIAG` every 300 seconds by default; pass `--diag-period 0` only when
+  relying on the firmware's periodic runtime diagnostics instead. Validate the
+  captured log with `tools/serial_log_check.py --profile serial-soak-60`.
 
 ### Milestone 5: Power And Enclosure Bring-Up
 
@@ -517,7 +528,7 @@ Hardware tests:
 - Touch tap/swipe/long-press.
 - RTC read after USB reset and after full power removal with coin cell fitted.
 - Battery ADC calibration at full, mid, and low pack voltage.
-- microSD mount and directory listing with a 32 GB FAT32 card.
+- microSD mount and directory listing with a 32 GB FAT32 card using `SDLS / 24`.
 - BLE scan/auth/write/reconnect from iOS.
 - 60-minute simulated ride.
 - Outdoor readability and touch behavior with gloves/wet screen as a later
@@ -526,7 +537,9 @@ Hardware tests:
 Memory tests:
 
 - Log free RAM after boot, after BLE connect, after route packet, after SD
-  mount, and after 60 minutes.
+  mount, and after 60 minutes. Use `DIAG`/`STATUS` over serial to request
+  deterministic snapshots at those checkpoints during bench validation, and use
+  `tools/serial_log_check.py` to fail missing, malformed, or regressed evidence.
 - Log reset reason at boot and include the raw reset reason in runtime
   diagnostics so watchdog, lockup, reset-pin, and system-off recoveries are
   visible during soak rides.

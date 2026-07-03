@@ -10,6 +10,9 @@ namespace {
 
 constexpr uint16_t MAX_ROUTE_PACKET_BYTES = 512;
 constexpr uint16_t MAX_FALLBACK_FRAME_BYTES = MAX_ROUTE_PACKET_BYTES + 4;
+constexpr uint8_t DEFAULT_SD_LIST_ENTRIES = 24;
+constexpr uint8_t MAX_SD_LIST_ENTRIES = 64;
+constexpr uint8_t MAX_SD_LIST_PATH_LEN = 63;
 
 char *skipSpaces(char *text) {
   while (text != nullptr && *text != '\0' &&
@@ -81,6 +84,9 @@ void SerialSimulator::update() {
       processLine(line);
       lineLen = 0;
       line[0] = '\0';
+      if (diagnosticRequestPending) {
+        return;
+      }
       continue;
     }
     if (static_cast<size_t>(lineLen) + 1 >= sizeof(line)) {
@@ -91,6 +97,14 @@ void SerialSimulator::update() {
     }
     line[lineLen++] = ch;
   }
+}
+
+bool SerialSimulator::takeDiagnosticRequest() {
+  if (!diagnosticRequestPending) {
+    return false;
+  }
+  diagnosticRequestPending = false;
+  return true;
 }
 
 void SerialSimulator::processLine(char *input) {
@@ -124,6 +138,24 @@ void SerialSimulator::processLine(char *input) {
     } else {
       server->beginSimulationSession();
     }
+    return;
+  }
+  if (strcasecmp(command, "BLE") == 0) {
+    if (args != nullptr && strcasecmp(args, "DISCONNECT") == 0) {
+      server->requestBleReset("serial-sim", false);
+      return;
+    }
+    if (args != nullptr && strcasecmp(args, "RESET") == 0) {
+      server->requestBleReset("serial-sim", true);
+      return;
+    }
+    Serial.println("SerialSim: BLE expects DISCONNECT|RESET");
+    return;
+  }
+  if (strcasecmp(command, "DIAG") == 0 ||
+      strcasecmp(command, "STATUS") == 0) {
+    diagnosticRequestPending = true;
+    Serial.println("SerialSim: diagnostic snapshot requested");
     return;
   }
   if (strcasecmp(command, "NAV") == 0) {
@@ -165,6 +197,16 @@ void SerialSimulator::processLine(char *input) {
       return;
     }
     mapLite->probeBlock(mapMetersX, mapMetersY);
+    return;
+  }
+  if (strcasecmp(command, "SDLS") == 0) {
+    const char *path = "/";
+    uint8_t maxEntries = DEFAULT_SD_LIST_ENTRIES;
+    if (mapLite == nullptr || !parseSdListPayload(args, path, maxEntries)) {
+      Serial.println("SerialSim: SDLS expects [path] [maxEntries 1..64]");
+      return;
+    }
+    mapLite->printDirectory(path, maxEntries);
     return;
   }
 
@@ -399,6 +441,48 @@ bool SerialSimulator::parseMapProbePayload(char *args, int32_t &mapMetersX,
   return true;
 }
 
+bool SerialSimulator::parseSdListPayload(char *args, const char *&path,
+                                         uint8_t &maxEntries) const {
+  path = "/";
+  maxEntries = DEFAULT_SD_LIST_ENTRIES;
+  if (args == nullptr) {
+    return true;
+  }
+
+  char *first = strtok(args, " ");
+  char *second = strtok(nullptr, " ");
+  char *extra = strtok(nullptr, " ");
+  if (extra != nullptr) {
+    return false;
+  }
+
+  unsigned long parsedEntries = 0;
+  if (first == nullptr) {
+    return true;
+  }
+  if (second == nullptr && parseUnsignedLongToken(first, parsedEntries)) {
+    if (parsedEntries == 0 || parsedEntries > MAX_SD_LIST_ENTRIES) {
+      return false;
+    }
+    maxEntries = static_cast<uint8_t>(parsedEntries);
+    return true;
+  }
+
+  if (strlen(first) > MAX_SD_LIST_PATH_LEN) {
+    return false;
+  }
+  path = first;
+  if (second == nullptr) {
+    return true;
+  }
+  if (!parseUnsignedLongToken(second, parsedEntries) || parsedEntries == 0 ||
+      parsedEntries > MAX_SD_LIST_ENTRIES) {
+    return false;
+  }
+  maxEntries = static_cast<uint8_t>(parsedEntries);
+  return true;
+}
+
 bool SerialSimulator::parseTouchGesture(const char *args,
                                         TouchGesture &gesture) const {
   if (args == nullptr) {
@@ -434,14 +518,17 @@ bool SerialSimulator::parseTouchGesture(const char *args,
 void SerialSimulator::printHelp() const {
   Serial.println("SerialSim commands:");
   Serial.println("  SIM ON|OFF");
+  Serial.println("  BLE DISCONNECT|RESET");
+  Serial.println("  DIAG");
   Serial.println("  NAV icon|meters|instruction");
   Serial.println("  GPS lat lon [heading unix speedCmps alt distance elapsed remaining]");
   Serial.println("  SET id value");
   Serial.println("  SET 5 1");
   Serial.println("  BRIGHTNESS percent");
   Serial.println("  TOUCH tap|long|left|right|up|down");
-  Serial.println("    settings: tap toggles orientation, long schedules reboot");
+  Serial.println("    settings: tap toggles orientation, long resets BLE");
   Serial.println("  MAPPROBE mapMetersX mapMetersY");
+  Serial.println("  SDLS [path] [maxEntries]");
   Serial.println("  ROUTECLEAR");
   Serial.println("  GPSHEX <hex>, ROUTEHEX <hex>, SETHEX <hex>, FRAMEHEX <hex>");
 }

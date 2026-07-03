@@ -62,6 +62,7 @@ public:
   bool updateForGps(int32_t latMicrodegrees, int32_t lonMicrodegrees,
                     uint32_t nowMs);
   bool renderLastProbePreview(DisplayRound &display, uint32_t nowMs);
+  bool printDirectory(const char *path = "/", uint8_t maxEntries = 24);
   bool isReady() const { return sdReady; }
   MapLiteStatus status() const;
   static const char *decisionName(MapLiteDecision decision);

@@ -12,6 +12,8 @@ constexpr uint8_t SD_SPI_MHZ = 12;
 constexpr const char *MAP_PREFIXES[] = {"/VECTMAP", "/maps", ""};
 constexpr uint32_t GPS_BLOCK_PROBE_MIN_INTERVAL_MS = 5000;
 constexpr uint32_t MAP_LITE_RENDER_MIN_INTERVAL_MS = 5000;
+constexpr uint8_t DEFAULT_SD_LIST_ENTRIES = 24;
+constexpr uint8_t MAX_SD_LIST_ENTRIES = 64;
 
 uint16_t readU16LE(const uint8_t *data) {
   return static_cast<uint16_t>(data[0]) |
@@ -122,6 +124,59 @@ MapBlockProbeResult MapLite::probeBlock(int32_t mapMetersX,
 }
 
 MapLiteStatus MapLite::status() const { return currentStatus; }
+
+bool MapLite::printDirectory(const char *path, uint8_t maxEntries) {
+  const char *target = (path == nullptr || *path == '\0') ? "/" : path;
+  const uint8_t entryLimit =
+      maxEntries == 0 ? DEFAULT_SD_LIST_ENTRIES
+                      : maxEntries > MAX_SD_LIST_ENTRIES ? MAX_SD_LIST_ENTRIES
+                                                         : maxEntries;
+  if (!sdReady) {
+    Serial.print("MapLite: SD list unavailable path=");
+    Serial.println(target);
+    return false;
+  }
+
+  SdFile dir;
+  if (!dir.open(target, O_RDONLY) || !dir.isDir()) {
+    Serial.print("MapLite: SD list failed path=");
+    Serial.println(target);
+    dir.close();
+    return false;
+  }
+
+  uint8_t entryCount = 0;
+  bool truncated = false;
+  SdFile entry;
+  while (entryCount < entryLimit && entry.openNext(&dir, O_RDONLY)) {
+    char name[48] = "";
+    const size_t nameLen = entry.getName(name, sizeof(name));
+    Serial.print("MapLite: sd entry name=");
+    Serial.print(nameLen > 0 ? name : "<unnamed>");
+    Serial.print(" dir=");
+    Serial.print(entry.isDir());
+    Serial.print(" size=");
+    Serial.println(static_cast<uint32_t>(entry.fileSize()));
+    entry.close();
+    entryCount++;
+  }
+  if (entryCount >= entryLimit && entry.openNext(&dir, O_RDONLY)) {
+    truncated = true;
+    entry.close();
+  }
+  const bool readError = dir.getError();
+  dir.close();
+
+  Serial.print("MapLite: SD list path=");
+  Serial.print(target);
+  Serial.print(" entries=");
+  Serial.print(entryCount);
+  Serial.print(" truncated=");
+  Serial.print(truncated);
+  Serial.print(" error=");
+  Serial.println(readError);
+  return !readError;
+}
 
 bool MapLite::renderLastProbePreview(DisplayRound &display, uint32_t nowMs) {
   if (!currentStatus.hasProbe || !currentStatus.lastResult.found ||

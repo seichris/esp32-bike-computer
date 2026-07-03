@@ -110,6 +110,8 @@ def emit_commands(args: argparse.Namespace) -> Iterable[str]:
             f"GPS {lat} {lon} {heading} {unix_time} {args.speed_cmps} "
             f"{args.altitude_m} {distance} {elapsed} {remaining}"
         )
+        if sample > 0 and args.diag_period > 0 and elapsed % args.diag_period == 0:
+            yield "DIAG"
         previous = current
 
     if args.clear_route:
@@ -136,6 +138,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=120,
         help="touch gesture period in seconds; use 0 to disable",
     )
+    parser.add_argument(
+        "--diag-period",
+        type=int,
+        default=300,
+        help="diagnostic snapshot period in seconds; use 0 to disable",
+    )
     parser.add_argument("--keep-route", action="store_false", dest="clear_route")
     parser.add_argument("--keep-sim-on", action="store_false", dest="sim_off")
     parser.set_defaults(clear_route=True, sim_off=True)
@@ -150,6 +158,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--nav-period and --setting-period must be positive")
     if args.touch_period < 0:
         parser.error("--touch-period must be non-negative")
+    if args.diag_period < 0:
+        parser.error("--diag-period must be non-negative")
     return args
 
 

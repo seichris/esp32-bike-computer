@@ -95,6 +95,10 @@ void loop() {
   const bike_ble::GpsPosition &gps = bleNav.currentGps();
   mapLite.updateForGps(gps.latMicrodegrees, gps.lonMicrodegrees, now);
   diagnostics.update(bleNav, powerManager, roundUi, idleSleepManager, mapLite);
+  if (serialSimulator.takeDiagnosticRequest()) {
+    diagnostics.logNow("serial", bleNav, powerManager, roundUi,
+                       idleSleepManager, mapLite);
+  }
 
   const bool settingsWriteDue =
       ((bleNav.hasUnpersistedSettings() &&

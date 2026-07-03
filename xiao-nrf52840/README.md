@@ -46,6 +46,10 @@ SET 7 4
 BRIGHTNESS 80
 TOUCH long
 TOUCH up
+BLE DISCONNECT
+BLE RESET
+DIAG
+SDLS / 24
 MAPPROBE 11556000 149000
 ROUTECLEAR
 SIM OFF
@@ -76,9 +80,23 @@ traffic, changes target brightness, clears the route, and ends with `SIM OFF`.
 It also emits periodic `TOUCH` gestures by default so page switching, density
 toggle, settings entry, map-orientation toggle, and brightness adjustment paths
 are included in soak runs; pass `--touch-period 0` to disable those gestures.
-For map-lite SD checks on hardware, `MAPPROBE mapMetersX mapMetersY` probes a
-specific Web Mercator map block directly, while `GPS lat lon ...` exercises the
-GPS-driven block-change path through the main loop.
+It emits `DIAG` every 300 seconds by default so heap, BLE, route, power, RTC,
+idle, and map-lite counters are captured at deterministic points in the serial
+log; use `--diag-period 0` to rely only on periodic runtime diagnostics.
+Captured logs can be checked with:
+
+```sh
+python3 tools/serial_log_check.py /tmp/xiao-serial.log
+python3 tools/serial_log_check.py /tmp/xiao-serial.log --profile serial-soak-60
+```
+
+The `serial-soak-60` profile expects at least 12 diagnostic snapshots, 60
+minutes of heartbeat uptime, GPS/navigation/route/settings traffic, retained
+route preview points, nonzero heap, and no rejected/failed/reboot lines.
+For map-lite SD checks on hardware, `SDLS / 24` prints a bounded microSD root
+directory listing, `MAPPROBE mapMetersX mapMetersY` probes a specific Web
+Mercator map block directly, and `GPS lat lon ...` exercises the GPS-driven
+block-change path through the main loop.
 
 ## Upload
 
@@ -137,9 +155,10 @@ implemented behind serial simulation as `TOUCH tap|long|left|right|up|down`:
 left/right swipes change pages, center tap toggles ride data density, long press
 opens settings, center tap while settings is open toggles north-up/course-up
 map orientation, up/down swipes adjust brightness while settings is open, and a
-second long press while settings is open schedules the existing delayed reboot
-command. Real coordinate/duration decoding waits for the actual touch-controller
-bring-up.
+second long press while settings is open disconnects the current BLE client and
+clears peripheral bonds to force a reconnect/pairing reset. The existing
+authenticated `SET 5 1` command remains the delayed software reboot path. Real
+coordinate/duration decoding waits for the actual touch-controller bring-up.
 
 ## Milestone 4 Scope
 
@@ -151,8 +170,15 @@ The board core captures and clears `RESETREAS` before application setup;
 diagnostics logs that saved value at boot with decoded labels and repeats the
 raw value in runtime snapshots. The XIAO target accepts the existing iOS reboot
 command (`SET 5 1` / settings characteristic id `5`, value `1`) and performs a
-short delayed `NVIC_SystemReset()` from the main BLE processing loop. The board
-core uses FreeRTOS `heap_3`, so the heap number is an approximate linker-heap
+short delayed `NVIC_SystemReset()` from the main BLE processing loop. Serial
+commands `BLE DISCONNECT` and `BLE RESET` exercise reconnect recovery; `BLE
+RESET` also clears Bluefruit peripheral bonds. Runtime diagnostics include BLE
+reset counts and timestamps. `DIAG`/`STATUS` requests an immediate diagnostics
+snapshot, and the serial soak generator emits those snapshots periodically by
+default. `tools/serial_log_check.py` validates captured serial evidence for
+boot heap, reset reason, diagnostic snapshot count, packet counters, route
+preview points, uptime, and forbidden error lines. The board core uses FreeRTOS
+`heap_3`, so the heap number is an approximate linker-heap
 gap rather than a full allocator fragmentation report. Brightness and
 BLE-provided map/display settings are loaded from InternalFS through the
 `settings_store` module; known map setting updates, including minimum polygon
@@ -191,9 +217,11 @@ renderer. The `map_lite` module initializes the Round Display microSD SPI bus,
 formats the existing `/VECTMAP/<folder>/<blockX>_<blockY>.fmb` paths, scans FMB
 feature records without allocating feature arrays, and logs open time, scan
 time, candidate feature counts, candidate point counts, and a provisional
-go/no-go decision label. The main loop now converts the latest BLE GPS fix to
-Web Mercator meters and probes only when the current 4096 m map block changes,
-with a short throttle to keep simulated jumps from spamming SD reads.
+go/no-go decision label. The serial simulator exposes `SDLS [path] [maxEntries]`
+for bounded hardware directory listing evidence. The main loop now converts the
+latest BLE GPS fix to Web Mercator meters and probes only when the current 4096
+m map block changes, with a short throttle to keep simulated jumps from
+spamming SD reads.
 
 The Route page now has a bounded map-lite preview renderer that reopens the last
 probed block, skips polygon bodies, streams candidate polyline points, and draws

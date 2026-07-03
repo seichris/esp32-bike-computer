@@ -164,8 +164,8 @@ bool RoundUi::handleGesture(TouchGesture gesture,
     break;
   case TouchGesture::LongPress:
     if (page == RoundPage::Settings) {
-      bleServer.requestLocalReboot("touch");
-      Serial.println("RoundUi: reboot requested");
+      bleServer.requestBleReset("touch", true);
+      Serial.println("RoundUi: BLE reconnect reset requested");
     } else {
       page = RoundPage::Settings;
       Serial.println("RoundUi: page=settings");

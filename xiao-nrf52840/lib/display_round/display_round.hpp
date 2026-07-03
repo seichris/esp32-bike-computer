@@ -22,6 +22,8 @@ private:
   uint8_t brightnessPercent = 100;
   uint16_t frameLineCount = 0;
   bool frameActive = false;
+  bool statusOverlayPending = false;
+  bool initialized = false;
 };
 
 } // namespace xiao_round

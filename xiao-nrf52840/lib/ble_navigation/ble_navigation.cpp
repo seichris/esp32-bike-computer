@@ -148,6 +148,40 @@ void BLENavigationServer::requestLocalReboot(const char *source) {
   refreshStats();
 }
 
+void BLENavigationServer::requestBleReset(const char *source, bool clearBonds) {
+  const uint32_t now = millis();
+  stats.deviceCommandCount++;
+  stats.bleResetCount++;
+  stats.lastDeviceCommandMs = now;
+  stats.lastBleResetMs = stats.lastDeviceCommandMs;
+
+  Serial.print("BLE: ");
+  Serial.print(source == nullptr ? "local" : source);
+  Serial.print(" reset requested clear_bonds=");
+  Serial.println(clearBonds);
+
+  if (clearBonds) {
+    Bluefruit.Periph.clearBonds();
+  }
+
+  if (simulationSessionActive) {
+    simulationSessionActive = false;
+    authenticated = false;
+    pendingAuthNonce[0] = '\0';
+    stats.disconnectCount++;
+    stats.lastDisconnectMs = now;
+    Serial.println("BLE: serial simulation session reset");
+  }
+
+  if (connected && activeConnHandle != BLE_CONN_HANDLE_INVALID) {
+    Bluefruit.disconnect(activeConnHandle);
+  } else if (!Bluefruit.Advertising.isRunning()) {
+    Bluefruit.Advertising.start(0);
+  }
+
+  refreshStats();
+}
+
 void BLENavigationServer::beginSimulationSession() {
   if (!simulationSessionActive) {
     simulationSessionActive = true;

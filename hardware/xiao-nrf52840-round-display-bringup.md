@@ -16,6 +16,8 @@ target. It is hardware evidence, not firmware architecture.
   or serial-verified yet.
 - Milestone 1 repo skeleton: builds locally for `xiao_nrf52840_round`; upload
   and serial heartbeat verification are pending a connected XIAO board.
+- Repo firmware exposes `SDLS / 24` for a bounded microSD directory listing
+  once vendor hardware proof is complete.
 
 ## Required Hardware
 
@@ -93,7 +95,9 @@ The log must prove all items below on the same firmware:
 - Touch event detected.
 - RTC read completed.
 - Battery ADC read completed.
-- microSD mounted and read/write test completed.
+- microSD mounted and read/write test completed in the vendor example.
+- Repo firmware `SDLS / 24` prints a bounded 32 GB FAT32 card directory
+  listing after the XIAO target is uploaded.
 
 ```text
 TODO: XIAO HardwareTest serial log.

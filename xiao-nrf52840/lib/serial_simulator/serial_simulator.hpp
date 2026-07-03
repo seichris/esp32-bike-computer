@@ -14,6 +14,7 @@ public:
   void begin(BLENavigationServer &targetServer, PowerManager &targetPower,
              MapLite &targetMapLite, RoundUi &targetUi);
   void update();
+  bool takeDiagnosticRequest();
 
 private:
   void processLine(char *line);
@@ -34,6 +35,8 @@ private:
   bool parseBrightnessPayload(const char *args, uint8_t &out) const;
   bool parseMapProbePayload(char *args, int32_t &mapMetersX,
                             int32_t &mapMetersY) const;
+  bool parseSdListPayload(char *args, const char *&path,
+                          uint8_t &maxEntries) const;
   bool parseTouchGesture(const char *args, TouchGesture &gesture) const;
   void printHelp() const;
 
@@ -43,6 +46,7 @@ private:
   RoundUi *roundUi = nullptr;
   char line[1152] = "";
   uint16_t lineLen = 0;
+  bool diagnosticRequestPending = false;
 };
 
 } // namespace xiao_round

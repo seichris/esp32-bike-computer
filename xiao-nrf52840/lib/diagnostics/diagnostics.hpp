@@ -17,6 +17,9 @@ public:
               const PowerManager &powerManager, const RoundUi &roundUi,
               const IdleSleepManager &idleSleepManager,
               const MapLite &mapLite);
+  void logNow(const char *label, const BLENavigationServer &bleServer,
+              const PowerManager &powerManager, const RoundUi &roundUi,
+              const IdleSleepManager &idleSleepManager, const MapLite &mapLite);
   size_t approximateFreeHeapBytes() const;
 
 private:

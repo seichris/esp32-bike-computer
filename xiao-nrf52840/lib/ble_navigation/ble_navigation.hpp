@@ -20,6 +20,7 @@ struct BLEDebugStats {
   uint32_t gpsPacketCount = 0;
   uint32_t settingsPacketCount = 0;
   uint32_t deviceCommandCount = 0;
+  uint32_t bleResetCount = 0;
   uint32_t rejectedUnauthenticatedCount = 0;
   uint32_t lastConnectMs = 0;
   uint32_t lastDisconnectMs = 0;
@@ -30,6 +31,7 @@ struct BLEDebugStats {
   uint32_t lastGpsPacketMs = 0;
   uint32_t lastSettingsPacketMs = 0;
   uint32_t lastDeviceCommandMs = 0;
+  uint32_t lastBleResetMs = 0;
   uint32_t lastRejectedUnauthenticatedMs = 0;
 };
 
@@ -61,6 +63,7 @@ public:
   bool applyLocalMapSetting(uint8_t settingId, int32_t value,
                             const char *source);
   void requestLocalReboot(const char *source);
+  void requestBleReset(const char *source, bool clearBonds);
   void beginSimulationSession();
   void endSimulationSession();
   void injectNavigationWrite(const uint8_t *data, uint16_t len);

@@ -57,6 +57,17 @@ void Diagnostics::update(const BLENavigationServer &bleServer,
               mapLite);
 }
 
+void Diagnostics::logNow(const char *label,
+                         const BLENavigationServer &bleServer,
+                         const PowerManager &powerManager,
+                         const RoundUi &roundUi,
+                         const IdleSleepManager &idleSleepManager,
+                         const MapLite &mapLite) {
+  lastLogMs = millis();
+  logSnapshot(label == nullptr ? "manual" : label, bleServer, powerManager,
+              roundUi, idleSleepManager, mapLite);
+}
+
 size_t Diagnostics::approximateFreeHeapBytes() const {
   const caddr_t currentBreak = _sbrk(0);
   if (currentBreak == reinterpret_cast<caddr_t>(-1) ||
@@ -111,6 +122,10 @@ void Diagnostics::logSnapshot(const char *label,
   Serial.print(stats.settingsPacketCount);
   Serial.print(" device_commands=");
   Serial.print(stats.deviceCommandCount);
+  Serial.print(" ble_resets=");
+  Serial.print(stats.bleResetCount);
+  Serial.print(" last_ble_reset_ms=");
+  Serial.print(stats.lastBleResetMs);
   const rtc::Status &rtcStatus = rtc::status();
   Serial.print(" rtc_present=");
   Serial.print(rtcStatus.present);
