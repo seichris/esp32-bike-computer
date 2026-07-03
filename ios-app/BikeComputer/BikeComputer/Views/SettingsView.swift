@@ -29,7 +29,7 @@ struct SettingsView: View {
                     }
                 }
                 
-                Section(header: Text("Map Rendering"), footer: Text("Higher values = faster rendering but less detail.")) {
+                Section(header: Text("Map Rendering"), footer: Text("Feature toggles control map categories; polygon size filters tiny filled areas.")) {
                     VStack(alignment: .leading) {
                         HStack {
                             Text("Min Polygon Size")
@@ -45,7 +45,7 @@ struct SettingsView: View {
                 }
                 .disabled(!bleManager.supportsDeviceSettings)
                 
-                Section(header: Text("Detail Level")) {
+                Section(header: Text("Detail Level"), footer: Text("Controls small-area density without overriding feature visibility.")) {
                     Picker("Detail", selection: $bleManager.detailLevel) {
                         Text("Low").tag(0)
                         Text("Medium").tag(1)

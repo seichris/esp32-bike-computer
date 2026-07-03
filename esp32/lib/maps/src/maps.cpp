@@ -43,24 +43,6 @@ struct MapRenderSettings {
 };
 extern MapRenderSettings mapRenderSettings;
 
-static inline bool isVisibleForDetailLevel(uint8_t typeId,
-                                           uint8_t detailLevel) {
-  if (typeId == 0 || detailLevel >= 2)
-    return true;
-
-  if (detailLevel == 1)
-    return !(typeId >= 100 && typeId < 150);
-
-  if (typeId >= 50 && typeId < 100)
-    return false; // Paths
-  if (typeId >= 100 && typeId < 150)
-    return false; // Buildings
-  if (typeId >= 150 && typeId < 200)
-    return false; // Nature/landuse
-
-  return true;
-}
-
 enum class VisibilityClass : uint8_t {
   Always,
   MajorRoad,
@@ -77,17 +59,6 @@ static inline bool isClassVisible(VisibilityClass visibilityClass,
                                   const MapRenderSettings &settings) {
   if (visibilityClass == VisibilityClass::Always)
     return true;
-
-  if (settings.detailLevel == 0 &&
-      (visibilityClass == VisibilityClass::Building ||
-       visibilityClass == VisibilityClass::GreenSpace ||
-       visibilityClass == VisibilityClass::Water ||
-       visibilityClass == VisibilityClass::Path ||
-       visibilityClass == VisibilityClass::OtherArea))
-    return false;
-  if (settings.detailLevel == 1 &&
-      visibilityClass == VisibilityClass::Building)
-    return false;
 
   uint32_t visMask = settings.visibilityMask;
   switch (visibilityClass) {
@@ -183,12 +154,26 @@ static inline VisibilityClass legacyLineVisibilityClass(uint16_t color,
 // 5 water, 6 rail, 7 other areas.
 static inline bool isTypeVisible(uint8_t typeId,
                                  const MapRenderSettings &settings) {
-  if (!isVisibleForDetailLevel(typeId, settings.detailLevel))
-    return false;
-
   if (typeId == 0)
     return true; // Unknown types always visible
   return isClassVisible(visibilityClassForTypeId(typeId), settings);
+}
+
+static inline uint8_t detailPolygonSizeFloor(uint8_t detailLevel) {
+  switch (detailLevel) {
+  case 0:
+    return 24;
+  case 1:
+    return 12;
+  default:
+    return 0;
+  }
+}
+
+static inline uint8_t effectiveMinPolygonSize(
+    const MapRenderSettings &settings) {
+  return std::max(settings.minPolygonSize,
+                  detailPolygonSizeFloor(settings.detailLevel));
 }
 
 static inline bool isPolygonVisible(uint8_t typeId, uint16_t color,
@@ -1668,12 +1653,13 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             newPolygon.bbox.min.y = minY;
             newPolygon.bbox.max.y = maxY;
 
-            // Skip polygons smaller than minPolygonSize (configurable via BLE)
+            // Skip tiny polygons based on explicit min size plus detail density.
+            const uint8_t minPolygonSize =
+                effectiveMinPolygonSize(mapRenderSettings);
             int16_t polyWidth = maxX - minX;
             int16_t polyHeight = maxY - minY;
-            if (mapRenderSettings.minPolygonSize > 0 &&
-                polyWidth * polyHeight < mapRenderSettings.minPolygonSize *
-                                             mapRenderSettings.minPolygonSize) {
+            if (minPolygonSize > 0 &&
+                polyWidth * polyHeight < minPolygonSize * minPolygonSize) {
               poly_drawn--; // Don't count as drawn
               continue;
             }
