@@ -61,11 +61,11 @@ class NavigationEngine: NSObject, ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isReady in
                 guard isReady, let self else { return }
+                self.resendCurrentDeviceGpsPosition()
                 guard self.isNavigating else {
                     self.bleManager?.clearRouteGeometry()
                     return
                 }
-                self.resendCurrentDeviceGpsPosition()
                 self.resendCurrentRouteGeometry()
                 self.resendCurrentNavigationState()
             }
@@ -109,7 +109,7 @@ class NavigationEngine: NSObject, ObservableObject {
             sendRouteGeometryIfNeeded(currentLocation: initialLocation)
             processLocation(initialLocation)
             updateRideTelemetry(gpsLocation: initialLocation, routeLocation: initialLocation)
-            sendDeviceGpsPosition(initialLocation, convertFromMapKitRoute: true)
+            sendInitialDeviceGpsPosition(initialLocation, convertFromMapKitRoute: true)
         }
     }
     
@@ -179,7 +179,7 @@ class NavigationEngine: NSObject, ObservableObject {
         // Calculate position
         if let position = interpolatePositionAlongRoute(progress: simulationProgress) {
             simulatedPosition = position
-            
+
             let location = CLLocation(
                 coordinate: position,
                 altitude: 0,
@@ -372,7 +372,7 @@ class NavigationEngine: NSObject, ObservableObject {
     }
 
     private func resendCurrentDeviceGpsPosition() {
-        guard isNavigating, let lastDeviceGpsLocation else { return }
+        guard let lastDeviceGpsLocation else { return }
 
         sendDeviceGpsPosition(lastDeviceGpsLocation.location,
                               convertFromMapKitRoute: lastDeviceGpsLocation.convertFromMapKitRoute)
@@ -464,6 +464,17 @@ class NavigationEngine: NSObject, ObservableObject {
                                     distanceTraveledMeters: rideDistanceMeters,
                                     elapsedSeconds: rideStartDate.map { Date().timeIntervalSince($0) },
                                     routeRemainingMeters: lastRouteRemainingMeters)
+    }
+
+    private func sendInitialDeviceGpsPosition(_ location: CLLocation, convertFromMapKitRoute: Bool) {
+        sendDeviceGpsPosition(location, convertFromMapKitRoute: convertFromMapKitRoute)
+
+        for delay in [0.5, 1.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.isNavigating else { return }
+                self.sendDeviceGpsPosition(location, convertFromMapKitRoute: convertFromMapKitRoute)
+            }
+        }
     }
 }
 

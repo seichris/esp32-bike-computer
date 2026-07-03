@@ -492,6 +492,10 @@ void loop() {
   lastLoopMs = now;
   loopCount++;
 
+  // Process app-provided GPS transitions before any periodic work that can
+  // briefly block on display, sensor, BLE, or debug output.
+  checkPendingMapTransition();
+
   if (!waitScreenRefresh) {
     uint32_t startUs = micros();
     lv_timer_handler();
@@ -511,9 +515,6 @@ void loop() {
   waveshare_board::imu::process();
   processWaveshareBootButton();
 #endif
-
-  // Check if we need to transition from waiting screen to map
-  checkPendingMapTransition();
 
   logSystemDebugHeartbeat();
 

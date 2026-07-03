@@ -18,7 +18,11 @@ lv_obj_t *arrowNav;
 
 void formatNavigationInstruction(const char *instruction, char *buffer,
                                  size_t bufferSize) {
-  if (!instruction || bufferSize == 0) {
+  if (bufferSize == 0) {
+    return;
+  }
+  buffer[0] = '\0';
+  if (!instruction) {
     return;
   }
 
@@ -44,7 +48,7 @@ void navigationScr(_lv_obj_t *screen) {
   lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
   nameNav = lv_label_create(screen);
-  lv_obj_set_style_text_font(nameNav, fontVeryLarge, 0);
+  lv_obj_set_style_text_font(nameNav, &lv_font_montserrat_48, 0);
   lv_obj_set_style_text_color(nameNav, lv_color_white(), 0);
   lv_obj_set_style_text_align(nameNav, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_long_mode(nameNav, LV_LABEL_LONG_WRAP);

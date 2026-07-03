@@ -100,12 +100,13 @@ Current setting IDs:
 | `7` | Zoom level | `0...5` |
 | `8` | Visibility mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/tracks, bit 3 major roads, bit 4 local streets, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker |
 | `9` | Street line width boost | `0...24` px added to known road/path line style widths; legacy unknown lines are boosted when their stored style width is at least 3px; final rendered width is capped at 24px |
+| `10` | Current-position marker scale | `1...5`; default is `2`, so the map position marker renders at twice its original size. The firmware shows a white dot when no route is loaded and a white arrow while navigating. |
 
-Detail level is applied before the visibility mask. High keeps all feature
-classes available, medium hides building footprints, and low hides buildings,
-parks/green space, water, paths/tracks, and other low-priority areas. Roads,
-railways, the route overlay, and the current-position marker remain controlled
-by their visibility bits at every detail level.
+Feature visibility toggles are authoritative for their classes. Detail level
+controls small-area density without overriding the visibility mask: high uses
+the explicit Min Polygon Size, medium applies at least a 12px floor, and low
+applies at least a 24px floor. For example, the Buildings toggle can show or
+hide buildings at any detail level.
 
 ## OSM Map Blocks
 

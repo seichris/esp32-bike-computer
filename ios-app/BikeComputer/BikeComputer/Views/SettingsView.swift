@@ -29,7 +29,7 @@ struct SettingsView: View {
                     }
                 }
                 
-                Section(header: Text("Map Rendering"), footer: Text("Higher values = faster rendering but less detail.")) {
+                Section(header: Text("Map Rendering"), footer: Text("Feature toggles control map categories; polygon size filters tiny filled areas.")) {
                     VStack(alignment: .leading) {
                         HStack {
                             Text("Min Polygon Size")
@@ -45,7 +45,7 @@ struct SettingsView: View {
                 }
                 .disabled(!bleManager.supportsDeviceSettings)
                 
-                Section(header: Text("Detail Level")) {
+                Section(header: Text("Detail Level"), footer: Text("Controls small-area density without overriding feature visibility.")) {
                     Picker("Detail", selection: $bleManager.detailLevel) {
                         Text("Low").tag(0)
                         Text("Medium").tag(1)
@@ -69,6 +69,19 @@ struct SettingsView: View {
                         Slider(value: $bleManager.routeLineWidth, in: 2...48, step: 1)
                             .onChange(of: bleManager.routeLineWidth) { newValue in
                                 bleManager.sendSetting(id: 3, value: Int32(newValue))
+                        }
+                    }
+
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text("Position Marker Size")
+                            Spacer()
+                            Text("\(Int(bleManager.positionMarkerScale))x")
+                                .foregroundColor(.secondary)
+                        }
+                        Slider(value: $bleManager.positionMarkerScale, in: 1...5, step: 1)
+                            .onChange(of: bleManager.positionMarkerScale) { newValue in
+                                bleManager.sendSetting(id: 10, value: Int32(newValue))
                         }
                     }
                 }
@@ -103,8 +116,8 @@ struct SettingsView: View {
                 
                 Section(header: Text("Map Mode")) {
                     Picker("Rotation", selection: $bleManager.mapRotationMode) {
-                        Text("North Up (Red)").tag(0)
-                        Text("Head Up (Blue)").tag(1)
+                        Text("North Up").tag(0)
+                        Text("Course Up").tag(1)
                     }
                     .pickerStyle(.segmented)
                     .onChange(of: bleManager.mapRotationMode) { newValue in

@@ -35,30 +35,13 @@ struct MapRenderSettings {
   uint8_t detailLevel;
   uint8_t routeLineWidth;
   uint8_t streetLineWidthBoost;
+  uint8_t positionMarkerScale;
   uint8_t displayRotation;
   uint8_t mapRotationMode;
   uint8_t zoomLevel;
   uint32_t visibilityMask;
 };
 extern MapRenderSettings mapRenderSettings;
-
-static inline bool isVisibleForDetailLevel(uint8_t typeId,
-                                           uint8_t detailLevel) {
-  if (typeId == 0 || detailLevel >= 2)
-    return true;
-
-  if (detailLevel == 1)
-    return !(typeId >= 100 && typeId < 150);
-
-  if (typeId >= 50 && typeId < 100)
-    return false; // Paths
-  if (typeId >= 100 && typeId < 150)
-    return false; // Buildings
-  if (typeId >= 150 && typeId < 200)
-    return false; // Nature/landuse
-
-  return true;
-}
 
 enum class VisibilityClass : uint8_t {
   Always,
@@ -76,17 +59,6 @@ static inline bool isClassVisible(VisibilityClass visibilityClass,
                                   const MapRenderSettings &settings) {
   if (visibilityClass == VisibilityClass::Always)
     return true;
-
-  if (settings.detailLevel == 0 &&
-      (visibilityClass == VisibilityClass::Building ||
-       visibilityClass == VisibilityClass::GreenSpace ||
-       visibilityClass == VisibilityClass::Water ||
-       visibilityClass == VisibilityClass::Path ||
-       visibilityClass == VisibilityClass::OtherArea))
-    return false;
-  if (settings.detailLevel == 1 &&
-      visibilityClass == VisibilityClass::Building)
-    return false;
 
   uint32_t visMask = settings.visibilityMask;
   switch (visibilityClass) {
@@ -182,12 +154,26 @@ static inline VisibilityClass legacyLineVisibilityClass(uint16_t color,
 // 5 water, 6 rail, 7 other areas.
 static inline bool isTypeVisible(uint8_t typeId,
                                  const MapRenderSettings &settings) {
-  if (!isVisibleForDetailLevel(typeId, settings.detailLevel))
-    return false;
-
   if (typeId == 0)
     return true; // Unknown types always visible
   return isClassVisible(visibilityClassForTypeId(typeId), settings);
+}
+
+static inline uint8_t detailPolygonSizeFloor(uint8_t detailLevel) {
+  switch (detailLevel) {
+  case 0:
+    return 24;
+  case 1:
+    return 12;
+  default:
+    return 0;
+  }
+}
+
+static inline uint8_t effectiveMinPolygonSize(
+    const MapRenderSettings &settings) {
+  return std::max(settings.minPolygonSize,
+                  detailPolygonSizeFloor(settings.detailLevel));
 }
 
 static inline bool isPolygonVisible(uint8_t typeId, uint16_t color,
@@ -224,6 +210,24 @@ static inline bool shouldBoostLineWidth(uint8_t typeId, uint8_t styleWidth) {
 static void *bufMapTemp = nullptr;
 static void *bufMapIcon = nullptr;
 static void *bufArrow = nullptr;
+
+static void *ensureArrowBuffer() {
+  if (bufArrow != nullptr)
+    return bufArrow;
+
+  const size_t arrowStride =
+      lv_draw_buf_width_to_stride(48, LV_COLOR_FORMAT_ARGB8888);
+  const size_t arrowSize = arrowStride * 48;
+  bufArrow = heap_caps_malloc(arrowSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const char *source = "internal";
+  if (bufArrow == nullptr) {
+    bufArrow = heap_caps_malloc(arrowSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    source = "psram";
+  }
+  ESP_LOGI(TAG, "MapBuff: arrow ARGB stride=%u size=%u ptr=%p source=%s",
+           (unsigned)arrowStride, (unsigned)arrowSize, bufArrow, source);
+  return bufArrow;
+}
 
 static void plotMarkerPixel(lv_obj_t *canvas, int16_t x, int16_t y,
                             lv_color_t color) {
@@ -262,6 +266,80 @@ static void drawThickMarkerLine(lv_obj_t *canvas, int16_t x0, int16_t y0,
     if (e2 <= dx) {
       err += dx;
       y0 += sy;
+    }
+  }
+}
+
+static uint8_t lineClipOutCode(float x, float y, float minX, float minY,
+                               float maxX, float maxY) {
+  uint8_t code = 0;
+  if (x < minX)
+    code |= 1;
+  else if (x > maxX)
+    code |= 2;
+  if (y < minY)
+    code |= 4;
+  else if (y > maxY)
+    code |= 8;
+  return code;
+}
+
+static bool clipLineToRect(int16_t &x1, int16_t &y1, int16_t &x2, int16_t &y2,
+                           int32_t minX, int32_t minY, int32_t maxX,
+                           int32_t maxY) {
+  float fx1 = x1;
+  float fy1 = y1;
+  float fx2 = x2;
+  float fy2 = y2;
+  uint8_t code1 = lineClipOutCode(fx1, fy1, minX, minY, maxX, maxY);
+  uint8_t code2 = lineClipOutCode(fx2, fy2, minX, minY, maxX, maxY);
+
+  while (true) {
+    if ((code1 | code2) == 0) {
+      x1 = (int16_t)roundf(fx1);
+      y1 = (int16_t)roundf(fy1);
+      x2 = (int16_t)roundf(fx2);
+      y2 = (int16_t)roundf(fy2);
+      return true;
+    }
+
+    if ((code1 & code2) != 0)
+      return false;
+
+    uint8_t outsideCode = code1 != 0 ? code1 : code2;
+    float x = 0;
+    float y = 0;
+
+    if (outsideCode & 8) {
+      if (fy2 == fy1)
+        return false;
+      x = fx1 + (fx2 - fx1) * (maxY - fy1) / (fy2 - fy1);
+      y = maxY;
+    } else if (outsideCode & 4) {
+      if (fy2 == fy1)
+        return false;
+      x = fx1 + (fx2 - fx1) * (minY - fy1) / (fy2 - fy1);
+      y = minY;
+    } else if (outsideCode & 2) {
+      if (fx2 == fx1)
+        return false;
+      y = fy1 + (fy2 - fy1) * (maxX - fx1) / (fx2 - fx1);
+      x = maxX;
+    } else {
+      if (fx2 == fx1)
+        return false;
+      y = fy1 + (fy2 - fy1) * (minX - fx1) / (fx2 - fx1);
+      x = minX;
+    }
+
+    if (outsideCode == code1) {
+      fx1 = x;
+      fy1 = y;
+      code1 = lineClipOutCode(fx1, fy1, minX, minY, maxX, maxY);
+    } else {
+      fx2 = x;
+      fy2 = y;
+      code2 = lineClipOutCode(fx2, fy2, minX, minY, maxX, maxY);
     }
   }
 }
@@ -308,6 +386,75 @@ static void drawNavigationMarker(lv_obj_t *canvas) {
   drawThickMarkerLine(canvas, 10, 42, 24, 4, color, strokeWidth);
 
   lv_obj_invalidate(canvas);
+}
+
+static void drawPositionDotMarker(lv_obj_t *canvas) {
+  if (!canvas)
+    return;
+
+  lv_canvas_fill_bg(canvas, lv_color_hex(0x000000), LV_OPA_TRANSP);
+
+  const lv_color_t color = lv_color_white();
+  constexpr int16_t center = 24;
+  constexpr int16_t radius = 8;
+
+  for (int16_t y = center - radius; y <= center + radius; y++) {
+    for (int16_t x = center - radius; x <= center + radius; x++) {
+      const int16_t dx = x - center;
+      const int16_t dy = y - center;
+      if (dx * dx + dy * dy <= radius * radius)
+        plotMarkerPixel(canvas, x, y, color);
+    }
+  }
+
+  lv_obj_invalidate(canvas);
+}
+
+static uint8_t currentMarkerScale() {
+  return (uint8_t)std::min(std::max((int)mapRenderSettings.positionMarkerScale,
+                                    1),
+                           5);
+}
+
+static void applyNavigationMarkerScale(lv_obj_t *canvas) {
+  if (!canvas)
+    return;
+
+  const int32_t scale = currentMarkerScale() * 256;
+  lv_obj_set_style_transform_pivot_x(canvas, 24, 0);
+  lv_obj_set_style_transform_pivot_y(canvas, 24, 0);
+  lv_obj_set_style_transform_scale_x(canvas, scale, 0);
+  lv_obj_set_style_transform_scale_y(canvas, scale, 0);
+}
+
+static void updateCurrentPositionMarker(lv_obj_t *canvas, bool force = false) {
+  if (!canvas || bufArrow == nullptr)
+    return;
+
+  static bool hasLastShape = false;
+  static bool lastWasNavigating = false;
+  static uint8_t lastScale = 0;
+
+  const bool isNavigating = routeOverlay.hasRoute();
+  const uint8_t scale = currentMarkerScale();
+  if (!force && hasLastShape && lastWasNavigating == isNavigating &&
+      lastScale == scale) {
+    applyNavigationMarkerScale(canvas);
+    return;
+  }
+
+  if (isNavigating) {
+    drawNavigationMarker(canvas);
+  } else {
+    drawPositionDotMarker(canvas);
+  }
+
+  applyNavigationMarkerScale(canvas);
+  hasLastShape = true;
+  lastWasNavigating = isNavigating;
+  lastScale = scale;
+  log_i("Position marker updated: %s scale=%u",
+        isNavigating ? "navigation arrow" : "location dot", scale);
 }
 
 static int16_t mapAnchorXForWidth(uint16_t width) {
@@ -1157,6 +1304,10 @@ void Maps::drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
   int32_t buf_w = draw_buf->header.w;
   int32_t buf_h = draw_buf->header.h;
   uint32_t stride_pixels = draw_buf->header.stride / 2;
+  const int32_t clipMargin = (int32_t)width + 2;
+  if (!clipLineToRect(x1, y1, x2, y2, -clipMargin, -clipMargin,
+                      buf_w - 1 + clipMargin, buf_h - 1 + clipMargin))
+    return;
 
   if (width < 2) {
     drawLineSegment(buf, buf_w, buf_h, stride_pixels, x1, y1, x2, y2, color);
@@ -1502,12 +1653,13 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             newPolygon.bbox.min.y = minY;
             newPolygon.bbox.max.y = maxY;
 
-            // Skip polygons smaller than minPolygonSize (configurable via BLE)
+            // Skip tiny polygons based on explicit min size plus detail density.
+            const uint8_t minPolygonSize =
+                effectiveMinPolygonSize(mapRenderSettings);
             int16_t polyWidth = maxX - minX;
             int16_t polyHeight = maxY - minY;
-            if (mapRenderSettings.minPolygonSize > 0 &&
-                polyWidth * polyHeight < mapRenderSettings.minPolygonSize *
-                                             mapRenderSettings.minPolygonSize) {
+            if (minPolygonSize > 0 &&
+                polyWidth * polyHeight < minPolygonSize * minPolygonSize) {
               poly_drawn--; // Don't count as drawn
               continue;
             }
@@ -1918,10 +2070,7 @@ void Maps::initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull) {
   }
 
   if (bufArrow == nullptr) {
-    const size_t arrowStride =
-        lv_draw_buf_width_to_stride(48, LV_COLOR_FORMAT_ARGB8888);
-    bufArrow = heap_caps_malloc(arrowStride * 48,
-                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    ensureArrowBuffer();
   }
 
   Maps::oldMapTile = {};           // Old Map tile coordinates and zoom
@@ -1956,6 +2105,7 @@ void Maps::deleteMapScrSprites() {
  *
  */
 void Maps::createMapScrSprites() {
+  ESP_LOGI(TAG, "createMapScrSprites start");
   // Map Sprite
   // Map Sprite (Canvas)
   uint16_t w = Maps::mapScrWidth;
@@ -1984,6 +2134,10 @@ void Maps::createMapScrSprites() {
   }
   ESP_LOGI(TAG, "MapBuff: W=%d H=%d Stride=%d Size=%d", w, h, stride_bytes,
            requiredSize);
+  if (bufMapScr == nullptr) {
+    ESP_LOGE(TAG, "MapBuff: screen buffer allocation failed");
+    return;
+  }
 
   lv_canvas_set_buffer(Maps::canvasMap, bufMapScr, w, h,
                        LV_COLOR_FORMAT_RGB565);
@@ -2002,12 +2156,18 @@ void Maps::createMapScrSprites() {
                        LV_COLOR_FORMAT_RGB565);
 
   // Arrow Sprite (Canvas) - 48x48 for better visibility
-  Maps::canvasArrow =
-      lv_canvas_create(mapTile); // Create on mapTile instead of active screen
-  lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
-  lv_canvas_set_buffer(Maps::canvasArrow, bufArrow, 48, 48,
-                       LV_COLOR_FORMAT_ARGB8888);
-  drawNavigationMarker(Maps::canvasArrow);
+  if (ensureArrowBuffer() != nullptr) {
+    Maps::canvasArrow =
+        lv_canvas_create(mapTile); // Create on mapTile instead of active screen
+    lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
+    lv_canvas_set_buffer(Maps::canvasArrow, bufArrow, 48, 48,
+                         LV_COLOR_FORMAT_ARGB8888);
+    updateCurrentPositionMarker(Maps::canvasArrow, true);
+  } else {
+    ESP_LOGE(TAG, "MapBuff: arrow buffer unavailable; marker disabled");
+    Maps::canvasArrow = nullptr;
+  }
+  ESP_LOGI(TAG, "createMapScrSprites done");
 
   // Make arrow clickable to toggle rotation mode
   // lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_CLICKABLE);
@@ -2048,12 +2208,10 @@ void Maps::toggleRotationMode() {
  * @brief Update GPS indicator arrow color based on rotation mode
  */
 void Maps::updateArrowColor() {
-  if (!Maps::canvasArrow)
+  if (!Maps::canvasArrow || bufArrow == nullptr)
     return;
 
-  drawNavigationMarker(Maps::canvasArrow);
-
-  log_i("Arrow marker updated: filled white");
+  updateCurrentPositionMarker(Maps::canvasArrow, true);
 }
 
 /**
@@ -2181,6 +2339,8 @@ void Maps::displayMap() {
     uint16_t h = mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
     const int16_t anchorX = mapAnchorXForWidth(Maps::mapScrWidth);
     const int16_t anchorY = mapAnchorYForHeight(h);
+    updateCurrentPositionMarker(Maps::canvasArrow);
+    const int16_t markerVisualHalf = 24 * currentMarkerScale();
     int16_t x, y;
 
     if (Maps::followGps) {
@@ -2236,7 +2396,12 @@ void Maps::displayMap() {
       lv_obj_set_pos(Maps::canvasArrow, x, y);
 
       // Simple bounds check to hide if too far off screen
-      if (x < -20 || x > Maps::mapScrWidth + 20 || y < -20 || y > h + 20) {
+      const int16_t centerX = x + 24;
+      const int16_t centerY = y + 24;
+      if (centerX < -markerVisualHalf ||
+          centerX > (int16_t)Maps::mapScrWidth + markerVisualHalf ||
+          centerY < -markerVisualHalf ||
+          centerY > (int16_t)h + markerVisualHalf) {
         lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
         ESP_LOGI(TAG, "GPS indicator hidden: off-screen at (%d,%d)", x, y);
       } else {
