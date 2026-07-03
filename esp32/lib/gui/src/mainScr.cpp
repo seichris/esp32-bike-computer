@@ -814,6 +814,7 @@ void createMainScr() {
   lv_obj_set_size(mapTile, TFT_WIDTH, TFT_HEIGHT);
   lv_obj_set_pos(mapTile, 0, 0);
   lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(mapTile, LV_OBJ_FLAG_CLICKABLE);
   activeTile = MAP; // Ensure map logic runs in updateMainScreen
 
   navTile = lv_obj_create(mainScreen);
