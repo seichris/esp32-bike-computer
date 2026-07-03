@@ -54,7 +54,7 @@ void navigationScr(_lv_obj_t *screen) {
   lv_label_set_long_mode(nameNav, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(nameNav, TFT_WIDTH - 24);
   lv_label_set_text_static(nameNav, "Waiting for instruction");
-  lv_obj_align(nameNav, LV_ALIGN_TOP_MID, 0, 24);
+  lv_obj_align(nameNav, LV_ALIGN_TOP_MID, 0, 72);
 
   latNav = lv_label_create(screen);
   lv_obj_set_style_text_font(latNav, fontOptions, 0);
@@ -67,15 +67,17 @@ void navigationScr(_lv_obj_t *screen) {
   lv_obj_add_flag(lonNav, LV_OBJ_FLAG_HIDDEN);
 
   distNav = lv_label_create(screen);
-  lv_obj_set_style_text_font(distNav, fontVeryLarge, 0);
+  lv_obj_set_style_text_font(distNav, &lv_font_montserrat_48, 0);
   lv_obj_set_style_text_color(distNav, lv_color_white(), 0);
+  lv_obj_set_style_text_align(distNav, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_text_static(distNav, "--");
-  lv_obj_align(distNav, LV_ALIGN_CENTER, 0, 60);
+  lv_obj_set_width(distNav, TFT_WIDTH);
+  lv_obj_align(distNav, LV_ALIGN_CENTER, 0, 38);
 
   arrowNav = lv_img_create(screen);
-  lv_img_set_zoom(arrowNav, iconScale);
+  lv_img_set_zoom(arrowNav, iconScale * 2);
   lv_obj_update_layout(arrowNav);
-  lv_obj_align(arrowNav, LV_ALIGN_BOTTOM_MID, 0, -28);
+  lv_obj_align(arrowNav, LV_ALIGN_BOTTOM_MID, 0, -18);
 
   LV_IMG_DECLARE(navup);
   lv_img_set_src(arrowNav, &navup);

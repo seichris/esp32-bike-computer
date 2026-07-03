@@ -82,7 +82,6 @@ extern Maps mapView;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 static void processWaveshareBootButton() {
   constexpr uint32_t DEBOUNCE_MS = 50;
-  constexpr uint32_t SHORT_PRESS_MAX_MS = 1200;
 
   static bool lastPressed = false;
   static bool stablePressed = false;
@@ -109,10 +108,9 @@ static void processWaveshareBootButton() {
   }
 
   const uint32_t pressDurationMs = now - pressStartMs;
-  if (pressDurationMs > 0 && pressDurationMs <= SHORT_PRESS_MAX_MS) {
-    log_i("Waveshare BOOT short press: toggling navigation screen");
-    toggleNavigationScreen();
-  }
+  log_i("Waveshare BOOT released after %lu ms; cycling main screen",
+        static_cast<unsigned long>(pressDurationMs));
+  toggleNavigationScreen();
 }
 #endif
 extern Gps gps;
@@ -169,6 +167,8 @@ static const char *debugTileName(uint8_t tile) {
     return "NAV";
   case SATTRACK:
     return "SATTRACK";
+  case RIDESTATS:
+    return "RIDESTATS";
   default:
     return "UNKNOWN";
   }

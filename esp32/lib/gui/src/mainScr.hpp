@@ -16,6 +16,7 @@
 #endif
 #include "globalGuiDef.h"
 #include "navScr.hpp"
+#include "rideTelemetryScr.hpp"
 #include "satInfoScr.hpp"
 #include "widgets.hpp"
 
@@ -37,6 +38,7 @@ enum tileName {
   MAP,
   NAV,
   SATTRACK,
+  RIDESTATS,
 };
 
 /**
@@ -45,6 +47,7 @@ enum tileName {
  */
 extern lv_obj_t *compassTile;
 extern lv_obj_t *navTile;
+extern lv_obj_t *rideStatsTile;
 extern lv_obj_t *mapTile;
 extern lv_obj_t *satTrackTile;
 extern lv_obj_t *tilesScreen;
@@ -75,6 +78,7 @@ void fullScreenEvent(lv_event_t *event);
 void zoomOutEvent(lv_event_t *event);
 void zoomInEvent(lv_event_t *event);
 void updateNavEvent(lv_event_t *event);
+void showNextMainScreen();
 
 void createMainScr();
 void toggleNavigationScreen();

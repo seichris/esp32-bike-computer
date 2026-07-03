@@ -35,6 +35,48 @@ enum RoutePolylineEndpoint {
     }
 }
 
+enum RouteProgress {
+    static func remainingDistance(from location: CLLocation, in route: MKRoute) -> CLLocationDistance? {
+        let polyline = route.polyline
+        let pointCount = polyline.pointCount
+        guard pointCount > 1 else { return nil }
+
+        let routePoints = polyline.points()
+        let target = MKMapPoint(location.coordinate)
+        var totalDistance: CLLocationDistance = 0
+        var closestDistance = Double.greatestFiniteMagnitude
+        var closestDistanceAlongRoute: CLLocationDistance = 0
+
+        for index in 0..<(pointCount - 1) {
+            let start = routePoints[index]
+            let end = routePoints[index + 1]
+            let dx = end.x - start.x
+            let dy = end.y - start.y
+            let segmentLengthSquared = dx * dx + dy * dy
+            let segmentLength = start.distance(to: end)
+
+            if segmentLengthSquared > 0 {
+                let rawProjection = ((target.x - start.x) * dx + (target.y - start.y) * dy) / segmentLengthSquared
+                let projection = min(max(rawProjection, 0), 1)
+                let projected = MKMapPoint(x: start.x + projection * dx, y: start.y + projection * dy)
+                let distanceToSegment = target.distance(to: projected)
+                if distanceToSegment < closestDistance {
+                    closestDistance = distanceToSegment
+                    closestDistanceAlongRoute = totalDistance + start.distance(to: projected)
+                }
+            }
+
+            totalDistance += segmentLength
+        }
+
+        guard totalDistance > 0 else { return nil }
+
+        let routeDistance = route.distance > 0 ? route.distance : totalDistance
+        let scaledDistanceAlongRoute = (closestDistanceAlongRoute / totalDistance) * routeDistance
+        return max(routeDistance - scaledDistanceAlongRoute, 0)
+    }
+}
+
 enum RouteEndpointSelection {
     static func sourceEndpoint(hasSelectedSource: Bool, sourceAddress: String) -> RouteEndpoint {
         hasSelectedSource ? .query(sourceAddress) : .currentLocation
@@ -49,6 +91,54 @@ enum RouteInitialLocation {
 
 enum RouteTransportTypes {
     static let cycling = MKDirectionsTransportType(rawValue: 1 << 3)
+}
+
+enum DeviceGPSPacketBuilder {
+    static let invalidSpeedCmps = UInt16.max
+    static let invalidRouteRemainingMeters = UInt32.max
+
+    static func data(
+        lat: Double,
+        lon: Double,
+        heading: Double = 0,
+        unixTime: UInt32 = UInt32(Date().timeIntervalSince1970),
+        speedMetersPerSecond: Double? = nil,
+        altitudeMeters: Double? = nil,
+        distanceTraveledMeters: Double? = nil,
+        elapsedSeconds: TimeInterval? = nil,
+        routeRemainingMeters: Double? = nil
+    ) -> Data {
+        var data = Data()
+        let latInt = Int32(lat * 1_000_000)
+        let lonInt = Int32(lon * 1_000_000)
+        let headingDeg: UInt16 = heading >= 0 ? UInt16(min(heading, 359)) : 0
+        let speedCmps: UInt16 = {
+            guard let speedMetersPerSecond, speedMetersPerSecond >= 0 else {
+                return invalidSpeedCmps
+            }
+            return UInt16(min((speedMetersPerSecond * 100).rounded(), Double(UInt16.max - 1)))
+        }()
+        let altitudeInt = Int16(max(min((altitudeMeters ?? 0).rounded(), Double(Int16.max)), Double(Int16.min)))
+        let distanceInt = UInt32(max(min((distanceTraveledMeters ?? 0).rounded(), Double(UInt32.max)), 0))
+        let elapsedInt = UInt32(max(min((elapsedSeconds ?? 0).rounded(), Double(UInt32.max)), 0))
+        let routeRemainingInt: UInt32 = {
+            guard let routeRemainingMeters, routeRemainingMeters >= 0 else {
+                return invalidRouteRemainingMeters
+            }
+            return UInt32(max(min(routeRemainingMeters.rounded(), Double(UInt32.max - 1)), 0))
+        }()
+
+        withUnsafeBytes(of: latInt.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: lonInt.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: headingDeg.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: unixTime.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: speedCmps.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: altitudeInt.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: distanceInt.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: elapsedInt.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: routeRemainingInt.littleEndian) { data.append(contentsOf: $0) }
+        return data
+    }
 }
 
 enum NavigationPacketBuilder {

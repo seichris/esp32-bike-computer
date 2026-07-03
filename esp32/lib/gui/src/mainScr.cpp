@@ -46,6 +46,7 @@ static void positionMapToolbarButtons(uint16_t mapHeight) {
 lv_obj_t *tilesScreen;
 lv_obj_t *compassTile;
 lv_obj_t *navTile;
+lv_obj_t *rideStatsTile;
 lv_obj_t *mapTile;
 lv_obj_t *satTrackTile;
 lv_obj_t *btnFullScreen;
@@ -288,6 +289,10 @@ void updateMainScreen(lv_timer_t *t) {
       lv_obj_send_event(navTile, LV_EVENT_VALUE_CHANGED, NULL);
       break;
 
+    case RIDESTATS:
+      lv_obj_send_event(rideStatsTile, LV_EVENT_VALUE_CHANGED, NULL);
+      break;
+
     case SATTRACK:
       lv_obj_send_event(satTrackTile, LV_EVENT_VALUE_CHANGED, NULL);
       break;
@@ -417,6 +422,7 @@ void scrollMapEvent(lv_event_t *event) {
     lv_indev_t *indev = lv_event_get_indev(event);
     static int last_x = 0, last_y = 0;
     static bool isDragging = false;
+    static bool dragStarted = false;
     static uint32_t pressStartTime = 0;
     static bool longPressTriggered = false;
     static int pressStartX = 0, pressStartY = 0;
@@ -472,6 +478,7 @@ void scrollMapEvent(lv_event_t *event) {
       pendingDy = 0;
       lastDragRedrawTime = 0;
       isScrollingMap = true;
+      dragStarted = false;
       log_i("PRESSED: x=%d y=%d", p.x, p.y);
       break;
     }
@@ -497,12 +504,13 @@ void scrollMapEvent(lv_event_t *event) {
       }
 
       const int SCROLL_THRESHOLD = 5;
+      const int DRAG_START_THRESHOLD = 32;
+      int totalMoveX = abs(p.x - pressStartX);
+      int totalMoveY = abs(p.y - pressStartY);
+      int totalMove = totalMoveX + totalMoveY;
 
       // Check for long press (1 second hold without significant movement)
       if (!longPressTriggered && pressStartTime > 0) {
-        int totalMoveX = abs(p.x - pressStartX);
-        int totalMoveY = abs(p.y - pressStartY);
-
         if (totalMoveX < 20 && totalMoveY < 20) {
           // Finger hasn't moved much - check for long press
           if (millis() - pressStartTime > 1800) {
@@ -519,6 +527,20 @@ void scrollMapEvent(lv_event_t *event) {
           // Finger moved - this is a scroll, not a long press
           pressStartTime = 0;
         }
+      }
+
+      if (!dragStarted) {
+        if (totalMove < DRAG_START_THRESHOLD) {
+          break;
+        }
+
+        dragStarted = true;
+        last_x = p.x;
+        last_y = p.y;
+        pressStartTime = 0;
+        log_i("DRAG START: p(%d,%d) start(%d,%d) total=%d", p.x, p.y,
+              pressStartX, pressStartY, totalMove);
+        break;
       }
 
       if (abs(dx) > SCROLL_THRESHOLD || abs(dy) > SCROLL_THRESHOLD) {
@@ -538,7 +560,7 @@ void scrollMapEvent(lv_event_t *event) {
     case LV_EVENT_PRESS_LOST: {
       lv_indev_get_point(indev, &p);
 
-      if (isDragging) {
+      if (isDragging && dragStarted) {
         int dx = p.x - last_x;
         int dy = p.y - last_y;
         const int MAX_JUMP = 400;
@@ -557,32 +579,37 @@ void scrollMapEvent(lv_event_t *event) {
           millis() - pressStartTime < 300) {
         int totalMove = abs(p.x - pressStartX) + abs(p.y - pressStartY);
         if (totalMove < 30) {
-          // GPS indicator is at the board-specific map anchor when followGps
-          // is true.
-          // When followGps is false, it could be anywhere - use center area
-          // anyway since user expects to tap the center indicator
-          int centerX = mapInteractionAnchorX();
-          int centerY = mapInteractionAnchorY();
-          int distX = abs(p.x - centerX);
-          int distY = abs(p.y - centerY);
-          log_i("SHORT TAP CHECK: pos(%d,%d) center(%d,%d) dist(%d,%d)", p.x,
-                p.y, centerX, centerY, distX, distY);
-          // Increased hit area to 120px radius (user request to double it)
-          if (distX < 120 && distY < 120) {
-            log_i("SHORT TAP ON GPS DOT: Toggling rotation mode");
-            mapView.toggleRotationMode();
+          if (mapRenderSettings.tapToSwitchScreens) {
+            log_i("MAP SHORT TAP: cycling main screen");
+            showNextMainScreen();
+          } else {
+            // GPS indicator is at the board-specific map anchor when followGps
+            // is true. When followGps is false, use the center area since users
+            // expect to tap the center indicator.
+            int centerX = mapInteractionAnchorX();
+            int centerY = mapInteractionAnchorY();
+            int distX = abs(p.x - centerX);
+            int distY = abs(p.y - centerY);
+            log_i("SHORT TAP CHECK: pos(%d,%d) center(%d,%d) dist(%d,%d)", p.x,
+                  p.y, centerX, centerY, distX, distY);
+            // Increased hit area to 120px radius (user request to double it)
+            if (distX < 120 && distY < 120) {
+              log_i("SHORT TAP ON GPS DOT: Toggling rotation mode");
+              mapView.toggleRotationMode();
 
-            // Sync back to mapRenderSettings so it persists if we save or app
-            // queries it (though app push is one-way usually)
-            mapRenderSettings.mapRotationMode =
-                (mapView.rotationMode == Maps::ROT_COURSE_UP) ? 1 : 0;
-            log_i("Synced rotation mode to settings: %d",
-                  mapRenderSettings.mapRotationMode);
+              // Sync back to mapRenderSettings so it persists if we save or app
+              // queries it (though app push is one-way usually)
+              mapRenderSettings.mapRotationMode =
+                  (mapView.rotationMode == Maps::ROT_COURSE_UP) ? 1 : 0;
+              log_i("Synced rotation mode to settings: %d",
+                    mapRenderSettings.mapRotationMode);
+            }
           }
         }
       }
 
       isDragging = false;
+      dragStarted = false;
       isScrollingMap = false;
       pressStartTime = 0;
       log_i("RELEASED/LOST: drag ended%s",
@@ -722,35 +749,73 @@ void updateNavEvent(lv_event_t *event) {
   lv_img_set_angle(arrowNav, arrowAngle);
 }
 
-static void showNavigationScreen(bool showNavigation) {
-  if (!mapTile || !navTile) {
+static void showMainTile(tileName tile) {
+  if (!mapTile || !navTile || !rideStatsTile) {
     return;
   }
 
-  if (showNavigation) {
-    activeTile = NAV;
-    canScrollMap = false;
-    lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
+
+  activeTile = tile;
+  canScrollMap = tile == MAP;
+
+  switch (tile) {
+  case NAV:
     lv_obj_clear_flag(navTile, LV_OBJ_FLAG_HIDDEN);
     lv_obj_send_event(navTile, LV_EVENT_VALUE_CHANGED, NULL);
     log_i("UI: switched to navigation instruction screen");
-  } else {
-    activeTile = MAP;
-    canScrollMap = true;
-    lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
+    break;
+  case RIDESTATS:
+    lv_obj_clear_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_send_event(rideStatsTile, LV_EVENT_VALUE_CHANGED, NULL);
+    log_i("UI: switched to ride telemetry screen");
+    break;
+  case MAP:
+  default:
     lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
     mapView.redrawMap = true;
     lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
     log_i("UI: switched to map screen");
+    break;
   }
 }
 
-void toggleNavigationScreen() {
-  if (!isMainScreen || !mainScreen || !mapTile || !navTile) {
+void showNextMainScreen() {
+  switch (activeTile) {
+  case MAP:
+    showMainTile(NAV);
+    break;
+  case NAV:
+    showMainTile(RIDESTATS);
+    break;
+  case RIDESTATS:
+  default:
+    showMainTile(MAP);
+    break;
+  }
+}
+
+static void tapCycleScreenEvent(lv_event_t *event) {
+  if (!mapRenderSettings.tapToSwitchScreens) {
     return;
   }
 
-  showNavigationScreen(activeTile == MAP);
+  if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+    return;
+  }
+
+  log_i("UI: short tap cycling main screen");
+  showNextMainScreen();
+}
+
+void toggleNavigationScreen() {
+  if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile) {
+    return;
+  }
+
+  showNextMainScreen();
 }
 
 /**
@@ -767,6 +832,7 @@ void createMainScr() {
   lv_obj_set_size(mapTile, TFT_WIDTH, TFT_HEIGHT);
   lv_obj_set_pos(mapTile, 0, 0);
   lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(mapTile, LV_OBJ_FLAG_CLICKABLE);
   activeTile = MAP; // Ensure map logic runs in updateMainScreen
 
   navTile = lv_obj_create(mainScreen);
@@ -774,9 +840,24 @@ void createMainScr() {
   lv_obj_set_size(navTile, TFT_WIDTH, TFT_HEIGHT);
   lv_obj_set_pos(navTile, 0, 0);
   lv_obj_clear_flag(navTile, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(navTile, LV_OBJ_FLAG_CLICKABLE);
   navigationScr(navTile);
   lv_obj_add_event_cb(navTile, updateNavEvent, LV_EVENT_VALUE_CHANGED, NULL);
+  lv_obj_add_event_cb(navTile, tapCycleScreenEvent, LV_EVENT_CLICKED, NULL);
   lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
+
+  rideStatsTile = lv_obj_create(mainScreen);
+  lv_obj_remove_style_all(rideStatsTile);
+  lv_obj_set_size(rideStatsTile, TFT_WIDTH, TFT_HEIGHT);
+  lv_obj_set_pos(rideStatsTile, 0, 0);
+  lv_obj_clear_flag(rideStatsTile, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_CLICKABLE);
+  rideTelemetryScr(rideStatsTile);
+  lv_obj_add_event_cb(rideStatsTile, updateRideTelemetryEvent,
+                      LV_EVENT_VALUE_CHANGED, NULL);
+  lv_obj_add_event_cb(rideStatsTile, tapCycleScreenEvent, LV_EVENT_CLICKED,
+                      NULL);
+  lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
 
   // Set tilesScreen to same as mapTile for compatibility
   tilesScreen = mapTile;

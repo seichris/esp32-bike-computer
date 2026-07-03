@@ -66,13 +66,18 @@ Lat: Int32 microdegrees
 Lon: Int32 microdegrees
 Heading: UInt16 degrees, 0...359
 UnixTime: UInt32 seconds since 1970-01-01T00:00:00Z (optional)
+Speed: UInt16 centimeters/second, 0xFFFF invalid (optional)
+Altitude: Int16 meters (optional)
+DistanceTraveled: UInt32 meters (optional)
+ElapsedTime: UInt32 seconds (optional)
+RouteRemaining: UInt32 meters, 0xFFFFFFFF invalid (optional)
 ```
 
 Live CoreLocation coordinates are sent as WGS-84. Simulated or MapKit route
 coordinates are converted from GCJ-02 to WGS-84 before writing. Firmware accepts
-the original 8-byte lat/lon payload, the 10-byte lat/lon/heading payload, and
-the 14-byte payload with Unix time. The Waveshare firmware uses the optional
-Unix time to sync the onboard PCF85063 RTC.
+the original 8-byte lat/lon payload, the 10-byte lat/lon/heading payload, the
+14-byte payload with Unix time, and the extended 30-byte telemetry payload. The
+Waveshare firmware uses the optional Unix time to sync the onboard PCF85063 RTC.
 
 ## Map Settings (`2A73`)
 
@@ -96,6 +101,7 @@ Current setting IDs:
 | `8` | Visibility mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/tracks, bit 3 major roads, bit 4 local streets, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker |
 | `9` | Street line width boost | `0...24` px added to known road/path line style widths; legacy unknown lines are boosted when their stored style width is at least 3px; final rendered width is capped at 24px |
 | `10` | Current-position marker scale | `1...5`; default is `2`, so the map position marker renders at twice its original size. The firmware shows a white dot when no route is loaded and a white arrow while navigating. |
+| `11` | Tap to switch screens | `0` disabled, `1` enabled. When enabled, a short tap cycles the device between map, navigation instruction, and ride stats screens. Map drags and long presses are ignored by this shortcut. |
 
 Feature visibility toggles are authoritative for their classes. Detail level
 controls small-area density without overriding the visibility mask: high uses

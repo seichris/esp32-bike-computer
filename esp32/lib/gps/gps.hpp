@@ -74,6 +74,10 @@ public:
     uint8_t fixMode;
     int16_t altitude;
     uint16_t speed;
+    uint32_t distanceTraveled;
+    uint32_t elapsedSeconds;
+    uint32_t routeRemaining;
+    bool hasRouteRemaining;
     double latitude;
     double longitude;
     uint16_t heading;

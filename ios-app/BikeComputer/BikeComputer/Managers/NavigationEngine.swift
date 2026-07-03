@@ -33,6 +33,10 @@ class NavigationEngine: NSObject, ObservableObject {
     private var geometrySendInterval: TimeInterval = 2.0
     private var lastGeometrySendTime: Date = .distantPast
     private let geometryWindowSize: Int = 30
+    private var rideStartDate: Date?
+    private var rideDistanceMeters: CLLocationDistance = 0
+    private var lastRideLocation: CLLocation?
+    private var lastRouteRemainingMeters: CLLocationDistance?
     
     // Simulation state
     private var simulationTimer: Timer?
@@ -70,10 +74,16 @@ class NavigationEngine: NSObject, ObservableObject {
 
     func processExternalLocation(_ location: CLLocation) {
         guard !isSimulationMode else { return }
-        sendDeviceGpsPosition(location, convertFromMapKitRoute: false)
         let routeLocation = CoordinateConverter.mapKitRouteLocation(fromGPSLocation: location)
-        guard shouldAcceptLiveLocation(routeLocation) else { return }
-        processLocation(routeLocation)
+        let acceptedRouteLocation: CLLocation?
+        if shouldAcceptLiveLocation(routeLocation) {
+            processLocation(routeLocation)
+            acceptedRouteLocation = routeLocation
+        } else {
+            acceptedRouteLocation = nil
+        }
+        updateRideTelemetry(gpsLocation: location, routeLocation: acceptedRouteLocation)
+        sendDeviceGpsPosition(location, convertFromMapKitRoute: false)
     }
     
     /// Start navigation with a given route
@@ -89,15 +99,17 @@ class NavigationEngine: NSObject, ObservableObject {
         hasAcceptedLiveLocation = initialLocation == nil
         lastSentGeometryHash = 0
         lastGeometrySendTime = .distantPast
+        resetRideTelemetry(startingAt: initialLocation)
         
         print("Navigation started with \(route.steps.count) steps (Test Mode: \(isTestMode))")
         
         if isTestMode {
             startSimulation()
         } else if let initialLocation {
-            sendInitialDeviceGpsPosition(initialLocation, convertFromMapKitRoute: true)
             sendRouteGeometryIfNeeded(currentLocation: initialLocation)
             processLocation(initialLocation)
+            updateRideTelemetry(gpsLocation: initialLocation, routeLocation: initialLocation)
+            sendInitialDeviceGpsPosition(initialLocation, convertFromMapKitRoute: true)
         }
     }
     
@@ -114,6 +126,7 @@ class NavigationEngine: NSObject, ObservableObject {
         hasAcceptedLiveLocation = false
         lastSentGeometryHash = 0
         lastGeometrySendTime = .distantPast
+        resetRideTelemetry(startingAt: nil)
         stopSimulation()
         print("Navigation stopped")
     }
@@ -166,12 +179,21 @@ class NavigationEngine: NSObject, ObservableObject {
         // Calculate position
         if let position = interpolatePositionAlongRoute(progress: simulationProgress) {
             simulatedPosition = position
-            
-            let location = CLLocation(latitude: position.latitude, longitude: position.longitude)
-            sendDeviceGpsPosition(location, convertFromMapKitRoute: true)
-            
+
+            let location = CLLocation(
+                coordinate: position,
+                altitude: 0,
+                horizontalAccuracy: 5,
+                verticalAccuracy: -1,
+                course: -1,
+                speed: simulationSpeed,
+                timestamp: now
+            )
+
             // Also process location for navigation instructions
             processLocation(location)
+            updateRideTelemetry(gpsLocation: location, routeLocation: location)
+            sendDeviceGpsPosition(location, convertFromMapKitRoute: true)
         }
     }
     
@@ -355,6 +377,33 @@ class NavigationEngine: NSObject, ObservableObject {
         sendDeviceGpsPosition(lastDeviceGpsLocation.location,
                               convertFromMapKitRoute: lastDeviceGpsLocation.convertFromMapKitRoute)
     }
+
+    private func resetRideTelemetry(startingAt location: CLLocation?) {
+        rideStartDate = location == nil ? nil : Date()
+        rideDistanceMeters = 0
+        lastRideLocation = location
+        lastRouteRemainingMeters = nil
+    }
+
+    private func updateRideTelemetry(gpsLocation: CLLocation, routeLocation: CLLocation?) {
+        if rideStartDate == nil {
+            rideStartDate = Date()
+        }
+
+        if let lastRideLocation {
+            let distanceIncrement = gpsLocation.distance(from: lastRideLocation)
+            if distanceIncrement >= 0 && distanceIncrement < 100 {
+                rideDistanceMeters += distanceIncrement
+            }
+        }
+        lastRideLocation = gpsLocation
+
+        if isNavigating, let route = currentRoute, let routeLocation {
+            lastRouteRemainingMeters = RouteProgress.remainingDistance(from: routeLocation, in: route)
+        } else {
+            lastRouteRemainingMeters = nil
+        }
+    }
     
     /// Extract clean instruction text from MKRoute.Step
     private func extractInstruction(from step: MKRoute.Step) -> String {
@@ -409,7 +458,12 @@ class NavigationEngine: NSObject, ObservableObject {
         let heading = location.course >= 0 ? location.course : 0
         bleManager?.sendGPSPosition(lat: wgsCoordinate.latitude,
                                     lon: wgsCoordinate.longitude,
-                                    heading: heading)
+                                    heading: heading,
+                                    speedMetersPerSecond: location.speed,
+                                    altitudeMeters: location.altitude,
+                                    distanceTraveledMeters: rideDistanceMeters,
+                                    elapsedSeconds: rideStartDate.map { Date().timeIntervalSince($0) },
+                                    routeRemainingMeters: lastRouteRemainingMeters)
     }
 
     private func sendInitialDeviceGpsPosition(_ location: CLLocation, convertFromMapKitRoute: Bool) {

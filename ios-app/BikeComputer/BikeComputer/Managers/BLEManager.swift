@@ -131,6 +131,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var displayRotation: Int = 0 
     @Published var mapRotationMode: Int = 0 // 0=North Up, 1=Course Up  // 0-3: 0°, 90°, 180°, 270°
     @Published var zoomLevel: Int = 2 // 0-4: 0=super-zoom, 1=closest, 4=farthest
+    @Published var tapToSwitchScreens: Bool = false
     
     // Feature Visibility
     @Published var showBuildings: Bool = true
@@ -204,7 +205,9 @@ class BLEManager: NSObject, ObservableObject {
         static let positionMarkerScale = "mapSettings.positionMarkerScale"
         static let displayRotation = "mapSettings.displayRotation"
         static let mapRotationMode = "mapSettings.mapRotationMode"
+        static let resetMapRotationModeToNorthUp = "mapSettings.resetMapRotationModeToNorthUp.v1"
         static let zoomLevel = "mapSettings.zoomLevel"
+        static let tapToSwitchScreens = "deviceSettings.tapToSwitchScreens"
         static let showBuildings = "mapSettings.showBuildings"
         static let showGreenSpace = "mapSettings.showGreenSpace"
         static let showPaths = "mapSettings.showPaths"
@@ -238,8 +241,15 @@ class BLEManager: NSObject, ObservableObject {
         streetLineWidthBoost = defaults.object(forKey: SettingsKeys.streetLineWidthBoost) as? Double ?? 0.0
         positionMarkerScale = defaults.object(forKey: SettingsKeys.positionMarkerScale) as? Double ?? 2.0
         displayRotation = defaults.object(forKey: SettingsKeys.displayRotation) as? Int ?? 0
-        mapRotationMode = defaults.object(forKey: SettingsKeys.mapRotationMode) as? Int ?? 0
+        if defaults.bool(forKey: SettingsKeys.resetMapRotationModeToNorthUp) {
+            mapRotationMode = defaults.object(forKey: SettingsKeys.mapRotationMode) as? Int ?? 0
+        } else {
+            mapRotationMode = 0
+            defaults.set(0, forKey: SettingsKeys.mapRotationMode)
+            defaults.set(true, forKey: SettingsKeys.resetMapRotationModeToNorthUp)
+        }
         zoomLevel = defaults.object(forKey: SettingsKeys.zoomLevel) as? Int ?? 2
+        tapToSwitchScreens = defaults.object(forKey: SettingsKeys.tapToSwitchScreens) as? Bool ?? false
         showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
         let legacyNature = defaults.object(forKey: SettingsKeys.legacyShowNature) as? Bool ?? true
         let legacyMinorRoads = defaults.object(forKey: SettingsKeys.legacyShowMinorRoads) as? Bool ?? true
@@ -270,6 +280,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(displayRotation, forKey: SettingsKeys.displayRotation)
         defaults.set(mapRotationMode, forKey: SettingsKeys.mapRotationMode)
         defaults.set(zoomLevel, forKey: SettingsKeys.zoomLevel)
+        defaults.set(tapToSwitchScreens, forKey: SettingsKeys.tapToSwitchScreens)
         defaults.set(showBuildings, forKey: SettingsKeys.showBuildings)
         defaults.set(showGreenSpace, forKey: SettingsKeys.showGreenSpace)
         defaults.set(showPaths, forKey: SettingsKeys.showPaths)
@@ -406,9 +417,18 @@ class BLEManager: NSObject, ObservableObject {
         sendRouteGeometry(Data())
     }
 
-    /// Send GPS position to ESP32.
-    /// Format: [Lat:4][Lon:4][Heading:2][UnixTime:4] with WGS-84 microdegrees.
-    func sendGPSPosition(lat: Double, lon: Double, heading: Double = 0) {
+    /// Send GPS position and optional ride telemetry to ESP32.
+    /// Format: [Lat:4][Lon:4][Heading:2][UnixTime:4][SpeedCmps:2][Altitude:2][Distance:4][Elapsed:4][RouteRemaining:4].
+    func sendGPSPosition(
+        lat: Double,
+        lon: Double,
+        heading: Double = 0,
+        speedMetersPerSecond: Double? = nil,
+        altitudeMeters: Double? = nil,
+        distanceTraveledMeters: Double? = nil,
+        elapsedSeconds: TimeInterval? = nil,
+        routeRemainingMeters: Double? = nil
+    ) {
         guard let peripheral = connectedPeripheral,
               isConnected,
               isNavigationReady else {
@@ -416,15 +436,16 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
 
-        var data = Data()
-        let latInt = Int32(lat * 1_000_000)
-        let lonInt = Int32(lon * 1_000_000)
-        let headingDeg: UInt16 = heading >= 0 ? UInt16(min(heading, 359)) : 0
-        let unixTime = UInt32(Date().timeIntervalSince1970)
-        withUnsafeBytes(of: latInt.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: lonInt.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: headingDeg.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: unixTime.littleEndian) { data.append(contentsOf: $0) }
+        let data = DeviceGPSPacketBuilder.data(
+            lat: lat,
+            lon: lon,
+            heading: heading,
+            speedMetersPerSecond: speedMetersPerSecond,
+            altitudeMeters: altitudeMeters,
+            distanceTraveledMeters: distanceTraveledMeters,
+            elapsedSeconds: elapsedSeconds,
+            routeRemainingMeters: routeRemainingMeters
+        )
 
         if let characteristic = gpsPositionCharacteristic {
             peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
@@ -827,6 +848,7 @@ class BLEManager: NSObject, ObservableObject {
         sendSetting(id: 4, value: Int32(displayRotation))
         sendSetting(id: 6, value: Int32(mapRotationMode))
         sendSetting(id: 7, value: Int32(zoomLevel))
+        sendSetting(id: 11, value: tapToSwitchScreens ? 1 : 0)
     }
 
     private func sendOrQueueClientProof(_ proofData: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {

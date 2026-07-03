@@ -462,11 +462,54 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
   gps.gpsData.longitude = (double)lon / 1000000.0;
   gps.gpsData.fixMode = 3;
   gps.gpsData.satellites = 10;
+  gps.gpsData.speed = 0;
+  gps.gpsData.altitude = 0;
+  gps.gpsData.distanceTraveled = 0;
+  gps.gpsData.elapsedSeconds = 0;
+  gps.gpsData.routeRemaining = 0;
+  gps.gpsData.hasRouteRemaining = false;
 
   if (len >= 10) {
     uint16_t headingVal;
     memcpy(&headingVal, data + 8, sizeof(headingVal));
     gps.gpsData.heading = headingVal;
+  }
+
+  if (len >= 16) {
+    uint16_t speedCmps;
+    memcpy(&speedCmps, data + 14, sizeof(speedCmps));
+    if (speedCmps != 0xFFFF) {
+      gps.gpsData.speed = (uint16_t)((speedCmps * 36U + 500U) / 1000U);
+    } else {
+      gps.gpsData.speed = 0;
+    }
+  }
+
+  if (len >= 18) {
+    int16_t altitudeMeters;
+    memcpy(&altitudeMeters, data + 16, sizeof(altitudeMeters));
+    gps.gpsData.altitude = altitudeMeters;
+  }
+
+  if (len >= 22) {
+    uint32_t distanceMeters;
+    memcpy(&distanceMeters, data + 18, sizeof(distanceMeters));
+    gps.gpsData.distanceTraveled = distanceMeters;
+  }
+
+  if (len >= 26) {
+    uint32_t elapsedSeconds;
+    memcpy(&elapsedSeconds, data + 22, sizeof(elapsedSeconds));
+    gps.gpsData.elapsedSeconds = elapsedSeconds;
+  }
+
+  if (len >= 30) {
+    uint32_t routeRemainingMeters;
+    memcpy(&routeRemainingMeters, data + 26, sizeof(routeRemainingMeters));
+    gps.gpsData.hasRouteRemaining = routeRemainingMeters != 0xFFFFFFFF;
+    if (gps.gpsData.hasRouteRemaining) {
+      gps.gpsData.routeRemaining = routeRemainingMeters;
+    }
   }
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -563,6 +606,14 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     settingsPrefs.end();
     Serial.printf("BLE Settings: positionMarkerScale = %d (saved)\n",
                   mapRenderSettings.positionMarkerScale);
+    break;
+  case 11:
+    mapRenderSettings.tapToSwitchScreens = settingValue != 0 ? 1 : 0;
+    settingsPrefs.begin("mapSettings", false);
+    settingsPrefs.putUChar("tapSwitch", mapRenderSettings.tapToSwitchScreens);
+    settingsPrefs.end();
+    Serial.printf("BLE Settings: tapToSwitchScreens = %d (saved)\n",
+                  mapRenderSettings.tapToSwitchScreens);
     break;
   case 4:
     mapRenderSettings.displayRotation =
@@ -801,18 +852,20 @@ static void loadSettingsFromNVS() {
       sanitizeMapDisplayRotation(prefs.getUChar("rotation", 0), "NVS");
   mapRenderSettings.mapRotationMode = prefs.getUChar("mapRotMode", 0);
   mapRenderSettings.zoomLevel = prefs.getUChar("zoomLevel", 4);
+  mapRenderSettings.tapToSwitchScreens = prefs.getUChar("tapSwitch", 0);
   mapRenderSettings.visibilityMask = prefs.getUInt("visMask", 0xFFFFFFFF);
 
   prefs.end();
 
   Serial.printf("BLE: Loaded settings from NVS - minPolySize=%d, "
                 "detailLevel=%d, routeWidth=%d, streetBoost=%d, "
-                "markerScale=%d, rotation=%d\n",
+                "markerScale=%d, rotation=%d, tapSwitch=%d\n",
                 mapRenderSettings.minPolygonSize, mapRenderSettings.detailLevel,
                 mapRenderSettings.routeLineWidth,
                 mapRenderSettings.streetLineWidthBoost,
                 mapRenderSettings.positionMarkerScale,
-                mapRenderSettings.displayRotation);
+                mapRenderSettings.displayRotation,
+                mapRenderSettings.tapToSwitchScreens);
 }
 
 void BLENavigationServer::init(const char *deviceName) {
