@@ -33,6 +33,8 @@ class NavigationEngine: NSObject, ObservableObject {
     private var geometrySendInterval: TimeInterval = 2.0
     private var lastGeometrySendTime: Date = .distantPast
     private let geometryWindowSize: Int = 30
+    private let idleGpsSyncInterval: TimeInterval = 10 * 60
+    private var lastIdleGpsSyncTime: Date = .distantPast
     private var rideStartDate: Date?
     private var rideDistanceMeters: CLLocationDistance = 0
     private var lastRideLocation: CLLocation?
@@ -83,7 +85,12 @@ class NavigationEngine: NSObject, ObservableObject {
             acceptedRouteLocation = nil
         }
         updateRideTelemetry(gpsLocation: location, routeLocation: acceptedRouteLocation)
-        sendDeviceGpsPosition(location, convertFromMapKitRoute: false)
+        if isNavigating {
+            sendDeviceGpsPosition(location, convertFromMapKitRoute: false)
+        } else {
+            lastDeviceGpsLocation = (location, false)
+            sendIdleDeviceTimeSyncIfNeeded(location)
+        }
     }
     
     /// Start navigation with a given route
@@ -126,6 +133,7 @@ class NavigationEngine: NSObject, ObservableObject {
         hasAcceptedLiveLocation = false
         lastSentGeometryHash = 0
         lastGeometrySendTime = .distantPast
+        lastIdleGpsSyncTime = .distantPast
         resetRideTelemetry(startingAt: nil)
         stopSimulation()
         print("Navigation stopped")
@@ -376,6 +384,15 @@ class NavigationEngine: NSObject, ObservableObject {
 
         sendDeviceGpsPosition(lastDeviceGpsLocation.location,
                               convertFromMapKitRoute: lastDeviceGpsLocation.convertFromMapKitRoute)
+    }
+
+    private func sendIdleDeviceTimeSyncIfNeeded(_ location: CLLocation) {
+        let now = Date()
+        guard now.timeIntervalSince(lastIdleGpsSyncTime) >= idleGpsSyncInterval else { return }
+        guard let bleManager, bleManager.isConnected, bleManager.isNavigationReady else { return }
+
+        sendDeviceGpsPosition(location, convertFromMapKitRoute: false)
+        lastIdleGpsSyncTime = now
     }
 
     private func resetRideTelemetry(startingAt location: CLLocation?) {

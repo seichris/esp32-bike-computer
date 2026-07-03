@@ -14,107 +14,25 @@ struct ContentView: View {
     
     @StateObject private var coordinator = BikeComputerCoordinator()
     
-    @State private var showingRouteInput = false
     @State private var sourceAddress = ""
     @State private var destinationAddress = ""
-    @State private var transportType: MKDirectionsTransportType = RouteTransportTypes.cycling
     @State private var showingSettings = false
+    @State private var isSearchPanelExpanded = false
     
     var body: some View {
-        NavigationView {
-            VStack(spacing: 15) {
-                // BLE Connection Status + Settings
-                HStack {
-                    ConnectionStatusView(
-                        isConnected: coordinator.isConnected,
-                        signalStrength: coordinator.signalStrength,
-                        onReconnect: { coordinator.reconnect() }
-                    )
-                    
-                    Button(action: { showingSettings = true }) {
-                        Image(systemName: "gearshape.fill")
-                            .font(.title3)
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.trailing, 30)
-                }
-                
-                // Main Content Views
-                if coordinator.isNavigating {
-                    // Swipeable view: map | navigation+workout
-                    TabView(selection: $coordinator.selectedView) {
-                        mapView
-                            .tag(0)
+        GeometryReader { proxy in
+            ZStack {
+                mapView
+                    .ignoresSafeArea()
 
-                        CombinedNavigationWorkoutView(coordinator: coordinator)
-                            .tag(1)
-                    }
-                    .tabViewStyle(PageTabViewStyle(indexDisplayMode: .automatic))
-                    .indexViewStyle(PageIndexViewStyle(backgroundDisplayMode: .always))
-                    .frame(height: 550)
-                } else if coordinator.routeCalculation.isCalculating {
-                    CalculationStatusView(status: coordinator.routeCalculation.status)
-                } else {
-                    // Swipeable view: map | workout
-                    TabView(selection: $coordinator.selectedView) {
-                        mapView
-                            .tag(0)
+                VStack(spacing: 0) {
+                    topOverlay
 
-                        WorkoutOnlyView(coordinator: coordinator)
-                            .tag(1)
-                    }
-                    .tabViewStyle(PageTabViewStyle(indexDisplayMode: .automatic))
-                    .indexViewStyle(PageIndexViewStyle(backgroundDisplayMode: .always))
-                    .frame(height: 550)
+                    Spacer()
+
+                    bottomOverlay(maxHeight: proxy.size.height * 0.68)
                 }
-                
-                // Bottom Controls
-                VStack(spacing: 15) {
-                    if !coordinator.isNavigating {
-                        // Search bar for destination
-                        Button(action: {
-                            showingRouteInput = true
-                        }) {
-                            HStack {
-                                Image(systemName: "magnifyingglass")
-                                    .foregroundColor(.secondary)
-                                Text("Search for a destination")
-                                    .foregroundColor(.secondary)
-                                Spacer()
-                            }
-                            .padding()
-                            .background(Color(.systemGray6))
-                            .cornerRadius(12)
-                        }
-                    } else {
-                        Button(action: {
-                            coordinator.stopNavigation()
-                        }) {
-                            Label("Stop Navigation", systemImage: "stop.fill")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                                .frame(maxWidth: .infinity)
-                                .padding()
-                                .background(Color.red)
-                                .cornerRadius(12)
-                        }
-                    }
-                }
-                .padding(.horizontal, 30)
-                .padding(.bottom, 0)
-            }
-            .navigationBarHidden(true)
-            .fullScreenCover(isPresented: $showingRouteInput) {
-                RouteInputView(
-                    sourceAddress: $sourceAddress,
-                    destinationAddress: $destinationAddress,
-                    currentAddress: coordinator.currentAddress,
-                    currentLocation: coordinator.currentLocation,
-                    onStartNavigation: { source, destination, transport, isTestMode in
-                        transportType = transport
-                        coordinator.startNavigation(from: source, to: destination, transportType: transport, isTestMode: isTestMode)
-                    }
-                )
+                .ignoresSafeArea(.container, edges: .bottom)
             }
             .alert("Navigation Error", isPresented: $coordinator.alert.isShowing) {
                 Button("OK", role: .cancel) { }
@@ -127,9 +45,71 @@ struct ContentView: View {
             }
         }
         .onChange(of: coordinator.selectedView) { newValue in
-            // Notify coordinator of view change
             coordinator.updateSelectedView(newValue)
         }
+    }
+
+    private var topOverlay: some View {
+        HStack(alignment: .center, spacing: 12) {
+            ConnectionStatusView(
+                isConnected: coordinator.isConnected,
+                onReconnect: { coordinator.reconnect() }
+            )
+
+            Button(action: { showingSettings = true }) {
+                Image(systemName: "gearshape.fill")
+                    .font(.title3)
+                    .foregroundColor(.primary)
+                    .shadow(color: .white.opacity(0.8), radius: 2, x: 0, y: 1)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Settings")
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 8)
+        .zIndex(10)
+    }
+
+    @ViewBuilder
+    private func bottomOverlay(maxHeight: CGFloat) -> some View {
+        VStack(spacing: 12) {
+            if coordinator.routeCalculation.isCalculating {
+                CalculationStatusView(status: coordinator.routeCalculation.status)
+                    .padding(.horizontal, 18)
+            } else if coordinator.isNavigating {
+                navigationControlPanel
+            } else {
+                RouteSearchPanel(
+                    sourceAddress: $sourceAddress,
+                    destinationAddress: $destinationAddress,
+                    isExpanded: $isSearchPanelExpanded,
+                    currentAddress: coordinator.currentAddress,
+                    currentLocation: coordinator.currentLocation,
+                    maxExpandedHeight: maxHeight,
+                    onStartNavigation: { source, destination, transport, isTestMode in
+                        isSearchPanelExpanded = false
+                        coordinator.startNavigation(from: source, to: destination, transportType: transport, isTestMode: isTestMode)
+                    }
+                )
+                .padding(.horizontal, 12)
+            }
+        }
+        .padding(.bottom, 12)
+        .animation(.spring(response: 0.34, dampingFraction: 0.88), value: isSearchPanelExpanded)
+        .animation(.easeInOut(duration: 0.2), value: coordinator.routeCalculation.isCalculating)
+        .animation(.easeInOut(duration: 0.2), value: coordinator.isNavigating)
+    }
+
+    private var navigationControlPanel: some View {
+        MapNavigationInstructionCard(
+            iconID: coordinator.currentIconID,
+            distanceToManeuver: coordinator.distanceToManeuver,
+            instruction: coordinator.currentInstruction,
+            onStopNavigation: { coordinator.stopNavigation() }
+        )
+        .padding(.horizontal, 12)
     }
     
     // MARK: - Map View
@@ -140,12 +120,15 @@ struct ContentView: View {
             route: coordinator.currentRoute,
             simulatedPosition: coordinator.simulatedPosition,
             isSimulationMode: coordinator.isSimulationMode,
+            onMapTapped: {
+                if isSearchPanelExpanded {
+                    isSearchPanelExpanded = false
+                }
+            },
             onDestinationSelected: coordinator.isNavigating ? nil : { coordinate, mapLocation in
                 coordinator.handleDestinationSelection(coordinate: coordinate, mapLocation: mapLocation)
             }
         )
-        .cornerRadius(20)
-        .padding(.horizontal, 30)
     }
 }
 

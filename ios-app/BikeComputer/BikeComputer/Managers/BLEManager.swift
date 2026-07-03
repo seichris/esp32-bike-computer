@@ -117,6 +117,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var isNavigationReady: Bool = false
     @Published var supportsDeviceSettings: Bool = false
     @Published var peripheralName: String = ""
+    @Published var hardwareLabel: String = ""
     @Published var signalStrength: Int = 0
     @Published var centralStateDescription: String = "unknown"
     @Published var trustedPeripheralDescription: String = "none"
@@ -132,6 +133,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapRotationMode: Int = 0 // 0=North Up, 1=Course Up  // 0-3: 0°, 90°, 180°, 270°
     @Published var zoomLevel: Int = 2 // 0-4: 0=super-zoom, 1=closest, 4=farthest
     @Published var tapToSwitchScreens: Bool = false
+    @Published var deviceBrightnessPercent: Double = 100
     
     // Feature Visibility
     @Published var showBuildings: Bool = true
@@ -152,6 +154,11 @@ class BLEManager: NSObject, ObservableObject {
     private let routeGeometryCharacteristicUUID = CBUUID(string: "2A6F")
     private let gpsPositionCharacteristicUUID = CBUUID(string: "2A72")
     private let settingsCharacteristicUUID = CBUUID(string: "2A73")
+    private let deviceInformationServiceUUID = CBUUID(string: "180A")
+    private let modelNumberCharacteristicUUID = CBUUID(string: "2A24")
+    private let firmwareRevisionCharacteristicUUID = CBUUID(string: "2A26")
+    private let hardwareRevisionCharacteristicUUID = CBUUID(string: "2A27")
+    private let manufacturerNameCharacteristicUUID = CBUUID(string: "2A29")
     
     // MARK: - Private Properties
     private var centralManager: CBCentralManager!
@@ -161,6 +168,7 @@ class BLEManager: NSObject, ObservableObject {
     private var routeGeometryCharacteristic: CBCharacteristic?
     private var gpsPositionCharacteristic: CBCharacteristic?
     private var settingsCharacteristic: CBCharacteristic?
+    private var deviceInformation: [CBUUID: String] = [:]
     private var navigationWriteEndpoint: NavigationWriteEndpoint?
     private var navigationWriteQueue = NavigationWriteQueue(maxCount: 16)
     private var isConnecting: Bool = false
@@ -208,6 +216,7 @@ class BLEManager: NSObject, ObservableObject {
         static let resetMapRotationModeToNorthUp = "mapSettings.resetMapRotationModeToNorthUp.v1"
         static let zoomLevel = "mapSettings.zoomLevel"
         static let tapToSwitchScreens = "deviceSettings.tapToSwitchScreens"
+        static let deviceBrightnessPercent = "deviceSettings.brightnessPercent"
         static let showBuildings = "mapSettings.showBuildings"
         static let showGreenSpace = "mapSettings.showGreenSpace"
         static let showPaths = "mapSettings.showPaths"
@@ -250,6 +259,7 @@ class BLEManager: NSObject, ObservableObject {
         }
         zoomLevel = defaults.object(forKey: SettingsKeys.zoomLevel) as? Int ?? 2
         tapToSwitchScreens = defaults.object(forKey: SettingsKeys.tapToSwitchScreens) as? Bool ?? false
+        deviceBrightnessPercent = defaults.object(forKey: SettingsKeys.deviceBrightnessPercent) as? Double ?? 100
         showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
         let legacyNature = defaults.object(forKey: SettingsKeys.legacyShowNature) as? Bool ?? true
         let legacyMinorRoads = defaults.object(forKey: SettingsKeys.legacyShowMinorRoads) as? Bool ?? true
@@ -281,6 +291,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(mapRotationMode, forKey: SettingsKeys.mapRotationMode)
         defaults.set(zoomLevel, forKey: SettingsKeys.zoomLevel)
         defaults.set(tapToSwitchScreens, forKey: SettingsKeys.tapToSwitchScreens)
+        defaults.set(deviceBrightnessPercent, forKey: SettingsKeys.deviceBrightnessPercent)
         defaults.set(showBuildings, forKey: SettingsKeys.showBuildings)
         defaults.set(showGreenSpace, forKey: SettingsKeys.showGreenSpace)
         defaults.set(showPaths, forKey: SettingsKeys.showPaths)
@@ -849,6 +860,7 @@ class BLEManager: NSObject, ObservableObject {
         sendSetting(id: 6, value: Int32(mapRotationMode))
         sendSetting(id: 7, value: Int32(zoomLevel))
         sendSetting(id: 11, value: tapToSwitchScreens ? 1 : 0)
+        sendSetting(id: 12, value: Int32(deviceBrightnessPercent))
     }
 
     private func sendOrQueueClientProof(_ proofData: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {
@@ -1037,7 +1049,7 @@ extension BLEManager: CBCentralManagerDelegate {
         resetReconnectionState()
         
         // Discover services
-        peripheral.discoverServices([serviceUUID])
+        peripheral.discoverServices([serviceUUID, deviceInformationServiceUUID])
     }
     
     func centralManager(_ central: CBCentralManager, 
@@ -1052,6 +1064,8 @@ extension BLEManager: CBCentralManagerDelegate {
         isConnected = false
         isConnecting = false
         supportsDeviceSettings = false
+        hardwareLabel = ""
+        deviceInformation.removeAll()
         connectedPeripheral = nil
         navigationCharacteristic = nil
         authCharacteristic = nil
@@ -1155,6 +1169,15 @@ extension BLEManager: CBPeripheralDelegate {
                 log("Discovering all BikeComputer service characteristics")
                 peripheral.discoverCharacteristics(nil, for: service)
             }
+            if service.uuid == deviceInformationServiceUUID {
+                log("Discovering Device Information characteristics")
+                peripheral.discoverCharacteristics([
+                    modelNumberCharacteristicUUID,
+                    firmwareRevisionCharacteristicUUID,
+                    hardwareRevisionCharacteristicUUID,
+                    manufacturerNameCharacteristicUUID
+                ], for: service)
+            }
         }
     }
     
@@ -1170,6 +1193,12 @@ extension BLEManager: CBPeripheralDelegate {
         
         for characteristic in characteristics {
             log("Discovered characteristic: \(characteristic.uuid) props=\(characteristic.properties.debugDescription)")
+
+            if service.uuid == deviceInformationServiceUUID,
+               characteristic.properties.contains(.read) {
+                peripheral.readValue(for: characteristic)
+                continue
+            }
             
             if characteristic.uuid == characteristicUUID {
                 guard characteristic.properties.contains(.writeWithoutResponse) else {
@@ -1271,9 +1300,31 @@ extension BLEManager: CBPeripheralDelegate {
             handleAuthResponse(data, peripheral: peripheral, characteristic: characteristic)
             return
         }
+
+        if [modelNumberCharacteristicUUID,
+            firmwareRevisionCharacteristicUUID,
+            hardwareRevisionCharacteristicUUID,
+            manufacturerNameCharacteristicUUID].contains(characteristic.uuid),
+           let value = String(data: data.trimmedTrailingNullsAndWhitespace, encoding: .utf8),
+           !value.isEmpty {
+            deviceInformation[characteristic.uuid] = value
+            updateHardwareLabel()
+            log("Device information \(characteristic.uuid): \(value)")
+            return
+        }
         
         if let string = String(data: data, encoding: .utf8) {
             log("Received from ESP32: \(string)")
+        }
+    }
+
+    private func updateHardwareLabel() {
+        if let model = deviceInformation[modelNumberCharacteristicUUID] {
+            hardwareLabel = model
+        } else if let hardware = deviceInformation[hardwareRevisionCharacteristicUUID] {
+            hardwareLabel = hardware
+        } else {
+            hardwareLabel = ""
         }
     }
     

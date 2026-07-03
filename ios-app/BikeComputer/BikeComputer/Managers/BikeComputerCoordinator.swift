@@ -28,6 +28,7 @@ class BikeComputerCoordinator: ObservableObject {
     // BLE Connection
     @Published var isConnected: Bool = false
     @Published var peripheralName: String = ""
+    @Published var hardwareLabel: String = ""
     @Published var signalStrength: Int = 0
 
     // Navigation
@@ -86,6 +87,9 @@ class BikeComputerCoordinator: ObservableObject {
 
         bleManager.$peripheralName
             .assign(to: &$peripheralName)
+
+        bleManager.$hardwareLabel
+            .assign(to: &$hardwareLabel)
 
         bleManager.$signalStrength
             .assign(to: &$signalStrength)

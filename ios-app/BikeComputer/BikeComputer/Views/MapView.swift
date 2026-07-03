@@ -28,6 +28,7 @@ struct MapViewContainer: UIViewRepresentable {
     let route: MKRoute?
     let simulatedPosition: CLLocationCoordinate2D?
     let isSimulationMode: Bool
+    let onMapTapped: (() -> Void)?
     let onDestinationSelected: ((CLLocationCoordinate2D, CLLocation?) -> Void)?
     
     func makeUIView(context: Context) -> MKMapView {
@@ -47,8 +48,17 @@ struct MapViewContainer: UIViewRepresentable {
         )
         longPress.minimumPressDuration = 0.5
         mapView.addGestureRecognizer(longPress)
+
+        let tap = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleTap(_:))
+        )
+        tap.cancelsTouchesInView = false
+        tap.delegate = context.coordinator
+        mapView.addGestureRecognizer(tap)
         
         // Store the callback in coordinator
+        context.coordinator.onMapTapped = onMapTapped
         context.coordinator.onDestinationSelected = onDestinationSelected
         
         return mapView
@@ -57,6 +67,8 @@ struct MapViewContainer: UIViewRepresentable {
     func updateUIView(_ uiView: MKMapView, context: Context) {
         // Store reference to map view in coordinator
         context.coordinator.mapView = uiView
+        context.coordinator.onMapTapped = onMapTapped
+        context.coordinator.onDestinationSelected = onDestinationSelected
         
         // Only set initial region once if not already set
         if let location = location, 
@@ -154,11 +166,24 @@ struct MapViewContainer: UIViewRepresentable {
         Coordinator()
     }
     
-    class Coordinator: NSObject, MKMapViewDelegate {
+    class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         var lastRoute: MKRoute?
         var mapView: MKMapView?
+        var onMapTapped: (() -> Void)?
         var onDestinationSelected: ((CLLocationCoordinate2D, CLLocation?) -> Void)?
         var hasSetInitialRegion = false
+
+        @objc func handleTap(_ gestureRecognizer: UITapGestureRecognizer) {
+            guard gestureRecognizer.state == .ended else { return }
+            onMapTapped?()
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
         
         @objc func handleLongPress(_ gestureRecognizer: UILongPressGestureRecognizer) {
             guard gestureRecognizer.state == .began,

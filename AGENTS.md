@@ -85,6 +85,14 @@ Healthy boot log checkpoints from the Waveshare board:
 - Open: `ios-app/BikeComputer/BikeComputer.xcodeproj`
 - Real-device testing / trust / sharing notes: `ios-app/README.md`
 
+### XIAO nRF52840 Round Display (PlatformIO)
+
+- Target docs: `xiao-nrf52840/README.md`
+- Build: `cd xiao-nrf52840 && pio run -e xiao_nrf52840_round`
+- Upload after verifying the XIAO port: `cd xiao-nrf52840 && pio run -e xiao_nrf52840_round -t upload --upload-port /dev/cu.usbmodemXXXX`
+- If using Chris's local temporary PlatformIO setup:
+  `cd xiao-nrf52840 && PLATFORMIO_CORE_DIR=/tmp/open-bike-pio-core-313 /tmp/open-bike-pio-313/bin/pio run -e xiao_nrf52840_round`
+
 ## BLE contract
 
 Current firmware implements BLE service UUID
@@ -115,6 +123,41 @@ Highlights:
 - Touch reset is via **TCA9554 P0** (I2C `0x20`) — do **not** toggle GPIO20 (USB D+).
 - SD card is SPI on `CS=41, MOSI=1, MISO=3, SCK=2` (firmware uses HSPI to avoid the display QSPI bus).
 - Touch input is interrupt-gated on CST9217 `INT=GPIO21`; do not return to rapid polling. Arduino Core 3.x `Wire.requestFrom()` failures against the CST9217 can crash the I2C ISR if reads are attempted while no touch data is ready.
+
+## Hardware bring-up (XIAO nRF52840 + Round Display)
+
+Milestone 0 tracking note: `hardware/xiao-nrf52840-round-display-bringup.md`
+
+Before claiming XIAO hardware readiness, validate Seeed's Round Display
+`HardwareTest` example on the actual XIAO nRF52840. The XIAO target should use a
+branch name and PR title that do not contain `codex` in any capitalization.
+
+Current local check on 2026-07-03:
+- `/dev/cu.usbmodem2101` is the ESP32-S3 `USB JTAG/serial debug unit`
+  (`VID:PID 303A:1001`), not the XIAO nRF52840.
+- Milestone 0 is not hardware-complete until a serial log shows display init,
+  touch, RTC read, battery ADC read, and microSD mount from the XIAO Round
+  Display `HardwareTest` firmware.
+- Repo-side XIAO firmware now includes the PlatformIO skeleton, Bluefruit BLE
+  protocol/auth server, serial-backed MVP UI state machine, runtime diagnostics,
+  InternalFS brightness/map setting load/save path, conservative power manager
+  for battery ADC sampling plus auto-dim/backlight-off behavior, and a
+  cooperative idle manager that yields bounded FreeRTOS/tickless-idle windows
+  between BLE/UI work. It also has a fixed 128-point route preview for
+  breadcrumb/heading state and a map-lite SD/FMB stream scanner in
+  `xiao-nrf52840/lib/map_lite/` that logs candidate feature counts/timing for
+  the go/no-go decision. BLE Device
+  Information Service metadata is present for the iOS hardware label. It builds
+  with the temporary Python 3.13 PlatformIO setup documented in
+  `xiao-nrf52840/README.md`.
+- Power/enclosure validation note:
+  `hardware/xiao-round-display-power-enclosure.md`
+- RTC support is repo-side implemented under `xiao-nrf52840/lib/rtc/`; it uses
+  I2C `D4/D5`, probes `0x51`, syncs from BLE GPS Unix timestamps, and still
+  needs XIAO hardware plus coin-cell retention validation.
+- XIAO upload, iOS BLE discovery/authentication, real LCD output, touch, RTC,
+  calibrated battery ADC, microSD, map-lite timing, battery runtime, thermal
+  behavior, enclosure, and ride-duration validation remain hardware-gated.
 
 ## Offline maps (OSM_Extract)
 
