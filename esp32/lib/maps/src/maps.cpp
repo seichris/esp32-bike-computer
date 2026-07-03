@@ -403,6 +403,28 @@ static void drawNavigationMarker(lv_obj_t *canvas) {
   lv_obj_invalidate(canvas);
 }
 
+static void drawPositionDotMarker(lv_obj_t *canvas) {
+  if (!canvas)
+    return;
+
+  lv_canvas_fill_bg(canvas, lv_color_hex(0x000000), LV_OPA_TRANSP);
+
+  const lv_color_t color = lv_color_white();
+  constexpr int16_t center = 24;
+  constexpr int16_t radius = 8;
+
+  for (int16_t y = center - radius; y <= center + radius; y++) {
+    for (int16_t x = center - radius; x <= center + radius; x++) {
+      const int16_t dx = x - center;
+      const int16_t dy = y - center;
+      if (dx * dx + dy * dy <= radius * radius)
+        plotMarkerPixel(canvas, x, y, color);
+    }
+  }
+
+  lv_obj_invalidate(canvas);
+}
+
 static uint8_t currentMarkerScale() {
   return (uint8_t)std::min(std::max((int)mapRenderSettings.positionMarkerScale,
                                     1),
@@ -418,6 +440,36 @@ static void applyNavigationMarkerScale(lv_obj_t *canvas) {
   lv_obj_set_style_transform_pivot_y(canvas, 24, 0);
   lv_obj_set_style_transform_scale_x(canvas, scale, 0);
   lv_obj_set_style_transform_scale_y(canvas, scale, 0);
+}
+
+static void updateCurrentPositionMarker(lv_obj_t *canvas, bool force = false) {
+  if (!canvas || bufArrow == nullptr)
+    return;
+
+  static bool hasLastShape = false;
+  static bool lastWasNavigating = false;
+  static uint8_t lastScale = 0;
+
+  const bool isNavigating = routeOverlay.hasRoute();
+  const uint8_t scale = currentMarkerScale();
+  if (!force && hasLastShape && lastWasNavigating == isNavigating &&
+      lastScale == scale) {
+    applyNavigationMarkerScale(canvas);
+    return;
+  }
+
+  if (isNavigating) {
+    drawNavigationMarker(canvas);
+  } else {
+    drawPositionDotMarker(canvas);
+  }
+
+  applyNavigationMarkerScale(canvas);
+  hasLastShape = true;
+  lastWasNavigating = isNavigating;
+  lastScale = scale;
+  log_i("Position marker updated: %s scale=%u",
+        isNavigating ? "navigation arrow" : "location dot", scale);
 }
 
 static int16_t mapAnchorXForWidth(uint16_t width) {
@@ -2124,8 +2176,7 @@ void Maps::createMapScrSprites() {
     lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
     lv_canvas_set_buffer(Maps::canvasArrow, bufArrow, 48, 48,
                          LV_COLOR_FORMAT_ARGB8888);
-    drawNavigationMarker(Maps::canvasArrow);
-    applyNavigationMarkerScale(Maps::canvasArrow);
+    updateCurrentPositionMarker(Maps::canvasArrow, true);
   } else {
     ESP_LOGE(TAG, "MapBuff: arrow buffer unavailable; marker disabled");
     Maps::canvasArrow = nullptr;
@@ -2174,10 +2225,7 @@ void Maps::updateArrowColor() {
   if (!Maps::canvasArrow || bufArrow == nullptr)
     return;
 
-  drawNavigationMarker(Maps::canvasArrow);
-  applyNavigationMarkerScale(Maps::canvasArrow);
-
-  log_i("Arrow marker updated: filled white");
+  updateCurrentPositionMarker(Maps::canvasArrow, true);
 }
 
 /**
@@ -2305,7 +2353,7 @@ void Maps::displayMap() {
     uint16_t h = mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
     const int16_t anchorX = mapAnchorXForWidth(Maps::mapScrWidth);
     const int16_t anchorY = mapAnchorYForHeight(h);
-    applyNavigationMarkerScale(Maps::canvasArrow);
+    updateCurrentPositionMarker(Maps::canvasArrow);
     const int16_t markerVisualHalf = 24 * currentMarkerScale();
     int16_t x, y;
 

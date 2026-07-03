@@ -74,7 +74,7 @@ struct SettingsView: View {
 
                     VStack(alignment: .leading) {
                         HStack {
-                            Text("Position Arrow Size")
+                            Text("Position Marker Size")
                             Spacer()
                             Text("\(Int(bleManager.positionMarkerScale))x")
                                 .foregroundColor(.secondary)
