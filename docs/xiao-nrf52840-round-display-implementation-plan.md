@@ -121,6 +121,10 @@ Current repo checkpoint:
 - Repo-side Milestone 1 through Milestone 4 slices are implemented: pin/display
   skeleton, Bluefruit BLE server/auth/protocol parsing, MVP UI state machine,
   approximate heap/runtime diagnostics, and InternalFS brightness settings.
+  Display rendering now compiles against Seeed_GFX using the Round Display
+  `BOARD_SCREEN_COMBO 501`/GC9A01 setup, with boot/status text and route/map
+  line primitives routed to the LCD backend while serial logs remain available
+  for bench diagnostics.
   Route geometry is decoded into a fixed 128-point in-memory preview for
   breadcrumb/heading state, and diagnostics now include stored route points,
   battery voltage/percent, brightness, render timing, and the nRF52 reset
@@ -183,13 +187,12 @@ Current repo checkpoint:
   block checks. The Route page also has a bounded preview renderer that reopens
   the last probed block, skips polygon bodies, streams candidate polylines, and
   draws at most 160 line segments through the XIAO display primitive API; the
-  current display backend counts/logs those primitives until the Seeed LCD
-  driver is validated on hardware. Map-lite core math and decision thresholds
-  now have native tests covering Mercator conversion, negative block/folder path
-  formatting, candidate feature classification, screen mapping, and go/no-go
-  decisions. The Route page also draws a bounded route breadcrumb overlay
-  centered on the current GPS fix, or the route start before GPS arrives,
-  through the same display primitive API.
+  Seeed_GFX backend renders and logs those primitives for hardware evidence.
+  Map-lite core math and decision thresholds now have native tests covering
+  Mercator conversion, negative block/folder path formatting, candidate feature
+  classification, screen mapping, and go/no-go decisions. The Route page also
+  draws a bounded route breadcrumb overlay centered on the current GPS fix, or
+  the route start before GPS arrives, through the same display primitive API.
 - The XIAO target exposes BLE Device Information Service metadata, and the iOS
   app reads/surfaces the hardware model label when present while keeping scan
   and navigation writes on the existing BikeComputer service/characteristics.

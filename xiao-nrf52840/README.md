@@ -115,9 +115,11 @@ against the bootloader serial port.
 ## Milestone 1 Scope
 
 The current skeleton initializes safe GPIO state for the shared LCD/SD SPI chip
-selects, backlight, and touch interrupt, then emits a serial heartbeat. Display
-drawing is a placeholder until Seeed's `HardwareTest` example has passed on the
-actual board.
+selects, backlight, and touch interrupt, then emits a serial heartbeat.
+`DisplayRound` now compiles against Seeed_GFX using the Round Display
+`BOARD_SCREEN_COMBO 501`/GC9A01 setup and draws the boot screen, status text,
+and map/route line primitives. Real LCD output still requires Seeed's
+`HardwareTest` example and repo firmware to be uploaded to the actual board.
 
 ## Milestone 2 Scope
 
@@ -135,9 +137,8 @@ It also exposes the standard BLE Device Information Service with model,
 manufacturer, hardware revision, and software revision strings so the iOS app
 can label XIAO hardware when connected.
 
-The route/map/display renderers are still placeholders in this target. Milestone
-2 proves the repo-side BLE protocol port compiles; authenticated iOS discovery
-and real packet flow still require a connected XIAO nRF52840.
+Milestone 2 proves the repo-side BLE protocol port compiles; authenticated iOS
+discovery and real packet flow still require a connected XIAO nRF52840.
 
 ## Milestone 3 Scope
 
@@ -145,10 +146,11 @@ The repo-side MVP UI now has ride, navigation, route, and settings pages backed
 by the BLE state snapshot. Route geometry is decoded into a fixed 128-point
 preview for route-page point counts, route-nearby heading, and a bounded
 breadcrumb overlay centered on the current GPS fix or route start. Battery
-status is shown on the ride page. Rendering still goes through `DisplayRound`
-serial placeholders until the vendor LCD driver is validated on hardware. Touch
-page switching is wired to the Round Display touch interrupt pin as a wake/event
-placeholder. Tap switching is enabled before setting ID `11` arrives so
+status is shown on the ride page. Rendering goes through `DisplayRound` into
+the Seeed_GFX display backend while keeping serial status logs for bench-side
+diagnostics. Touch page switching is wired to the Round Display touch interrupt
+pin as a wake/event placeholder. Tap switching is enabled before setting ID `11`
+arrives so
 standalone bring-up can cycle pages; after iOS syncs that setting, its value
 controls whether touch interrupt taps cycle pages. Planned gesture behavior is
 implemented behind serial simulation as `TOUCH tap|long|left|right|up|down`:
@@ -225,10 +227,10 @@ spamming SD reads.
 
 The Route page now has a bounded map-lite preview renderer that reopens the last
 probed block, skips polygon bodies, streams candidate polyline points, and draws
-at most 160 line segments through the `DisplayRound` primitive API. The current
-display backend still counts/logs primitives until the Seeed LCD driver is
-validated on hardware. Runtime diagnostics expose SD readiness, probe count,
-last block, open/scan timing, candidate point count, preview render timing,
+at most 160 line segments through the `DisplayRound` primitive API. The display
+backend now renders those primitives through Seeed_GFX and still counts/logs
+them for diagnostics. Runtime diagnostics expose SD readiness, probe count, last
+block, open/scan timing, candidate point count, preview render timing,
 drawn/skipped segments, and the current `candidate`/`too-slow`/`too-complex`/
 `no-data`/`invalid` decision so hardware runs can capture the evidence needed
 for the go/no-go decision.
