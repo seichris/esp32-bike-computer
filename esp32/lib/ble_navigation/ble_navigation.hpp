@@ -31,21 +31,29 @@ struct NavigationData {
 /**
  * @brief Map rendering settings (configurable via BLE from iOS app)
  * Settings IDs: 1=minPolygonSize, 2=detailLevel, 3=routeLineWidth,
- * 4=displayRotation, 6=mapRotationMode, 7=zoomLevel, 8=visibilityMask
+ * 4=displayRotation, 6=mapRotationMode, 7=zoomLevel, 8=visibilityMask,
+ * 9=streetLineWidthBoost, 10=positionMarkerScale
  */
 struct MapRenderSettings {
   uint8_t minPolygonSize = 0; // 0-50: Skip polygons smaller than N pixels²
   uint8_t detailLevel = 2;    // 0=Low, 1=Med, 2=High
-  uint8_t routeLineWidth = 4; // 2-8: Route overlay line width in pixels
+  uint8_t routeLineWidth = 4; // 2-48: Route overlay line width in pixels
+  uint8_t streetLineWidthBoost = 0; // 0-24: Extra map street width in pixels
+  uint8_t positionMarkerScale = 2;  // 1-5: Current-position marker scale
   uint8_t displayRotation =
       0; // 0-3: Display rotation (0=0°, 1=90°, 2=180°, 3=270°)
   uint8_t mapRotationMode = 0; // 0=North Up, 1=Course Up
   uint8_t zoomLevel = 2;       // 0-5: Zoom level (0=super, 2=default)
   uint32_t visibilityMask =
-      0xFFFFFFFF; // Bitmask: bit0=buildings, bit1=nature, bit2=paths
+      0xFFFFFFFF; // Bits: 0 buildings, 1 green, 2 paths, 3 major roads,
+                  // 4 local streets, 5 water, 6 rail, 7 other areas,
+                  // 8 route overlay, 9 current position
 };
 
 extern MapRenderSettings mapRenderSettings;
+
+NavigationData getCurrentNavigationData();
+bool hasCurrentNavigationData();
 
 struct BLEDebugStats {
   bool initialized = false;

@@ -34,6 +34,8 @@ struct MapRenderSettings {
   uint8_t minPolygonSize;
   uint8_t detailLevel;
   uint8_t routeLineWidth;
+  uint8_t streetLineWidthBoost;
+  uint8_t positionMarkerScale;
   uint8_t displayRotation;
   uint8_t mapRotationMode;
   uint8_t zoomLevel;
@@ -41,46 +43,419 @@ struct MapRenderSettings {
 };
 extern MapRenderSettings mapRenderSettings;
 
-static inline bool isVisibleForDetailLevel(uint8_t typeId,
-                                           uint8_t detailLevel) {
-  if (typeId == 0 || detailLevel >= 2)
+enum class VisibilityClass : uint8_t {
+  Always,
+  MajorRoad,
+  LocalStreet,
+  Building,
+  GreenSpace,
+  Water,
+  Path,
+  Rail,
+  OtherArea,
+};
+
+static inline bool isClassVisible(VisibilityClass visibilityClass,
+                                  const MapRenderSettings &settings) {
+  if (visibilityClass == VisibilityClass::Always)
     return true;
 
-  if (detailLevel == 1)
-    return !(typeId >= 100 && typeId < 150);
+  uint32_t visMask = settings.visibilityMask;
+  switch (visibilityClass) {
+  case VisibilityClass::MajorRoad:
+    return (visMask & (1 << 3)) != 0;
+  case VisibilityClass::LocalStreet:
+    return (visMask & (1 << 4)) != 0;
+  case VisibilityClass::Building:
+    return (visMask & (1 << 0)) != 0;
+  case VisibilityClass::GreenSpace:
+    return (visMask & (1 << 1)) != 0;
+  case VisibilityClass::Water:
+    return (visMask & (1 << 5)) != 0;
+  case VisibilityClass::Path:
+    return (visMask & (1 << 2)) != 0;
+  case VisibilityClass::Rail:
+    return (visMask & (1 << 6)) != 0;
+  case VisibilityClass::OtherArea:
+    return (visMask & (1 << 7)) != 0;
+  case VisibilityClass::Always:
+  default:
+    return true;
+  }
+}
 
+static inline VisibilityClass visibilityClassForTypeId(uint8_t typeId) {
+  if (typeId >= 1 && typeId <= 5)
+    return VisibilityClass::MajorRoad;
+  if (typeId >= 6 && typeId < 50)
+    return VisibilityClass::LocalStreet;
   if (typeId >= 50 && typeId < 100)
-    return false; // Paths
+    return VisibilityClass::Path;
   if (typeId >= 100 && typeId < 150)
-    return false; // Buildings
+    return VisibilityClass::Building;
+  if (typeId == 152 || typeId == 153)
+    return VisibilityClass::Water;
   if (typeId >= 150 && typeId < 200)
-    return false; // Nature/landuse
+    return VisibilityClass::GreenSpace;
+  if (typeId == 210)
+    return VisibilityClass::Rail;
+  if (typeId >= 200)
+    return VisibilityClass::OtherArea;
+  return VisibilityClass::Always;
+}
 
-  return true;
+static inline VisibilityClass legacyPolygonVisibilityClass(uint16_t color) {
+  switch (color) {
+  case 0xAD55: // grayclear
+  case 0xDED6: // apple_building
+    return VisibilityClass::Building;
+  case 0x9F93: // greenclear
+  case 0xCF6E: // greenclear2
+  case 0x76EE: // green
+  case 0xB713: // apple_park
+  case 0xD757: // apple_farm
+    return VisibilityClass::GreenSpace;
+  case 0x6D3E: // blueclear
+  case 0x227E: // blue
+  case 0xFFF1: // yellow/beach
+  case 0xA6DE: // apple_water
+    return VisibilityClass::Water;
+  case 0xD69A: // grayclear2
+  case 0xC618: // apple_land_gray
+    return VisibilityClass::OtherArea;
+  default:
+    return VisibilityClass::Always;
+  }
+}
+
+static inline VisibilityClass legacyLineVisibilityClass(uint16_t color,
+                                                        uint8_t width) {
+  if (color == 0xFA45 || color == 0xAB00 || color == 0xA42B)
+    return VisibilityClass::Path;
+  if (color == 0x632C && width <= 1)
+    return VisibilityClass::Path;
+  if ((color == 0xAA1F || color == 0xA6DE) && width <= 2)
+    return VisibilityClass::Water;
+  if (color == 0x0000 || (color == 0x632C && width >= 2))
+    return VisibilityClass::Rail;
+  if ((color == 0xFFF1 || color == 0xFF36 || color == 0xFCC2 ||
+       color == 0xF567) &&
+      width >= 5)
+    return VisibilityClass::MajorRoad;
+  if (color == 0xFFFF && width >= 3)
+    return VisibilityClass::LocalStreet;
+  if ((color == 0xFCC2 || color == 0xF567) && width <= 3)
+    return VisibilityClass::Path;
+  return VisibilityClass::Always;
 }
 
 // Helper: Check if a typeId is visible based on detail level and visibilityMask.
-// Bit 0 = buildings (100-149), Bit 1 = nature (150-199), Bit 2 = paths (50-99).
+// Bits: 0 buildings, 1 green space, 2 paths, 3 major roads, 4 local streets,
+// 5 water, 6 rail, 7 other areas.
 static inline bool isTypeVisible(uint8_t typeId,
                                  const MapRenderSettings &settings) {
-  if (!isVisibleForDetailLevel(typeId, settings.detailLevel))
-    return false;
-
-  uint32_t visMask = settings.visibilityMask;
   if (typeId == 0)
     return true; // Unknown types always visible
-  if (typeId >= 100 && typeId < 150)
-    return (visMask & (1 << 0)) != 0; // Buildings
-  if (typeId >= 150 && typeId < 200)
-    return (visMask & (1 << 1)) != 0; // Nature
-  if (typeId >= 50 && typeId < 100)
-    return (visMask & (1 << 2)) != 0; // Minor roads
-  return true; // Major roads (1-49) and others always visible
+  return isClassVisible(visibilityClassForTypeId(typeId), settings);
+}
+
+static inline uint8_t detailPolygonSizeFloor(uint8_t detailLevel) {
+  switch (detailLevel) {
+  case 0:
+    return 24;
+  case 1:
+    return 12;
+  default:
+    return 0;
+  }
+}
+
+static inline uint8_t effectiveMinPolygonSize(
+    const MapRenderSettings &settings) {
+  return std::max(settings.minPolygonSize,
+                  detailPolygonSizeFloor(settings.detailLevel));
+}
+
+static inline bool isPolygonVisible(uint8_t typeId, uint16_t color,
+                                    const MapRenderSettings &settings) {
+  if (typeId != 0)
+    return isTypeVisible(typeId, settings);
+  return isClassVisible(legacyPolygonVisibilityClass(color), settings);
+}
+
+static inline bool isLineVisible(uint8_t typeId, uint16_t color, uint8_t width,
+                                 const MapRenderSettings &settings) {
+  if (typeId != 0)
+    return isTypeVisible(typeId, settings);
+  return isClassVisible(legacyLineVisibilityClass(color, width), settings);
+}
+
+static inline bool isRouteOverlayVisible(const MapRenderSettings &settings) {
+  return (settings.visibilityMask & (1 << 8)) != 0;
+}
+
+static inline bool isCurrentPositionVisible(const MapRenderSettings &settings) {
+  return (settings.visibilityMask & (1 << 9)) != 0;
+}
+
+static inline bool shouldBoostLineWidth(uint8_t typeId, uint8_t styleWidth) {
+  if (typeId >= 1 && typeId < 100)
+    return true;
+
+  // Older/unknown map blocks may not carry type IDs. In our styles, ordinary
+  // roads are 3px or wider, while waterways/rail/coastline are normally 1-2px.
+  return typeId == 0 && styleWidth >= 3;
 }
 
 static void *bufMapTemp = nullptr;
 static void *bufMapIcon = nullptr;
 static void *bufArrow = nullptr;
+
+static void *ensureArrowBuffer() {
+  if (bufArrow != nullptr)
+    return bufArrow;
+
+  const size_t arrowStride =
+      lv_draw_buf_width_to_stride(48, LV_COLOR_FORMAT_ARGB8888);
+  const size_t arrowSize = arrowStride * 48;
+  bufArrow = heap_caps_malloc(arrowSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const char *source = "internal";
+  if (bufArrow == nullptr) {
+    bufArrow = heap_caps_malloc(arrowSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    source = "psram";
+  }
+  ESP_LOGI(TAG, "MapBuff: arrow ARGB stride=%u size=%u ptr=%p source=%s",
+           (unsigned)arrowStride, (unsigned)arrowSize, bufArrow, source);
+  return bufArrow;
+}
+
+static void plotMarkerPixel(lv_obj_t *canvas, int16_t x, int16_t y,
+                            lv_color_t color) {
+  if (x < 0 || x >= 48 || y < 0 || y >= 48)
+    return;
+
+  lv_canvas_set_px(canvas, x, y, color, LV_OPA_COVER);
+}
+
+static void drawThickMarkerLine(lv_obj_t *canvas, int16_t x0, int16_t y0,
+                                int16_t x1, int16_t y1, lv_color_t color,
+                                uint8_t thickness) {
+  int16_t dx = abs(x1 - x0);
+  int16_t sx = x0 < x1 ? 1 : -1;
+  int16_t dy = -abs(y1 - y0);
+  int16_t sy = y0 < y1 ? 1 : -1;
+  int16_t err = dx + dy;
+  const int16_t radius = thickness / 2;
+
+  while (true) {
+    for (int16_t oy = -radius; oy <= radius; oy++) {
+      for (int16_t ox = -radius; ox <= radius; ox++) {
+        if (ox * ox + oy * oy <= radius * radius)
+          plotMarkerPixel(canvas, x0 + ox, y0 + oy, color);
+      }
+    }
+
+    if (x0 == x1 && y0 == y1)
+      break;
+
+    int16_t e2 = 2 * err;
+    if (e2 >= dy) {
+      err += dy;
+      x0 += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      y0 += sy;
+    }
+  }
+}
+
+static uint8_t lineClipOutCode(float x, float y, float minX, float minY,
+                               float maxX, float maxY) {
+  uint8_t code = 0;
+  if (x < minX)
+    code |= 1;
+  else if (x > maxX)
+    code |= 2;
+  if (y < minY)
+    code |= 4;
+  else if (y > maxY)
+    code |= 8;
+  return code;
+}
+
+static bool clipLineToRect(int16_t &x1, int16_t &y1, int16_t &x2, int16_t &y2,
+                           int32_t minX, int32_t minY, int32_t maxX,
+                           int32_t maxY) {
+  float fx1 = x1;
+  float fy1 = y1;
+  float fx2 = x2;
+  float fy2 = y2;
+  uint8_t code1 = lineClipOutCode(fx1, fy1, minX, minY, maxX, maxY);
+  uint8_t code2 = lineClipOutCode(fx2, fy2, minX, minY, maxX, maxY);
+
+  while (true) {
+    if ((code1 | code2) == 0) {
+      x1 = (int16_t)roundf(fx1);
+      y1 = (int16_t)roundf(fy1);
+      x2 = (int16_t)roundf(fx2);
+      y2 = (int16_t)roundf(fy2);
+      return true;
+    }
+
+    if ((code1 & code2) != 0)
+      return false;
+
+    uint8_t outsideCode = code1 != 0 ? code1 : code2;
+    float x = 0;
+    float y = 0;
+
+    if (outsideCode & 8) {
+      if (fy2 == fy1)
+        return false;
+      x = fx1 + (fx2 - fx1) * (maxY - fy1) / (fy2 - fy1);
+      y = maxY;
+    } else if (outsideCode & 4) {
+      if (fy2 == fy1)
+        return false;
+      x = fx1 + (fx2 - fx1) * (minY - fy1) / (fy2 - fy1);
+      y = minY;
+    } else if (outsideCode & 2) {
+      if (fx2 == fx1)
+        return false;
+      y = fy1 + (fy2 - fy1) * (maxX - fx1) / (fx2 - fx1);
+      x = maxX;
+    } else {
+      if (fx2 == fx1)
+        return false;
+      y = fy1 + (fy2 - fy1) * (minX - fx1) / (fx2 - fx1);
+      x = minX;
+    }
+
+    if (outsideCode == code1) {
+      fx1 = x;
+      fy1 = y;
+      code1 = lineClipOutCode(fx1, fy1, minX, minY, maxX, maxY);
+    } else {
+      fx2 = x;
+      fy2 = y;
+      code2 = lineClipOutCode(fx2, fy2, minX, minY, maxX, maxY);
+    }
+  }
+}
+
+static bool isInsideNavigationMarker(int16_t x, int16_t y) {
+  constexpr int16_t px[] = {24, 38, 24, 10};
+  constexpr int16_t py[] = {4, 42, 34, 42};
+  bool inside = false;
+
+  for (uint8_t i = 0, j = 3; i < 4; j = i++) {
+    const bool crosses = ((py[i] > y) != (py[j] > y)) &&
+                         (x < (px[j] - px[i]) * (y - py[i]) /
+                                      (py[j] - py[i]) +
+                                  px[i]);
+    if (crosses)
+      inside = !inside;
+  }
+
+  return inside;
+}
+
+static void drawNavigationMarker(lv_obj_t *canvas) {
+  if (!canvas)
+    return;
+
+  lv_canvas_fill_bg(canvas, lv_color_hex(0x000000), LV_OPA_TRANSP);
+
+  const lv_color_t color = lv_color_white();
+
+  // 24x24 lucide-style navigation polygon scaled to this 48x48 marker:
+  // points="12 2 19 21 12 17 5 21 12 2"
+  for (int16_t y = 0; y < 48; y++) {
+    for (int16_t x = 0; x < 48; x++) {
+      if (isInsideNavigationMarker(x, y))
+        plotMarkerPixel(canvas, x, y, color);
+    }
+  }
+
+  // Stroke the edges in the same color so the filled marker stays crisp.
+  constexpr uint8_t strokeWidth = 3;
+  drawThickMarkerLine(canvas, 24, 4, 38, 42, color, strokeWidth);
+  drawThickMarkerLine(canvas, 38, 42, 24, 34, color, strokeWidth);
+  drawThickMarkerLine(canvas, 24, 34, 10, 42, color, strokeWidth);
+  drawThickMarkerLine(canvas, 10, 42, 24, 4, color, strokeWidth);
+
+  lv_obj_invalidate(canvas);
+}
+
+static void drawPositionDotMarker(lv_obj_t *canvas) {
+  if (!canvas)
+    return;
+
+  lv_canvas_fill_bg(canvas, lv_color_hex(0x000000), LV_OPA_TRANSP);
+
+  const lv_color_t color = lv_color_white();
+  constexpr int16_t center = 24;
+  constexpr int16_t radius = 8;
+
+  for (int16_t y = center - radius; y <= center + radius; y++) {
+    for (int16_t x = center - radius; x <= center + radius; x++) {
+      const int16_t dx = x - center;
+      const int16_t dy = y - center;
+      if (dx * dx + dy * dy <= radius * radius)
+        plotMarkerPixel(canvas, x, y, color);
+    }
+  }
+
+  lv_obj_invalidate(canvas);
+}
+
+static uint8_t currentMarkerScale() {
+  return (uint8_t)std::min(std::max((int)mapRenderSettings.positionMarkerScale,
+                                    1),
+                           5);
+}
+
+static void applyNavigationMarkerScale(lv_obj_t *canvas) {
+  if (!canvas)
+    return;
+
+  const int32_t scale = currentMarkerScale() * 256;
+  lv_obj_set_style_transform_pivot_x(canvas, 24, 0);
+  lv_obj_set_style_transform_pivot_y(canvas, 24, 0);
+  lv_obj_set_style_transform_scale_x(canvas, scale, 0);
+  lv_obj_set_style_transform_scale_y(canvas, scale, 0);
+}
+
+static void updateCurrentPositionMarker(lv_obj_t *canvas, bool force = false) {
+  if (!canvas || bufArrow == nullptr)
+    return;
+
+  static bool hasLastShape = false;
+  static bool lastWasNavigating = false;
+  static uint8_t lastScale = 0;
+
+  const bool isNavigating = routeOverlay.hasRoute();
+  const uint8_t scale = currentMarkerScale();
+  if (!force && hasLastShape && lastWasNavigating == isNavigating &&
+      lastScale == scale) {
+    applyNavigationMarkerScale(canvas);
+    return;
+  }
+
+  if (isNavigating) {
+    drawNavigationMarker(canvas);
+  } else {
+    drawPositionDotMarker(canvas);
+  }
+
+  applyNavigationMarkerScale(canvas);
+  hasLastShape = true;
+  lastWasNavigating = isNavigating;
+  lastScale = scale;
+  log_i("Position marker updated: %s scale=%u",
+        isNavigating ? "navigation arrow" : "location dot", scale);
+}
 
 static int16_t mapAnchorXForWidth(uint16_t width) {
   return gui_layout::mapAnchorX(width);
@@ -921,7 +1296,7 @@ void Maps::fillPolygon(const Polygon &p,
  * @param color (Already swapped for RGB565 if needed)
  */
 void Maps::drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
-                    int16_t y2, uint16_t color) {
+                    int16_t y2, uint16_t color, uint8_t width) {
   lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
   if (draw_buf == NULL)
     return;
@@ -929,7 +1304,44 @@ void Maps::drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
   int32_t buf_w = draw_buf->header.w;
   int32_t buf_h = draw_buf->header.h;
   uint32_t stride_pixels = draw_buf->header.stride / 2;
+  const int32_t clipMargin = (int32_t)width + 2;
+  if (!clipLineToRect(x1, y1, x2, y2, -clipMargin, -clipMargin,
+                      buf_w - 1 + clipMargin, buf_h - 1 + clipMargin))
+    return;
 
+  if (width < 2) {
+    drawLineSegment(buf, buf_w, buf_h, stride_pixels, x1, y1, x2, y2, color);
+    return;
+  }
+
+  float dx = x2 - x1;
+  float dy = y2 - y1;
+  float len = sqrtf(dx * dx + dy * dy);
+  if (len < 1.0f) {
+    if (x1 >= 0 && x1 < buf_w && y1 >= 0 && y1 < buf_h) {
+      buf[y1 * stride_pixels + x1] = color;
+    }
+    return;
+  }
+
+  dx /= len;
+  dy /= len;
+  float px = -dy;
+  float py = dx;
+
+  int16_t start = -((int16_t)width - 1) / 2;
+  int16_t end = (int16_t)width / 2;
+  for (int16_t t = start; t <= end; t++) {
+    int16_t ox = (int16_t)roundf(px * t);
+    int16_t oy = (int16_t)roundf(py * t);
+    drawLineSegment(buf, buf_w, buf_h, stride_pixels, x1 + ox, y1 + oy,
+                    x2 + ox, y2 + oy, color);
+  }
+}
+
+void Maps::drawLineSegment(uint16_t *buf, int32_t buf_w, int32_t buf_h,
+                           uint32_t stride_pixels, int16_t x1, int16_t y1,
+                           int16_t x2, int16_t y2, uint16_t color) {
   // Bresenham's Line Algorithm
   int dx = abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
   int dy = -abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
@@ -1211,7 +1623,8 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             }
 
             // Skip if type is hidden by visibility mask
-            if (!isTypeVisible(polygon.typeId, mapRenderSettings)) {
+            if (!isPolygonVisible(polygon.typeId, polygon.color,
+                                  mapRenderSettings)) {
               continue;
             }
 
@@ -1240,12 +1653,13 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             newPolygon.bbox.min.y = minY;
             newPolygon.bbox.max.y = maxY;
 
-            // Skip polygons smaller than minPolygonSize (configurable via BLE)
+            // Skip tiny polygons based on explicit min size plus detail density.
+            const uint8_t minPolygonSize =
+                effectiveMinPolygonSize(mapRenderSettings);
             int16_t polyWidth = maxX - minX;
             int16_t polyHeight = maxY - minY;
-            if (mapRenderSettings.minPolygonSize > 0 &&
-                polyWidth * polyHeight < mapRenderSettings.minPolygonSize *
-                                             mapRenderSettings.minPolygonSize) {
+            if (minPolygonSize > 0 &&
+                polyWidth * polyHeight < minPolygonSize * minPolygonSize) {
               poly_drawn--; // Don't count as drawn
               continue;
             }
@@ -1272,7 +1686,8 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           continue;
 
         // Skip if type is hidden by visibility mask
-        if (!isTypeVisible(line.typeId, mapRenderSettings))
+        if (!isLineVisible(line.typeId, line.color, line.width,
+                           mapRenderSettings))
           continue;
 
         uint16_t color_swapped = line.color; // Use color directly (RGB565)
@@ -1301,10 +1716,16 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
         };
 
         Point16 p1 = transformPoint(line.points[0]);
+        int32_t streetBoost = shouldBoostLineWidth(line.typeId, line.width)
+                                  ? mapRenderSettings.streetLineWidthBoost
+                                  : 0;
+        uint8_t lineWidth = (uint8_t)std::min<int32_t>(
+            std::max<int32_t>(line.width, 1) + streetBoost, 24);
 
         for (int i = 0; i < (int)line.points.size() - 1; i++) {
           Point16 p2 = transformPoint(line.points[i + 1]);
-          Maps::drawLine(canvas, p1.x, p1.y, p2.x, p2.y, color_swapped);
+          Maps::drawLine(canvas, p1.x, p1.y, p2.x, p2.y, color_swapped,
+                         lineWidth);
           p1 = p2;
         }
       }
@@ -1649,8 +2070,7 @@ void Maps::initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull) {
   }
 
   if (bufArrow == nullptr) {
-    bufArrow = heap_caps_malloc(48 * 48 * sizeof(lv_color_t),
-                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    ensureArrowBuffer();
   }
 
   Maps::oldMapTile = {};           // Old Map tile coordinates and zoom
@@ -1685,6 +2105,7 @@ void Maps::deleteMapScrSprites() {
  *
  */
 void Maps::createMapScrSprites() {
+  ESP_LOGI(TAG, "createMapScrSprites start");
   // Map Sprite
   // Map Sprite (Canvas)
   uint16_t w = Maps::mapScrWidth;
@@ -1713,6 +2134,10 @@ void Maps::createMapScrSprites() {
   }
   ESP_LOGI(TAG, "MapBuff: W=%d H=%d Stride=%d Size=%d", w, h, stride_bytes,
            requiredSize);
+  if (bufMapScr == nullptr) {
+    ESP_LOGE(TAG, "MapBuff: screen buffer allocation failed");
+    return;
+  }
 
   lv_canvas_set_buffer(Maps::canvasMap, bufMapScr, w, h,
                        LV_COLOR_FORMAT_RGB565);
@@ -1731,24 +2156,18 @@ void Maps::createMapScrSprites() {
                        LV_COLOR_FORMAT_RGB565);
 
   // Arrow Sprite (Canvas) - 48x48 for better visibility
-  Maps::canvasArrow =
-      lv_canvas_create(mapTile); // Create on mapTile instead of active screen
-  lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
-  lv_canvas_set_buffer(Maps::canvasArrow, bufArrow, 48, 48,
-                       LV_COLOR_FORMAT_RGB565);
-
-  // Fill with a bright red circle for GPS indicator
-  lv_canvas_fill_bg(Maps::canvasArrow, lv_color_hex(0x000000), LV_OPA_TRANSP);
-  lv_layer_t layer;
-  lv_canvas_init_layer(Maps::canvasArrow, &layer);
-  lv_draw_rect_dsc_t rect_dsc;
-  lv_draw_rect_dsc_init(&rect_dsc);
-  rect_dsc.bg_color = lv_color_hex(0xFF0000); // Bright red
-  rect_dsc.bg_opa = LV_OPA_COVER;
-  rect_dsc.radius = 20;            // Make it circular
-  lv_area_t area = {4, 4, 44, 44}; // 40x40 circle centered in 48x48 canvas
-  lv_draw_rect(&layer, &rect_dsc, &area);
-  lv_canvas_finish_layer(Maps::canvasArrow, &layer);
+  if (ensureArrowBuffer() != nullptr) {
+    Maps::canvasArrow =
+        lv_canvas_create(mapTile); // Create on mapTile instead of active screen
+    lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
+    lv_canvas_set_buffer(Maps::canvasArrow, bufArrow, 48, 48,
+                         LV_COLOR_FORMAT_ARGB8888);
+    updateCurrentPositionMarker(Maps::canvasArrow, true);
+  } else {
+    ESP_LOGE(TAG, "MapBuff: arrow buffer unavailable; marker disabled");
+    Maps::canvasArrow = nullptr;
+  }
+  ESP_LOGI(TAG, "createMapScrSprites done");
 
   // Make arrow clickable to toggle rotation mode
   // lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_CLICKABLE);
@@ -1789,28 +2208,10 @@ void Maps::toggleRotationMode() {
  * @brief Update GPS indicator arrow color based on rotation mode
  */
 void Maps::updateArrowColor() {
-  if (!Maps::canvasArrow)
+  if (!Maps::canvasArrow || bufArrow == nullptr)
     return;
 
-  // Choose color based on rotation mode
-  // North-Up = Red, Course-Up = Blue
-  uint32_t color = (rotationMode == ROT_NORTH_UP) ? 0xFF0000 : 0x0066FF;
-
-  // Redraw the arrow canvas with new color
-  lv_canvas_fill_bg(Maps::canvasArrow, lv_color_hex(0x000000), LV_OPA_TRANSP);
-  lv_layer_t layer;
-  lv_canvas_init_layer(Maps::canvasArrow, &layer);
-  lv_draw_rect_dsc_t rect_dsc;
-  lv_draw_rect_dsc_init(&rect_dsc);
-  rect_dsc.bg_color = lv_color_hex(color);
-  rect_dsc.bg_opa = LV_OPA_COVER;
-  rect_dsc.radius = 20;
-  lv_area_t area = {4, 4, 44, 44};
-  lv_draw_rect(&layer, &rect_dsc, &area);
-  lv_canvas_finish_layer(Maps::canvasArrow, &layer);
-
-  log_i("Arrow color updated: %s (0x%06X)",
-        (rotationMode == ROT_NORTH_UP) ? "RED" : "BLUE", color);
+  updateCurrentPositionMarker(Maps::canvasArrow, true);
 }
 
 /**
@@ -1929,9 +2330,17 @@ void Maps::displayMap() {
 
   // Update Arrow Position
   if (Maps::canvasArrow) {
+    if (!isCurrentPositionVisible(mapRenderSettings)) {
+      lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
+      MAPIO_LOG("MAPIO: current-position marker hidden by visibility mask\n");
+      return;
+    }
+
     uint16_t h = mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
     const int16_t anchorX = mapAnchorXForWidth(Maps::mapScrWidth);
     const int16_t anchorY = mapAnchorYForHeight(h);
+    updateCurrentPositionMarker(Maps::canvasArrow);
+    const int16_t markerVisualHalf = 24 * currentMarkerScale();
     int16_t x, y;
 
     if (Maps::followGps) {
@@ -1987,7 +2396,12 @@ void Maps::displayMap() {
       lv_obj_set_pos(Maps::canvasArrow, x, y);
 
       // Simple bounds check to hide if too far off screen
-      if (x < -20 || x > Maps::mapScrWidth + 20 || y < -20 || y > h + 20) {
+      const int16_t centerX = x + 24;
+      const int16_t centerY = y + 24;
+      if (centerX < -markerVisualHalf ||
+          centerX > (int16_t)Maps::mapScrWidth + markerVisualHalf ||
+          centerY < -markerVisualHalf ||
+          centerY > (int16_t)h + markerVisualHalf) {
         lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
         ESP_LOGI(TAG, "GPS indicator hidden: off-screen at (%d,%d)", x, y);
       } else {
@@ -2058,7 +2472,7 @@ void Maps::generateVectorMap(uint8_t zoom) {
   const uint32_t routeStartMs = MAPIO_TIME_MS();
   ESP_LOGI(TAG, "Checking for route overlay: hasRoute=%d",
            routeOverlay.hasRoute());
-  if (routeOverlay.hasRoute()) {
+  if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
     ESP_LOGI(TAG,
              "Drawing route overlay: centerMerc=(%d,%d) "
              "zoom=%d points=%d",
@@ -2076,6 +2490,8 @@ void Maps::generateVectorMap(uint8_t zoom) {
                            mapAnchorYForHeight(canvasHeight));
     ESP_LOGI(TAG, "Route overlay draw complete (rotation=%.2f rad, canvasH=%d)",
              rotationRad, canvasHeight);
+  } else if (routeOverlay.hasRoute()) {
+    ESP_LOGI(TAG, "Route overlay hidden by visibility mask");
   } else {
     ESP_LOGI(TAG, "No route overlay to draw (no route data)");
   }

@@ -10,6 +10,7 @@
 
 #include "globalGuiDef.h"
 #include "navup.h"
+#include <cstddef>
 
 /**
  * @brief Navigation Tile screen objects
@@ -22,3 +23,5 @@ extern lv_obj_t *distNav;
 extern lv_obj_t *arrowNav;
 
 void navigationScr(_lv_obj_t *screen);
+void formatNavigationInstruction(const char *instruction, char *buffer,
+                                 size_t bufferSize);

@@ -57,11 +57,11 @@ class NavigationEngine: NSObject, ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isReady in
                 guard isReady, let self else { return }
+                self.resendCurrentDeviceGpsPosition()
                 guard self.isNavigating else {
                     self.bleManager?.clearRouteGeometry()
                     return
                 }
-                self.resendCurrentDeviceGpsPosition()
                 self.resendCurrentRouteGeometry()
                 self.resendCurrentNavigationState()
             }
@@ -95,7 +95,7 @@ class NavigationEngine: NSObject, ObservableObject {
         if isTestMode {
             startSimulation()
         } else if let initialLocation {
-            sendDeviceGpsPosition(initialLocation, convertFromMapKitRoute: true)
+            sendInitialDeviceGpsPosition(initialLocation, convertFromMapKitRoute: true)
             sendRouteGeometryIfNeeded(currentLocation: initialLocation)
             processLocation(initialLocation)
         }
@@ -350,7 +350,7 @@ class NavigationEngine: NSObject, ObservableObject {
     }
 
     private func resendCurrentDeviceGpsPosition() {
-        guard isNavigating, let lastDeviceGpsLocation else { return }
+        guard let lastDeviceGpsLocation else { return }
 
         sendDeviceGpsPosition(lastDeviceGpsLocation.location,
                               convertFromMapKitRoute: lastDeviceGpsLocation.convertFromMapKitRoute)
@@ -410,6 +410,17 @@ class NavigationEngine: NSObject, ObservableObject {
         bleManager?.sendGPSPosition(lat: wgsCoordinate.latitude,
                                     lon: wgsCoordinate.longitude,
                                     heading: heading)
+    }
+
+    private func sendInitialDeviceGpsPosition(_ location: CLLocation, convertFromMapKitRoute: Bool) {
+        sendDeviceGpsPosition(location, convertFromMapKitRoute: convertFromMapKitRoute)
+
+        for delay in [0.5, 1.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.isNavigating else { return }
+                self.sendDeviceGpsPosition(location, convertFromMapKitRoute: convertFromMapKitRoute)
+            }
+        }
     }
 }
 

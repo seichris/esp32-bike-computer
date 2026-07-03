@@ -29,7 +29,7 @@ struct SettingsView: View {
                     }
                 }
                 
-                Section(header: Text("Map Rendering"), footer: Text("Higher values = faster rendering but less detail.")) {
+                Section(header: Text("Map Rendering"), footer: Text("Feature toggles control map categories; polygon size filters tiny filled areas.")) {
                     VStack(alignment: .leading) {
                         HStack {
                             Text("Min Polygon Size")
@@ -45,7 +45,7 @@ struct SettingsView: View {
                 }
                 .disabled(!bleManager.supportsDeviceSettings)
                 
-                Section(header: Text("Detail Level")) {
+                Section(header: Text("Detail Level"), footer: Text("Controls small-area density without overriding feature visibility.")) {
                     Picker("Detail", selection: $bleManager.detailLevel) {
                         Text("Low").tag(0)
                         Text("Medium").tag(1)
@@ -66,9 +66,38 @@ struct SettingsView: View {
                             Text("\(Int(bleManager.routeLineWidth)) px")
                                 .foregroundColor(.secondary)
                         }
-                        Slider(value: $bleManager.routeLineWidth, in: 2...8, step: 1)
+                        Slider(value: $bleManager.routeLineWidth, in: 2...48, step: 1)
                             .onChange(of: bleManager.routeLineWidth) { newValue in
                                 bleManager.sendSetting(id: 3, value: Int32(newValue))
+                        }
+                    }
+
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text("Position Marker Size")
+                            Spacer()
+                            Text("\(Int(bleManager.positionMarkerScale))x")
+                                .foregroundColor(.secondary)
+                        }
+                        Slider(value: $bleManager.positionMarkerScale, in: 1...5, step: 1)
+                            .onChange(of: bleManager.positionMarkerScale) { newValue in
+                                bleManager.sendSetting(id: 10, value: Int32(newValue))
+                        }
+                    }
+                }
+                .disabled(!bleManager.supportsDeviceSettings)
+
+                Section(header: Text("Map Streets")) {
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text("Street Width Boost")
+                            Spacer()
+                            Text("+\(Int(bleManager.streetLineWidthBoost)) px")
+                                .foregroundColor(.secondary)
+                        }
+                        Slider(value: $bleManager.streetLineWidthBoost, in: 0...24, step: 1)
+                            .onChange(of: bleManager.streetLineWidthBoost) { newValue in
+                                bleManager.sendSetting(id: 9, value: Int32(newValue))
                         }
                     }
                 }
@@ -87,8 +116,8 @@ struct SettingsView: View {
                 
                 Section(header: Text("Map Mode")) {
                     Picker("Rotation", selection: $bleManager.mapRotationMode) {
-                        Text("North Up (Red)").tag(0)
-                        Text("Head Up (Blue)").tag(1)
+                        Text("North Up").tag(0)
+                        Text("Course Up").tag(1)
                     }
                     .pickerStyle(.segmented)
                     .onChange(of: bleManager.mapRotationMode) { newValue in
@@ -115,13 +144,35 @@ struct SettingsView: View {
                 }
                 .disabled(!bleManager.supportsDeviceSettings)
                 
-                Section(header: Text("Feature Visibility"), footer: Text("Show/Hide map features.")) {
+                Section(header: Text("Navigation Overlays"), footer: Text("Show or hide live navigation layers drawn above the map.")) {
+                    Toggle("Route Line", isOn: $bleManager.showRouteOverlay)
+                        .onChange(of: bleManager.showRouteOverlay) { _ in bleManager.sendVisibilityMask() }
+                    Toggle("Current Position", isOn: $bleManager.showCurrentPosition)
+                        .onChange(of: bleManager.showCurrentPosition) { _ in bleManager.sendVisibilityMask() }
+                }
+                .disabled(!bleManager.supportsDeviceSettings)
+
+                Section(header: Text("Roads & Paths"), footer: Text("Control which street and trail classes appear on the device map.")) {
+                    Toggle("Major Roads", isOn: $bleManager.showMajorRoads)
+                        .onChange(of: bleManager.showMajorRoads) { _ in bleManager.sendVisibilityMask() }
+                    Toggle("Local Streets", isOn: $bleManager.showLocalStreets)
+                        .onChange(of: bleManager.showLocalStreets) { _ in bleManager.sendVisibilityMask() }
+                    Toggle("Paths & Tracks", isOn: $bleManager.showPaths)
+                        .onChange(of: bleManager.showPaths) { _ in bleManager.sendVisibilityMask() }
+                    Toggle("Railways", isOn: $bleManager.showRailways)
+                        .onChange(of: bleManager.showRailways) { _ in bleManager.sendVisibilityMask() }
+                }
+                .disabled(!bleManager.supportsDeviceSettings)
+
+                Section(header: Text("Places & Terrain"), footer: Text("Control background map areas and lower-priority context.")) {
                     Toggle("Buildings", isOn: $bleManager.showBuildings)
                         .onChange(of: bleManager.showBuildings) { _ in bleManager.sendVisibilityMask() }
-                    Toggle("Parks & Nature", isOn: $bleManager.showNature)
-                        .onChange(of: bleManager.showNature) { _ in bleManager.sendVisibilityMask() }
-                    Toggle("Paths", isOn: $bleManager.showMinorRoads)
-                        .onChange(of: bleManager.showMinorRoads) { _ in bleManager.sendVisibilityMask() }
+                    Toggle("Parks & Nature", isOn: $bleManager.showGreenSpace)
+                        .onChange(of: bleManager.showGreenSpace) { _ in bleManager.sendVisibilityMask() }
+                    Toggle("Water", isOn: $bleManager.showWater)
+                        .onChange(of: bleManager.showWater) { _ in bleManager.sendVisibilityMask() }
+                    Toggle("Other Areas", isOn: $bleManager.showOtherAreas)
+                        .onChange(of: bleManager.showOtherAreas) { _ in bleManager.sendVisibilityMask() }
                 }
                 .disabled(!bleManager.supportsDeviceSettings)
                 

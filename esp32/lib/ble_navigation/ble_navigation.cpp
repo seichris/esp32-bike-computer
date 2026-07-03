@@ -49,6 +49,12 @@ static BLEDebugStats bleDebugStats;
 static uint16_t activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
 static bool unauthTimeoutDisconnectRequested = false;
 
+NavigationData getCurrentNavigationData() { return currentNavData; }
+
+bool hasCurrentNavigationData() {
+  return currentNavData.distance > 0 || currentNavData.instruction[0] != '\0';
+}
+
 // Route geometry debouncing - skip redundant parses
 static uint32_t lastRouteHash = 0;
 static size_t lastRouteLen = 0;
@@ -420,6 +426,21 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
                 source == nullptr ? "unknown" : source, (unsigned)len);
   bleDebugStats.routePacketCount++;
   bleDebugStats.lastRoutePacketMs = millis();
+
+  if (!gpsReceivedFromApp && len >= 8) {
+    int32_t routeStartLat = 0;
+    int32_t routeStartLon = 0;
+    memcpy(&routeStartLat, data, sizeof(routeStartLat));
+    memcpy(&routeStartLon, data + sizeof(routeStartLon), sizeof(routeStartLon));
+    gps.gpsData.latitude = (double)routeStartLat / 1000000.0;
+    gps.gpsData.longitude = (double)routeStartLon / 1000000.0;
+    gpsReceivedFromApp = true;
+    pendingTransitionToMap = true;
+    Serial.printf(
+        "BLE route geometry: seeded map start %.6f,%.6f; transitioning to map\n",
+        gps.gpsData.latitude, gps.gpsData.longitude);
+  }
+
   routeOverlay.parseRouteData(data, len);
   triggerMapRedraw();
 }
@@ -516,12 +537,32 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     break;
   case 3:
     mapRenderSettings.routeLineWidth =
-        (uint8_t)std::min(std::max(settingValue, (int32_t)2), (int32_t)8);
+        (uint8_t)std::min(std::max(settingValue, (int32_t)2), (int32_t)48);
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar("routeWidth", mapRenderSettings.routeLineWidth);
     settingsPrefs.end();
     Serial.printf("BLE Settings: routeLineWidth = %d (saved)\n",
                   mapRenderSettings.routeLineWidth);
+    break;
+  case 9:
+    mapRenderSettings.streetLineWidthBoost =
+        (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)24);
+    settingsPrefs.begin("mapSettings", false);
+    settingsPrefs.putUChar("streetBoost",
+                           mapRenderSettings.streetLineWidthBoost);
+    settingsPrefs.end();
+    Serial.printf("BLE Settings: streetLineWidthBoost = %d (saved)\n",
+                  mapRenderSettings.streetLineWidthBoost);
+    break;
+  case 10:
+    mapRenderSettings.positionMarkerScale =
+        (uint8_t)std::min(std::max(settingValue, (int32_t)1), (int32_t)5);
+    settingsPrefs.begin("mapSettings", false);
+    settingsPrefs.putUChar("markerScale",
+                           mapRenderSettings.positionMarkerScale);
+    settingsPrefs.end();
+    Serial.printf("BLE Settings: positionMarkerScale = %d (saved)\n",
+                  mapRenderSettings.positionMarkerScale);
     break;
   case 4:
     mapRenderSettings.displayRotation =
@@ -714,7 +755,8 @@ public:
 /**
  * @brief Settings characteristic callback - receives runtime config from iOS
  * app Format: [settingId:1][value:4] = 5 bytes Setting IDs: 1=minPolygonSize,
- * 2=detailLevel, 3=routeLineWidth
+ * 2=detailLevel, 3=routeLineWidth, 9=streetLineWidthBoost,
+ * 10=positionMarkerScale
  */
 class MySettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
@@ -753,6 +795,8 @@ static void loadSettingsFromNVS() {
   mapRenderSettings.minPolygonSize = prefs.getUChar("minPolySize", 0);
   mapRenderSettings.detailLevel = prefs.getUChar("detailLevel", 2);
   mapRenderSettings.routeLineWidth = prefs.getUChar("routeWidth", 4);
+  mapRenderSettings.streetLineWidthBoost = prefs.getUChar("streetBoost", 0);
+  mapRenderSettings.positionMarkerScale = prefs.getUChar("markerScale", 2);
   mapRenderSettings.displayRotation =
       sanitizeMapDisplayRotation(prefs.getUChar("rotation", 0), "NVS");
   mapRenderSettings.mapRotationMode = prefs.getUChar("mapRotMode", 0);
@@ -762,9 +806,12 @@ static void loadSettingsFromNVS() {
   prefs.end();
 
   Serial.printf("BLE: Loaded settings from NVS - minPolySize=%d, "
-                "detailLevel=%d, routeWidth=%d, rotation=%d\n",
+                "detailLevel=%d, routeWidth=%d, streetBoost=%d, "
+                "markerScale=%d, rotation=%d\n",
                 mapRenderSettings.minPolygonSize, mapRenderSettings.detailLevel,
                 mapRenderSettings.routeLineWidth,
+                mapRenderSettings.streetLineWidthBoost,
+                mapRenderSettings.positionMarkerScale,
                 mapRenderSettings.displayRotation);
 }
 

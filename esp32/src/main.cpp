@@ -78,6 +78,43 @@ extern Storage storage;
 extern Battery battery;
 extern Power power;
 extern Maps mapView;
+
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+static void processWaveshareBootButton() {
+  constexpr uint32_t DEBOUNCE_MS = 50;
+  constexpr uint32_t SHORT_PRESS_MAX_MS = 1200;
+
+  static bool lastPressed = false;
+  static bool stablePressed = false;
+  static uint32_t lastChangeMs = 0;
+  static uint32_t pressStartMs = 0;
+
+  const uint32_t now = millis();
+  const bool pressed = digitalRead(BOARD_BOOT_PIN) == LOW;
+
+  if (pressed != lastPressed) {
+    lastPressed = pressed;
+    lastChangeMs = now;
+    return;
+  }
+
+  if (pressed == stablePressed || now - lastChangeMs < DEBOUNCE_MS) {
+    return;
+  }
+
+  stablePressed = pressed;
+  if (stablePressed) {
+    pressStartMs = now;
+    return;
+  }
+
+  const uint32_t pressDurationMs = now - pressStartMs;
+  if (pressDurationMs > 0 && pressDurationMs <= SHORT_PRESS_MAX_MS) {
+    log_i("Waveshare BOOT short press: toggling navigation screen");
+    toggleNavigationScreen();
+  }
+}
+#endif
 extern Gps gps;
 #ifdef ENABLE_COMPASS
 Compass compass;
@@ -272,8 +309,11 @@ void setup() {
 #ifdef WAVESHARE_AMOLED_175
   waveshare_board::recoverI2CBus();
 #endif
-#ifdef POWER_SAVE
+#if defined(POWER_SAVE) || defined(WAVESHARE_AMOLED_175) ||                   \
+    defined(WAVESHARE_AMOLED_206)
   pinMode(BOARD_BOOT_PIN, INPUT_PULLUP);
+#endif
+#ifdef POWER_SAVE
 #ifdef ICENAV_BOARD
   gpio_hold_dis(GPIO_NUM_46);
   gpio_hold_dis((gpio_num_t)BOARD_BOOT_PIN);
@@ -450,6 +490,10 @@ void loop() {
   lastLoopMs = now;
   loopCount++;
 
+  // Process app-provided GPS transitions before any periodic work that can
+  // briefly block on display, sensor, BLE, or debug output.
+  checkPendingMapTransition();
+
   if (!waitScreenRefresh) {
     uint32_t startUs = micros();
     lv_timer_handler();
@@ -467,10 +511,8 @@ void loop() {
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   waveshare_board::imu::process();
+  processWaveshareBootButton();
 #endif
-
-  // Check if we need to transition from waiting screen to map
-  checkPendingMapTransition();
 
   logSystemDebugHeartbeat();
 
