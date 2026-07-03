@@ -56,12 +56,6 @@ struct MapNavigationInstructionCard: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Capsule()
-                .fill(Color.secondary.opacity(0.35))
-                .frame(width: 38, height: 5)
-                .padding(.top, 8)
-                .padding(.bottom, 12)
-
             HStack(alignment: .center, spacing: 14) {
                 ZStack {
                     Circle()
@@ -101,7 +95,7 @@ struct MapNavigationInstructionCard: View {
                 .accessibilityLabel("End navigation")
             }
             .padding(.horizontal, 16)
-            .padding(.bottom, 16)
+            .padding(.vertical, 16)
         }
         .frame(maxWidth: .infinity)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
@@ -139,9 +133,12 @@ struct NavigationInstructionBanner: View {
                 Text(instruction)
                     .font(.system(size: 28, weight: .semibold, design: .rounded))
                     .foregroundColor(.white.opacity(0.72))
-                    .lineLimit(1)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(nil)
                     .minimumScaleFactor(0.72)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .layoutPriority(1)
 
             Spacer(minLength: 0)
         }
@@ -151,12 +148,6 @@ struct NavigationInstructionBanner: View {
             RoundedRectangle(cornerRadius: 30, style: .continuous)
                 .fill(Color.black.opacity(0.66))
         )
-        .overlay(alignment: .bottom) {
-            Capsule()
-                .fill(Color.white.opacity(0.28))
-                .frame(width: 46, height: 5)
-                .padding(.bottom, 10)
-        }
         .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 8)
         .accessibilityElement(children: .combine)
     }
@@ -174,17 +165,13 @@ struct NavigationMetricsPanel: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            Capsule()
-                .fill(Color.secondary.opacity(0.32))
-                .frame(width: 44, height: 5)
-                .padding(.top, 10)
-
             HStack(alignment: .center, spacing: 0) {
                 NavigationMetricColumn(value: formattedArrival, label: "arrival")
                 NavigationMetricColumn(value: formattedTime, label: timeUnit)
                 NavigationMetricColumn(value: formattedDistance, label: distanceUnit)
             }
             .padding(.horizontal, 12)
+            .padding(.top, 18)
 
             Button(action: onStopNavigation) {
                 Text("End")
