@@ -5,6 +5,48 @@ on:
   pull_request:
 
 jobs:
+  hygiene:
+    name: Hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check whitespace
+        env:
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+        run: |
+          base_sha="$PULL_REQUEST_BASE_SHA"
+          if [ -z "$base_sha" ]; then
+            base_sha="$PUSH_BASE_SHA"
+          fi
+
+          if [ -n "$base_sha" ] && ! printf '%s' "$base_sha" | grep -q '^0\{40\}$'; then
+            git diff --check "$base_sha"..HEAD
+            exit $?
+          fi
+
+          git diff-tree --check --no-commit-id --root -r HEAD
+      - name: Check branch and PR title
+        env:
+          REF_NAME: ${{ github.head_ref || github.ref_name }}
+          PR_TITLE: ${{ github.event.pull_request.title || '' }}
+        run: |
+          ref_name_lower="$(printf '%s' "$REF_NAME" | tr '[:upper:]' '[:lower:]')"
+          pr_title_lower="$(printf '%s' "$PR_TITLE" | tr '[:upper:]' '[:lower:]')"
+
+          failed=0
+          if printf '%s' "$ref_name_lower" | grep -q 'codex'; then
+            echo "branch name must not contain 'codex': $REF_NAME" >&2
+            failed=1
+          fi
+          if [ -n "$PR_TITLE" ] && printf '%s' "$pr_title_lower" | grep -q 'codex'; then
+            echo "PR title must not contain 'codex': $PR_TITLE" >&2
+            failed=1
+          fi
+          exit "$failed"
+
   esp32:
     name: ESP32
     runs-on: ubuntu-latest
@@ -27,24 +69,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run Swift helper tests
-        run: |
-          swiftc \
-            BikeComputer/BikeComputer/Models/AppModels.swift \
-            BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
-            BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
-            BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
-            BikeComputer/BikeComputer/Managers/BLEManager.swift \
-            BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
-            BikeComputerTests/NavigationProtocolTests.swift \
-            -o /tmp/NavigationProtocolTests
-          /tmp/NavigationProtocolTests
-        working-directory: ios-app
+        run: ios-app/scripts/run-navigation-tests.sh
       - name: Build app
         run: |
           xcodebuild \
             -project BikeComputer/BikeComputer.xcodeproj \
             -scheme BikeComputer \
-            -destination 'generic/platform=iOS' \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
             build
         working-directory: ios-app
@@ -78,3 +111,46 @@ jobs:
         run: docker compose build tools
       - name: Smoke test tools image
         run: docker compose run --rm tools python -c "import mapnik; import matplotlib; import shapely; import yaml; from osgeo import ogr"
+
+  xiao-tools:
+    name: XIAO Tools
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: xiao-nrf52840
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            tools/evidence_bundle_check.py \
+            tools/hardware_bringup_check.py \
+            tools/serial_log_check.py \
+            tools/serial_sim_ride.py \
+            tools/test_evidence_bundle_check.py \
+            tools/test_hardware_bringup_check.py \
+            tools/test_serial_log_check.py \
+            tools/test_serial_sim_ride.py
+      - name: Serial evidence tests
+        run: python -m unittest discover -s tools -p 'test_*.py'
+
+  xiao-firmware:
+    name: XIAO Firmware
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: xiao-nrf52840
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade platformio
+      - name: Native tests
+        run: pio test -e native_protocol
+      - name: Build firmware
+        run: pio run -e xiao_nrf52840_round

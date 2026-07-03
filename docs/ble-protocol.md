@@ -75,9 +75,12 @@ RouteRemaining: UInt32 meters, 0xFFFFFFFF invalid (optional)
 
 Live CoreLocation coordinates are sent as WGS-84. Simulated or MapKit route
 coordinates are converted from GCJ-02 to WGS-84 before writing. Firmware accepts
-the original 8-byte lat/lon payload, the 10-byte lat/lon/heading payload, the
-14-byte payload with Unix time, and the extended 30-byte telemetry payload. The
-Waveshare firmware uses the optional Unix time to sync the onboard PCF85063 RTC.
+only complete sequential field prefixes: 8, 10, 14, 16, 18, 22, 26, or 30 bytes.
+Malformed intermediate lengths are rejected rather than partially parsed. The
+XIAO firmware uses the optional Unix time to sync the onboard PCF85063 RTC. The
+iOS app writes GPS at live cadence while navigating and throttles idle
+GPS/Unix-time writes to a 10-minute cadence when connected with no active
+navigation session.
 
 ## Map Settings (`2A73`)
 
@@ -96,12 +99,14 @@ Current setting IDs:
 | `2` | Detail level | `0` low, `1` medium, `2` high |
 | `3` | Route line width | `2...48` |
 | `4` | Display rotation | `0...3` |
+| `5` | Reboot device command | `1` schedules a device reboot |
 | `6` | Map rotation mode | `0` north-up, `1` course-up |
 | `7` | Zoom level | `0...5` |
 | `8` | Visibility mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/tracks, bit 3 major roads, bit 4 local streets, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker |
 | `9` | Street line width boost | `0...24` px added to known road/path line style widths; legacy unknown lines are boosted when their stored style width is at least 3px; final rendered width is capped at 24px |
 | `10` | Current-position marker scale | `1...5`; default is `2`, so the map position marker renders at twice its original size. The firmware shows a white dot when no route is loaded and a white arrow while navigating. |
 | `11` | Tap to switch screens | `0` disabled, `1` enabled. When enabled, a short tap cycles the device between map, navigation instruction, and ride stats screens. Map drags and long presses are ignored by this shortcut. |
+| `12` | Device target brightness | `5...100` percent |
 
 Feature visibility toggles are authoritative for their classes. Detail level
 controls small-area density without overriding the visibility mask: high uses
