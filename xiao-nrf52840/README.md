@@ -57,7 +57,9 @@ firmware evidence must include SD listing output, LCD init, boot/status drawing,
 nonzero map/route line primitives, touch coordinates, and a classified gesture.
 If the USB or vendor output uses unexpected wording, add
 `EVIDENCE board_identity=pass` only after verifying the connected board. The
-checker rejects logs that still show ESP32-S3 board evidence.
+checker rejects logs that still show ESP32-S3 board evidence. Partial bench runs
+may use `--allow-missing` for peripheral checks, but board identity is always
+required.
 
 The bring-up record lives at
 `../hardware/xiao-nrf52840-round-display-bringup.md`.

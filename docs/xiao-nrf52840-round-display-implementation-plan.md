@@ -210,10 +210,10 @@ Current repo checkpoint:
   in `hardware/xiao-round-display-power-enclosure.md`.
 - Map-lite go/no-go validation is tracked in
   `hardware/xiao-map-lite-go-no-go.md`; it remains pending real hardware logs.
-- The iOS companion keeps the shared BLE UUIDs and fallback frame prefixes in
-  a single protocol constant set, still scans by service UUID, surfaces Device
-  Information model/hardware labels, and has tests guarding UUIDs, fallback
-  `MAPR`/`GPSP`/`MSET` writes, and brightness setting ID `12`.
+- The XIAO target keeps the shared BLE UUIDs and fallback frame prefixes aligned
+  with `docs/ble-protocol.md`, advertises Device Information model/hardware
+  labels, and preserves the existing `MAPR`/`GPSP`/`MSET` frame contract plus
+  brightness setting ID `12`.
 - Repo-side Milestone 6 map-lite probing/rendering is implemented as a measured
   experiment: `lib/map_lite/` initializes the Round Display microSD SPI bus
   through SdFat, probes known `.fmb` lookup paths, scans `.fmb` feature records
@@ -253,10 +253,6 @@ Current repo checkpoint:
   calibrated battery readings, RTC, microSD, map-lite timing, runtime, thermal,
   enclosure, and ride-duration validation are still pending a connected XIAO
   nRF52840 Round Display.
-- The iOS companion app now opens to a full-screen map with overlay controls.
-  Route entry is handled by the inline `RouteSearchPanel` rather than the older
-  full-screen route-input cover.
-- The current local iOS changes compile for the `BikeComputer` simulator target.
 
 ## Toolchain Plan
 

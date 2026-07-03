@@ -164,6 +164,34 @@ class HardwareBringupEvidenceTests(unittest.TestCase):
         self.assertIn("vendor_touch", missing)
         self.assertIn("repo_sdls", missing)
 
+    def test_main_does_not_allow_missing_board_identity(self) -> None:
+        lines = [
+            "EVIDENCE vendor_display=pass",
+            "EVIDENCE vendor_touch=pass",
+            "EVIDENCE vendor_rtc=pass",
+            "EVIDENCE vendor_battery=pass",
+            "EVIDENCE vendor_sd=pass",
+            "MapLite: SD list path=/ entries=3 truncated=0 error=0",
+            "DisplayRound: Seeed_GFX GC9A01 init complete",
+            "DisplayRound: boot screen drawn",
+            "DisplayRound: map frame route lines=3 elapsed_ms=12",
+            "RoundUi: touch start x=120 y=90",
+            "RoundUi: gesture=tap",
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "bringup.log"
+            log_path.write_text("\n".join(lines), encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = hardware_bringup_check.main(
+                    [str(log_path), "--allow-missing", "board_identity"]
+                )
+
+        self.assertEqual(1, exit_code)
+        self.assertIn("FAIL board_identity", output.getvalue())
+        self.assertIn("missing XIAO nRF52840 board identity", output.getvalue())
+
     def test_main_returns_failure_for_incomplete_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             log_path = Path(temp_dir) / "bringup.log"

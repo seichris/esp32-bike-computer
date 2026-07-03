@@ -137,6 +137,7 @@ RULES: tuple[EvidenceRule, ...] = (
 
 
 RULE_BY_KEY = {rule.key: rule for rule in RULES}
+NON_WAIVABLE_RULE_KEYS = frozenset({"board_identity"})
 
 
 def read_lines(path: str) -> list[str]:
@@ -199,7 +200,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="append",
         choices=sorted(RULE_BY_KEY),
         default=[],
-        help="temporarily allow a missing evidence key during partial bench runs",
+        help=(
+            "temporarily allow a missing evidence key during partial bench runs; "
+            "board_identity is always required"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -209,7 +213,7 @@ def main(argv: list[str]) -> int:
     lines = read_lines(args.log)
     found = find_evidence(lines)
     forbidden_board_lines = find_forbidden_board_lines(lines)
-    allowed_missing = set(args.allow_missing)
+    allowed_missing = set(args.allow_missing) - NON_WAIVABLE_RULE_KEYS
     missing = [
         rule for rule in RULES if rule.key not in found and rule.key not in allowed_missing
     ]

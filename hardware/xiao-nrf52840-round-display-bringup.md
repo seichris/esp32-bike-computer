@@ -115,6 +115,10 @@ EVIDENCE repo_touch_start=pass
 EVIDENCE repo_touch_gesture=pass
 ```
 
+`--allow-missing` may be used for partial peripheral bench runs, but it cannot
+waive `board_identity`; every passing Milestone 0 log must prove the attached
+board is the XIAO nRF52840.
+
 Required evidence:
 
 - Connected board identity shows Seeed XIAO nRF52840, not the ESP32-S3 board.
