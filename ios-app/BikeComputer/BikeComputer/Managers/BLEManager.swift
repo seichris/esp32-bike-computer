@@ -204,6 +204,7 @@ class BLEManager: NSObject, ObservableObject {
         static let positionMarkerScale = "mapSettings.positionMarkerScale"
         static let displayRotation = "mapSettings.displayRotation"
         static let mapRotationMode = "mapSettings.mapRotationMode"
+        static let resetMapRotationModeToNorthUp = "mapSettings.resetMapRotationModeToNorthUp.v1"
         static let zoomLevel = "mapSettings.zoomLevel"
         static let showBuildings = "mapSettings.showBuildings"
         static let showGreenSpace = "mapSettings.showGreenSpace"
@@ -238,7 +239,13 @@ class BLEManager: NSObject, ObservableObject {
         streetLineWidthBoost = defaults.object(forKey: SettingsKeys.streetLineWidthBoost) as? Double ?? 0.0
         positionMarkerScale = defaults.object(forKey: SettingsKeys.positionMarkerScale) as? Double ?? 2.0
         displayRotation = defaults.object(forKey: SettingsKeys.displayRotation) as? Int ?? 0
-        mapRotationMode = defaults.object(forKey: SettingsKeys.mapRotationMode) as? Int ?? 0
+        if defaults.bool(forKey: SettingsKeys.resetMapRotationModeToNorthUp) {
+            mapRotationMode = defaults.object(forKey: SettingsKeys.mapRotationMode) as? Int ?? 0
+        } else {
+            mapRotationMode = 0
+            defaults.set(0, forKey: SettingsKeys.mapRotationMode)
+            defaults.set(true, forKey: SettingsKeys.resetMapRotationModeToNorthUp)
+        }
         zoomLevel = defaults.object(forKey: SettingsKeys.zoomLevel) as? Int ?? 2
         showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
         let legacyNature = defaults.object(forKey: SettingsKeys.legacyShowNature) as? Bool ?? true
