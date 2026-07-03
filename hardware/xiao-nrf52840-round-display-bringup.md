@@ -16,6 +16,8 @@ target. It is hardware evidence, not firmware architecture.
   or serial-verified yet.
 - Milestone 1 repo skeleton: builds locally for `xiao_nrf52840_round`; upload
   and serial heartbeat verification are pending a connected XIAO board.
+- Repo firmware uses Seeed_GFX setup 501 for the GC9A01 display backend; LCD
+  output is compile-verified but not visually verified.
 - Repo firmware exposes `SDLS / 24` for a bounded microSD directory listing
   once vendor hardware proof is complete.
 
@@ -98,6 +100,8 @@ The log must prove all items below on the same firmware:
 - microSD mounted and read/write test completed in the vendor example.
 - Repo firmware `SDLS / 24` prints a bounded 32 GB FAT32 card directory
   listing after the XIAO target is uploaded.
+- Repo firmware boot/status text and route/map line primitives are visible on
+  the round LCD after the XIAO target is uploaded.
 
 ```text
 TODO: XIAO HardwareTest serial log.
