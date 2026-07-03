@@ -2,6 +2,20 @@
 
 iOS companion application for the [IceNav-v3 ESP32 Bike Computer](../IceNav-v3). This app handles route planning and transmits navigation data via Bluetooth Low Energy (BLE).
 
+## Local Tests
+
+Run the standalone navigation/BLE protocol tests from the repository root:
+
+```sh
+ios-app/scripts/run-navigation-tests.sh
+```
+
+These tests compile the testable app helpers with `xcrun swiftc` and cover route
+math, BLE packet builders, BLE authentication vectors, fallback `2A6E` framed
+writes, and XIAO-compatible UUID/settings constants. The Xcode project currently
+has only the app target, so the `BikeComputer` scheme does not run these tests
+through Xcode's test action.
+
 ## 🛠 Testing with a Real iPhone
 
 To test the app on a physical device and share it with others, follow these steps:

@@ -130,9 +130,12 @@ struct NavigationProtocolTests {
         testDeviceGPSPacketBuilder()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
+        testDeviceBLEProtocolConstants()
+        testHardwareLabelPreference()
         testBLEPairingAuthenticator()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
+        testBLEManagerSendsBrightnessFallbackSetting()
         testBLEManagerPersistsNewMapSettings()
         testNavigationSendTrackerReadinessRetry()
         testNavigationEngineResendsWhenBLEBecomesReady()
@@ -331,6 +334,30 @@ struct NavigationProtocolTests {
         assertEqual(queue.count, 0, "queue is empty after flush")
     }
 
+    static func testDeviceBLEProtocolConstants() {
+        assertEqual(DeviceBLEProtocol.serviceUUIDString, "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800", "service UUID must stay firmware-compatible")
+        assertEqual(DeviceBLEProtocol.navigationCharacteristicUUIDString, "2A6E", "navigation characteristic UUID must stay firmware-compatible")
+        assertEqual(DeviceBLEProtocol.routeGeometryCharacteristicUUIDString, "2A6F", "route characteristic UUID must stay firmware-compatible")
+        assertEqual(DeviceBLEProtocol.gpsPositionCharacteristicUUIDString, "2A72", "GPS characteristic UUID must stay firmware-compatible")
+        assertEqual(DeviceBLEProtocol.settingsCharacteristicUUIDString, "2A73", "settings characteristic UUID must stay firmware-compatible")
+        assertEqual(DeviceBLEProtocol.routeGeometryFallbackPrefix, "MAPR", "route fallback remains framed over navigation writes")
+        assertEqual(DeviceBLEProtocol.gpsPositionFallbackPrefix, "GPSP", "GPS fallback remains framed over navigation writes")
+        assertEqual(DeviceBLEProtocol.settingsFallbackPrefix, "MSET", "settings fallback remains framed over navigation writes")
+        assertEqual(DeviceBLEProtocol.brightnessSettingID, 12, "brightness uses firmware setting ID 12")
+    }
+
+    static func testHardwareLabelPreference() {
+        assertEqual(DeviceBLEProtocol.hardwareLabel(model: "BikeComputer-XIAO", hardware: "nRF52840"),
+                    "BikeComputer-XIAO",
+                    "model number is the preferred hardware label")
+        assertEqual(DeviceBLEProtocol.hardwareLabel(model: nil, hardware: "XIAO nRF52840"),
+                    "XIAO nRF52840",
+                    "hardware revision is used when model is absent")
+        assertEqual(DeviceBLEProtocol.hardwareLabel(model: "", hardware: ""),
+                    "",
+                    "missing device information produces no hardware label")
+    }
+
     static func testBLEPairingAuthenticator() {
         let nonce = "00112233445566778899aabbccddeeff"
         let serverProof = "a88fdf1fe1bc0381314cc68820d92cb8da4942cb49ba2062d7f7750cd1f7eb4b"
@@ -389,7 +416,9 @@ struct NavigationProtocolTests {
 
         assertEqual(sentPackets.count, 1, "settings without a dedicated characteristic should use fallback navigation writes")
         let packet = sentPackets[0]
-        assertEqual(String(data: packet.prefix(4), encoding: .utf8), "MSET", "fallback settings packet uses MSET prefix")
+        assertEqual(String(data: packet.prefix(4), encoding: .utf8),
+                    DeviceBLEProtocol.settingsFallbackPrefix,
+                    "fallback settings packet uses MSET prefix")
         assertEqual(packet[4], 8, "fallback settings packet includes setting id")
         let valueBytes = Array(packet[5..<9])
         let value = Int32(valueBytes[0])
@@ -397,6 +426,40 @@ struct NavigationProtocolTests {
             | (Int32(valueBytes[2]) << 16)
             | (Int32(valueBytes[3]) << 24)
         assertEqual(value, 7, "fallback settings packet includes little-endian value")
+    }
+
+    static func testBLEManagerSendsBrightnessFallbackSetting() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: "deviceSettings.brightnessPercent")
+
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.deviceBrightnessPercent = 65
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        manager.sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(manager.deviceBrightnessPercent))
+
+        assertEqual(sentPackets.count, 1, "brightness without a dedicated characteristic should use fallback navigation writes")
+        let packet = sentPackets[0]
+        assertEqual(String(data: packet.prefix(4), encoding: .utf8), DeviceBLEProtocol.settingsFallbackPrefix, "brightness fallback uses MSET prefix")
+        assertEqual(packet[4], DeviceBLEProtocol.brightnessSettingID, "brightness fallback uses setting ID 12")
+        let valueBytes = Array(packet[5..<9])
+        let value = Int32(valueBytes[0])
+            | (Int32(valueBytes[1]) << 8)
+            | (Int32(valueBytes[2]) << 16)
+            | (Int32(valueBytes[3]) << 24)
+        assertEqual(value, 65, "brightness fallback includes little-endian percent")
+
+        let reloaded = BLEManager()
+        assertEqual(Int(reloaded.deviceBrightnessPercent), 65, "brightness setting persists for UI display")
+        defaults.removeObject(forKey: "deviceSettings.brightnessPercent")
     }
 
     static func testBLEManagerPersistsNewMapSettings() {

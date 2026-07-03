@@ -18,6 +18,48 @@ struct NavigationWriteEndpoint {
     let write: (Data) -> Void
 }
 
+enum DeviceBLEProtocol {
+    static let serviceUUIDString = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800"
+    static let navigationCharacteristicUUIDString = "2A6E"
+    static let authCharacteristicUUIDString = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002"
+    static let routeGeometryCharacteristicUUIDString = "2A6F"
+    static let gpsPositionCharacteristicUUIDString = "2A72"
+    static let settingsCharacteristicUUIDString = "2A73"
+    static let deviceInformationServiceUUIDString = "180A"
+    static let modelNumberCharacteristicUUIDString = "2A24"
+    static let firmwareRevisionCharacteristicUUIDString = "2A26"
+    static let hardwareRevisionCharacteristicUUIDString = "2A27"
+    static let manufacturerNameCharacteristicUUIDString = "2A29"
+
+    static let routeGeometryFallbackPrefix = "MAPR"
+    static let gpsPositionFallbackPrefix = "GPSP"
+    static let settingsFallbackPrefix = "MSET"
+
+    static let brightnessSettingID: UInt8 = 12
+
+    static var serviceUUID: CBUUID { CBUUID(string: serviceUUIDString) }
+    static var navigationCharacteristicUUID: CBUUID { CBUUID(string: navigationCharacteristicUUIDString) }
+    static var authCharacteristicUUID: CBUUID { CBUUID(string: authCharacteristicUUIDString) }
+    static var routeGeometryCharacteristicUUID: CBUUID { CBUUID(string: routeGeometryCharacteristicUUIDString) }
+    static var gpsPositionCharacteristicUUID: CBUUID { CBUUID(string: gpsPositionCharacteristicUUIDString) }
+    static var settingsCharacteristicUUID: CBUUID { CBUUID(string: settingsCharacteristicUUIDString) }
+    static var deviceInformationServiceUUID: CBUUID { CBUUID(string: deviceInformationServiceUUIDString) }
+    static var modelNumberCharacteristicUUID: CBUUID { CBUUID(string: modelNumberCharacteristicUUIDString) }
+    static var firmwareRevisionCharacteristicUUID: CBUUID { CBUUID(string: firmwareRevisionCharacteristicUUIDString) }
+    static var hardwareRevisionCharacteristicUUID: CBUUID { CBUUID(string: hardwareRevisionCharacteristicUUIDString) }
+    static var manufacturerNameCharacteristicUUID: CBUUID { CBUUID(string: manufacturerNameCharacteristicUUIDString) }
+
+    static func hardwareLabel(model: String?, hardware: String?) -> String {
+        if let model, !model.isEmpty {
+            return model
+        }
+        if let hardware, !hardware.isEmpty {
+            return hardware
+        }
+        return ""
+    }
+}
+
 enum BLEPairingAuthenticator {
     private static let key = SymmetricKey(data: Data("BikeComputer BLE v1 local pairing key".utf8))
 
@@ -117,6 +159,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var isNavigationReady: Bool = false
     @Published var supportsDeviceSettings: Bool = false
     @Published var peripheralName: String = ""
+    @Published var hardwareLabel: String = ""
     @Published var signalStrength: Int = 0
     @Published var centralStateDescription: String = "unknown"
     @Published var trustedPeripheralDescription: String = "none"
@@ -132,6 +175,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapRotationMode: Int = 0 // 0=North Up, 1=Course Up  // 0-3: 0°, 90°, 180°, 270°
     @Published var zoomLevel: Int = 2 // 0-4: 0=super-zoom, 1=closest, 4=farthest
     @Published var tapToSwitchScreens: Bool = false
+    @Published var deviceBrightnessPercent: Double = 100
     
     // Feature Visibility
     @Published var showBuildings: Bool = true
@@ -146,12 +190,17 @@ class BLEManager: NSObject, ObservableObject {
     @Published var showCurrentPosition: Bool = true
     
     // MARK: - BLE UUIDs (matching ESP32)
-    private let serviceUUID = CBUUID(string: "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800")
-    private let characteristicUUID = CBUUID(string: "2A6E")    // Navigation Data Characteristic
-    private let authCharacteristicUUID = CBUUID(string: "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002")
-    private let routeGeometryCharacteristicUUID = CBUUID(string: "2A6F")
-    private let gpsPositionCharacteristicUUID = CBUUID(string: "2A72")
-    private let settingsCharacteristicUUID = CBUUID(string: "2A73")
+    private let serviceUUID = DeviceBLEProtocol.serviceUUID
+    private let characteristicUUID = DeviceBLEProtocol.navigationCharacteristicUUID
+    private let authCharacteristicUUID = DeviceBLEProtocol.authCharacteristicUUID
+    private let routeGeometryCharacteristicUUID = DeviceBLEProtocol.routeGeometryCharacteristicUUID
+    private let gpsPositionCharacteristicUUID = DeviceBLEProtocol.gpsPositionCharacteristicUUID
+    private let settingsCharacteristicUUID = DeviceBLEProtocol.settingsCharacteristicUUID
+    private let deviceInformationServiceUUID = DeviceBLEProtocol.deviceInformationServiceUUID
+    private let modelNumberCharacteristicUUID = DeviceBLEProtocol.modelNumberCharacteristicUUID
+    private let firmwareRevisionCharacteristicUUID = DeviceBLEProtocol.firmwareRevisionCharacteristicUUID
+    private let hardwareRevisionCharacteristicUUID = DeviceBLEProtocol.hardwareRevisionCharacteristicUUID
+    private let manufacturerNameCharacteristicUUID = DeviceBLEProtocol.manufacturerNameCharacteristicUUID
     
     // MARK: - Private Properties
     private var centralManager: CBCentralManager!
@@ -161,6 +210,7 @@ class BLEManager: NSObject, ObservableObject {
     private var routeGeometryCharacteristic: CBCharacteristic?
     private var gpsPositionCharacteristic: CBCharacteristic?
     private var settingsCharacteristic: CBCharacteristic?
+    private var deviceInformation: [CBUUID: String] = [:]
     private var navigationWriteEndpoint: NavigationWriteEndpoint?
     private var navigationWriteQueue = NavigationWriteQueue(maxCount: 16)
     private var isConnecting: Bool = false
@@ -208,6 +258,7 @@ class BLEManager: NSObject, ObservableObject {
         static let resetMapRotationModeToNorthUp = "mapSettings.resetMapRotationModeToNorthUp.v1"
         static let zoomLevel = "mapSettings.zoomLevel"
         static let tapToSwitchScreens = "deviceSettings.tapToSwitchScreens"
+        static let deviceBrightnessPercent = "deviceSettings.brightnessPercent"
         static let showBuildings = "mapSettings.showBuildings"
         static let showGreenSpace = "mapSettings.showGreenSpace"
         static let showPaths = "mapSettings.showPaths"
@@ -250,6 +301,7 @@ class BLEManager: NSObject, ObservableObject {
         }
         zoomLevel = defaults.object(forKey: SettingsKeys.zoomLevel) as? Int ?? 2
         tapToSwitchScreens = defaults.object(forKey: SettingsKeys.tapToSwitchScreens) as? Bool ?? false
+        deviceBrightnessPercent = defaults.object(forKey: SettingsKeys.deviceBrightnessPercent) as? Double ?? 100
         showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
         let legacyNature = defaults.object(forKey: SettingsKeys.legacyShowNature) as? Bool ?? true
         let legacyMinorRoads = defaults.object(forKey: SettingsKeys.legacyShowMinorRoads) as? Bool ?? true
@@ -281,6 +333,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(mapRotationMode, forKey: SettingsKeys.mapRotationMode)
         defaults.set(zoomLevel, forKey: SettingsKeys.zoomLevel)
         defaults.set(tapToSwitchScreens, forKey: SettingsKeys.tapToSwitchScreens)
+        defaults.set(deviceBrightnessPercent, forKey: SettingsKeys.deviceBrightnessPercent)
         defaults.set(showBuildings, forKey: SettingsKeys.showBuildings)
         defaults.set(showGreenSpace, forKey: SettingsKeys.showGreenSpace)
         defaults.set(showPaths, forKey: SettingsKeys.showPaths)
@@ -402,7 +455,7 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
 
-        var fallback = Data("MAPR".utf8)
+        var fallback = Data(DeviceBLEProtocol.routeGeometryFallbackPrefix.utf8)
         fallback.append(data)
         guard fallback.count <= maxLength else {
             log("Cannot send geometry: \(data.count) bytes exceeds write limit \(maxLength)")
@@ -453,7 +506,7 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
 
-        var fallback = Data("GPSP".utf8)
+        var fallback = Data(DeviceBLEProtocol.gpsPositionFallbackPrefix.utf8)
         fallback.append(data)
         guard fallback.count <= peripheral.maximumWriteValueLength(for: .withoutResponse) else {
             log("Cannot send GPS position fallback: write limit exceeded")
@@ -480,7 +533,7 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
 
-        var fallback = Data("MSET".utf8)
+        var fallback = Data(DeviceBLEProtocol.settingsFallbackPrefix.utf8)
         fallback.append(data)
         guard fallback.count <= (navigationWriteEndpoint?.maximumWriteLength ?? 0) else {
             log("Cannot send fallback setting: write limit exceeded")
@@ -849,6 +902,7 @@ class BLEManager: NSObject, ObservableObject {
         sendSetting(id: 6, value: Int32(mapRotationMode))
         sendSetting(id: 7, value: Int32(zoomLevel))
         sendSetting(id: 11, value: tapToSwitchScreens ? 1 : 0)
+        sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(deviceBrightnessPercent))
     }
 
     private func sendOrQueueClientProof(_ proofData: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {
@@ -1037,7 +1091,7 @@ extension BLEManager: CBCentralManagerDelegate {
         resetReconnectionState()
         
         // Discover services
-        peripheral.discoverServices([serviceUUID])
+        peripheral.discoverServices([serviceUUID, deviceInformationServiceUUID])
     }
     
     func centralManager(_ central: CBCentralManager, 
@@ -1052,6 +1106,8 @@ extension BLEManager: CBCentralManagerDelegate {
         isConnected = false
         isConnecting = false
         supportsDeviceSettings = false
+        hardwareLabel = ""
+        deviceInformation.removeAll()
         connectedPeripheral = nil
         navigationCharacteristic = nil
         authCharacteristic = nil
@@ -1155,6 +1211,15 @@ extension BLEManager: CBPeripheralDelegate {
                 log("Discovering all BikeComputer service characteristics")
                 peripheral.discoverCharacteristics(nil, for: service)
             }
+            if service.uuid == deviceInformationServiceUUID {
+                log("Discovering Device Information characteristics")
+                peripheral.discoverCharacteristics([
+                    modelNumberCharacteristicUUID,
+                    firmwareRevisionCharacteristicUUID,
+                    hardwareRevisionCharacteristicUUID,
+                    manufacturerNameCharacteristicUUID
+                ], for: service)
+            }
         }
     }
     
@@ -1170,6 +1235,12 @@ extension BLEManager: CBPeripheralDelegate {
         
         for characteristic in characteristics {
             log("Discovered characteristic: \(characteristic.uuid) props=\(characteristic.properties.debugDescription)")
+
+            if service.uuid == deviceInformationServiceUUID,
+               characteristic.properties.contains(.read) {
+                peripheral.readValue(for: characteristic)
+                continue
+            }
             
             if characteristic.uuid == characteristicUUID {
                 guard characteristic.properties.contains(.writeWithoutResponse) else {
@@ -1271,10 +1342,29 @@ extension BLEManager: CBPeripheralDelegate {
             handleAuthResponse(data, peripheral: peripheral, characteristic: characteristic)
             return
         }
+
+        if [modelNumberCharacteristicUUID,
+            firmwareRevisionCharacteristicUUID,
+            hardwareRevisionCharacteristicUUID,
+            manufacturerNameCharacteristicUUID].contains(characteristic.uuid),
+           let value = String(data: data.trimmedTrailingNullsAndWhitespace, encoding: .utf8),
+           !value.isEmpty {
+            deviceInformation[characteristic.uuid] = value
+            updateHardwareLabel()
+            log("Device information \(characteristic.uuid): \(value)")
+            return
+        }
         
         if let string = String(data: data, encoding: .utf8) {
             log("Received from ESP32: \(string)")
         }
+    }
+
+    private func updateHardwareLabel() {
+        hardwareLabel = DeviceBLEProtocol.hardwareLabel(
+            model: deviceInformation[modelNumberCharacteristicUUID],
+            hardware: deviceInformation[hardwareRevisionCharacteristicUUID]
+        )
     }
     
     func peripheral(_ peripheral: CBPeripheral, 

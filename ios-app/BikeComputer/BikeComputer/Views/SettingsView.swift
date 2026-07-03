@@ -14,21 +14,11 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             Form {
-                Section(header: Text("Connection")) {
-                    HStack {
-                        Text("ESP32")
-                        Spacer()
-                        Text(bleManager.isConnected ? "Connected" : "Disconnected")
-                            .foregroundColor(bleManager.isConnected ? .green : .red)
-                    }
-                    HStack {
-                        Text("Device Settings")
-                        Spacer()
-                        Text(bleManager.supportsDeviceSettings ? "Available" : "Unavailable")
-                            .foregroundColor(bleManager.supportsDeviceSettings ? .green : .secondary)
-                    }
-                }
-                
+                connectionSummary
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 8, trailing: 20))
+
                 Section(header: Text("Map Rendering"), footer: Text("Feature toggles control map categories; polygon size filters tiny filled areas.")) {
                     VStack(alignment: .leading) {
                         HStack {
@@ -185,6 +175,19 @@ struct SettingsView: View {
                 .disabled(!bleManager.supportsDeviceSettings)
                 
                 Section(header: Text("Device")) {
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text("Brightness")
+                            Spacer()
+                            Text("\(Int(bleManager.deviceBrightnessPercent))%")
+                                .foregroundColor(.secondary)
+                        }
+                        Slider(value: $bleManager.deviceBrightnessPercent, in: 5...100, step: 5)
+                            .onChange(of: bleManager.deviceBrightnessPercent) { newValue in
+                                bleManager.sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(newValue))
+                            }
+                    }
+
                     Button(action: {
                         bleManager.sendSetting(id: 5, value: 1) // Reboot command
                     }) {
@@ -256,6 +259,31 @@ struct SettingsView: View {
             .navigationTitle("Map Settings")
             .navigationBarTitleDisplayMode(.inline)
         }
+    }
+
+    private var connectionSummary: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("Bike Computer")
+                .font(.body)
+
+            Spacer()
+
+            Text(connectionStatusText)
+                .font(.subheadline)
+                .foregroundColor(bleManager.isConnected ? .green : .red)
+        }
+    }
+
+    private var connectionStatusText: String {
+        guard bleManager.isConnected else {
+            return "Disconnected"
+        }
+
+        if bleManager.signalStrength != 0 {
+            return "Connected \(bleManager.signalStrength) dBm"
+        }
+
+        return "Connected"
     }
 }
 
