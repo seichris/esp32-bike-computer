@@ -554,6 +554,16 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.printf("BLE Settings: streetLineWidthBoost = %d (saved)\n",
                   mapRenderSettings.streetLineWidthBoost);
     break;
+  case 10:
+    mapRenderSettings.positionMarkerScale =
+        (uint8_t)std::min(std::max(settingValue, (int32_t)1), (int32_t)5);
+    settingsPrefs.begin("mapSettings", false);
+    settingsPrefs.putUChar("markerScale",
+                           mapRenderSettings.positionMarkerScale);
+    settingsPrefs.end();
+    Serial.printf("BLE Settings: positionMarkerScale = %d (saved)\n",
+                  mapRenderSettings.positionMarkerScale);
+    break;
   case 4:
     mapRenderSettings.displayRotation =
         (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)3);
@@ -745,7 +755,8 @@ public:
 /**
  * @brief Settings characteristic callback - receives runtime config from iOS
  * app Format: [settingId:1][value:4] = 5 bytes Setting IDs: 1=minPolygonSize,
- * 2=detailLevel, 3=routeLineWidth, 9=streetLineWidthBoost
+ * 2=detailLevel, 3=routeLineWidth, 9=streetLineWidthBoost,
+ * 10=positionMarkerScale
  */
 class MySettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
@@ -785,6 +796,7 @@ static void loadSettingsFromNVS() {
   mapRenderSettings.detailLevel = prefs.getUChar("detailLevel", 2);
   mapRenderSettings.routeLineWidth = prefs.getUChar("routeWidth", 4);
   mapRenderSettings.streetLineWidthBoost = prefs.getUChar("streetBoost", 0);
+  mapRenderSettings.positionMarkerScale = prefs.getUChar("markerScale", 2);
   mapRenderSettings.displayRotation =
       sanitizeMapDisplayRotation(prefs.getUChar("rotation", 0), "NVS");
   mapRenderSettings.mapRotationMode = prefs.getUChar("mapRotMode", 0);
@@ -794,10 +806,12 @@ static void loadSettingsFromNVS() {
   prefs.end();
 
   Serial.printf("BLE: Loaded settings from NVS - minPolySize=%d, "
-                "detailLevel=%d, routeWidth=%d, streetBoost=%d, rotation=%d\n",
+                "detailLevel=%d, routeWidth=%d, streetBoost=%d, "
+                "markerScale=%d, rotation=%d\n",
                 mapRenderSettings.minPolygonSize, mapRenderSettings.detailLevel,
                 mapRenderSettings.routeLineWidth,
                 mapRenderSettings.streetLineWidthBoost,
+                mapRenderSettings.positionMarkerScale,
                 mapRenderSettings.displayRotation);
 }
 

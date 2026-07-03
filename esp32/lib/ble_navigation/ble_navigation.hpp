@@ -32,13 +32,14 @@ struct NavigationData {
  * @brief Map rendering settings (configurable via BLE from iOS app)
  * Settings IDs: 1=minPolygonSize, 2=detailLevel, 3=routeLineWidth,
  * 4=displayRotation, 6=mapRotationMode, 7=zoomLevel, 8=visibilityMask,
- * 9=streetLineWidthBoost
+ * 9=streetLineWidthBoost, 10=positionMarkerScale
  */
 struct MapRenderSettings {
   uint8_t minPolygonSize = 0; // 0-50: Skip polygons smaller than N pixels²
   uint8_t detailLevel = 2;    // 0=Low, 1=Med, 2=High
   uint8_t routeLineWidth = 4; // 2-48: Route overlay line width in pixels
   uint8_t streetLineWidthBoost = 0; // 0-24: Extra map street width in pixels
+  uint8_t positionMarkerScale = 2;  // 1-5: Current-position arrow scale
   uint8_t displayRotation =
       0; // 0-3: Display rotation (0=0°, 1=90°, 2=180°, 3=270°)
   uint8_t mapRotationMode = 0; // 0=North Up, 1=Course Up

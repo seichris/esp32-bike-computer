@@ -35,6 +35,7 @@ struct MapRenderSettings {
   uint8_t detailLevel;
   uint8_t routeLineWidth;
   uint8_t streetLineWidthBoost;
+  uint8_t positionMarkerScale;
   uint8_t displayRotation;
   uint8_t mapRotationMode;
   uint8_t zoomLevel;
@@ -400,6 +401,23 @@ static void drawNavigationMarker(lv_obj_t *canvas) {
   drawThickMarkerLine(canvas, 10, 42, 24, 4, color, strokeWidth);
 
   lv_obj_invalidate(canvas);
+}
+
+static uint8_t currentMarkerScale() {
+  return (uint8_t)std::min(std::max((int)mapRenderSettings.positionMarkerScale,
+                                    1),
+                           5);
+}
+
+static void applyNavigationMarkerScale(lv_obj_t *canvas) {
+  if (!canvas)
+    return;
+
+  const int32_t scale = currentMarkerScale() * 256;
+  lv_obj_set_style_transform_pivot_x(canvas, 24, 0);
+  lv_obj_set_style_transform_pivot_y(canvas, 24, 0);
+  lv_obj_set_style_transform_scale_x(canvas, scale, 0);
+  lv_obj_set_style_transform_scale_y(canvas, scale, 0);
 }
 
 static int16_t mapAnchorXForWidth(uint16_t width) {
@@ -2107,6 +2125,7 @@ void Maps::createMapScrSprites() {
     lv_canvas_set_buffer(Maps::canvasArrow, bufArrow, 48, 48,
                          LV_COLOR_FORMAT_ARGB8888);
     drawNavigationMarker(Maps::canvasArrow);
+    applyNavigationMarkerScale(Maps::canvasArrow);
   } else {
     ESP_LOGE(TAG, "MapBuff: arrow buffer unavailable; marker disabled");
     Maps::canvasArrow = nullptr;
@@ -2156,6 +2175,7 @@ void Maps::updateArrowColor() {
     return;
 
   drawNavigationMarker(Maps::canvasArrow);
+  applyNavigationMarkerScale(Maps::canvasArrow);
 
   log_i("Arrow marker updated: filled white");
 }
@@ -2285,6 +2305,8 @@ void Maps::displayMap() {
     uint16_t h = mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
     const int16_t anchorX = mapAnchorXForWidth(Maps::mapScrWidth);
     const int16_t anchorY = mapAnchorYForHeight(h);
+    applyNavigationMarkerScale(Maps::canvasArrow);
+    const int16_t markerVisualHalf = 24 * currentMarkerScale();
     int16_t x, y;
 
     if (Maps::followGps) {
@@ -2340,7 +2362,12 @@ void Maps::displayMap() {
       lv_obj_set_pos(Maps::canvasArrow, x, y);
 
       // Simple bounds check to hide if too far off screen
-      if (x < -20 || x > Maps::mapScrWidth + 20 || y < -20 || y > h + 20) {
+      const int16_t centerX = x + 24;
+      const int16_t centerY = y + 24;
+      if (centerX < -markerVisualHalf ||
+          centerX > (int16_t)Maps::mapScrWidth + markerVisualHalf ||
+          centerY < -markerVisualHalf ||
+          centerY > (int16_t)h + markerVisualHalf) {
         lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
         ESP_LOGI(TAG, "GPS indicator hidden: off-screen at (%d,%d)", x, y);
       } else {

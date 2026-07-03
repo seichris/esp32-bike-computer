@@ -71,6 +71,19 @@ struct SettingsView: View {
                                 bleManager.sendSetting(id: 3, value: Int32(newValue))
                         }
                     }
+
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text("Position Arrow Size")
+                            Spacer()
+                            Text("\(Int(bleManager.positionMarkerScale))x")
+                                .foregroundColor(.secondary)
+                        }
+                        Slider(value: $bleManager.positionMarkerScale, in: 1...5, step: 1)
+                            .onChange(of: bleManager.positionMarkerScale) { newValue in
+                                bleManager.sendSetting(id: 10, value: Int32(newValue))
+                        }
+                    }
                 }
                 .disabled(!bleManager.supportsDeviceSettings)
 
