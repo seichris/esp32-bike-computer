@@ -23,6 +23,10 @@ def compile_patterns(*patterns: str) -> tuple[re.Pattern[str], ...]:
 
 
 VENDOR_LINE = r"^(?!.*(?:DisplayRound:|MapLite:|RoundUi:|Diagnostics:|BLE:|SerialSim:))"
+BOARD_IDENTITY_LINE = (
+    r"^(?!\s*(?:#|//|[-*]\s))"
+    r"(?=.*\b(?:USB|connected|detected|mounted|device|board|serial|port)\b)"
+)
 FORBIDDEN_BOARD_RE = re.compile(
     r"\bEspressif\s+USB\s+JTAG/serial\s+debug\s+unit\b|"
     r"\bUSB\s+JTAG/serial\s+debug\s+unit\b|\bESP32[- ]?S3\b|"
@@ -40,8 +44,8 @@ RULES: tuple[EvidenceRule, ...] = (
         "board_identity",
         "XIAO nRF52840 board identity",
         compile_patterns(
-            r"\b(Seeed\s+Studio\s+)?XIAO\b.*\bnRF52840\b",
-            r"\bnRF52840\b.*\b(Seeed\s+Studio\s+)?XIAO\b",
+            BOARD_IDENTITY_LINE + r".*\b(Seeed\s+Studio\s+)?XIAO\b.*\bnRF52840\b",
+            BOARD_IDENTITY_LINE + r".*\bnRF52840\b.*\b(Seeed\s+Studio\s+)?XIAO\b",
             r"\bEVIDENCE\s+board_identity\s*=\s*(pass|ok|true|1)\b",
         ),
     ),

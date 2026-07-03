@@ -47,6 +47,22 @@ class HardwareBringupEvidenceTests(unittest.TestCase):
 
         self.assertIn("board_identity", found)
 
+    def test_board_identity_requires_observed_device_context(self) -> None:
+        lines = [
+            "Implementation plan for the XIAO nRF52840 Round Display target",
+            "- Required hardware: Seeed Studio XIAO nRF52840",
+            "# USB: Seeed Studio XIAO nRF52840 mounted at /dev/cu.usbmodem101",
+        ]
+        found = hardware_bringup_check.find_evidence(lines)
+
+        self.assertNotIn("board_identity", found)
+
+    def test_observed_usb_device_line_satisfies_board_identity(self) -> None:
+        lines = ["USB: Seeed Studio XIAO nRF52840 mounted at /dev/cu.usbmodem101"]
+        found = hardware_bringup_check.find_evidence(lines)
+
+        self.assertIn("board_identity", found)
+
     def test_complete_peripheral_evidence_without_board_identity_fails(self) -> None:
         lines = [
             "EVIDENCE vendor_display=pass",

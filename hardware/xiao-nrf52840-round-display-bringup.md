@@ -117,7 +117,9 @@ EVIDENCE repo_touch_gesture=pass
 
 `--allow-missing` may be used for partial peripheral bench runs, but it cannot
 waive `board_identity`; every passing Milestone 0 log must prove the attached
-board is the XIAO nRF52840.
+board is the XIAO nRF52840. The checker accepts observed USB/device/board lines
+or an explicit `EVIDENCE board_identity=pass` marker added after bench
+verification; planning prose or commented template lines do not count.
 
 Required evidence:
 

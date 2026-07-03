@@ -59,7 +59,9 @@ If the USB or vendor output uses unexpected wording, add
 `EVIDENCE board_identity=pass` only after verifying the connected board. The
 checker rejects logs that still show ESP32-S3 board evidence. Partial bench runs
 may use `--allow-missing` for peripheral checks, but board identity is always
-required.
+required. Use an observed USB/device/board line or an explicit
+`EVIDENCE board_identity=pass` marker after bench verification; planning notes
+and commented template lines do not count.
 
 The bring-up record lives at
 `../hardware/xiao-nrf52840-round-display-bringup.md`.
