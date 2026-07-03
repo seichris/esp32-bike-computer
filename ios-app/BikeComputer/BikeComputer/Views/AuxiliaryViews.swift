@@ -11,54 +11,30 @@ import SwiftUI
 
 struct ConnectionStatusView: View {
     let isConnected: Bool
-    let signalStrength: Int
     let onReconnect: () -> Void
     
     var body: some View {
-        HStack(spacing: 8) {
-            // Status Light
-            Image(systemName: "circle.fill")
-                .font(.caption)
-                .foregroundColor(isConnected ? .green : .red)
-                .shadow(color: isConnected ? .green.opacity(0.5) : .red.opacity(0.5), 
-                       radius: 4)
-            
-            // "BikeComputer" Label
-            Text("BikeComputer")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                    
-            // Signal Info
-            if isConnected && signalStrength != 0 {
-                Text("•")
+        Button(action: onReconnect) {
+            HStack(spacing: 8) {
+                Image(systemName: "circle.fill")
                     .font(.caption)
-                    .foregroundColor(.secondary.opacity(0.5))
-                
-                Image(systemName: SignalIcon.icon(for: signalStrength))
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    
-                Text("\(signalStrength) dBm")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
+                    .foregroundColor(isConnected ? .green : .red)
+                    .shadow(
+                        color: isConnected ? .green.opacity(0.5) : .red.opacity(0.5),
+                        radius: 4
+                    )
 
-            // Reconnect Button (only shown when not connected)
-            if !isConnected {
-                Button(action: onReconnect) {
-                    Label("Reconnect", systemImage: "antenna.radiowaves.left.and.right")
-                        .font(.caption)
-                        .foregroundColor(.blue)
-                }
+                Text("BikeComputer")
+                    .font(.caption)
+                    .foregroundColor(.primary)
+                    .shadow(color: .white.opacity(0.8), radius: 2, x: 0, y: 1)
             }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
         }
-        .padding()
-        .frame(maxWidth: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(.systemGray6))
-        )
-        .padding(.horizontal, 30)
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel(isConnected ? "BikeComputer connected" : "Reconnect BikeComputer")
     }
 }
 
@@ -84,7 +60,9 @@ struct CalculationStatusView: View {
                     .padding(.horizontal)
             }
         }
-        .frame(height: 550)
+        .padding()
+        .frame(maxWidth: .infinity)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 
@@ -130,4 +108,3 @@ enum SignalIcon {
         }
     }
 }
-

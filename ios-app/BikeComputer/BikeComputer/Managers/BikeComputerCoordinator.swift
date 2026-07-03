@@ -28,6 +28,7 @@ class BikeComputerCoordinator: ObservableObject {
     // BLE Connection
     @Published var isConnected: Bool = false
     @Published var peripheralName: String = ""
+    @Published var hardwareLabel: String = ""
     @Published var signalStrength: Int = 0
 
     // Navigation
@@ -38,6 +39,9 @@ class BikeComputerCoordinator: ObservableObject {
     @Published var currentRoute: MKRoute?
     @Published var isSimulationMode: Bool = false
     @Published var simulatedPosition: CLLocationCoordinate2D?
+    @Published var routeRemainingDistance: CLLocationDistance?
+    @Published var routeRemainingTime: TimeInterval?
+    @Published var expectedArrivalDate: Date?
 
     // Workout
     @Published var isWorkoutActive: Bool = false
@@ -87,6 +91,9 @@ class BikeComputerCoordinator: ObservableObject {
         bleManager.$peripheralName
             .assign(to: &$peripheralName)
 
+        bleManager.$hardwareLabel
+            .assign(to: &$hardwareLabel)
+
         bleManager.$signalStrength
             .assign(to: &$signalStrength)
 
@@ -113,6 +120,15 @@ class BikeComputerCoordinator: ObservableObject {
 
         navEngine.$currentIconID
             .assign(to: &$currentIconID)
+
+        navEngine.$routeRemainingDistance
+            .assign(to: &$routeRemainingDistance)
+
+        navEngine.$routeRemainingTime
+            .assign(to: &$routeRemainingTime)
+
+        navEngine.$expectedArrivalDate
+            .assign(to: &$expectedArrivalDate)
 
         // Bind health kit manager state
         healthKitManager.$isAuthorized
