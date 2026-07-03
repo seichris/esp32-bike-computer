@@ -104,14 +104,13 @@ static void processWaveshareBootButton() {
   stablePressed = pressed;
   if (stablePressed) {
     pressStartMs = now;
-    log_i("Waveshare BOOT pressed: cycling main screen");
-    toggleNavigationScreen();
     return;
   }
 
   const uint32_t pressDurationMs = now - pressStartMs;
-  log_i("Waveshare BOOT released after %lu ms",
+  log_i("Waveshare BOOT released after %lu ms; cycling main screen",
         static_cast<unsigned long>(pressDurationMs));
+  toggleNavigationScreen();
 }
 #endif
 extern Gps gps;

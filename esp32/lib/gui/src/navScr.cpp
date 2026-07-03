@@ -67,10 +67,9 @@ void navigationScr(_lv_obj_t *screen) {
   lv_obj_add_flag(lonNav, LV_OBJ_FLAG_HIDDEN);
 
   distNav = lv_label_create(screen);
-  lv_obj_set_style_text_font(distNav, fontVeryLarge, 0);
+  lv_obj_set_style_text_font(distNav, &lv_font_montserrat_48, 0);
   lv_obj_set_style_text_color(distNav, lv_color_white(), 0);
   lv_obj_set_style_text_align(distNav, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_transform_scale(distNav, LV_SCALE_NONE * 2, 0);
   lv_label_set_text_static(distNav, "--");
   lv_obj_set_width(distNav, TFT_WIDTH);
   lv_obj_align(distNav, LV_ALIGN_CENTER, 0, 38);
