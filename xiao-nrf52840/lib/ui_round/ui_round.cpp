@@ -318,10 +318,12 @@ void RoundUi::drawMapGuidancePage(const BLENavigationServer &bleServer,
   const bike_ble::GpsPosition &gps = bleServer.currentGps();
   const BLEDebugStats stats = bleServer.getDebugStats();
   const bool hasGps = gpsLooksValid(gps, stats);
-  const bool hasNavigation =
-      route.loaded || nav.distanceMeters > 0 || nav.instruction[0] != '\0';
+  const bool isNavigating = route.loaded;
+  const bool hasManeuver =
+      isNavigating &&
+      (nav.iconId != 0 || nav.distanceMeters > 0 || nav.instruction[0] != '\0');
   const uint16_t orientationHeading =
-      hasNavigation ? routeHeadingNearGps(route, gps) : 0;
+      isNavigating ? routeHeadingNearGps(route, gps) : 0;
 
   bool mapRendered = false;
   uint16_t routeSegments = 0;
@@ -340,7 +342,7 @@ void RoundUi::drawMapGuidancePage(const BLENavigationServer &bleServer,
         viewport.centerMapMetersX = centerMapMetersX;
         viewport.centerMapMetersY = centerMapMetersY;
         viewport.headingDegrees = orientationHeading;
-        viewport.courseUp = hasNavigation;
+        viewport.courseUp = isNavigating;
         mapRendered =
             mapLite.renderLastProbePreview(*display, frameStartMs, viewport);
       }
@@ -348,11 +350,11 @@ void RoundUi::drawMapGuidancePage(const BLENavigationServer &bleServer,
       mapRendered = mapLite.renderLastProbePreview(*display, frameStartMs);
     }
     routeSegments =
-        drawRoutePreview(route, gps, stats, orientationHeading, hasNavigation,
+        drawRoutePreview(route, gps, stats, orientationHeading, isNavigating,
                          false);
-    display->drawCenteredPositionMarker(hasNavigation);
+    display->drawCenteredPositionMarker(isNavigating);
     display->drawNavigationGuidanceOverlay(nav.iconId, nav.distanceMeters,
-                                           hasNavigation);
+                                           hasManeuver);
     display->endMapFrame(mapRendered ? "guidance-map" : "guidance-preview",
                          millis() - frameStartMs, false);
   }
