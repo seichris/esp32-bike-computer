@@ -184,7 +184,8 @@ void DisplayRound::drawCenteredPositionMarker(bool courseUp) {
 }
 
 void DisplayRound::drawNavigationGuidanceOverlay(uint8_t iconId,
-                                                 uint16_t distanceMeters) {
+                                                 uint16_t distanceMeters,
+                                                 bool active) {
   if (!frameActive) {
     return;
   }
@@ -197,6 +198,17 @@ void DisplayRound::drawNavigationGuidanceOverlay(uint8_t iconId,
   const int16_t panelHeight = height - panelY;
   tft.fillRect(0, panelY, width, panelHeight, GUIDANCE_PANEL_COLOR);
   tft.drawFastHLine(0, panelY, width, GUIDANCE_DIM_COLOR);
+
+  if (!active) {
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(TFT_WHITE, GUIDANCE_PANEL_COLOR);
+    tft.setTextSize(3);
+    tft.drawString("Map", width / 2, panelY + 18);
+    tft.setTextSize(2);
+    tft.setTextColor(GUIDANCE_DIM_COLOR, GUIDANCE_PANEL_COLOR);
+    tft.drawString("Ready", width / 2, panelY + 52);
+    return;
+  }
 
   drawManeuverArrow(iconId, 50, panelY + 45, TFT_WHITE);
 
@@ -219,7 +231,8 @@ void DisplayRound::drawNavigationGuidanceOverlay(uint8_t iconId,
   tft.drawString(unit, 104, panelY + 58);
 }
 
-void DisplayRound::endMapFrame(const char *label, uint32_t elapsedMs) {
+void DisplayRound::endMapFrame(const char *label, uint32_t elapsedMs,
+                               bool keepStatusOverlay) {
   Serial.print("DisplayRound: map frame ");
   Serial.print(label == nullptr ? "preview" : label);
   Serial.print(" lines=");
@@ -227,7 +240,7 @@ void DisplayRound::endMapFrame(const char *label, uint32_t elapsedMs) {
   Serial.print(" elapsed_ms=");
   Serial.println(elapsedMs);
   frameActive = false;
-  statusOverlayPending = true;
+  statusOverlayPending = keepStatusOverlay;
 }
 
 } // namespace xiao_round

@@ -351,9 +351,10 @@ void RoundUi::drawMapGuidancePage(const BLENavigationServer &bleServer,
         drawRoutePreview(route, gps, stats, orientationHeading, hasNavigation,
                          false);
     display->drawCenteredPositionMarker(hasNavigation);
-    display->drawNavigationGuidanceOverlay(nav.iconId, nav.distanceMeters);
+    display->drawNavigationGuidanceOverlay(nav.iconId, nav.distanceMeters,
+                                           hasNavigation);
     display->endMapFrame(mapRendered ? "guidance-map" : "guidance-preview",
-                         millis() - frameStartMs);
+                         millis() - frameStartMs, false);
   }
 
   Serial.print("RoundUi: guidance map=");
