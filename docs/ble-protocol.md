@@ -130,3 +130,37 @@ Folder/block naming follows the OSM extract pipeline:
 - `4096 x 4096` meter blocks
 - `16 x 16` block folders
 - folder name format like `+0032+0008`
+
+## Map Transfer Control
+
+Bulk map packs are transferred over Wi-Fi/HTTP, not BLE. BLE is the control and
+status channel used by the iOS app to ask the device to enter transfer mode and
+to inspect the installed map state.
+
+The authenticated `2A6E` framed command channel should carry these control
+commands:
+
+| Command | Direction | Payload | Meaning |
+| --- | --- | --- | --- |
+| `MTRN` | iOS -> ESP32 | `enter` | Enable short-lived map-transfer mode. |
+| `MTRN` | iOS -> ESP32 | `exit` | Disable map-transfer mode. |
+| `MSTS` | iOS -> ESP32 | empty | Request current map-transfer status. |
+
+Status responses should include:
+
+- `activeMapId`: map id from `/sdcard/VECTMAP/active-map.json`, if present.
+- `installedMapIds`: map ids known to the installer.
+- `freeSdBytes`: available SD-card bytes when known.
+- `transferMode`: whether Wi-Fi/HTTP upload mode is enabled.
+- `lastTransferError`: last installer/upload error code and message.
+- `baseUrl`: temporary HTTP base URL when transfer mode is enabled.
+
+The ESP32 map installer validates staged packs before activation:
+
+- manifest schema version must be `1`.
+- `mapId` and session ids may contain only letters, numbers, `.`, `_`, and `-`.
+- files must live under `VECTMAP/` and end in `.fmb` or `.fmp`.
+- path traversal and absolute paths are rejected.
+- declared byte size and SHA-256 must match the staged file.
+- activation writes `/sdcard/VECTMAP/active-map.json` only after all map files
+  have been published.

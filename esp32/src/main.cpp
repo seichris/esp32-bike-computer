@@ -59,6 +59,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "power.hpp"
 
 #include "maps.hpp"
+#include "map_transfer.hpp"
 
 // BLE Navigation for iOS route overlay
 #include "ble_navigation.hpp"
@@ -408,6 +409,19 @@ void setup() {
     // SD card failed - fall back to internal FFat storage
     Serial.println("SD Card failed, falling back to FFat...");
     storage.initSPIFFS();
+  }
+
+  {
+    map_transfer::MapTransferInstaller mapInstaller("/sdcard");
+    std::string activeMapId;
+    map_transfer::InstallStatus activeStatus =
+        mapInstaller.readActiveMapId(activeMapId);
+    if (activeStatus.ok) {
+      Serial.printf("MAP_TRANSFER: activeMapId=%s\n", activeMapId.c_str());
+    } else {
+      Serial.printf("MAP_TRANSFER: activeMap unavailable code=%s message=%s\n",
+                    activeStatus.code.c_str(), activeStatus.message.c_str());
+    }
   }
 
   createGpxFolders();
