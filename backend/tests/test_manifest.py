@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from map_platform.manifest import PipelineMetadata, build_manifest, stable_map_id, validate_pack_path, write_pack_archive
@@ -50,8 +51,14 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(len(manifest["files"]), 2)
             self.assertTrue(archive.exists())
             self.assertGreater(archive.stat().st_size, 0)
+            with zipfile.ZipFile(archive) as zip_archive:
+                compress_types = {info.filename: info.compress_type for info in zip_archive.infolist()}
+            self.assertEqual(compress_types["manifest.json"], zipfile.ZIP_STORED)
+            self.assertEqual(
+                compress_types[f"VECTMAP/{map_id}/+0032+0008/123_456.fmb"],
+                zipfile.ZIP_STORED,
+            )
 
 
 if __name__ == "__main__":
     unittest.main()
-

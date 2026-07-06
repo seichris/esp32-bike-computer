@@ -28,6 +28,8 @@ final class OfflineMapManager: ObservableObject {
     }
     @Published private(set) var currentJob: OfflineMapJob?
     @Published private(set) var downloadURL: URL?
+    @Published private(set) var downloadedPackURL: URL?
+    @Published private(set) var transferProgress: Double = 0
     @Published private(set) var isBusy = false
     @Published private(set) var statusMessage = ""
     @Published private(set) var errorMessage: String?
@@ -56,6 +58,8 @@ final class OfflineMapManager: ObservableObject {
                 let request = try self.makeCustomBBoxRequest()
                 self.currentJob = try await client.createJob(request)
                 self.downloadURL = nil
+                self.downloadedPackURL = nil
+                self.transferProgress = 0
                 self.statusMessage = self.currentJob?.status ?? ""
             }
         }
@@ -70,6 +74,8 @@ final class OfflineMapManager: ObservableObject {
                 self.statusMessage = self.currentJob?.status ?? ""
                 if self.currentJob?.mapId == nil {
                     self.downloadURL = nil
+                    self.downloadedPackURL = nil
+                    self.transferProgress = 0
                 }
             }
         }
@@ -85,6 +91,61 @@ final class OfflineMapManager: ObservableObject {
                 let client = try self.makeClient()
                 self.downloadURL = try await client.downloadURL(mapId: mapId)
                 self.statusMessage = "download ready"
+            }
+        }
+    }
+
+    func downloadPack() {
+        Task {
+            await runBusy {
+                let mapId = try self.readyMapId()
+                let url: URL
+                if let downloadURL = self.downloadURL {
+                    url = downloadURL
+                } else {
+                    let client = try self.makeClient()
+                    url = try await client.downloadURL(mapId: mapId)
+                    self.downloadURL = url
+                }
+
+                let (temporaryURL, _) = try await URLSession.shared.download(from: url)
+                let destination = try self.cachedPackURL(mapId: mapId)
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    try FileManager.default.removeItem(at: destination)
+                }
+                try FileManager.default.moveItem(at: temporaryURL, to: destination)
+                self.downloadedPackURL = destination
+                self.transferProgress = 0
+                self.statusMessage = "pack downloaded"
+            }
+        }
+    }
+
+    func transferDownloadedPack(bleManager: BLEManager) {
+        Task {
+            await runBusy {
+                let packURL: URL
+                if let downloadedPackURL = self.downloadedPackURL {
+                    packURL = downloadedPackURL
+                } else {
+                    throw OfflineMapPlatformError.missingDownloadURL
+                }
+
+                let baseURL = try await self.enableDeviceTransferMode(bleManager: bleManager)
+                let archive = try OfflineMapPackArchive(url: packURL)
+                let sessionId = UUID().uuidString.lowercased()
+                let client = MapTransferDeviceClient(baseURL: baseURL)
+                self.transferProgress = 0
+                self.statusMessage = "uploading to device"
+                try await client.upload(archive: archive, sessionId: sessionId) { completed, total, path in
+                    self.transferProgress = total == 0 ? 0 : Double(completed) / Double(total)
+                    self.statusMessage = "uploaded \(completed)/\(total): \(path)"
+                }
+                self.statusMessage = "activating map"
+                try await client.activate(sessionId: sessionId)
+                self.transferProgress = 1
+                self.statusMessage = "map installed"
+                bleManager.requestMapTransferStatus()
             }
         }
     }
@@ -107,6 +168,43 @@ final class OfflineMapManager: ObservableObject {
             throw OfflineMapPlatformError.invalidBaseURL
         }
         return OfflineMapPlatformClient(baseURL: url, apiToken: apiToken)
+    }
+
+    private func readyMapId() throws -> String {
+        guard let mapId = currentJob?.mapId else {
+            throw OfflineMapPlatformError.missingMapId
+        }
+        return mapId
+    }
+
+    private func cachedPackURL(mapId: String) throws -> URL {
+        let directory = try FileManager.default.url(
+            for: .cachesDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ).appendingPathComponent("OfflineMapPacks", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("\(mapId).zip")
+    }
+
+    private func enableDeviceTransferMode(bleManager: BLEManager) async throws -> URL {
+        guard bleManager.isNavigationReady else {
+            throw OfflineMapPlatformError.missingTransferBaseURL
+        }
+
+        bleManager.requestMapTransferMode(enabled: true)
+        bleManager.requestMapTransferStatus()
+        for attempt in 0..<32 {
+            if bleManager.mapTransferModeEnabled, let baseURL = bleManager.mapTransferBaseURL {
+                return baseURL
+            }
+            if attempt % 4 == 3 {
+                bleManager.requestMapTransferStatus()
+            }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        throw OfflineMapPlatformError.missingTransferBaseURL
     }
 
     private func runBusy(_ operation: @MainActor @escaping () async throws -> Void) async {

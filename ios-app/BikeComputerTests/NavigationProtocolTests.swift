@@ -33,6 +33,39 @@ func readInt32LE(_ data: Data, offset: Int) -> Int32 {
     Int32(bitPattern: readUInt32LE(data, offset: offset))
 }
 
+func appendUInt16LE(_ value: UInt16, to data: inout Data) {
+    data.append(UInt8(value & 0xFF))
+    data.append(UInt8((value >> 8) & 0xFF))
+}
+
+func appendUInt32LE(_ value: UInt32, to data: inout Data) {
+    data.append(UInt8(value & 0xFF))
+    data.append(UInt8((value >> 8) & 0xFF))
+    data.append(UInt8((value >> 16) & 0xFF))
+    data.append(UInt8((value >> 24) & 0xFF))
+}
+
+func makeStoredZip(entries: [(String, Data)]) -> Data {
+    var zip = Data()
+    for (path, body) in entries {
+        let name = Data(path.utf8)
+        appendUInt32LE(0x0403_4B50, to: &zip)
+        appendUInt16LE(20, to: &zip)
+        appendUInt16LE(0, to: &zip)
+        appendUInt16LE(0, to: &zip)
+        appendUInt16LE(0, to: &zip)
+        appendUInt16LE(0, to: &zip)
+        appendUInt32LE(0, to: &zip)
+        appendUInt32LE(UInt32(body.count), to: &zip)
+        appendUInt32LE(UInt32(body.count), to: &zip)
+        appendUInt16LE(UInt16(name.count), to: &zip)
+        appendUInt16LE(0, to: &zip)
+        zip.append(name)
+        zip.append(body)
+    }
+    return zip
+}
+
 func assertCoordinate(
     _ actual: CLLocationCoordinate2D,
     latitude expectedLatitude: CLLocationDegrees,
@@ -150,6 +183,8 @@ struct NavigationProtocolTests {
         testOfflineMapCustomBBoxRequest()
         testOfflineMapCreateJobURLRequest()
         testOfflineMapPolygonClosesRing()
+        testOfflineMapStoredZipReader()
+        testMapTransferUploadURLEncodesPlusPathComponents()
         print("NavigationProtocolTests passed")
     }
 
@@ -329,6 +364,44 @@ struct NavigationProtocolTests {
             return
         }
         assertEqual(rings[0].first, rings[0].last, "custom polygon closes outer ring")
+    }
+
+    static func testOfflineMapStoredZipReader() {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("offline-map-test-\(UUID().uuidString).zip")
+        let manifest = Data("{\"schemaVersion\":1}".utf8)
+        let block = Data("map-block".utf8)
+        let zip = makeStoredZip(entries: [
+            ("manifest.json", manifest),
+            ("ATTRIBUTION.txt", Data("OpenStreetMap".utf8)),
+            ("VECTMAP/map-1/+0032+0008/123_456.fmb", block)
+        ])
+        try? zip.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        guard let archive = try? OfflineMapPackArchive(url: url) else {
+            assert(false, "stored zip archive should parse")
+            return
+        }
+
+        assertEqual(archive.mapFileEntries.count, 1, "zip reader exposes VECTMAP file entries")
+        assertEqual(archive.manifestEntry?.path, "manifest.json", "zip reader exposes manifest entry")
+        assertEqual(try? archive.data(for: archive.mapFileEntries[0]), block, "zip reader reads entry data")
+    }
+
+    static func testMapTransferUploadURLEncodesPlusPathComponents() {
+        let baseURL = URL(string: "http://192.168.4.20:8080")!
+        let url = MapTransferDeviceClient.uploadURL(
+            baseURL: baseURL,
+            sessionId: "session-1",
+            relativePath: "VECTMAP/map-1/+0032+0008/123_456.fmb"
+        )
+
+        assertEqual(
+            url.absoluteString,
+            "http://192.168.4.20:8080/map-transfer/sessions/session-1/VECTMAP/map-1/%2B0032%2B0008/123_456.fmb",
+            "upload URL percent-encodes plus signs so firmware does not decode them as spaces"
+        )
     }
 
     static func testNavigationPacketBuilder() {

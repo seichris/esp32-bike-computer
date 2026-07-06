@@ -8,6 +8,7 @@
 import SwiftUI
 
 struct OfflineMapsView: View {
+    @EnvironmentObject private var bleManager: BLEManager
     @StateObject private var manager = OfflineMapManager()
 
     var body: some View {
@@ -71,6 +72,39 @@ struct OfflineMapsView: View {
                     Text(downloadURL.absoluteString)
                         .font(.caption)
                         .textSelection(.enabled)
+
+                    Button(action: manager.downloadPack) {
+                        Label("Download Pack", systemImage: "square.and.arrow.down")
+                    }
+                    .disabled(manager.isBusy)
+                }
+            }
+
+            Section(header: Text("Device Transfer")) {
+                OfflineMapValueRow(
+                    title: "BLE",
+                    value: bleManager.isNavigationReady ? "Ready" : "Not Ready"
+                )
+                OfflineMapValueRow(
+                    title: "Transfer",
+                    value: bleManager.mapTransferStatusDescription
+                )
+                if let localURL = manager.downloadedPackURL {
+                    OfflineMapValueRow(title: "Pack", value: localURL.lastPathComponent)
+                }
+
+                Button(action: { bleManager.requestMapTransferMode(enabled: true) }) {
+                    Label("Enable Transfer Mode", systemImage: "wifi")
+                }
+                .disabled(!bleManager.isNavigationReady)
+
+                Button(action: { manager.transferDownloadedPack(bleManager: bleManager) }) {
+                    Label("Upload to Device", systemImage: "sdcard")
+                }
+                .disabled(manager.isBusy || !bleManager.isNavigationReady || manager.downloadedPackURL == nil)
+
+                if manager.transferProgress > 0 && manager.transferProgress < 1 {
+                    ProgressView(value: manager.transferProgress)
                 }
             }
 
@@ -111,5 +145,6 @@ private struct OfflineMapValueRow: View {
 #Preview {
     NavigationView {
         OfflineMapsView()
+            .environmentObject(BLEManager())
     }
 }

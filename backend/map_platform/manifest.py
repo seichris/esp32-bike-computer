@@ -105,7 +105,7 @@ def write_pack_archive(map_root: Path, manifest: dict[str, Any], archive_path: P
         "OpenStreetMap data is licensed under the Open Data Commons Open Database License (ODbL).\n"
     )
 
-    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
         for path in sorted(map_root.rglob("*")):
             if path.is_file():
                 archive.write(path, path.relative_to(map_root).as_posix())

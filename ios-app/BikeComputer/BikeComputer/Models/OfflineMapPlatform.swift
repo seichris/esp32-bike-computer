@@ -163,6 +163,10 @@ struct OfflineMapDownloadURL: Decodable, Equatable {
 enum OfflineMapPlatformError: LocalizedError {
     case invalidBaseURL
     case missingMapId
+    case missingDownloadURL
+    case missingTransferBaseURL
+    case invalidPack(String)
+    case unsupportedPackCompression(String)
     case invalidResponse
     case serverStatus(Int, String)
 
@@ -172,11 +176,231 @@ enum OfflineMapPlatformError: LocalizedError {
             return "Invalid map server URL"
         case .missingMapId:
             return "Map pack is not ready"
+        case .missingDownloadURL:
+            return "Download URL is not ready"
+        case .missingTransferBaseURL:
+            return "Device map transfer mode is not ready"
+        case .invalidPack(let message):
+            return "Invalid map pack: \(message)"
+        case .unsupportedPackCompression(let path):
+            return "Map pack entry is compressed and cannot be transferred: \(path)"
         case .invalidResponse:
             return "Map server returned an invalid response"
         case .serverStatus(let status, let body):
             return "Map server returned \(status): \(body)"
         }
+    }
+}
+
+struct OfflineMapPackEntry: Equatable {
+    let path: String
+    let offset: UInt64
+    let byteCount: Int
+}
+
+struct OfflineMapPackArchive {
+    let url: URL
+    let entries: [OfflineMapPackEntry]
+
+    var manifestEntry: OfflineMapPackEntry? {
+        entries.first { $0.path == "manifest.json" }
+    }
+
+    var mapFileEntries: [OfflineMapPackEntry] {
+        entries.filter { $0.path.hasPrefix("VECTMAP/") }
+    }
+
+    init(url: URL) throws {
+        self.url = url
+        self.entries = try Self.readEntries(url: url)
+        guard manifestEntry != nil else {
+            throw OfflineMapPlatformError.invalidPack("manifest.json is missing")
+        }
+        guard !mapFileEntries.isEmpty else {
+            throw OfflineMapPlatformError.invalidPack("no VECTMAP files found")
+        }
+    }
+
+    func data(for entry: OfflineMapPackEntry) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: entry.offset)
+        let data = try handle.read(upToCount: entry.byteCount) ?? Data()
+        guard data.count == entry.byteCount else {
+            throw OfflineMapPlatformError.invalidPack("truncated entry \(entry.path)")
+        }
+        return data
+    }
+
+    private static func readEntries(url: URL) throws -> [OfflineMapPackEntry] {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        guard let fileSize = (attributes[.size] as? NSNumber)?.uint64Value else {
+            throw OfflineMapPlatformError.invalidPack("file size unavailable")
+        }
+
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var offset: UInt64 = 0
+        var entries: [OfflineMapPackEntry] = []
+
+        while offset + 4 <= fileSize {
+            try handle.seek(toOffset: offset)
+            let signatureData = try handle.read(upToCount: 4) ?? Data()
+            guard signatureData.count == 4 else { break }
+            let signature = signatureData.uint32LE(at: 0)
+            if signature == 0x0201_4B50 || signature == 0x0605_4B50 {
+                break
+            }
+            guard signature == 0x0403_4B50 else {
+                throw OfflineMapPlatformError.invalidPack("unexpected zip header")
+            }
+
+            let header = try handle.read(upToCount: 26) ?? Data()
+            guard header.count == 26 else {
+                throw OfflineMapPlatformError.invalidPack("truncated local header")
+            }
+
+            let flags = header.uint16LE(at: 2)
+            let compression = header.uint16LE(at: 4)
+            let compressedSize = UInt64(header.uint32LE(at: 14))
+            let uncompressedSize = UInt64(header.uint32LE(at: 18))
+            let nameLength = Int(header.uint16LE(at: 22))
+            let extraLength = UInt64(header.uint16LE(at: 24))
+
+            guard flags & 0x0008 == 0 else {
+                throw OfflineMapPlatformError.invalidPack("zip data descriptors are unsupported")
+            }
+            guard compression == 0 else {
+                let nameData = try handle.read(upToCount: nameLength) ?? Data()
+                let path = String(data: nameData, encoding: .utf8) ?? "unknown"
+                throw OfflineMapPlatformError.unsupportedPackCompression(path)
+            }
+            guard compressedSize == uncompressedSize,
+                  compressedSize <= UInt64(Int.max) else {
+                throw OfflineMapPlatformError.invalidPack("entry size is invalid")
+            }
+
+            let nameData = try handle.read(upToCount: nameLength) ?? Data()
+            guard nameData.count == nameLength,
+                  let path = String(data: nameData, encoding: .utf8) else {
+                throw OfflineMapPlatformError.invalidPack("entry name is invalid")
+            }
+            guard isSafePackPath(path) else {
+                throw OfflineMapPlatformError.invalidPack("unsafe entry path \(path)")
+            }
+
+            let dataOffset = offset + 30 + UInt64(nameLength) + extraLength
+            guard dataOffset + compressedSize <= fileSize else {
+                throw OfflineMapPlatformError.invalidPack("entry extends past end of file")
+            }
+
+            if !path.hasSuffix("/") {
+                entries.append(OfflineMapPackEntry(
+                    path: path,
+                    offset: dataOffset,
+                    byteCount: Int(compressedSize)
+                ))
+            }
+            offset = dataOffset + compressedSize
+        }
+
+        return entries
+    }
+
+    private static func isSafePackPath(_ path: String) -> Bool {
+        guard !path.isEmpty,
+              !path.hasPrefix("/"),
+              !path.contains("\\"),
+              !path.contains("//"),
+              !path.contains("..") else {
+            return false
+        }
+        if path == "manifest.json" ||
+            path == "ATTRIBUTION.txt" ||
+            path.hasPrefix("LICENSES/") {
+            return true
+        }
+        guard path.hasPrefix("VECTMAP/") else {
+            return false
+        }
+        return path.split(separator: "/").allSatisfy { part in
+            !part.isEmpty && part != "." && part != ".." && !part.hasPrefix(".")
+        }
+    }
+}
+
+struct MapTransferDeviceClient {
+    let baseURL: URL
+    var session: URLSession = .shared
+
+    @MainActor
+    func upload(
+        archive: OfflineMapPackArchive,
+        sessionId: String,
+        progress: @escaping (_ completed: Int, _ total: Int, _ path: String) -> Void
+    ) async throws {
+        guard let manifest = archive.manifestEntry else {
+            throw OfflineMapPlatformError.invalidPack("manifest.json is missing")
+        }
+
+        let uploadEntries = [manifest] + archive.mapFileEntries.sorted { $0.path < $1.path }
+        for (index, entry) in uploadEntries.enumerated() {
+            let data = try archive.data(for: entry)
+            try await put(sessionId: sessionId, path: entry.path, data: data)
+            progress(index + 1, uploadEntries.count, entry.path)
+        }
+    }
+
+    func activate(sessionId: String) async throws {
+        var request = URLRequest(url: Self.uploadURL(
+            baseURL: baseURL,
+            sessionId: sessionId,
+            relativePath: "activate"
+        ))
+        request.httpMethod = "POST"
+        _ = try await send(request: request, data: nil)
+    }
+
+    private func put(sessionId: String, path: String, data: Data) async throws {
+        var request = URLRequest(url: Self.uploadURL(
+            baseURL: baseURL,
+            sessionId: sessionId,
+            relativePath: path
+        ))
+        request.httpMethod = "PUT"
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        _ = try await send(request: request, data: data)
+    }
+
+    private func send(request: URLRequest, data: Data?) async throws -> Data {
+        let response: (Data, URLResponse)
+        if let data {
+            response = try await session.upload(for: request, from: data)
+        } else {
+            response = try await session.data(for: request)
+        }
+        guard let http = response.1 as? HTTPURLResponse else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        guard 200..<300 ~= http.statusCode else {
+            let bodyText = String(data: response.0, encoding: .utf8) ?? ""
+            throw OfflineMapPlatformError.serverStatus(http.statusCode, bodyText)
+        }
+        return response.0
+    }
+
+    nonisolated static func uploadURL(baseURL: URL, sessionId: String, relativePath: String) -> URL {
+        let base = baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let encodedSegments = (["map-transfer", "sessions", sessionId] + relativePath.split(separator: "/").map(String.init))
+            .map(percentEncodedPathComponent)
+            .joined(separator: "/")
+        return URL(string: "\(base)/\(encodedSegments)")!
+    }
+
+    private nonisolated static func percentEncodedPathComponent(_ value: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/+?#")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 }
 
@@ -269,6 +493,19 @@ struct OfflineMapPlatformClient {
             throw OfflineMapPlatformError.invalidResponse
         }
         return url
+    }
+}
+
+private extension Data {
+    func uint16LE(at offset: Int) -> UInt16 {
+        UInt16(self[offset]) | (UInt16(self[offset + 1]) << 8)
+    }
+
+    func uint32LE(at offset: Int) -> UInt32 {
+        UInt32(self[offset]) |
+            (UInt32(self[offset + 1]) << 8) |
+            (UInt32(self[offset + 2]) << 16) |
+            (UInt32(self[offset + 3]) << 24)
     }
 }
 
