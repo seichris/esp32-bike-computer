@@ -34,6 +34,8 @@ enum DeviceBLEProtocol {
     static let routeGeometryFallbackPrefix = "MAPR"
     static let gpsPositionFallbackPrefix = "GPSP"
     static let settingsFallbackPrefix = "MSET"
+    static let mapTransferControlPrefix = "MTRN"
+    static let mapTransferStatusPrefix = "MSTS"
 
     static let brightnessSettingID: UInt8 = 12
     static let enabledScreensSettingID: UInt8 = 13
@@ -210,6 +212,11 @@ class BLEManager: NSObject, ObservableObject {
     @Published var centralStateDescription: String = "unknown"
     @Published var trustedPeripheralDescription: String = "none"
     @Published var debugEvents: [String] = []
+    @Published var mapTransferModeEnabled: Bool = false
+    @Published var mapTransferBaseURL: URL?
+    @Published var mapTransferActiveMapId: String = ""
+    @Published var mapTransferLastError: String?
+    @Published var mapTransferStatusDescription: String = "unknown"
     
     // MARK: - Map Settings (persisted for UI display)
     @Published var minPolygonSize: Double = 0
@@ -677,6 +684,18 @@ class BLEManager: NSObject, ObservableObject {
                     value: Int32(defaultDeviceScreen.rawValue))
     }
 
+    @discardableResult
+    func requestMapTransferMode(enabled: Bool) -> Bool {
+        var packet = Data(DeviceBLEProtocol.mapTransferControlPrefix.utf8)
+        packet.append(Data((enabled ? "enter" : "exit").utf8))
+        return sendFallbackMapPacket(packet, label: enabled ? "map transfer enter" : "map transfer exit")
+    }
+
+    @discardableResult
+    func requestMapTransferStatus() -> Bool {
+        sendFallbackMapPacket(Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8), label: "map transfer status")
+    }
+
     func sendDebugNavigationPacket() {
         let packet = "\(NavigationIconID.left)|123|Debug turn left"
         guard sendNavigationData(packet) else {
@@ -749,6 +768,10 @@ class BLEManager: NSObject, ObservableObject {
         settingsCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
+        mapTransferModeEnabled = false
+        mapTransferBaseURL = nil
+        mapTransferLastError = nil
+        mapTransferStatusDescription = "unknown"
         pendingAuthNonce = nil
         authWriteState = .idle
         navigationWriteQueue.removeAll()
@@ -1073,16 +1096,18 @@ class BLEManager: NSObject, ObservableObject {
         scheduleNavigationFlushRetryIfNeeded()
     }
 
-    private func sendFallbackMapPacket(_ data: Data, label: String) {
+    @discardableResult
+    private func sendFallbackMapPacket(_ data: Data, label: String) -> Bool {
         guard let endpoint = navigationWriteEndpoint,
               isConnected,
               isNavigationReady else {
             log("Cannot send fallback \(label): navigation endpoint not ready")
-            return
+            return false
         }
 
         enqueueNavigationWrite(data, endpoint: endpoint, label: "fallback \(label)")
         log("Queued fallback \(label): \(data.count) bytes")
+        return true
     }
 
     private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
@@ -1236,6 +1261,10 @@ extension BLEManager: CBCentralManagerDelegate {
         settingsCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
+        mapTransferModeEnabled = false
+        mapTransferBaseURL = nil
+        mapTransferLastError = nil
+        mapTransferStatusDescription = "unknown"
         pendingAuthNonce = nil
         authWriteState = .idle
         navigationWriteQueue.removeAll()
@@ -1369,6 +1398,9 @@ extension BLEManager: CBPeripheralDelegate {
                 }
 
                 navigationCharacteristic = characteristic
+                if characteristic.properties.contains(.notify) {
+                    peripheral.setNotifyValue(true, for: characteristic)
+                }
                 beginAuthenticationIfReady(for: peripheral, source: "navigation characteristic")
                 scheduleAuthenticationRetry(for: peripheral)
             }
@@ -1463,6 +1495,11 @@ extension BLEManager: CBPeripheralDelegate {
             return
         }
 
+        if characteristic.uuid == characteristicUUID,
+           handleMapTransferStatusNotification(data) {
+            return
+        }
+
         if [modelNumberCharacteristicUUID,
             firmwareRevisionCharacteristicUUID,
             hardwareRevisionCharacteristicUUID,
@@ -1485,6 +1522,51 @@ extension BLEManager: CBPeripheralDelegate {
             model: deviceInformation[modelNumberCharacteristicUUID],
             hardware: deviceInformation[hardwareRevisionCharacteristicUUID]
         )
+    }
+
+    @discardableResult
+    func handleMapTransferStatusNotification(_ data: Data) -> Bool {
+        guard data.count >= 4,
+              String(data: data.prefix(4), encoding: .utf8) == DeviceBLEProtocol.mapTransferStatusPrefix else {
+            return false
+        }
+
+        let body = data.dropFirst(4)
+        guard let object = try? JSONSerialization.jsonObject(with: Data(body)) as? [String: Any] else {
+            mapTransferStatusDescription = "invalid status"
+            log("Received invalid map transfer status payload")
+            return true
+        }
+
+        mapTransferModeEnabled = object["enabled"] as? Bool ?? false
+        if let baseURLString = object["baseUrl"] as? String {
+            mapTransferBaseURL = URL(string: baseURLString)
+        } else {
+            mapTransferBaseURL = nil
+        }
+        mapTransferActiveMapId = object["activeMapId"] as? String ?? ""
+
+        if let lastError = object["lastError"] as? [String: Any] {
+            let code = lastError["code"] as? String ?? "error"
+            let message = lastError["message"] as? String ?? ""
+            mapTransferLastError = message.isEmpty ? code : "\(code): \(message)"
+        } else if let activeError = object["activeError"] as? [String: Any],
+                  (activeError["code"] as? String) != "active_missing" {
+            let code = activeError["code"] as? String ?? "active_error"
+            let message = activeError["message"] as? String ?? ""
+            mapTransferLastError = message.isEmpty ? code : "\(code): \(message)"
+        } else {
+            mapTransferLastError = nil
+        }
+
+        if mapTransferModeEnabled, let mapTransferBaseURL {
+            mapTransferStatusDescription = mapTransferBaseURL.absoluteString
+        } else {
+            mapTransferStatusDescription = "transfer mode disabled"
+        }
+
+        log("Map transfer status: \(mapTransferStatusDescription)")
+        return true
     }
     
     func peripheral(_ peripheral: CBPeripheral, 

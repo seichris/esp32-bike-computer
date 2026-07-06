@@ -136,6 +136,8 @@ struct NavigationProtocolTests {
         testBLEPairingAuthenticator()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
+        testBLEManagerSendsMapTransferControlFrames()
+        testBLEManagerParsesMapTransferStatus()
         testBLEManagerSendsBrightnessFallbackSetting()
         testBLEManagerSendsDeviceScreenSettings()
         testBLEManagerPersistsNewMapSettings()
@@ -397,6 +399,8 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.routeGeometryFallbackPrefix, "MAPR", "route fallback remains framed over navigation writes")
         assertEqual(DeviceBLEProtocol.gpsPositionFallbackPrefix, "GPSP", "GPS fallback remains framed over navigation writes")
         assertEqual(DeviceBLEProtocol.settingsFallbackPrefix, "MSET", "settings fallback remains framed over navigation writes")
+        assertEqual(DeviceBLEProtocol.mapTransferControlPrefix, "MTRN", "map transfer control remains framed over navigation writes")
+        assertEqual(DeviceBLEProtocol.mapTransferStatusPrefix, "MSTS", "map transfer status remains framed over navigation notifications")
         assertEqual(DeviceBLEProtocol.brightnessSettingID, 12, "brightness uses firmware setting ID 12")
         assertEqual(DeviceBLEProtocol.enabledScreensSettingID, 13, "enabled screens use firmware setting ID 13")
         assertEqual(DeviceBLEProtocol.defaultScreenSettingID, 14, "default screen uses firmware setting ID 14")
@@ -503,6 +507,42 @@ struct NavigationProtocolTests {
             | (Int32(valueBytes[2]) << 16)
             | (Int32(valueBytes[3]) << 24)
         assertEqual(value, 7, "fallback settings packet includes little-endian value")
+    }
+
+    static func testBLEManagerSendsMapTransferControlFrames() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        assert(manager.requestMapTransferMode(enabled: true), "map transfer enter should queue when BLE is ready")
+        assert(manager.requestMapTransferStatus(), "map transfer status should queue when BLE is ready")
+        assert(manager.requestMapTransferMode(enabled: false), "map transfer exit should queue when BLE is ready")
+
+        assertEqual(sentPackets.count, 3, "map transfer control should write three packets")
+        assertEqual(String(data: sentPackets[0], encoding: .utf8), "MTRNenter", "enter command uses MTRN frame")
+        assertEqual(String(data: sentPackets[1], encoding: .utf8), "MSTS", "status command uses MSTS frame")
+        assertEqual(String(data: sentPackets[2], encoding: .utf8), "MTRNexit", "exit command uses MTRN frame")
+    }
+
+    static func testBLEManagerParsesMapTransferStatus() {
+        let manager = BLEManager()
+        let json = """
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","activeMapId":"kyoto-v1","lastError":{"code":"previous","message":"previous upload failed"}}
+        """
+        let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)
+
+        assert(manager.handleMapTransferStatusNotification(packet), "MSTS notification should be consumed")
+        assert(manager.mapTransferModeEnabled, "status parser exposes enabled transfer mode")
+        assertEqual(manager.mapTransferBaseURL?.absoluteString, "http://192.168.4.20:8080", "status parser exposes base URL")
+        assertEqual(manager.mapTransferActiveMapId, "kyoto-v1", "status parser exposes active map id")
+        assertEqual(manager.mapTransferLastError, "previous: previous upload failed", "status parser exposes last transfer error")
     }
 
     static func testBLEManagerSendsBrightnessFallbackSetting() {

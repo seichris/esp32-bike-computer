@@ -137,23 +137,22 @@ Bulk map packs are transferred over Wi-Fi/HTTP, not BLE. BLE is the control and
 status channel used by the iOS app to ask the device to enter transfer mode and
 to inspect the installed map state.
 
-The authenticated `2A6E` framed command channel should carry these control
-commands:
+The authenticated `2A6E` framed command channel carries these control commands:
 
 | Command | Direction | Payload | Meaning |
 | --- | --- | --- | --- |
 | `MTRN` | iOS -> ESP32 | `enter` | Enable short-lived map-transfer mode. |
 | `MTRN` | iOS -> ESP32 | `exit` | Disable map-transfer mode. |
 | `MSTS` | iOS -> ESP32 | empty | Request current map-transfer status. |
+| `MSTS` | ESP32 -> iOS | UTF-8 JSON | Current map-transfer status notification. |
 
 Status responses should include:
 
 - `activeMapId`: map id from `/sdcard/VECTMAP/active-map.json`, if present.
-- `installedMapIds`: map ids known to the installer.
-- `freeSdBytes`: available SD-card bytes when known.
-- `transferMode`: whether Wi-Fi/HTTP upload mode is enabled.
-- `lastTransferError`: last installer/upload error code and message.
+- `enabled`: whether Wi-Fi/HTTP upload mode is enabled.
 - `baseUrl`: temporary HTTP base URL when transfer mode is enabled.
+- `lastError`: last installer/upload error code and message, when present.
+- `activeError`: active-map metadata error, when no active map is installed.
 
 The ESP32 map installer validates staged packs before activation:
 
