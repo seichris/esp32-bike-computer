@@ -30,6 +30,7 @@ jobs:
         run: |
           swiftc \
             BikeComputer/BikeComputer/Models/AppModels.swift \
+            BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift \
             BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
             BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
             BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \

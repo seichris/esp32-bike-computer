@@ -220,6 +220,14 @@ struct SettingsView: View {
                     .disabled(!bleManager.isConnected || !bleManager.supportsDeviceSettings)
                 }
 
+                Section(header: Text("Offline Maps")) {
+                    NavigationLink {
+                        OfflineMapsView()
+                    } label: {
+                        Label("Map Packs", systemImage: "map")
+                    }
+                }
+
                 Section(header: Text("BLE Debug")) {
                     HStack {
                         Text("Central")

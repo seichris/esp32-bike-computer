@@ -145,6 +145,9 @@ struct NavigationProtocolTests {
         testNavigationEngineClearsRouteGeometryOnStop()
         testNavigationEngineClearsRouteGeometryWhenReadyAndIdle()
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
+        testOfflineMapCustomBBoxRequest()
+        testOfflineMapCreateJobURLRequest()
+        testOfflineMapPolygonClosesRing()
         print("NavigationProtocolTests passed")
     }
 
@@ -275,6 +278,55 @@ struct NavigationProtocolTests {
         let invalidData = DeviceGPSPacketBuilder.data(lat: 0, lon: 0, unixTime: 0)
         assertEqual(readUInt16LE(invalidData, offset: 14), DeviceGPSPacketBuilder.invalidSpeedCmps, "missing speed uses invalid sentinel")
         assertEqual(readUInt32LE(invalidData, offset: 26), DeviceGPSPacketBuilder.invalidRouteRemainingMeters, "missing route remaining uses invalid sentinel")
+    }
+
+    static func testOfflineMapCustomBBoxRequest() {
+        let bounds = OfflineMapBounds(
+            center: CLLocationCoordinate2D(latitude: 35.0, longitude: 136.0),
+            sideLengthKm: 22.264
+        )
+        let request = OfflineMapJobRequest.customBBox(bounds)
+        assertEqual(request.mode, "custom_bbox", "custom cut-out uses backend bbox mode")
+        assert(request.bbox != nil, "custom cut-out includes bbox")
+        assert(abs((request.bbox?[1] ?? 0) - 34.9) < 0.001, "bbox min latitude uses requested size")
+        assert(abs((request.bbox?[3] ?? 0) - 35.1) < 0.001, "bbox max latitude uses requested size")
+    }
+
+    static func testOfflineMapCreateJobURLRequest() {
+        let request = OfflineMapJobRequest.customBBox(
+            OfflineMapBounds(minLon: 10, minLat: 20, maxLon: 11, maxLat: 21)
+        )
+        guard let url = URL(string: "https://maps.example.com/api") else {
+            assert(false, "base URL should parse")
+            return
+        }
+        guard let urlRequest = try? OfflineMapPlatformClient.makeCreateJobURLRequest(
+            baseURL: url,
+            apiToken: "secret",
+            jobRequest: request
+        ) else {
+            assert(false, "create job URL request should build")
+            return
+        }
+        assertEqual(urlRequest.url?.absoluteString, "https://maps.example.com/api/v1/map-jobs", "create job URL appends API path")
+        assertEqual(urlRequest.value(forHTTPHeaderField: "Authorization"), "Bearer secret", "create job request includes bearer token")
+        let body = String(data: urlRequest.httpBody ?? Data(), encoding: .utf8) ?? ""
+        assert(body.contains("\"mode\":\"custom_bbox\""), "create job body includes mode")
+        assert(body.contains("\"bbox\":[10,20,11,21]"), "create job body includes bbox")
+    }
+
+    static func testOfflineMapPolygonClosesRing() {
+        let request = OfflineMapJobRequest.customPolygon(ring: [
+            CLLocationCoordinate2D(latitude: 1, longitude: 2),
+            CLLocationCoordinate2D(latitude: 1, longitude: 3),
+            CLLocationCoordinate2D(latitude: 2, longitude: 3),
+            CLLocationCoordinate2D(latitude: 2, longitude: 2)
+        ])
+        guard case .polygon(let rings)? = request.geometry?.coordinates else {
+            assert(false, "custom polygon should encode polygon coordinates")
+            return
+        }
+        assertEqual(rings[0].first, rings[0].last, "custom polygon closes outer ring")
     }
 
     static func testNavigationPacketBuilder() {
