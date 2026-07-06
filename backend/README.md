@@ -57,7 +57,7 @@ into that cache.
 
 ## Coolify
 
-Use `backend/compose.coolify.yml` as the first Coolify deployment shape. The
+Use `backend/docker-compose.yml` as the first Coolify deployment shape. The
 service stores mutable state in the `map-platform-data` volume. The host needs
 enough CPU, RAM, and temporary disk for the largest allowed PBF cut-out.
 
