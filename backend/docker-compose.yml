@@ -12,8 +12,8 @@ services:
       MAP_PLATFORM_MAX_ACTIVE_JOBS: ${MAP_PLATFORM_MAX_ACTIVE_JOBS:-25}
     volumes:
       - map-platform-data:/data
-    ports:
-      - "8080:8080"
+    expose:
+      - "8080"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
       interval: 30s
