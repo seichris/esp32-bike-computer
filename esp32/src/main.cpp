@@ -60,6 +60,7 @@ extern xSemaphoreHandle gpsMutex;
 
 #include "maps.hpp"
 #include "map_transfer.hpp"
+#include "map_transfer_http.hpp"
 
 // BLE Navigation for iOS route overlay
 #include "ble_navigation.hpp"
@@ -79,6 +80,7 @@ extern Storage storage;
 extern Battery battery;
 extern Power power;
 extern Maps mapView;
+map_transfer::MapTransferHttpServer mapTransferHttp;
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 static void processWaveshareBootButton() {
@@ -423,6 +425,7 @@ void setup() {
                     activeStatus.code.c_str(), activeStatus.message.c_str());
     }
   }
+  mapTransferHttp.configure("/sdcard");
 
   createGpxFolders();
 
@@ -543,4 +546,6 @@ void loop() {
     }
   }
 #endif
+
+  mapTransferHttp.process();
 }

@@ -164,3 +164,16 @@ The ESP32 map installer validates staged packs before activation:
 - declared byte size and SHA-256 must match the staged file.
 - activation writes `/sdcard/VECTMAP/active-map.json` only after all map files
   have been published.
+
+When transfer mode is enabled, the ESP32 exposes a short-lived HTTP service for
+bulk upload:
+
+| Method | Path | Meaning |
+| --- | --- | --- |
+| `GET` | `/map-transfer/status` | Read transfer status and active map metadata. |
+| `PUT` | `/map-transfer/sessions/{sessionId}/manifest.json` | Upload the map pack manifest. |
+| `PUT` | `/map-transfer/sessions/{sessionId}/VECTMAP/{mapId}/{folder}/{file}` | Upload one `.fmb` or `.fmp` file. |
+| `POST` | `/map-transfer/sessions/{sessionId}/activate` | Validate and atomically activate the staged map. |
+
+The HTTP service is configured by firmware at boot but remains disabled until
+BLE transfer control enables it for an authenticated app session.
