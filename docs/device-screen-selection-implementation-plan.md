@@ -10,7 +10,7 @@ Current device screens on `main`:
 - Map
 - Navigation instruction
 - Ride stats
-- Map guidance
+- Map + Navigation
 
 The firmware should still be usable without iOS configuration. If no setting has
 been received, the current behavior should remain equivalent to enabling all
@@ -41,8 +41,8 @@ Add setting IDs:
 
 | ID | Meaning | Range |
 | --- | --- | --- |
-| `12` | Enabled main screens mask | bit 0 Map, bit 1 Navigation, bit 2 Ride Stats, bit 3 Map Guidance |
-| `13` | Default main screen | `0` Map, `1` Navigation, `2` Ride Stats, `3` Map Guidance |
+| `12` | Enabled main screens mask | bit 0 Map, bit 1 Navigation, bit 2 Ride Stats, bit 3 Map + Navigation |
+| `13` | Default main screen | `0` Map, `1` Navigation, `2` Ride Stats, `3` Map + Navigation |
 
 Do not use the firmware `tileName` enum values directly in the BLE protocol.
 That enum has legacy values and may change for internal compatibility. Define a
@@ -66,11 +66,13 @@ enum DeviceScreenSetting : uint8_t {
   DEVICE_SCREEN_MAP = 0,
   DEVICE_SCREEN_NAVIGATION = 1,
   DEVICE_SCREEN_RIDE_STATS = 2,
-  DEVICE_SCREEN_MAP_GUIDANCE = 3,
+  DEVICE_SCREEN_MAP_PLUS_NAVIGATION = 3,
 };
 ```
 
-Add helpers to translate from this protocol enum to `tileName`.
+Add helpers to translate from this protocol enum to `tileName`. The current
+firmware tile may still be named `MAP_GUIDANCE`; keep that internal name if it
+reduces churn, but expose the user-facing label as Map + Navigation.
 
 ### 2. Extend Persisted Settings
 
@@ -137,22 +139,23 @@ calls the same `showMainTile(defaultTile)` path used by runtime cycling.
 Be careful with map sprite creation:
 
 - The map canvas is parented to `mapTile`.
-- Map-backed screens are Map and Map Guidance.
+- Map-backed screens are Map and Map + Navigation.
 - If the default is Navigation or Ride Stats, the map canvas can still exist but
   the visible tile should be the configured default.
 
-### 6. Preserve Map Guidance Semantics
+### 6. Preserve Map + Navigation Semantics
 
-The Map Guidance screen must keep its current invariants:
+The Map + Navigation screen must keep its current invariants:
 
 - Dragging disabled.
 - `followGps` forced true.
 - North-up when no route is loaded.
 - Course-up when route geometry exists.
-- Bottom navigation overlay visible only in Map Guidance mode.
+- Bottom navigation overlay visible only in Map + Navigation mode.
 
 Enabled-screen cycling must not bypass those entry actions; it should call
-`showMainTile(MAP_GUIDANCE)` rather than mutating `activeTile` directly.
+the mapped `showMainTile(...)` target rather than mutating `activeTile`
+directly.
 
 ## iOS Plan
 
@@ -166,7 +169,7 @@ enum DeviceScreen: Int, CaseIterable, Identifiable {
     case map = 0
     case navigation = 1
     case rideStats = 2
-    case mapGuidance = 3
+    case mapPlusNavigation = 3
 }
 ```
 
@@ -230,7 +233,7 @@ Add a `Device Screens` section near the existing Screen Navigation section:
   - Map
   - Navigation
   - Ride Stats
-  - Map Guidance
+  - Map + Navigation
 - Picker:
   - Default Screen
 
@@ -254,7 +257,7 @@ Use concise names:
 - `Map`
 - `Navigation`
 - `Ride Stats`
-- `Map Guidance`
+- `Map + Navigation`
 
 Avoid explaining the screens inline. The surrounding settings page already uses
 short operational labels.
@@ -309,12 +312,13 @@ With a paired device:
 
 1. Enable all screens, set default Map, reboot device. Verify Map appears.
 2. Disable Navigation, cycle screens. Verify Navigation is skipped.
-3. Enable only Map Guidance, cycle screens. Verify it stays on Map Guidance.
+3. Enable only Map + Navigation, cycle screens. Verify it stays on
+   Map + Navigation.
 4. Set default Ride Stats, reboot. Verify Ride Stats appears.
 5. Disable current default. Verify app selects a new default and device remains
    on a valid screen.
-6. Start and stop navigation while Map Guidance is enabled. Verify stale turn
-   instructions do not remain after route clear.
+6. Start and stop navigation while Map + Navigation is enabled. Verify stale
+   turn instructions do not remain after route clear.
 
 ## Rollout Notes
 
