@@ -83,3 +83,5 @@ void showNextMainScreen();
 
 void createMainScr();
 void toggleNavigationScreen();
+void showConfiguredDefaultMainScreen();
+void applyDeviceScreenSettings();

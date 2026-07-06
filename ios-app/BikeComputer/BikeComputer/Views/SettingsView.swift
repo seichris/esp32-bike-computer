@@ -124,6 +124,26 @@ struct SettingsView: View {
                         }
                 }
                 .disabled(!bleManager.supportsDeviceSettings)
+
+                Section(header: Text("Device Screens")) {
+                    ForEach(DeviceScreen.allCases) { screen in
+                        Toggle(screen.title, isOn: Binding(
+                            get: { bleManager.isDeviceScreenEnabled(screen) },
+                            set: { bleManager.setDeviceScreen(screen, enabled: $0) }
+                        ))
+                        .disabled(bleManager.isOnlyEnabledDeviceScreen(screen))
+                    }
+
+                    Picker("Default Screen", selection: $bleManager.defaultDeviceScreen) {
+                        ForEach(bleManager.enabledDeviceScreens) { screen in
+                            Text(screen.title).tag(screen)
+                        }
+                    }
+                    .onChange(of: bleManager.defaultDeviceScreen) { _ in
+                        bleManager.sendDefaultDeviceScreen()
+                    }
+                }
+                .disabled(!bleManager.supportsDeviceSettings)
                 
                 Section(header: Text("Zoom Level"), footer: Text("0 = Super Zoom, 5 = Farthest")) {
                     Picker("Zoom", selection: $bleManager.zoomLevel) {

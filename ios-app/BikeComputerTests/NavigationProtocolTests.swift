@@ -131,11 +131,13 @@ struct NavigationProtocolTests {
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
         testDeviceBLEProtocolConstants()
+        testDeviceScreenValidation()
         testHardwareLabelPreference()
         testBLEPairingAuthenticator()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsBrightnessFallbackSetting()
+        testBLEManagerSendsDeviceScreenSettings()
         testBLEManagerPersistsNewMapSettings()
         testNavigationSendTrackerReadinessRetry()
         testNavigationEngineResendsWhenBLEBecomesReady()
@@ -344,6 +346,29 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.gpsPositionFallbackPrefix, "GPSP", "GPS fallback remains framed over navigation writes")
         assertEqual(DeviceBLEProtocol.settingsFallbackPrefix, "MSET", "settings fallback remains framed over navigation writes")
         assertEqual(DeviceBLEProtocol.brightnessSettingID, 12, "brightness uses firmware setting ID 12")
+        assertEqual(DeviceBLEProtocol.enabledScreensSettingID, 13, "enabled screens use firmware setting ID 13")
+        assertEqual(DeviceBLEProtocol.defaultScreenSettingID, 14, "default screen uses firmware setting ID 14")
+        assertEqual(DeviceScreen.map.rawValue, 0, "Map screen protocol value stays stable")
+        assertEqual(DeviceScreen.navigation.rawValue, 1, "Navigation screen protocol value stays stable")
+        assertEqual(DeviceScreen.rideStats.rawValue, 2, "Ride Stats screen protocol value stays stable")
+        assertEqual(DeviceScreen.mapPlusNavigation.rawValue, 3, "Map + Navigation screen protocol value stays stable")
+        assertEqual(DeviceScreen.mapPlusNavigation.title, "Map + Navigation", "combined map/navigation screen keeps user-facing label")
+        assertEqual(DeviceScreen.allScreensMask, 0x0F, "all supported device screens use the low four mask bits")
+    }
+
+    static func testDeviceScreenValidation() {
+        assertEqual(DeviceScreen.normalizedMask(0), DeviceScreen.allScreensMask, "zero screen mask falls back to all screens")
+        assertEqual(DeviceScreen.normalizedMask(0xFF), DeviceScreen.allScreensMask, "unknown screen mask bits are ignored")
+
+        let rideStatsOnly = DeviceScreen.rideStats.bit
+        assertEqual(DeviceScreen.fallbackDefault(for: DeviceScreen.mapPlusNavigation.rawValue, mask: rideStatsOnly),
+                    .rideStats,
+                    "disabled default falls back to the first enabled non-map screen")
+
+        let mapAndStats = DeviceScreen.map.bit | DeviceScreen.rideStats.bit
+        assertEqual(DeviceScreen.fallbackDefault(for: DeviceScreen.navigation.rawValue, mask: mapAndStats),
+                    .map,
+                    "disabled default prefers Map when Map is enabled")
     }
 
     static func testHardwareLabelPreference() {
@@ -462,19 +487,59 @@ struct NavigationProtocolTests {
         defaults.removeObject(forKey: "deviceSettings.brightnessPercent")
     }
 
+    static func testBLEManagerSendsDeviceScreenSettings() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.enabledDeviceScreensMask = DeviceScreen.map.bit | DeviceScreen.mapPlusNavigation.bit
+        manager.defaultDeviceScreen = .mapPlusNavigation
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        manager.sendEnabledDeviceScreensMask()
+        manager.sendDefaultDeviceScreen()
+
+        assertEqual(sentPackets.count, 2, "device screen settings should send mask and default packets")
+        assertEqual(String(data: sentPackets[0].prefix(4), encoding: .utf8), DeviceBLEProtocol.settingsFallbackPrefix, "screen mask fallback uses MSET prefix")
+        assertEqual(sentPackets[0][4], DeviceBLEProtocol.enabledScreensSettingID, "screen mask uses setting ID 13")
+        assertEqual(readInt32LE(sentPackets[0], offset: 5),
+                    Int32(DeviceScreen.map.bit | DeviceScreen.mapPlusNavigation.bit),
+                    "screen mask fallback includes little-endian mask")
+        assertEqual(sentPackets[1][4], DeviceBLEProtocol.defaultScreenSettingID, "default screen uses setting ID 14")
+        assertEqual(readInt32LE(sentPackets[1], offset: 5),
+                    Int32(DeviceScreen.mapPlusNavigation.rawValue),
+                    "default screen fallback includes little-endian screen value")
+    }
+
     static func testBLEManagerPersistsNewMapSettings() {
         let defaults = UserDefaults.standard
-        let keys = ["mapSettings.mapRotationMode", "mapSettings.zoomLevel"]
+        let keys = [
+            "mapSettings.mapRotationMode",
+            "mapSettings.zoomLevel",
+            "deviceSettings.enabledScreensMask",
+            "deviceSettings.defaultScreen"
+        ]
         keys.forEach { defaults.removeObject(forKey: $0) }
 
         let manager = BLEManager()
         manager.mapRotationMode = 1
         manager.zoomLevel = 5
+        manager.enabledDeviceScreensMask = DeviceScreen.navigation.bit | DeviceScreen.mapPlusNavigation.bit
+        manager.defaultDeviceScreen = .mapPlusNavigation
         manager.saveSettings()
 
         let reloaded = BLEManager()
         assertEqual(reloaded.mapRotationMode, 1, "map rotation mode should persist across BLEManager reloads")
         assertEqual(reloaded.zoomLevel, 5, "zoom level should persist across BLEManager reloads")
+        assertEqual(reloaded.enabledDeviceScreensMask,
+                    DeviceScreen.navigation.bit | DeviceScreen.mapPlusNavigation.bit,
+                    "enabled device screens should persist across BLEManager reloads")
+        assertEqual(reloaded.defaultDeviceScreen, .mapPlusNavigation, "default device screen should persist across BLEManager reloads")
 
         keys.forEach { defaults.removeObject(forKey: $0) }
     }
