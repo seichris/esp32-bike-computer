@@ -41,8 +41,11 @@ Add setting IDs:
 
 | ID | Meaning | Range |
 | --- | --- | --- |
-| `12` | Enabled main screens mask | bit 0 Map, bit 1 Navigation, bit 2 Ride Stats, bit 3 Map + Navigation |
-| `13` | Default main screen | `0` Map, `1` Navigation, `2` Ride Stats, `3` Map + Navigation |
+| `13` | Enabled main screens mask | bit 0 Map, bit 1 Navigation, bit 2 Ride Stats, bit 3 Map + Navigation |
+| `14` | Default main screen | `0` Map, `1` Navigation, `2` Ride Stats, `3` Map + Navigation |
+
+Setting ID `12` is already used by device brightness in the iOS app, so screen
+selection starts at `13`.
 
 Do not use the firmware `tileName` enum values directly in the BLE protocol.
 That enum has legacy values and may change for internal compatibility. Define a
@@ -95,13 +98,13 @@ When loading:
 - Clamp or validate `defaultScreen`.
 - If default is not enabled, choose a fallback.
 
-### 3. Handle Setting IDs 12 and 13
+### 3. Handle Setting IDs 13 and 14
 
 Extend `applyMapSetting`:
 
-- ID `12`: update `enabledScreensMask`, persist, and if the active screen is no
+- ID `13`: update `enabledScreensMask`, persist, and if the active screen is no
   longer enabled, switch to the configured fallback.
-- ID `13`: update `defaultScreen`, persist after validation, and optionally
+- ID `14`: update `defaultScreen`, persist after validation, and optionally
   switch immediately only if product wants live preview. Initial implementation
   should persist only and leave the current active screen unchanged.
 
@@ -123,7 +126,7 @@ Use these helpers from:
 
 - `showNextMainScreen()`
 - `toggleNavigationScreen()`
-- setting ID `12` live active-screen correction
+- setting ID `13` live active-screen correction
 - startup/default screen selection
 
 Keep existing behavior for unsupported screens like `COMPASS` and `SATTRACK`.
@@ -218,8 +221,8 @@ func sendDefaultDeviceScreen()
 These should call:
 
 ```swift
-sendSetting(id: 12, value: Int32(mask))
-sendSetting(id: 13, value: Int32(defaultScreen.rawValue))
+sendSetting(id: 13, value: Int32(mask))
+sendSetting(id: 14, value: Int32(defaultScreen.rawValue))
 ```
 
 Because `sendSetting` already saves settings and handles unsupported BLE state,
@@ -266,7 +269,7 @@ short operational labels.
 
 Update `docs/ble-protocol.md`:
 
-- Add setting IDs `12` and `13`.
+- Add setting IDs `13` and `14`.
 - Document bit mapping and stable screen enum.
 - State that firmware falls back to Map or first enabled screen if settings are
   invalid.
@@ -302,7 +305,7 @@ Extend `NavigationProtocolTests` or add focused BLEManager settings tests:
 - default screen persists across reloads.
 - disabling default changes default to first enabled screen.
 - last enabled screen cannot produce a zero mask.
-- setting IDs `12` and `13` are sent with expected values.
+- setting IDs `13` and `14` are sent with expected values.
 
 Run the existing iOS test command used by CI.
 
@@ -322,7 +325,7 @@ With a paired device:
 
 ## Rollout Notes
 
-- Old firmware will ignore setting IDs `12` and `13`; the iOS app should still
+- Old firmware will ignore setting IDs `13` and `14`; the iOS app should still
   save them locally.
 - New firmware with old iOS defaults to all screens and Map startup.
 - Keep the stable BLE screen enum separate from `tileName` to avoid protocol

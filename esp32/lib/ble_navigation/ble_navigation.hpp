@@ -32,8 +32,20 @@ struct NavigationData {
  * @brief Map rendering settings (configurable via BLE from iOS app)
  * Settings IDs: 1=minPolygonSize, 2=detailLevel, 3=routeLineWidth,
  * 4=displayRotation, 6=mapRotationMode, 7=zoomLevel, 8=visibilityMask,
- * 9=streetLineWidthBoost, 10=positionMarkerScale, 11=tapToSwitchScreens
+ * 9=streetLineWidthBoost, 10=positionMarkerScale, 11=tapToSwitchScreens,
+ * 13=enabledScreensMask, 14=defaultScreen
  */
+enum DeviceScreenSetting : uint8_t {
+  DEVICE_SCREEN_MAP = 0,
+  DEVICE_SCREEN_NAVIGATION = 1,
+  DEVICE_SCREEN_RIDE_STATS = 2,
+  DEVICE_SCREEN_MAP_PLUS_NAVIGATION = 3,
+};
+
+static constexpr uint8_t DEVICE_SCREEN_SUPPORTED_MASK =
+    (1 << DEVICE_SCREEN_MAP) | (1 << DEVICE_SCREEN_NAVIGATION) |
+    (1 << DEVICE_SCREEN_RIDE_STATS) | (1 << DEVICE_SCREEN_MAP_PLUS_NAVIGATION);
+
 struct MapRenderSettings {
   uint8_t minPolygonSize = 0; // 0-50: Skip polygons smaller than N pixels²
   uint8_t detailLevel = 2;    // 0=Low, 1=Med, 2=High
@@ -45,6 +57,9 @@ struct MapRenderSettings {
   uint8_t mapRotationMode = 0; // 0=North Up, 1=Course Up
   uint8_t zoomLevel = 2;       // 0-5: Zoom level (0=super, 2=default)
   uint8_t tapToSwitchScreens = 0; // 0=off, 1=short tap cycles main screens
+  uint8_t enabledScreensMask =
+      DEVICE_SCREEN_SUPPORTED_MASK; // Bits follow DeviceScreenSetting
+  uint8_t defaultScreen = DEVICE_SCREEN_MAP; // DeviceScreenSetting value
   uint32_t visibilityMask =
       0xFFFFFFFF; // Bits: 0 buildings, 1 green, 2 paths, 3 major roads,
                   // 4 local streets, 5 water, 6 rail, 7 other areas,

@@ -36,6 +36,8 @@ enum DeviceBLEProtocol {
     static let settingsFallbackPrefix = "MSET"
 
     static let brightnessSettingID: UInt8 = 12
+    static let enabledScreensSettingID: UInt8 = 13
+    static let defaultScreenSettingID: UInt8 = 14
 
     static var serviceUUID: CBUUID { CBUUID(string: serviceUUIDString) }
     static var navigationCharacteristicUUID: CBUUID { CBUUID(string: navigationCharacteristicUUIDString) }
@@ -57,6 +59,50 @@ enum DeviceBLEProtocol {
             return hardware
         }
         return ""
+    }
+}
+
+enum DeviceScreen: Int, CaseIterable, Identifiable {
+    case map = 0
+    case navigation = 1
+    case rideStats = 2
+    case mapPlusNavigation = 3
+
+    var id: Int { rawValue }
+    var bit: Int { 1 << rawValue }
+
+    var title: String {
+        switch self {
+        case .map:
+            return "Map"
+        case .navigation:
+            return "Navigation"
+        case .rideStats:
+            return "Ride Stats"
+        case .mapPlusNavigation:
+            return "Map + Navigation"
+        }
+    }
+
+    static var allScreensMask: Int {
+        allCases.reduce(0) { $0 | $1.bit }
+    }
+
+    static func normalizedMask(_ rawMask: Int) -> Int {
+        let mask = rawMask & allScreensMask
+        return mask == 0 ? allScreensMask : mask
+    }
+
+    static func fallbackDefault(for rawDefault: Int, mask rawMask: Int) -> DeviceScreen {
+        let mask = normalizedMask(rawMask)
+        let candidate = DeviceScreen(rawValue: rawDefault) ?? .map
+        if mask & candidate.bit != 0 {
+            return candidate
+        }
+        if mask & DeviceScreen.map.bit != 0 {
+            return .map
+        }
+        return allCases.first { mask & $0.bit != 0 } ?? .map
     }
 }
 
@@ -175,6 +221,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapRotationMode: Int = 0 // 0=North Up, 1=Course Up  // 0-3: 0°, 90°, 180°, 270°
     @Published var zoomLevel: Int = 2 // 0-4: 0=super-zoom, 1=closest, 4=farthest
     @Published var tapToSwitchScreens: Bool = false
+    @Published var enabledDeviceScreensMask: Int = DeviceScreen.allScreensMask
+    @Published var defaultDeviceScreen: DeviceScreen = .map
     @Published var deviceBrightnessPercent: Double = 100
     
     // Feature Visibility
@@ -258,6 +306,8 @@ class BLEManager: NSObject, ObservableObject {
         static let resetMapRotationModeToNorthUp = "mapSettings.resetMapRotationModeToNorthUp.v1"
         static let zoomLevel = "mapSettings.zoomLevel"
         static let tapToSwitchScreens = "deviceSettings.tapToSwitchScreens"
+        static let enabledDeviceScreensMask = "deviceSettings.enabledScreensMask"
+        static let defaultDeviceScreen = "deviceSettings.defaultScreen"
         static let deviceBrightnessPercent = "deviceSettings.brightnessPercent"
         static let showBuildings = "mapSettings.showBuildings"
         static let showGreenSpace = "mapSettings.showGreenSpace"
@@ -301,6 +351,13 @@ class BLEManager: NSObject, ObservableObject {
         }
         zoomLevel = defaults.object(forKey: SettingsKeys.zoomLevel) as? Int ?? 2
         tapToSwitchScreens = defaults.object(forKey: SettingsKeys.tapToSwitchScreens) as? Bool ?? false
+        enabledDeviceScreensMask = DeviceScreen.normalizedMask(
+            defaults.object(forKey: SettingsKeys.enabledDeviceScreensMask) as? Int ?? DeviceScreen.allScreensMask
+        )
+        defaultDeviceScreen = DeviceScreen.fallbackDefault(
+            for: defaults.object(forKey: SettingsKeys.defaultDeviceScreen) as? Int ?? DeviceScreen.map.rawValue,
+            mask: enabledDeviceScreensMask
+        )
         deviceBrightnessPercent = defaults.object(forKey: SettingsKeys.deviceBrightnessPercent) as? Double ?? 100
         showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
         let legacyNature = defaults.object(forKey: SettingsKeys.legacyShowNature) as? Bool ?? true
@@ -333,6 +390,13 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(mapRotationMode, forKey: SettingsKeys.mapRotationMode)
         defaults.set(zoomLevel, forKey: SettingsKeys.zoomLevel)
         defaults.set(tapToSwitchScreens, forKey: SettingsKeys.tapToSwitchScreens)
+        enabledDeviceScreensMask = DeviceScreen.normalizedMask(enabledDeviceScreensMask)
+        defaultDeviceScreen = DeviceScreen.fallbackDefault(
+            for: defaultDeviceScreen.rawValue,
+            mask: enabledDeviceScreensMask
+        )
+        defaults.set(enabledDeviceScreensMask, forKey: SettingsKeys.enabledDeviceScreensMask)
+        defaults.set(defaultDeviceScreen.rawValue, forKey: SettingsKeys.defaultDeviceScreen)
         defaults.set(deviceBrightnessPercent, forKey: SettingsKeys.deviceBrightnessPercent)
         defaults.set(showBuildings, forKey: SettingsKeys.showBuildings)
         defaults.set(showGreenSpace, forKey: SettingsKeys.showGreenSpace)
@@ -557,6 +621,60 @@ class BLEManager: NSObject, ObservableObject {
         if showCurrentPosition { mask |= (1 << 9) }
         
         sendSetting(id: 8, value: mask)
+    }
+
+    func isDeviceScreenEnabled(_ screen: DeviceScreen) -> Bool {
+        DeviceScreen.normalizedMask(enabledDeviceScreensMask) & screen.bit != 0
+    }
+
+    func isOnlyEnabledDeviceScreen(_ screen: DeviceScreen) -> Bool {
+        guard isDeviceScreenEnabled(screen) else { return false }
+        return DeviceScreen.allCases.filter { isDeviceScreenEnabled($0) }.count == 1
+    }
+
+    func setDeviceScreen(_ screen: DeviceScreen, enabled: Bool) {
+        var mask = DeviceScreen.normalizedMask(enabledDeviceScreensMask)
+        if enabled {
+            mask |= screen.bit
+        } else {
+            let candidateMask = mask & ~screen.bit
+            guard candidateMask != 0 else { return }
+            mask = candidateMask
+        }
+
+        let oldDefault = defaultDeviceScreen
+        enabledDeviceScreensMask = DeviceScreen.normalizedMask(mask)
+        defaultDeviceScreen = DeviceScreen.fallbackDefault(
+            for: defaultDeviceScreen.rawValue,
+            mask: enabledDeviceScreensMask
+        )
+        sendEnabledDeviceScreensMask()
+        if defaultDeviceScreen != oldDefault {
+            sendDefaultDeviceScreen()
+        }
+    }
+
+    var enabledDeviceScreens: [DeviceScreen] {
+        DeviceScreen.allCases.filter { isDeviceScreenEnabled($0) }
+    }
+
+    func sendEnabledDeviceScreensMask() {
+        enabledDeviceScreensMask = DeviceScreen.normalizedMask(enabledDeviceScreensMask)
+        defaultDeviceScreen = DeviceScreen.fallbackDefault(
+            for: defaultDeviceScreen.rawValue,
+            mask: enabledDeviceScreensMask
+        )
+        sendSetting(id: DeviceBLEProtocol.enabledScreensSettingID,
+                    value: Int32(enabledDeviceScreensMask))
+    }
+
+    func sendDefaultDeviceScreen() {
+        defaultDeviceScreen = DeviceScreen.fallbackDefault(
+            for: defaultDeviceScreen.rawValue,
+            mask: enabledDeviceScreensMask
+        )
+        sendSetting(id: DeviceBLEProtocol.defaultScreenSettingID,
+                    value: Int32(defaultDeviceScreen.rawValue))
     }
 
     func sendDebugNavigationPacket() {
@@ -902,6 +1020,8 @@ class BLEManager: NSObject, ObservableObject {
         sendSetting(id: 6, value: Int32(mapRotationMode))
         sendSetting(id: 7, value: Int32(zoomLevel))
         sendSetting(id: 11, value: tapToSwitchScreens ? 1 : 0)
+        sendEnabledDeviceScreensMask()
+        sendDefaultDeviceScreen()
         sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(deviceBrightnessPercent))
     }
 

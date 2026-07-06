@@ -29,6 +29,7 @@ BLENavigationServer bleNavServer;
 
 // Forward declaration of map redraw trigger
 extern void triggerMapRedraw();
+extern void applyDeviceScreenSettings();
 
 // NavigationData struct is now in ble_navigation.hpp
 
@@ -53,6 +54,36 @@ NavigationData getCurrentNavigationData() { return currentNavData; }
 
 bool hasCurrentNavigationData() {
   return currentNavData.distance > 0 || currentNavData.instruction[0] != '\0';
+}
+
+static uint8_t deviceScreenBit(uint8_t screen) {
+  return (screen <= DEVICE_SCREEN_MAP_PLUS_NAVIGATION) ? (1 << screen) : 0;
+}
+
+static uint8_t normalizedEnabledScreensMask(int32_t rawMask) {
+  uint8_t mask = (uint8_t)rawMask & DEVICE_SCREEN_SUPPORTED_MASK;
+  return mask == 0 ? DEVICE_SCREEN_SUPPORTED_MASK : mask;
+}
+
+static uint8_t normalizedDefaultScreen(int32_t rawDefault,
+                                       uint8_t enabledScreensMask) {
+  uint8_t defaultScreen =
+      rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_MAP_PLUS_NAVIGATION
+          ? (uint8_t)rawDefault
+          : (uint8_t)DEVICE_SCREEN_MAP;
+  if (enabledScreensMask & deviceScreenBit(defaultScreen)) {
+    return defaultScreen;
+  }
+  if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_MAP)) {
+    return DEVICE_SCREEN_MAP;
+  }
+  for (uint8_t screen = DEVICE_SCREEN_MAP;
+       screen <= DEVICE_SCREEN_MAP_PLUS_NAVIGATION; screen++) {
+    if (enabledScreensMask & deviceScreenBit(screen)) {
+      return screen;
+    }
+  }
+  return DEVICE_SCREEN_MAP;
 }
 
 static void clearCurrentNavigationData() {
@@ -621,6 +652,28 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.printf("BLE Settings: tapToSwitchScreens = %d (saved)\n",
                   mapRenderSettings.tapToSwitchScreens);
     break;
+  case 13:
+    mapRenderSettings.enabledScreensMask =
+        normalizedEnabledScreensMask(settingValue);
+    mapRenderSettings.defaultScreen = normalizedDefaultScreen(
+        mapRenderSettings.defaultScreen, mapRenderSettings.enabledScreensMask);
+    settingsPrefs.begin("mapSettings", false);
+    settingsPrefs.putUChar("screenMask", mapRenderSettings.enabledScreensMask);
+    settingsPrefs.putUChar("defaultScreen", mapRenderSettings.defaultScreen);
+    settingsPrefs.end();
+    applyDeviceScreenSettings();
+    Serial.printf("BLE Settings: enabledScreensMask = 0x%02X (saved)\n",
+                  mapRenderSettings.enabledScreensMask);
+    break;
+  case 14:
+    mapRenderSettings.defaultScreen = normalizedDefaultScreen(
+        settingValue, mapRenderSettings.enabledScreensMask);
+    settingsPrefs.begin("mapSettings", false);
+    settingsPrefs.putUChar("defaultScreen", mapRenderSettings.defaultScreen);
+    settingsPrefs.end();
+    Serial.printf("BLE Settings: defaultScreen = %d (saved)\n",
+                  mapRenderSettings.defaultScreen);
+    break;
   case 4:
     mapRenderSettings.displayRotation =
         (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)3);
@@ -859,19 +912,28 @@ static void loadSettingsFromNVS() {
   mapRenderSettings.mapRotationMode = prefs.getUChar("mapRotMode", 0);
   mapRenderSettings.zoomLevel = prefs.getUChar("zoomLevel", 4);
   mapRenderSettings.tapToSwitchScreens = prefs.getUChar("tapSwitch", 0);
+  mapRenderSettings.enabledScreensMask =
+      normalizedEnabledScreensMask(prefs.getUChar("screenMask",
+                                                 DEVICE_SCREEN_SUPPORTED_MASK));
+  mapRenderSettings.defaultScreen = normalizedDefaultScreen(
+      prefs.getUChar("defaultScreen", DEVICE_SCREEN_MAP),
+      mapRenderSettings.enabledScreensMask);
   mapRenderSettings.visibilityMask = prefs.getUInt("visMask", 0xFFFFFFFF);
 
   prefs.end();
 
   Serial.printf("BLE: Loaded settings from NVS - minPolySize=%d, "
                 "detailLevel=%d, routeWidth=%d, streetBoost=%d, "
-                "markerScale=%d, rotation=%d, tapSwitch=%d\n",
+                "markerScale=%d, rotation=%d, tapSwitch=%d, "
+                "screenMask=0x%02X, defaultScreen=%d\n",
                 mapRenderSettings.minPolygonSize, mapRenderSettings.detailLevel,
                 mapRenderSettings.routeLineWidth,
                 mapRenderSettings.streetLineWidthBoost,
                 mapRenderSettings.positionMarkerScale,
                 mapRenderSettings.displayRotation,
-                mapRenderSettings.tapToSwitchScreens);
+                mapRenderSettings.tapToSwitchScreens,
+                mapRenderSettings.enabledScreensMask,
+                mapRenderSettings.defaultScreen);
 }
 
 void BLENavigationServer::init(const char *deviceName) {
@@ -1007,4 +1069,8 @@ BLEDebugStats BLENavigationServer::getDebugStats() const {
 __attribute__((weak)) void triggerMapRedraw() {
   // Default implementation - will be overridden by mainScr.cpp
   Serial.println("BLE: triggerMapRedraw called (default - no map linked)");
+}
+
+__attribute__((weak)) void applyDeviceScreenSettings() {
+  // Default implementation - will be overridden by mainScr.cpp
 }

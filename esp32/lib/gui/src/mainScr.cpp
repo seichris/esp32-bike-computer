@@ -85,6 +85,86 @@ static bool isMapBackedTile(uint8_t tile) {
   return tile == MAP || tile == MAP_GUIDANCE;
 }
 
+static uint8_t normalizedEnabledScreensMask() {
+  const uint8_t mask =
+      mapRenderSettings.enabledScreensMask & DEVICE_SCREEN_SUPPORTED_MASK;
+  return mask == 0 ? DEVICE_SCREEN_SUPPORTED_MASK : mask;
+}
+
+static uint8_t deviceScreenBit(uint8_t screen) {
+  return (screen <= DEVICE_SCREEN_MAP_PLUS_NAVIGATION) ? (1 << screen) : 0;
+}
+
+static tileName tileForDeviceScreen(uint8_t screen) {
+  switch (screen) {
+  case DEVICE_SCREEN_NAVIGATION:
+    return NAV;
+  case DEVICE_SCREEN_RIDE_STATS:
+    return RIDESTATS;
+  case DEVICE_SCREEN_MAP_PLUS_NAVIGATION:
+    return MAP_GUIDANCE;
+  case DEVICE_SCREEN_MAP:
+  default:
+    return MAP;
+  }
+}
+
+static uint8_t deviceScreenForTile(tileName tile) {
+  switch (tile) {
+  case NAV:
+    return DEVICE_SCREEN_NAVIGATION;
+  case RIDESTATS:
+    return DEVICE_SCREEN_RIDE_STATS;
+  case MAP_GUIDANCE:
+    return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
+  case MAP:
+  default:
+    return DEVICE_SCREEN_MAP;
+  }
+}
+
+static bool isScreenEnabled(tileName tile) {
+  return (normalizedEnabledScreensMask() &
+          deviceScreenBit(deviceScreenForTile(tile))) != 0;
+}
+
+static uint8_t normalizedDefaultDeviceScreen() {
+  const uint8_t mask = normalizedEnabledScreensMask();
+  uint8_t defaultScreen = mapRenderSettings.defaultScreen;
+  if (defaultScreen > DEVICE_SCREEN_MAP_PLUS_NAVIGATION) {
+    defaultScreen = DEVICE_SCREEN_MAP;
+  }
+  if (mask & deviceScreenBit(defaultScreen)) {
+    return defaultScreen;
+  }
+  if (mask & deviceScreenBit(DEVICE_SCREEN_MAP)) {
+    return DEVICE_SCREEN_MAP;
+  }
+  for (uint8_t screen = DEVICE_SCREEN_MAP;
+       screen <= DEVICE_SCREEN_MAP_PLUS_NAVIGATION; screen++) {
+    if (mask & deviceScreenBit(screen)) {
+      return screen;
+    }
+  }
+  return DEVICE_SCREEN_MAP;
+}
+
+static tileName configuredDefaultTile() {
+  return tileForDeviceScreen(normalizedDefaultDeviceScreen());
+}
+
+static tileName nextEnabledTile(tileName current) {
+  const uint8_t currentScreen = deviceScreenForTile(current);
+  for (uint8_t offset = 1; offset <= 4; offset++) {
+    const uint8_t screen = (currentScreen + offset) % 4;
+    tileName candidate = tileForDeviceScreen(screen);
+    if (isScreenEnabled(candidate)) {
+      return candidate;
+    }
+  }
+  return configuredDefaultTile();
+}
+
 static bool isGuidanceNavigating() { return routeOverlay.hasRoute(); }
 
 static int16_t navigationArrowAngle(uint8_t iconID) {
@@ -916,20 +996,19 @@ static void showMainTile(tileName tile) {
 }
 
 void showNextMainScreen() {
-  switch (activeTile) {
-  case MAP:
-    showMainTile(NAV);
-    break;
-  case NAV:
-    showMainTile(RIDESTATS);
-    break;
-  case RIDESTATS:
-    showMainTile(MAP_GUIDANCE);
-    break;
-  case MAP_GUIDANCE:
-  default:
-    showMainTile(MAP);
-    break;
+  showMainTile(nextEnabledTile((tileName)activeTile));
+}
+
+void showConfiguredDefaultMainScreen() { showMainTile(configuredDefaultTile()); }
+
+void applyDeviceScreenSettings() {
+  if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
+      !mapGuidanceOverlay) {
+    return;
+  }
+
+  if (!isScreenEnabled((tileName)activeTile)) {
+    showMainTile(configuredDefaultTile());
   }
 }
 

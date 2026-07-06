@@ -461,4 +461,6 @@ void loadMainScreen() {
   // Trigger display update
   if (mapView.redrawMap)
     mapView.displayMap();
+
+  showConfiguredDefaultMainScreen();
 }
