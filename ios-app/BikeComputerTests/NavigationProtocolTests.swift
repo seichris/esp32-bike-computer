@@ -182,6 +182,7 @@ struct NavigationProtocolTests {
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         testOfflineMapCustomBBoxRequest()
         testOfflineMapCreateJobURLRequest()
+        testOfflineMapManagerMigratesProductionConfig()
         testOfflineMapPolygonClosesRing()
         testOfflineMapStoredZipReader()
         testMapTransferUploadURLEncodesPlusPathComponents()
@@ -350,6 +351,29 @@ struct NavigationProtocolTests {
         let body = String(data: urlRequest.httpBody ?? Data(), encoding: .utf8) ?? ""
         assert(body.contains("\"mode\":\"custom_bbox\""), "create job body includes mode")
         assert(body.contains("\"bbox\":[10,20,11,21]"), "create job body includes bbox")
+    }
+
+    static func testOfflineMapManagerMigratesProductionConfig() {
+        let suite = "offline-map-test-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        defaults.set("http://rhi0maej6bwo33hn0im6h4lf.178.18.245.246.sslip.io", forKey: "offlineMap.serverURL")
+        defaults.set("", forKey: "offlineMap.apiToken")
+
+        assertEqual(
+            OfflineMapManager.resolvedServerURL(defaults: defaults),
+            "https://maps.8o.vc",
+            "legacy offline map server URL migrates to production domain"
+        )
+        assertEqual(
+            OfflineMapManager.resolvedAPIToken(defaults: defaults),
+            OfflineMapServiceConfig.apiToken,
+            "empty stored map API token falls back to bundled build token"
+        )
     }
 
     static func testOfflineMapPolygonClosesRing() {

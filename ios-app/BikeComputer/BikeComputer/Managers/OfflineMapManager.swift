@@ -39,16 +39,21 @@ final class OfflineMapManager: ObservableObject {
     private static let centerLatitudeKey = "offlineMap.centerLatitude"
     private static let centerLongitudeKey = "offlineMap.centerLongitude"
     private static let sideLengthKey = "offlineMap.sideLengthKm"
+    private static let legacyServerURLs = [
+        "http://rhi0maej6bwo33hn0im6h4lf.178.18.245.246.sslip.io"
+    ]
 
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        self.serverURLString = defaults.string(forKey: Self.serverURLKey) ?? OfflineMapServiceConfig.productionServerURLString
-        self.apiToken = defaults.string(forKey: Self.apiTokenKey) ?? OfflineMapServiceConfig.apiToken
+        self.serverURLString = Self.resolvedServerURL(defaults: defaults)
+        self.apiToken = Self.resolvedAPIToken(defaults: defaults)
         self.centerLatitude = defaults.string(forKey: Self.centerLatitudeKey) ?? "35.16755"
         self.centerLongitude = defaults.string(forKey: Self.centerLongitudeKey) ?? "136.89451"
         self.sideLengthKm = defaults.string(forKey: Self.sideLengthKey) ?? "25"
+        defaults.set(serverURLString, forKey: Self.serverURLKey)
+        defaults.set(apiToken, forKey: Self.apiTokenKey)
     }
 
     func createCustomCutoutJob() {
@@ -153,6 +158,23 @@ final class OfflineMapManager: ObservableObject {
             throw OfflineMapPlatformError.invalidBaseURL
         }
         return OfflineMapPlatformClient(baseURL: url, apiToken: apiToken)
+    }
+
+    nonisolated static func resolvedServerURL(defaults: UserDefaults) -> String {
+        let stored = defaults.string(forKey: serverURLKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if stored.isEmpty || legacyServerURLs.contains(stored) {
+            return OfflineMapServiceConfig.productionServerURLString
+        }
+        return stored
+    }
+
+    nonisolated static func resolvedAPIToken(defaults: UserDefaults) -> String {
+        let bundled = OfflineMapServiceConfig.apiToken
+        let stored = defaults.string(forKey: apiTokenKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if stored.isEmpty, !bundled.isEmpty {
+            return bundled
+        }
+        return stored
     }
 
     private func readyMapId() throws -> String {

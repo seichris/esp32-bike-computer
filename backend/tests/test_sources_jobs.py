@@ -40,6 +40,14 @@ class SourceAndJobTests(unittest.TestCase):
         with self.assertRaises(SourceResolutionError):
             index.resolve_for_bounds(Bounds(-122.6, 37.6, -122.3, 37.9))
 
+    def test_configured_sources_cover_prefilled_nagoya_cutout(self):
+        source_index_path = Path(__file__).resolve().parents[1] / "config" / "source-regions.json"
+        index = SourceIndex.from_json(source_index_path)
+
+        source = index.resolve_for_bounds(Bounds(136.75, 35.05, 137.04, 35.29))
+
+        self.assertEqual(source.id, "geofabrik-asia-japan")
+
     def test_create_job_persists_request(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = MapJobService(SourceIndex([self.singapore]), JobStore(Path(tmp)))
