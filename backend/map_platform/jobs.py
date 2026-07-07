@@ -114,6 +114,8 @@ class JobStore:
             job.started_at = job.updated_at
         if finished or status in {JobStatus.READY, JobStatus.FAILED, JobStatus.EXPIRED, JobStatus.CANCELLED}:
             job.finished_at = job.updated_at
+        else:
+            job.finished_at = None
         if map_id is not None:
             job.map_id = map_id
         if pack_path is not None:

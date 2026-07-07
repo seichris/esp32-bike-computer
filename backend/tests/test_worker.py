@@ -58,7 +58,9 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(loaded.pack_bytes, 8)
             response = loaded.to_dict()
             self.assertEqual(response["packBytes"], 8)
-            self.assertTrue(any(timing["status"] == "ready" for timing in response["phaseTimings"]))
+            timings = response["phaseTimings"]
+            self.assertTrue(any(timing["status"] == "ready" for timing in timings))
+            self.assertTrue(all("durationSeconds" in timing for timing in timings))
 
     def test_worker_removes_stale_queue_lock(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -88,6 +90,10 @@ class WorkerTests(unittest.TestCase):
             self.assertTrue(second.processed)
             self.assertEqual(loaded.status.value, "ready")
             self.assertEqual(loaded.attempts, 2)
+            self.assertIsNotNone(loaded.finished_at)
+            first_queued_event = next(event for event in first.job.events if event["status"] == "queued")
+            self.assertIsNone(first.job.finished_at)
+            self.assertEqual(first_queued_event["message"], "queued for retry")
 
     def test_worker_ignores_cancelled_job(self):
         with tempfile.TemporaryDirectory() as tmp:
