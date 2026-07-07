@@ -343,9 +343,12 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func transferPack(at packURL: URL, bleManager: BLEManager) async throws {
+        statusMessage = "preparing transfer"
+        transferProgress = 0
         let archive = try await Task.detached(priority: .userInitiated) {
             try OfflineMapPackArchive(url: packURL)
         }.value
+        statusMessage = "requesting device transfer mode"
         let baseURL = try await enableDeviceTransferMode(bleManager: bleManager)
         defer {
             bleManager.requestMapTransferMode(enabled: false)
@@ -464,8 +467,12 @@ final class OfflineMapManager: ObservableObject {
             throw OfflineMapPlatformError.missingTransferBaseURL
         }
 
-        bleManager.requestMapTransferMode(enabled: true)
-        bleManager.requestMapTransferStatus()
+        guard bleManager.requestMapTransferMode(enabled: true) else {
+            throw OfflineMapPlatformError.missingTransferBaseURL
+        }
+        guard bleManager.requestMapTransferStatus() else {
+            throw OfflineMapPlatformError.missingTransferBaseURL
+        }
         for attempt in 0..<32 {
             if bleManager.mapTransferModeEnabled, let baseURL = bleManager.mapTransferBaseURL {
                 return baseURL

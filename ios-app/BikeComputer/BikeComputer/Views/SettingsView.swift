@@ -41,7 +41,7 @@ struct SettingsView: View {
 
                 DeviceScreensSettingsSection()
                 SavedMapsSettingsSection(manager: offlineMapManager)
-                if offlineMapManager.isBusy {
+                if offlineMapManager.isBusy || offlineMapManager.errorMessage != nil {
                     DownloadingMapsSettingsSection(manager: offlineMapManager)
                 }
 
