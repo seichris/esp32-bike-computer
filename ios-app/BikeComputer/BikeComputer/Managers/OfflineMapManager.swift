@@ -353,8 +353,8 @@ final class OfflineMapManager: ObservableObject {
         }.value
         statusMessage = "requesting device transfer mode"
         let baseURL = try await enableDeviceTransferMode(bleManager: bleManager)
-        try await joinDeviceTransferNetworkIfNeeded(bleManager: bleManager,
-                                                    baseURL: baseURL)
+        await joinDeviceTransferNetworkIfNeeded(bleManager: bleManager,
+                                                baseURL: baseURL)
         defer {
             bleManager.requestMapTransferMode(enabled: false)
         }
@@ -494,7 +494,7 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func joinDeviceTransferNetworkIfNeeded(bleManager: BLEManager,
-                                                   baseURL: URL) async throws {
+                                                   baseURL: URL) async {
         guard baseURL.host == "192.168.4.1",
               let ssid = bleManager.mapTransferAccessPointSSID,
               !ssid.isEmpty else {
@@ -525,20 +525,15 @@ final class OfflineMapManager: ObservableObject {
             if await isDeviceTransferServerReachable(baseURL: baseURL) {
                 return
             }
-            throw OfflineMapPlatformError.transferWiFiJoinFailed(
-                ssid,
-                "\(error.localizedDescription). Join \(ssid) in iOS Wi-Fi Settings, then retry."
-            )
+            statusMessage = "using device Wi-Fi"
+            return
         }
 
-        try await Task.sleep(nanoseconds: 2_000_000_000)
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
         if await isDeviceTransferServerReachable(baseURL: baseURL) {
             return
         }
-        throw OfflineMapPlatformError.transferWiFiJoinFailed(
-            ssid,
-            "Join \(ssid) in iOS Wi-Fi Settings, then retry."
-        )
+        statusMessage = "using device Wi-Fi"
 #endif
     }
 
