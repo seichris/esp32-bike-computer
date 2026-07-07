@@ -14,13 +14,12 @@ struct OfflineMapsView: View {
     var body: some View {
         Form {
             Section(header: Text("Map Server")) {
-                TextField("https://maps.example.com", text: $manager.serverURLString)
-                    .keyboardType(.URL)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                SecureField("API token", text: $manager.apiToken)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                OfflineMapValueRow(title: "Service", value: manager.serverURLString)
+                Button {
+                    manager.serverURLString = OfflineMapServiceConfig.productionServerURLString
+                } label: {
+                    Label("Use Production Server", systemImage: "checkmark.seal")
+                }
             }
 
             Section(header: Text("Custom Cut-Out")) {

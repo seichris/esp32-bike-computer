@@ -11,7 +11,7 @@
 #include "../../gui/src/guiLayout.hpp"
 // #include "../../compass/compass.hpp"
 extern Gps gps;
-// extern Storage storage;
+extern Storage storage;
 extern std::vector<wayPoint> trackData;
 const char *TAG PROGMEM = "Maps";
 
@@ -1525,7 +1525,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
 
   if (!Maps::isMapFound || memCache.blocks.empty()) {
     log_w("readVectorMap: No map data found for this location!");
-    Maps::showNoMap(canvas);
+    Maps::showNoMap(canvas, storage.getSdLoaded());
     MAPIO_LOG("MAPIO: canvas-draw ok=0 blocks=%u fillMs=%lu totalMs=%lu\n",
               (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
               (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
@@ -1802,7 +1802,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
   }
 }
 
-void Maps::showNoMap(lv_obj_t *canvas) {
+void Maps::showNoMap(lv_obj_t *canvas, bool sdPresent) {
   if (canvas == nullptr)
     return;
 
@@ -1835,7 +1835,7 @@ void Maps::showNoMap(lv_obj_t *canvas) {
   hint_dsc.opa = LV_OPA_COVER;
   hint_dsc.font = &lv_font_montserrat_16;
   hint_dsc.align = LV_TEXT_ALIGN_CENTER;
-  hint_dsc.text = "Insert SD card\nor upload a map";
+  hint_dsc.text = sdPresent ? "Download map\nfor this area" : "Insert SD card";
   lv_area_t hint_area = {16, (int16_t)(h / 2 - 6), (int16_t)(w - 17),
                          (int16_t)(h / 2 + 58)};
   lv_draw_label(&layer, &hint_dsc, &hint_area);
@@ -2362,9 +2362,10 @@ void Maps::displayMap() {
 
   // Update Arrow Position
   if (Maps::canvasArrow) {
-    if (!isCurrentPositionVisible(mapRenderSettings)) {
+    if (!Maps::isMapFound || !isCurrentPositionVisible(mapRenderSettings)) {
       lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
-      MAPIO_LOG("MAPIO: current-position marker hidden by visibility mask\n");
+      MAPIO_LOG("MAPIO: current-position marker hidden mapFound=%d visible=%d\n",
+                Maps::isMapFound, isCurrentPositionVisible(mapRenderSettings));
       return;
     }
 

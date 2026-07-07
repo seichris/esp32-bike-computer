@@ -8,6 +8,8 @@
 #include "ble_navigation.hpp"
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
+#include "../gui/src/globalGuiDef.h"
+#include "../maps/src/maps.hpp"
 #include "../map_transfer_http/map_transfer_http.hpp"
 #include "../route_overlay/route_overlay.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -26,6 +28,8 @@
 
 extern Gps gps;
 extern map_transfer::MapTransferHttpServer mapTransferHttp;
+extern Maps mapView;
+extern Storage storage;
 
 // Global instance
 BLENavigationServer bleNavServer;
@@ -472,7 +476,13 @@ static std::string mapTransferStatusJson() {
                      (transferStatus.configured ? "true" : "false") +
                      ",\"enabled\":" +
                      (transferStatus.enabled ? "true" : "false") +
-                     ",\"port\":" + std::to_string(transferStatus.port);
+                     ",\"port\":" + std::to_string(transferStatus.port) +
+                     ",\"sdPresent\":" +
+                     (storage.getSdLoaded() ? "true" : "false") +
+                     ",\"mapFound\":" +
+                     (mapView.debugIsMapFound() ? "true" : "false") +
+                     ",\"mapBlocks\":" +
+                     std::to_string(mapView.debugCachedBlockCount());
 
   if (transferStatus.enabled && WiFi.status() == WL_CONNECTED) {
     body += ",\"baseUrl\":\"http://" +

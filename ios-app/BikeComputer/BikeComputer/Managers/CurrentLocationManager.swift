@@ -12,6 +12,7 @@ import Combine
 class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published var currentLocation: CLLocation?
     @Published var currentAddress: String = "Current Location"
+    @Published var authorizationStatus: CLAuthorizationStatus
     
     private let locationManager = CLLocationManager()
     private var lastGeocodedLocation: CLLocation?
@@ -27,6 +28,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     weak var healthKitManager: HealthKitManager?
     
     override init() {
+        authorizationStatus = locationManager.authorizationStatus
         super.init()
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
@@ -46,6 +48,14 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     
     func requestLocation() {
         locationManager.requestLocation()
+    }
+
+    func requestWhenInUseAuthorization() {
+        locationManager.requestWhenInUseAuthorization()
+    }
+
+    var isLocationAuthorized: Bool {
+        authorizationStatus == .authorizedAlways || authorizationStatus == .authorizedWhenInUse
     }
     
     // MARK: - Smart Location Update Control (Optimization #3)
@@ -180,5 +190,10 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         print("Location error: \(error.localizedDescription)")
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        authorizationStatus = manager.authorizationStatus
+        updateLocationTracking()
     }
 }

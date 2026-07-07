@@ -217,6 +217,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferActiveMapId: String = ""
     @Published var mapTransferLastError: String?
     @Published var mapTransferStatusDescription: String = "unknown"
+    @Published var deviceHasSDCard: Bool?
+    @Published var deviceMapFoundForCurrentLocation: Bool?
+    @Published var deviceMapBlockCount: Int = 0
     
     // MARK: - Map Settings (persisted for UI display)
     @Published var minPolygonSize: Double = 0
@@ -772,6 +775,9 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferBaseURL = nil
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
+        deviceHasSDCard = nil
+        deviceMapFoundForCurrentLocation = nil
+        deviceMapBlockCount = 0
         pendingAuthNonce = nil
         authWriteState = .idle
         navigationWriteQueue.removeAll()
@@ -1265,6 +1271,9 @@ extension BLEManager: CBCentralManagerDelegate {
         mapTransferBaseURL = nil
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
+        deviceHasSDCard = nil
+        deviceMapFoundForCurrentLocation = nil
+        deviceMapBlockCount = 0
         pendingAuthNonce = nil
         authWriteState = .idle
         navigationWriteQueue.removeAll()
@@ -1545,6 +1554,9 @@ extension BLEManager: CBPeripheralDelegate {
             mapTransferBaseURL = nil
         }
         mapTransferActiveMapId = object["activeMapId"] as? String ?? ""
+        deviceHasSDCard = object["sdPresent"] as? Bool
+        deviceMapFoundForCurrentLocation = object["mapFound"] as? Bool
+        deviceMapBlockCount = object["mapBlocks"] as? Int ?? 0
 
         if let lastError = object["lastError"] as? [String: Any] {
             let code = lastError["code"] as? String ?? "error"
