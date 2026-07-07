@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -14,9 +15,9 @@ from .worker import MapWorker, cleanup_work_dirs, expire_ready_jobs
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Offline map platform operations")
-    parser.add_argument("--repo-root", default=Path(__file__).resolve().parents[2])
-    parser.add_argument("--data-root", default=None)
-    parser.add_argument("--source-index", default=None)
+    parser.add_argument("--repo-root", default=os.environ.get("MAP_PLATFORM_REPO_ROOT", Path(__file__).resolve().parents[2]))
+    parser.add_argument("--data-root", default=os.environ.get("MAP_PLATFORM_DATA_ROOT"))
+    parser.add_argument("--source-index", default=os.environ.get("MAP_PLATFORM_SOURCE_INDEX"))
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     create_job = subparsers.add_parser("create-job")
