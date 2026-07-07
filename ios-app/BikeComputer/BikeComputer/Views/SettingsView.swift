@@ -11,10 +11,18 @@ import UIKit
 struct SettingsView: View {
     @EnvironmentObject var bleManager: BLEManager
     @Environment(\.openURL) private var openURL
+    @ObservedObject private var offlineMapManager: OfflineMapManager
+    @State private var isOfflineMapsPresented: Bool
     let locationAuthorized: Bool
 
-    init(locationAuthorized: Bool = true) {
+    init(
+        locationAuthorized: Bool = true,
+        offlineMapManager: OfflineMapManager,
+        initialOfflineMapsPresented: Bool = false
+    ) {
         self.locationAuthorized = locationAuthorized
+        self.offlineMapManager = offlineMapManager
+        self._isOfflineMapsPresented = State(initialValue: initialOfflineMapsPresented)
     }
     
     var body: some View {
@@ -242,7 +250,7 @@ struct SettingsView: View {
 
                 Section(header: Text("Offline Maps")) {
                     NavigationLink {
-                        OfflineMapsView()
+                        OfflineMapsView(manager: offlineMapManager)
                     } label: {
                         Label("Map Packs", systemImage: "map")
                     }
@@ -304,6 +312,15 @@ struct SettingsView: View {
                     }
                 }
             }
+            .background(
+                NavigationLink(
+                    destination: OfflineMapsView(manager: offlineMapManager),
+                    isActive: $isOfflineMapsPresented
+                ) {
+                    EmptyView()
+                }
+                .hidden()
+            )
             .navigationTitle("Map Settings")
             .navigationBarTitleDisplayMode(.inline)
         }
@@ -336,6 +353,6 @@ struct SettingsView: View {
 }
 
 #Preview {
-    SettingsView()
+    SettingsView(offlineMapManager: OfflineMapManager())
         .environmentObject(BLEManager())
 }

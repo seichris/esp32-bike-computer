@@ -18,14 +18,21 @@ struct ContentView: View {
     @State private var sourceAddress = ""
     @State private var destinationAddress = ""
     @State private var showingSettings = false
+    @State private var openOfflineMapsInSettings = false
     @State private var isSearchPanelExpanded = false
     @State private var dismissedOfflineMapOnboarding = false
     
     var body: some View {
         GeometryReader { proxy in
             ZStack {
-                mapView
+                let selectionFrame = offlineMapSelectionFrame(in: proxy.size)
+
+                mapView(selectionFrame: offlineMapManager.isMapAreaSelectionActive ? selectionFrame : nil)
                     .ignoresSafeArea()
+
+                if offlineMapManager.isMapAreaSelectionActive {
+                    offlineMapSelectionOverlay(selectionFrame: selectionFrame)
+                }
 
                 VStack(spacing: 0) {
                     topOverlay
@@ -52,6 +59,7 @@ struct ContentView: View {
                         location: coordinator.currentLocation,
                         isLocationAuthorized: coordinator.isLocationAuthorized,
                         onRequestLocation: { coordinator.requestLocationAuthorization() },
+                        onChooseArea: { offlineMapManager.beginMapAreaSelection() },
                         onClose: { dismissedOfflineMapOnboarding = true }
                     )
                     .transition(.scale(scale: 0.96).combined(with: .opacity))
@@ -63,18 +71,34 @@ struct ContentView: View {
             } message: {
                 Text(coordinator.alert.message)
             }
-            .sheet(isPresented: $showingSettings) {
-                SettingsView(locationAuthorized: coordinator.isLocationAuthorized)
+            .sheet(isPresented: $showingSettings, onDismiss: {
+                openOfflineMapsInSettings = false
+            }) {
+                SettingsView(
+                    locationAuthorized: coordinator.isLocationAuthorized,
+                    offlineMapManager: offlineMapManager,
+                    initialOfflineMapsPresented: openOfflineMapsInSettings
+                )
                     .environmentObject(coordinator.bleManager)
             }
         }
         .onChange(of: coordinator.selectedView) { newValue in
             coordinator.updateSelectedView(newValue)
         }
+        .onChange(of: offlineMapManager.isMapAreaSelectionActive) { isActive in
+            if isActive {
+                showingSettings = false
+            }
+        }
     }
 
     private var shouldShowOfflineMapOnboarding: Bool {
         guard !dismissedOfflineMapOnboarding else { return false }
+        guard !offlineMapManager.isMapAreaSelectionActive else { return false }
+        guard !offlineMapManager.isBusy,
+              offlineMapManager.currentJob == nil,
+              offlineMapManager.downloadedPackURL == nil,
+              offlineMapManager.errorMessage == nil else { return false }
         if !coordinator.isLocationAuthorized {
             return true
         }
@@ -89,7 +113,10 @@ struct ContentView: View {
                 onReconnect: { coordinator.reconnect() }
             )
 
-            Button(action: { showingSettings = true }) {
+            Button(action: {
+                openOfflineMapsInSettings = false
+                showingSettings = true
+            }) {
                 Image(systemName: "gearshape.fill")
                     .font(.title3)
                     .foregroundColor(.primary)
@@ -114,6 +141,11 @@ struct ContentView: View {
             } else if coordinator.isNavigating {
                 navigationControlPanel
             } else {
+                if shouldShowOfflineMapStatusChip {
+                    offlineMapStatusChip
+                        .padding(.horizontal, 18)
+                }
+
                 RouteSearchPanel(
                     sourceAddress: $sourceAddress,
                     destinationAddress: $destinationAddress,
@@ -152,25 +184,137 @@ struct ContentView: View {
             instruction: coordinator.currentInstruction
         )
     }
+
+    private var shouldShowOfflineMapStatusChip: Bool {
+        offlineMapManager.isBusy ||
+            offlineMapManager.currentJob != nil ||
+            offlineMapManager.downloadedPackURL != nil ||
+            offlineMapManager.errorMessage != nil
+    }
+
+    private var offlineMapStatusChip: some View {
+        Button {
+            openOfflineMapsInSettings = true
+            showingSettings = true
+        } label: {
+            HStack(spacing: 10) {
+                if offlineMapManager.isBusy {
+                    ProgressView(value: offlineMapManager.downloadProgress > 0 ? offlineMapManager.downloadProgress : nil)
+                        .frame(width: 22, height: 22)
+                } else {
+                    Image(systemName: offlineMapManager.downloadedPackURL == nil ? "map" : "checkmark.circle.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(offlineMapManager.downloadedPackURL == nil ? .accentColor : .green)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(offlineMapStatusTitle)
+                        .font(.subheadline.weight(.semibold))
+                    Text("Open Offline Maps")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(.regularMaterial, in: Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Offline map download status")
+    }
+
+    private var offlineMapStatusTitle: String {
+        if let error = offlineMapManager.errorMessage, !error.isEmpty {
+            return "Map download needs attention"
+        }
+        if offlineMapManager.downloadedPackURL != nil {
+            return "Map pack ready to upload"
+        }
+        if !offlineMapManager.statusMessage.isEmpty {
+            return offlineMapManager.statusMessage
+        }
+        return "Preparing offline map"
+    }
     
     // MARK: - Map View
     
-    private var mapView: some View {
+    private func mapView(selectionFrame: CGRect?) -> some View {
         MapViewContainer(
             location: coordinator.currentLocation,
             route: coordinator.currentRoute,
             simulatedPosition: coordinator.simulatedPosition,
             isSimulationMode: coordinator.isSimulationMode,
             isNavigating: coordinator.isNavigating,
+            offlineMapSelectionFrame: selectionFrame,
             onMapTapped: {
                 if isSearchPanelExpanded {
                     isSearchPanelExpanded = false
                 }
             },
+            onOfflineMapSelectionBoundsChanged: { bounds in
+                offlineMapManager.updateMapAreaSelection(bounds: bounds)
+            },
             onDestinationSelected: coordinator.isNavigating ? nil : { coordinate, mapLocation in
                 coordinator.handleDestinationSelection(coordinate: coordinate, mapLocation: mapLocation)
             }
         )
+    }
+
+    private func offlineMapSelectionFrame(in size: CGSize) -> CGRect {
+        let width = min(max(size.width - 48, 180), 360)
+        let height = min(width * 0.72, size.height * 0.42)
+        return CGRect(
+            x: (size.width - width) / 2,
+            y: (size.height - height) / 2,
+            width: width,
+            height: height
+        )
+    }
+
+    private func offlineMapSelectionOverlay(selectionFrame: CGRect) -> some View {
+        ZStack(alignment: .top) {
+            Rectangle()
+                .fill(Color.black.opacity(0.10))
+                .allowsHitTesting(false)
+
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.white.opacity(0.12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.white, lineWidth: 2)
+                )
+                .frame(width: selectionFrame.width, height: selectionFrame.height)
+                .position(x: selectionFrame.midX, y: selectionFrame.midY)
+                .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 2)
+                .allowsHitTesting(false)
+
+            HStack(spacing: 12) {
+                Button {
+                    offlineMapManager.cancelMapAreaSelection()
+                } label: {
+                    Label("Cancel", systemImage: "xmark")
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    offlineMapManager.createJobFromSelectedMapArea()
+                } label: {
+                    Label("Download Area", systemImage: "arrow.down.circle")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(offlineMapManager.selectedMapBounds == nil)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.regularMaterial, in: Capsule())
+            .padding(.top, 70)
+        }
+        .ignoresSafeArea()
+        .zIndex(20)
     }
 }
 

@@ -29,8 +29,12 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var currentJob: OfflineMapJob?
     @Published private(set) var downloadURL: URL?
     @Published private(set) var downloadedPackURL: URL?
+    @Published private(set) var downloadProgress: Double = 0
+    @Published private(set) var downloadByteProgress: OfflineMapByteProgress?
     @Published private(set) var transferProgress: Double = 0
     @Published private(set) var isBusy = false
+    @Published private(set) var isMapAreaSelectionActive = false
+    @Published private(set) var selectedMapBounds: OfflineMapBounds?
     @Published private(set) var statusMessage = ""
     @Published private(set) var errorMessage: String?
 
@@ -57,17 +61,33 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func createCustomCutoutJob() {
-        Task {
-            await runBusy {
-                let client = try self.makeClient()
-                let request = try self.makeCustomBBoxRequest()
-                self.currentJob = try await client.createJob(request)
-                self.downloadURL = nil
-                self.downloadedPackURL = nil
-                self.transferProgress = 0
-                self.statusMessage = self.currentJob?.status ?? ""
-            }
+        do {
+            try createJobAndDownload(request: makeCustomBBoxRequest())
+        } catch {
+            errorMessage = diagnosticMessage(for: error)
         }
+    }
+
+    func beginMapAreaSelection() {
+        errorMessage = nil
+        isMapAreaSelectionActive = true
+    }
+
+    func cancelMapAreaSelection() {
+        isMapAreaSelectionActive = false
+    }
+
+    func updateMapAreaSelection(bounds: OfflineMapBounds) {
+        selectedMapBounds = bounds
+    }
+
+    func createJobFromSelectedMapArea() {
+        guard let selectedMapBounds else {
+            errorMessage = OfflineMapPlatformError.invalidResponse.localizedDescription
+            return
+        }
+        isMapAreaSelectionActive = false
+        createJobAndDownload(request: .customBBox(selectedMapBounds))
     }
 
     func installCurrentLocationMap(location: CLLocation, bleManager: BLEManager) {
@@ -84,6 +104,8 @@ final class OfflineMapManager: ObservableObject {
                 self.currentJob = try await client.createJob(request)
                 self.downloadURL = nil
                 self.downloadedPackURL = nil
+                self.downloadProgress = 0
+                self.downloadByteProgress = nil
                 self.transferProgress = 0
                 self.statusMessage = "creating map"
 
@@ -104,6 +126,8 @@ final class OfflineMapManager: ObservableObject {
                 if self.currentJob?.mapId == nil {
                     self.downloadURL = nil
                     self.downloadedPackURL = nil
+                    self.downloadProgress = 0
+                    self.downloadByteProgress = nil
                     self.transferProgress = 0
                 }
             }
@@ -151,6 +175,26 @@ final class OfflineMapManager: ObservableObject {
             sideLengthKm: sizeKm
         )
         return .customBBox(bounds)
+    }
+
+    private func createJobAndDownload(request: OfflineMapJobRequest) {
+        Task {
+            await runBusy {
+                let client = try self.makeClient()
+                self.currentJob = nil
+                self.downloadURL = nil
+                self.downloadedPackURL = nil
+                self.downloadProgress = 0
+                self.downloadByteProgress = nil
+                self.transferProgress = 0
+                self.statusMessage = "creating map job"
+
+                self.currentJob = try await client.createJob(request)
+                self.statusMessage = self.currentJob?.status ?? ""
+                try await self.waitForReadyMap(client: client)
+                try await self.downloadReadyPack(client: client)
+            }
+        }
     }
 
     private func makeClient() throws -> OfflineMapPlatformClient {
@@ -216,13 +260,21 @@ final class OfflineMapManager: ObservableObject {
         }
 
         statusMessage = "downloading pack"
-        let (temporaryURL, _) = try await URLSession.shared.download(from: url)
+        downloadProgress = 0
+        downloadByteProgress = nil
+        let temporaryURL = try await OfflineMapPackDownloader.download(from: url) { [weak self] progress in
+            self?.downloadProgress = progress
+        } onByteProgress: { [weak self] byteProgress in
+            self?.downloadByteProgress = byteProgress
+        }
         let destination = try cachedPackURL(mapId: mapId)
         if FileManager.default.fileExists(atPath: destination.path) {
             try FileManager.default.removeItem(at: destination)
         }
         try FileManager.default.moveItem(at: temporaryURL, to: destination)
         downloadedPackURL = destination
+        downloadProgress = 1
+        downloadByteProgress = nil
         transferProgress = 0
         statusMessage = "pack downloaded"
     }
@@ -291,7 +343,114 @@ final class OfflineMapManager: ObservableObject {
         do {
             try await operation()
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = diagnosticMessage(for: error)
         }
+    }
+
+    private func diagnosticMessage(for error: Error) -> String {
+        let nsError = error as NSError
+        var parts = [error.localizedDescription]
+        if nsError.domain != NSCocoaErrorDomain || nsError.code != 0 {
+            parts.append("\(nsError.domain) \(nsError.code)")
+        }
+        if let failingURL = nsError.userInfo[NSURLErrorFailingURLErrorKey] as? URL {
+            parts.append(failingURL.absoluteString)
+        }
+        if let failingURLString = nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String,
+           !parts.contains(failingURLString) {
+            parts.append(failingURLString)
+        }
+        return parts.joined(separator: "\n")
+    }
+}
+
+struct OfflineMapByteProgress: Equatable {
+    let completedBytes: Int64
+    let totalBytes: Int64
+}
+
+private final class OfflineMapPackDownloader: NSObject, URLSessionDownloadDelegate {
+    private let onProgress: @MainActor @Sendable (Double) -> Void
+    private let onByteProgress: @MainActor @Sendable (OfflineMapByteProgress) -> Void
+    private var continuation: CheckedContinuation<URL, Error>?
+    private var session: URLSession?
+
+    private init(
+        onProgress: @escaping @MainActor @Sendable (Double) -> Void,
+        onByteProgress: @escaping @MainActor @Sendable (OfflineMapByteProgress) -> Void
+    ) {
+        self.onProgress = onProgress
+        self.onByteProgress = onByteProgress
+    }
+
+    static func download(
+        from url: URL,
+        onProgress: @escaping @MainActor @Sendable (Double) -> Void,
+        onByteProgress: @escaping @MainActor @Sendable (OfflineMapByteProgress) -> Void
+    ) async throws -> URL {
+        let downloader = OfflineMapPackDownloader(onProgress: onProgress, onByteProgress: onByteProgress)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                downloader.continuation = continuation
+                let configuration = URLSessionConfiguration.default
+                configuration.timeoutIntervalForRequest = 120
+                configuration.timeoutIntervalForResource = 60 * 60
+                configuration.waitsForConnectivity = true
+                let session = URLSession(configuration: configuration, delegate: downloader, delegateQueue: nil)
+                downloader.session = session
+                session.downloadTask(with: url).resume()
+            }
+        } onCancel: {
+            downloader.session?.invalidateAndCancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        let progress = min(max(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite), 0), 1)
+        let byteProgress = OfflineMapByteProgress(
+            completedBytes: totalBytesWritten,
+            totalBytes: totalBytesExpectedToWrite
+        )
+        Task { @MainActor [onProgress, onByteProgress] in
+            onProgress(progress)
+            onByteProgress(byteProgress)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {
+        do {
+            let temporaryURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension("zip")
+            try FileManager.default.moveItem(at: location, to: temporaryURL)
+            continuation?.resume(returning: temporaryURL)
+        } catch {
+            continuation?.resume(throwing: error)
+        }
+        continuation = nil
+        session.finishTasksAndInvalidate()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        if let error, continuation != nil {
+            continuation?.resume(throwing: error)
+            continuation = nil
+        }
+        session.finishTasksAndInvalidate()
     }
 }

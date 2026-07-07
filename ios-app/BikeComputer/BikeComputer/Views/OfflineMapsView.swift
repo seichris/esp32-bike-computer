@@ -9,7 +9,7 @@ import SwiftUI
 
 struct OfflineMapsView: View {
     @EnvironmentObject private var bleManager: BLEManager
-    @StateObject private var manager = OfflineMapManager()
+    @ObservedObject var manager: OfflineMapManager
 
     var body: some View {
         Form {
@@ -22,18 +22,31 @@ struct OfflineMapsView: View {
                 }
             }
 
-            Section(header: Text("Custom Cut-Out")) {
-                TextField("Latitude", text: $manager.centerLatitude)
-                    .keyboardType(.numbersAndPunctuation)
-                TextField("Longitude", text: $manager.centerLongitude)
-                    .keyboardType(.numbersAndPunctuation)
-                TextField("Side length km", text: $manager.sideLengthKm)
-                    .keyboardType(.decimalPad)
-
-                Button(action: manager.createCustomCutoutJob) {
-                    Label("Create Map Job", systemImage: "map")
+            Section(header: Text("Map Selection")) {
+                Button(action: manager.beginMapAreaSelection) {
+                    Label("Choose Area on Map", systemImage: "rectangle.dashed")
                 }
-                .disabled(manager.isBusy || manager.serverURLString.isEmpty)
+                .disabled(manager.isBusy)
+
+                if let bounds = manager.selectedMapBounds {
+                    OfflineMapValueRow(
+                        title: "Selected Bounds",
+                        value: String(
+                            format: "%.4f, %.4f - %.4f, %.4f",
+                            bounds.minLat,
+                            bounds.minLon,
+                            bounds.maxLat,
+                            bounds.maxLon
+                        )
+                    )
+                }
+            }
+
+            if !manager.statusMessage.isEmpty {
+                Section(header: Text("Status")) {
+                    Text(manager.statusMessage)
+                        .foregroundColor(.secondary)
+                }
             }
 
             if let job = manager.currentJob {
@@ -72,10 +85,20 @@ struct OfflineMapsView: View {
                         .font(.caption)
                         .textSelection(.enabled)
 
-                    Button(action: manager.downloadPack) {
-                        Label("Download Pack", systemImage: "square.and.arrow.down")
+                    ProgressView(value: manager.downloadProgress)
+                    OfflineMapValueRow(title: "Progress", value: "\(Int((manager.downloadProgress * 100).rounded()))%")
+                    if let byteProgress = manager.downloadByteProgress {
+                        OfflineMapValueRow(
+                            title: "Downloaded",
+                            value: "\(Self.byteText(byteProgress.completedBytes)) of \(Self.byteText(byteProgress.totalBytes))"
+                        )
                     }
-                    .disabled(manager.isBusy)
+
+                    if manager.downloadedPackURL == nil && !manager.isBusy {
+                        Button(action: manager.downloadPack) {
+                            Label("Retry Download", systemImage: "arrow.clockwise")
+                        }
+                    }
                 }
             }
 
@@ -123,6 +146,10 @@ struct OfflineMapsView: View {
         .navigationTitle("Offline Maps")
         .navigationBarTitleDisplayMode(.inline)
     }
+
+    private static func byteText(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
 }
 
 private struct OfflineMapValueRow: View {
@@ -143,7 +170,7 @@ private struct OfflineMapValueRow: View {
 
 #Preview {
     NavigationView {
-        OfflineMapsView()
+        OfflineMapsView(manager: OfflineMapManager())
             .environmentObject(BLEManager())
     }
 }
