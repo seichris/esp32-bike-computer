@@ -63,7 +63,7 @@ struct SettingsView: View {
                     }
                 }
             }
-            .navigationTitle("Map Settings")
+            .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
         }
     }
