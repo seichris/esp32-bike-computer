@@ -11,7 +11,7 @@
 #include "../../gui/src/guiLayout.hpp"
 // #include "../../compass/compass.hpp"
 extern Gps gps;
-// extern Storage storage;
+extern Storage storage;
 extern std::vector<wayPoint> trackData;
 const char *TAG PROGMEM = "Maps";
 
@@ -1525,8 +1525,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
 
   if (!Maps::isMapFound || memCache.blocks.empty()) {
     log_w("readVectorMap: No map data found for this location!");
-    // VISUAL DEBUG: Fill with BLUE to confirm we are here
-    lv_canvas_fill_bg(canvas, lv_color_make(0x00, 0x00, 0xFF), LV_OPA_COVER);
+    Maps::showNoMap(canvas, storage.getSdLoaded());
     MAPIO_LOG("MAPIO: canvas-draw ok=0 blocks=%u fillMs=%lu totalMs=%lu\n",
               (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
               (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
@@ -1803,17 +1802,45 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
   }
 }
 
-void Maps::showNoMap(lv_obj_t *canvas) {
-  // Draw generic No Map image or text
-  lv_canvas_fill_bg(canvas, lv_color_hex(TFT_BLACK), LV_OPA_COVER);
-  // Draw text "NO MAP"
+void Maps::showNoMap(lv_obj_t *canvas, bool sdPresent) {
+  if (canvas == nullptr)
+    return;
+
+  lv_canvas_fill_bg(canvas, lv_color_hex(0x101820), LV_OPA_COVER);
+
+  lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
+  const int16_t w = draw_buf ? draw_buf->header.w : Maps::mapScrWidth;
+  const int16_t h =
+      draw_buf ? draw_buf->header.h
+               : (mapSet.mapFullScreen ? Maps::mapScrFull
+                                        : Maps::mapScrHeight);
+
   lv_layer_t layer;
   lv_canvas_init_layer(canvas, &layer);
-  lv_draw_label_dsc_t label_dsc;
-  lv_draw_label_dsc_init(&label_dsc);
-  label_dsc.color = lv_color_hex(TFT_WHITE);
-  label_dsc.text = "NO MAP";
-  // lv_draw_label(&layer, &label_dsc, ...); // Need area
+
+  lv_draw_label_dsc_t title_dsc;
+  lv_draw_label_dsc_init(&title_dsc);
+  title_dsc.color = lv_color_hex(TFT_WHITE);
+  title_dsc.opa = LV_OPA_COVER;
+  title_dsc.font = &lv_font_montserrat_24;
+  title_dsc.align = LV_TEXT_ALIGN_CENTER;
+  title_dsc.text = "No map data";
+  lv_area_t title_area = {0, (int16_t)(h / 2 - 46), (int16_t)(w - 1),
+                          (int16_t)(h / 2 - 16)};
+  lv_draw_label(&layer, &title_dsc, &title_area);
+
+  lv_draw_label_dsc_t hint_dsc;
+  lv_draw_label_dsc_init(&hint_dsc);
+  hint_dsc.color = lv_color_hex(0xB8C7D9);
+  hint_dsc.opa = LV_OPA_COVER;
+  hint_dsc.font = &lv_font_montserrat_16;
+  hint_dsc.align = LV_TEXT_ALIGN_CENTER;
+  hint_dsc.text = sdPresent ? "Download map\nfor this area" : "Insert SD card";
+  lv_area_t hint_area = {16, (int16_t)(h / 2 - 6), (int16_t)(w - 17),
+                         (int16_t)(h / 2 + 58)};
+  lv_draw_label(&layer, &hint_dsc, &hint_area);
+
+  lv_canvas_finish_layer(canvas, &layer);
 }
 
 /**
@@ -2335,9 +2362,10 @@ void Maps::displayMap() {
 
   // Update Arrow Position
   if (Maps::canvasArrow) {
-    if (!isCurrentPositionVisible(mapRenderSettings)) {
+    if (!Maps::isMapFound || !isCurrentPositionVisible(mapRenderSettings)) {
       lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
-      MAPIO_LOG("MAPIO: current-position marker hidden by visibility mask\n");
+      MAPIO_LOG("MAPIO: current-position marker hidden mapFound=%d visible=%d\n",
+                Maps::isMapFound, isCurrentPositionVisible(mapRenderSettings));
       return;
     }
 

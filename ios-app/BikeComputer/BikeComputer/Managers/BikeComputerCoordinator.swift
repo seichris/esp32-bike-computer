@@ -56,6 +56,7 @@ class BikeComputerCoordinator: ObservableObject {
     // Location
     @Published var currentLocation: CLLocation?
     @Published var currentAddress: String = "Current Location"
+    @Published var locationAuthorizationStatus: CLAuthorizationStatus = .notDetermined
 
     // Route Calculation
     @Published var routeCalculation = RouteCalculationState()
@@ -180,11 +181,25 @@ class BikeComputerCoordinator: ObservableObject {
             .sink { [weak self] _ in
                 guard let self, let location = self.locationManager.currentLocation else { return }
                 self.navEngine.processExternalLocation(location)
+                self.requestMapTransferStatusAfterDeviceRefresh()
+            }
+            .store(in: &cancellables)
+
+        locationManager.$currentLocation
+            .compactMap { $0 }
+            .combineLatest(bleManager.$isNavigationReady)
+            .filter { _, ready in ready }
+            .throttle(for: .seconds(8), scheduler: RunLoop.main, latest: true)
+            .sink { [weak self] _, _ in
+                self?.requestMapTransferStatusAfterDeviceRefresh()
             }
             .store(in: &cancellables)
 
         locationManager.$currentAddress
             .assign(to: &$currentAddress)
+
+        locationManager.$authorizationStatus
+            .assign(to: &$locationAuthorizationStatus)
 
         // Current firmware exposes only the navigation packet characteristic.
     }
@@ -261,6 +276,23 @@ class BikeComputerCoordinator: ObservableObject {
 
     func setViewingMap(_ viewing: Bool) {
         locationManager.setViewingMap(viewing)
+    }
+
+    func requestLocationAuthorization() {
+        locationManager.requestWhenInUseAuthorization()
+    }
+
+    var isLocationAuthorized: Bool {
+        locationAuthorizationStatus == .authorizedAlways ||
+            locationAuthorizationStatus == .authorizedWhenInUse
+    }
+
+    private func requestMapTransferStatusAfterDeviceRefresh() {
+        bleManager.requestMapTransferStatus()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, self.bleManager.isNavigationReady else { return }
+            self.bleManager.requestMapTransferStatus()
+        }
     }
 
     // MARK: - Public API: UI State

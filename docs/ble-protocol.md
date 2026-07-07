@@ -130,3 +130,49 @@ Folder/block naming follows the OSM extract pipeline:
 - `4096 x 4096` meter blocks
 - `16 x 16` block folders
 - folder name format like `+0032+0008`
+
+## Map Transfer Control
+
+Bulk map packs are transferred over Wi-Fi/HTTP, not BLE. BLE is the control and
+status channel used by the iOS app to ask the device to enter transfer mode and
+to inspect the installed map state.
+
+The authenticated `2A6E` framed command channel carries these control commands:
+
+| Command | Direction | Payload | Meaning |
+| --- | --- | --- | --- |
+| `MTRN` | iOS -> ESP32 | `enter` | Enable short-lived map-transfer mode. |
+| `MTRN` | iOS -> ESP32 | `exit` | Disable map-transfer mode. |
+| `MSTS` | iOS -> ESP32 | empty | Request current map-transfer status. |
+| `MSTS` | ESP32 -> iOS | UTF-8 JSON | Current map-transfer status notification. |
+
+Status responses should include:
+
+- `activeMapId`: map id from `/sdcard/VECTMAP/active-map.json`, if present.
+- `enabled`: whether Wi-Fi/HTTP upload mode is enabled.
+- `baseUrl`: temporary HTTP base URL when transfer mode is enabled.
+- `lastError`: last installer/upload error code and message, when present.
+- `activeError`: active-map metadata error, when no active map is installed.
+
+The ESP32 map installer validates staged packs before activation:
+
+- manifest schema version must be `1`.
+- `mapId` and session ids may contain only letters, numbers, `.`, `_`, and `-`.
+- files must live under `VECTMAP/` and end in `.fmb` or `.fmp`.
+- path traversal and absolute paths are rejected.
+- declared byte size and SHA-256 must match the staged file.
+- activation writes `/sdcard/VECTMAP/active-map.json` only after all map files
+  have been published.
+
+When transfer mode is enabled, the ESP32 exposes a short-lived HTTP service for
+bulk upload:
+
+| Method | Path | Meaning |
+| --- | --- | --- |
+| `GET` | `/map-transfer/status` | Read transfer status and active map metadata. |
+| `PUT` | `/map-transfer/sessions/{sessionId}/manifest.json` | Upload the map pack manifest. |
+| `PUT` | `/map-transfer/sessions/{sessionId}/VECTMAP/{mapId}/{folder}/{file}` | Upload one `.fmb` or `.fmp` file. |
+| `POST` | `/map-transfer/sessions/{sessionId}/activate` | Validate and atomically activate the staged map. |
+
+The HTTP service is configured by firmware at boot but remains disabled until
+BLE transfer control enables it for an authenticated app session.

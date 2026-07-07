@@ -8,6 +8,9 @@
 #include "ble_navigation.hpp"
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
+#include "../gui/src/globalGuiDef.h"
+#include "../maps/src/maps.hpp"
+#include "../map_transfer_http/map_transfer_http.hpp"
 #include "../route_overlay/route_overlay.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "../waveshare_board/display.hpp"
@@ -21,8 +24,12 @@
 #include <esp_system.h>
 #include <host/ble_hs_id.h>
 #include <mbedtls/md.h>
+#include <WiFi.h>
 
 extern Gps gps;
+extern map_transfer::MapTransferHttpServer mapTransferHttp;
+extern Maps mapView;
+extern Storage storage;
 
 // Global instance
 BLENavigationServer bleNavServer;
@@ -426,6 +433,119 @@ static bool hasPrefix(const std::string &value, const char *prefix) {
   return value.length() >= 4 && memcmp(value.data(), prefix, 4) == 0;
 }
 
+static std::string trimAscii(const std::string &value) {
+  size_t begin = 0;
+  while (begin < value.size() &&
+         std::isspace(static_cast<unsigned char>(value[begin]))) {
+    begin++;
+  }
+  size_t end = value.size();
+  while (end > begin &&
+         std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+    end--;
+  }
+  return value.substr(begin, end - begin);
+}
+
+static std::string jsonEscape(const std::string &value) {
+  std::string out;
+  out.reserve(value.size() + 8);
+  for (char c : value) {
+    if (c == '"' || c == '\\') {
+      out.push_back('\\');
+      out.push_back(c);
+    } else if (c == '\n') {
+      out += "\\n";
+    } else if (c == '\r') {
+      out += "\\r";
+    } else {
+      out.push_back(c);
+    }
+  }
+  return out;
+}
+
+static std::string mapTransferStatusJson() {
+  map_transfer::HttpTransferStatus transferStatus = mapTransferHttp.status();
+  std::string activeMapId;
+  map_transfer::MapTransferInstaller installer("/sdcard");
+  map_transfer::InstallStatus activeStatus =
+      installer.readActiveMapId(activeMapId);
+
+  std::string body = std::string("{\"configured\":") +
+                     (transferStatus.configured ? "true" : "false") +
+                     ",\"enabled\":" +
+                     (transferStatus.enabled ? "true" : "false") +
+                     ",\"port\":" + std::to_string(transferStatus.port) +
+                     ",\"sdPresent\":" +
+                     (storage.getSdLoaded() ? "true" : "false") +
+                     ",\"mapFound\":" +
+                     (mapView.debugIsMapFound() ? "true" : "false") +
+                     ",\"mapBlocks\":" +
+                     std::to_string(mapView.debugCachedBlockCount());
+
+  if (transferStatus.enabled && WiFi.status() == WL_CONNECTED) {
+    body += ",\"baseUrl\":\"http://" +
+            jsonEscape(WiFi.localIP().toString().c_str()) + ":" +
+            std::to_string(transferStatus.port) + "\"";
+  }
+
+  if (activeStatus.ok) {
+    body += ",\"activeMapId\":\"" + jsonEscape(activeMapId) + "\"";
+  } else {
+    body += ",\"activeError\":{\"code\":\"" + jsonEscape(activeStatus.code) +
+            "\",\"message\":\"" + jsonEscape(activeStatus.message) + "\"}";
+  }
+
+  if (!transferStatus.lastErrorCode.empty()) {
+    body += ",\"lastError\":{\"code\":\"" +
+            jsonEscape(transferStatus.lastErrorCode) + "\",\"message\":\"" +
+            jsonEscape(transferStatus.lastErrorMessage) + "\"}";
+  }
+
+  body += "}";
+  return body;
+}
+
+static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
+  if (pChar == nullptr) {
+    return;
+  }
+
+  std::string response = "MSTS" + mapTransferStatusJson();
+  pChar->setValue((uint8_t *)response.data(), response.size());
+  pChar->notify();
+  Serial.printf("BLE Map Transfer: status notified (%u bytes)\n",
+                (unsigned)response.size());
+}
+
+static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
+                                            NimBLECharacteristic *pChar) {
+  std::string command;
+  if (data != nullptr && len > 0) {
+    command.assign(reinterpret_cast<const char *>(data), len);
+    command = trimAscii(command);
+  }
+
+  if (command == "enter") {
+    bool enabled = mapTransferHttp.setEnabled(true);
+    Serial.printf("BLE Map Transfer: enter requested, enabled=%d\n", enabled);
+    notifyMapTransferStatus(pChar);
+    return;
+  }
+
+  if (command == "exit") {
+    bool disabled = mapTransferHttp.setEnabled(false);
+    Serial.printf("BLE Map Transfer: exit requested, disabled=%d\n", disabled);
+    notifyMapTransferStatus(pChar);
+    return;
+  }
+
+  Serial.printf("BLE Map Transfer: rejected unknown command '%s'\n",
+                command.c_str());
+  notifyMapTransferStatus(pChar);
+}
+
 static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
                                        const char *source) {
   if (len == 0) {
@@ -775,6 +895,7 @@ public:
   }
 
   void onDisconnect(NimBLEServer *pServer) override {
+    mapTransferHttp.setEnabled(false);
     server->connected = false;
     bleSessionAuthenticated = false;
     unauthTimeoutDisconnectRequested = false;
@@ -823,6 +944,23 @@ public:
       }
       handleMapSettingPayload((const uint8_t *)value.data() + 4,
                               value.length() - 4, "fallback");
+      return;
+    }
+
+    if (hasPrefix(value, "MTRN")) {
+      if (!requireAuthenticated("map transfer control")) {
+        return;
+      }
+      handleMapTransferControlPayload((const uint8_t *)value.data() + 4,
+                                      value.length() - 4, pChar);
+      return;
+    }
+
+    if (hasPrefix(value, "MSTS")) {
+      if (!requireAuthenticated("map transfer status")) {
+        return;
+      }
+      notifyMapTransferStatus(pChar);
       return;
     }
 

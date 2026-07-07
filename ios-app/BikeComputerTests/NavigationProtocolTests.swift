@@ -33,6 +33,39 @@ func readInt32LE(_ data: Data, offset: Int) -> Int32 {
     Int32(bitPattern: readUInt32LE(data, offset: offset))
 }
 
+func appendUInt16LE(_ value: UInt16, to data: inout Data) {
+    data.append(UInt8(value & 0xFF))
+    data.append(UInt8((value >> 8) & 0xFF))
+}
+
+func appendUInt32LE(_ value: UInt32, to data: inout Data) {
+    data.append(UInt8(value & 0xFF))
+    data.append(UInt8((value >> 8) & 0xFF))
+    data.append(UInt8((value >> 16) & 0xFF))
+    data.append(UInt8((value >> 24) & 0xFF))
+}
+
+func makeStoredZip(entries: [(String, Data)]) -> Data {
+    var zip = Data()
+    for (path, body) in entries {
+        let name = Data(path.utf8)
+        appendUInt32LE(0x0403_4B50, to: &zip)
+        appendUInt16LE(20, to: &zip)
+        appendUInt16LE(0, to: &zip)
+        appendUInt16LE(0, to: &zip)
+        appendUInt16LE(0, to: &zip)
+        appendUInt16LE(0, to: &zip)
+        appendUInt32LE(0, to: &zip)
+        appendUInt32LE(UInt32(body.count), to: &zip)
+        appendUInt32LE(UInt32(body.count), to: &zip)
+        appendUInt16LE(UInt16(name.count), to: &zip)
+        appendUInt16LE(0, to: &zip)
+        zip.append(name)
+        zip.append(body)
+    }
+    return zip
+}
+
 func assertCoordinate(
     _ actual: CLLocationCoordinate2D,
     latitude expectedLatitude: CLLocationDegrees,
@@ -136,6 +169,8 @@ struct NavigationProtocolTests {
         testBLEPairingAuthenticator()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
+        testBLEManagerSendsMapTransferControlFrames()
+        testBLEManagerParsesMapTransferStatus()
         testBLEManagerSendsBrightnessFallbackSetting()
         testBLEManagerSendsDeviceScreenSettings()
         testBLEManagerPersistsNewMapSettings()
@@ -145,6 +180,12 @@ struct NavigationProtocolTests {
         testNavigationEngineClearsRouteGeometryOnStop()
         testNavigationEngineClearsRouteGeometryWhenReadyAndIdle()
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
+        testOfflineMapCustomBBoxRequest()
+        testOfflineMapCreateJobURLRequest()
+        testOfflineMapManagerMigratesProductionConfig()
+        testOfflineMapPolygonClosesRing()
+        testOfflineMapStoredZipReader()
+        testMapTransferUploadURLEncodesPlusPathComponents()
         print("NavigationProtocolTests passed")
     }
 
@@ -277,6 +318,116 @@ struct NavigationProtocolTests {
         assertEqual(readUInt32LE(invalidData, offset: 26), DeviceGPSPacketBuilder.invalidRouteRemainingMeters, "missing route remaining uses invalid sentinel")
     }
 
+    static func testOfflineMapCustomBBoxRequest() {
+        let bounds = OfflineMapBounds(
+            center: CLLocationCoordinate2D(latitude: 35.0, longitude: 136.0),
+            sideLengthKm: 22.264
+        )
+        let request = OfflineMapJobRequest.customBBox(bounds)
+        assertEqual(request.mode, "custom_bbox", "custom cut-out uses backend bbox mode")
+        assert(request.bbox != nil, "custom cut-out includes bbox")
+        assert(abs((request.bbox?[1] ?? 0) - 34.9) < 0.001, "bbox min latitude uses requested size")
+        assert(abs((request.bbox?[3] ?? 0) - 35.1) < 0.001, "bbox max latitude uses requested size")
+    }
+
+    static func testOfflineMapCreateJobURLRequest() {
+        let request = OfflineMapJobRequest.customBBox(
+            OfflineMapBounds(minLon: 10, minLat: 20, maxLon: 11, maxLat: 21)
+        )
+        guard let url = URL(string: "https://maps.example.com/api") else {
+            assert(false, "base URL should parse")
+            return
+        }
+        guard let urlRequest = try? OfflineMapPlatformClient.makeCreateJobURLRequest(
+            baseURL: url,
+            apiToken: "secret",
+            jobRequest: request
+        ) else {
+            assert(false, "create job URL request should build")
+            return
+        }
+        assertEqual(urlRequest.url?.absoluteString, "https://maps.example.com/api/v1/map-jobs", "create job URL appends API path")
+        assertEqual(urlRequest.value(forHTTPHeaderField: "Authorization"), "Bearer secret", "create job request includes bearer token")
+        let body = String(data: urlRequest.httpBody ?? Data(), encoding: .utf8) ?? ""
+        assert(body.contains("\"mode\":\"custom_bbox\""), "create job body includes mode")
+        assert(body.contains("\"bbox\":[10,20,11,21]"), "create job body includes bbox")
+    }
+
+    static func testOfflineMapManagerMigratesProductionConfig() {
+        let suite = "offline-map-test-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        defaults.set("http://rhi0maej6bwo33hn0im6h4lf.178.18.245.246.sslip.io", forKey: "offlineMap.serverURL")
+        defaults.set("", forKey: "offlineMap.apiToken")
+
+        assertEqual(
+            OfflineMapManager.resolvedServerURL(defaults: defaults),
+            "https://maps.8o.vc",
+            "legacy offline map server URL migrates to production domain"
+        )
+        assertEqual(
+            OfflineMapManager.resolvedAPIToken(defaults: defaults),
+            OfflineMapServiceConfig.apiToken,
+            "empty stored map API token falls back to bundled build token"
+        )
+    }
+
+    static func testOfflineMapPolygonClosesRing() {
+        let request = OfflineMapJobRequest.customPolygon(ring: [
+            CLLocationCoordinate2D(latitude: 1, longitude: 2),
+            CLLocationCoordinate2D(latitude: 1, longitude: 3),
+            CLLocationCoordinate2D(latitude: 2, longitude: 3),
+            CLLocationCoordinate2D(latitude: 2, longitude: 2)
+        ])
+        guard case .polygon(let rings)? = request.geometry?.coordinates else {
+            assert(false, "custom polygon should encode polygon coordinates")
+            return
+        }
+        assertEqual(rings[0].first, rings[0].last, "custom polygon closes outer ring")
+    }
+
+    static func testOfflineMapStoredZipReader() {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("offline-map-test-\(UUID().uuidString).zip")
+        let manifest = Data("{\"schemaVersion\":1}".utf8)
+        let block = Data("map-block".utf8)
+        let zip = makeStoredZip(entries: [
+            ("manifest.json", manifest),
+            ("ATTRIBUTION.txt", Data("OpenStreetMap".utf8)),
+            ("VECTMAP/map-1/+0032+0008/123_456.fmb", block)
+        ])
+        try? zip.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        guard let archive = try? OfflineMapPackArchive(url: url) else {
+            assert(false, "stored zip archive should parse")
+            return
+        }
+
+        assertEqual(archive.mapFileEntries.count, 1, "zip reader exposes VECTMAP file entries")
+        assertEqual(archive.manifestEntry?.path, "manifest.json", "zip reader exposes manifest entry")
+        assertEqual(try? archive.data(for: archive.mapFileEntries[0]), block, "zip reader reads entry data")
+    }
+
+    static func testMapTransferUploadURLEncodesPlusPathComponents() {
+        let baseURL = URL(string: "http://192.168.4.20:8080")!
+        let url = MapTransferDeviceClient.uploadURL(
+            baseURL: baseURL,
+            sessionId: "session-1",
+            relativePath: "VECTMAP/map-1/+0032+0008/123_456.fmb"
+        )
+
+        assertEqual(
+            url.absoluteString,
+            "http://192.168.4.20:8080/map-transfer/sessions/session-1/VECTMAP/map-1/%2B0032%2B0008/123_456.fmb",
+            "upload URL percent-encodes plus signs so firmware does not decode them as spaces"
+        )
+    }
+
     static func testNavigationPacketBuilder() {
         let shortPacket = "2|150|Turn left"
         guard let shortData = NavigationPacketBuilder.data(from: shortPacket, maxLength: NavigationPacketBuilder.protocolMaxBytes) else {
@@ -345,6 +496,8 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.routeGeometryFallbackPrefix, "MAPR", "route fallback remains framed over navigation writes")
         assertEqual(DeviceBLEProtocol.gpsPositionFallbackPrefix, "GPSP", "GPS fallback remains framed over navigation writes")
         assertEqual(DeviceBLEProtocol.settingsFallbackPrefix, "MSET", "settings fallback remains framed over navigation writes")
+        assertEqual(DeviceBLEProtocol.mapTransferControlPrefix, "MTRN", "map transfer control remains framed over navigation writes")
+        assertEqual(DeviceBLEProtocol.mapTransferStatusPrefix, "MSTS", "map transfer status remains framed over navigation notifications")
         assertEqual(DeviceBLEProtocol.brightnessSettingID, 12, "brightness uses firmware setting ID 12")
         assertEqual(DeviceBLEProtocol.enabledScreensSettingID, 13, "enabled screens use firmware setting ID 13")
         assertEqual(DeviceBLEProtocol.defaultScreenSettingID, 14, "default screen uses firmware setting ID 14")
@@ -451,6 +604,45 @@ struct NavigationProtocolTests {
             | (Int32(valueBytes[2]) << 16)
             | (Int32(valueBytes[3]) << 24)
         assertEqual(value, 7, "fallback settings packet includes little-endian value")
+    }
+
+    static func testBLEManagerSendsMapTransferControlFrames() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        assert(manager.requestMapTransferMode(enabled: true), "map transfer enter should queue when BLE is ready")
+        assert(manager.requestMapTransferStatus(), "map transfer status should queue when BLE is ready")
+        assert(manager.requestMapTransferMode(enabled: false), "map transfer exit should queue when BLE is ready")
+
+        assertEqual(sentPackets.count, 3, "map transfer control should write three packets")
+        assertEqual(String(data: sentPackets[0], encoding: .utf8), "MTRNenter", "enter command uses MTRN frame")
+        assertEqual(String(data: sentPackets[1], encoding: .utf8), "MSTS", "status command uses MSTS frame")
+        assertEqual(String(data: sentPackets[2], encoding: .utf8), "MTRNexit", "exit command uses MTRN frame")
+    }
+
+    static func testBLEManagerParsesMapTransferStatus() {
+        let manager = BLEManager()
+        let json = """
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","lastError":{"code":"previous","message":"previous upload failed"}}
+        """
+        let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)
+
+        assert(manager.handleMapTransferStatusNotification(packet), "MSTS notification should be consumed")
+        assert(manager.mapTransferModeEnabled, "status parser exposes enabled transfer mode")
+        assertEqual(manager.mapTransferBaseURL?.absoluteString, "http://192.168.4.20:8080", "status parser exposes base URL")
+        assertEqual(manager.mapTransferActiveMapId, "kyoto-v1", "status parser exposes active map id")
+        assertEqual(manager.deviceHasSDCard, true, "status parser exposes physical SD state")
+        assertEqual(manager.deviceMapFoundForCurrentLocation, false, "status parser exposes current map coverage")
+        assertEqual(manager.deviceMapBlockCount, 0, "status parser exposes current map block count")
+        assertEqual(manager.mapTransferLastError, "previous: previous upload failed", "status parser exposes last transfer error")
     }
 
     static func testBLEManagerSendsBrightnessFallbackSetting() {

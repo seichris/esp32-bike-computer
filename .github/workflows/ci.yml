@@ -30,6 +30,7 @@ jobs:
         run: |
           swiftc \
             BikeComputer/BikeComputer/Models/AppModels.swift \
+            BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift \
             BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
             BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
             BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
@@ -78,3 +79,35 @@ jobs:
         run: docker compose build tools
       - name: Smoke test tools image
         run: docker compose run --rm tools python -c "import mapnik; import matplotlib; import shapely; import yaml; from osgeo import ogr"
+
+  backend:
+    name: Map Backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python syntax
+        run: python -m py_compile map_platform/*.py tests/*.py
+      - name: Unit tests
+        run: python -m unittest discover -s tests
+
+  esp32-host:
+    name: ESP32 Host Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: esp32
+    steps:
+      - uses: actions/checkout@v4
+      - name: Map transfer host tests
+        run: |
+          g++ -std=c++17 \
+            lib/map_transfer/map_transfer.cpp \
+            tools/tests/test_map_transfer.cpp \
+            -o /tmp/test_map_transfer
+          /tmp/test_map_transfer

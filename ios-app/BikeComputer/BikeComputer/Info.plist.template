@@ -20,6 +20,9 @@
 	
 	<key>NSLocationAlwaysUsageDescription</key>
 	<string>BikeComputer needs background location access to continue navigation when the app is not visible.</string>
+
+	<key>OfflineMapAPIToken</key>
+	<string>$(OFFLINE_MAP_API_TOKEN)</string>
 	
 	<!-- Bluetooth Permission -->
 	<key>NSBluetoothAlwaysUsageDescription</key>

@@ -13,6 +13,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
   ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \
+  ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \

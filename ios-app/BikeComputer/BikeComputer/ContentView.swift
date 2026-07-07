@@ -13,11 +13,13 @@ struct ContentView: View {
     // MARK: - State
     
     @StateObject private var coordinator = BikeComputerCoordinator()
+    @StateObject private var offlineMapManager = OfflineMapManager()
     
     @State private var sourceAddress = ""
     @State private var destinationAddress = ""
     @State private var showingSettings = false
     @State private var isSearchPanelExpanded = false
+    @State private var dismissedOfflineMapOnboarding = false
     
     var body: some View {
         GeometryReader { proxy in
@@ -39,6 +41,22 @@ struct ContentView: View {
                     bottomOverlay(maxHeight: proxy.size.height * 0.68)
                 }
                 .ignoresSafeArea(.container, edges: .bottom)
+
+                if shouldShowOfflineMapOnboarding {
+                    Color.black.opacity(0.18)
+                        .ignoresSafeArea()
+
+                    OfflineMapOnboardingView(
+                        manager: offlineMapManager,
+                        bleManager: coordinator.bleManager,
+                        location: coordinator.currentLocation,
+                        isLocationAuthorized: coordinator.isLocationAuthorized,
+                        onRequestLocation: { coordinator.requestLocationAuthorization() },
+                        onClose: { dismissedOfflineMapOnboarding = true }
+                    )
+                    .transition(.scale(scale: 0.96).combined(with: .opacity))
+                    .zIndex(20)
+                }
             }
             .alert("Navigation Error", isPresented: $coordinator.alert.isShowing) {
                 Button("OK", role: .cancel) { }
@@ -46,13 +64,22 @@ struct ContentView: View {
                 Text(coordinator.alert.message)
             }
             .sheet(isPresented: $showingSettings) {
-                SettingsView()
+                SettingsView(locationAuthorized: coordinator.isLocationAuthorized)
                     .environmentObject(coordinator.bleManager)
             }
         }
         .onChange(of: coordinator.selectedView) { newValue in
             coordinator.updateSelectedView(newValue)
         }
+    }
+
+    private var shouldShowOfflineMapOnboarding: Bool {
+        guard !dismissedOfflineMapOnboarding else { return false }
+        if !coordinator.isLocationAuthorized {
+            return true
+        }
+        return coordinator.bleManager.deviceHasSDCard == true &&
+            coordinator.bleManager.deviceMapFoundForCurrentLocation == false
     }
 
     private var topOverlay: some View {

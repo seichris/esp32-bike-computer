@@ -170,7 +170,7 @@ private:
                               uint16_t tileSize);
   void coords2map(double lat, double lon, tileBounds bound, uint16_t *pixelX,
                   uint16_t *pixelY);
-  void showNoMap(lv_obj_t *canvas);
+  void showNoMap(lv_obj_t *canvas, bool sdPresent);
   void drawMapWidgets(const MapSettings &mapSettings);
 
 public:

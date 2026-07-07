@@ -10,6 +10,12 @@ import UIKit
 
 struct SettingsView: View {
     @EnvironmentObject var bleManager: BLEManager
+    @Environment(\.openURL) private var openURL
+    let locationAuthorized: Bool
+
+    init(locationAuthorized: Bool = true) {
+        self.locationAuthorized = locationAuthorized
+    }
     
     var body: some View {
         NavigationView {
@@ -18,6 +24,20 @@ struct SettingsView: View {
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 8, trailing: 20))
+
+                if !locationAuthorized {
+                    Section {
+                        Button {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                openURL(url)
+                            }
+                        } label: {
+                            Label("Enable Location Access", systemImage: "location")
+                        }
+                    } footer: {
+                        Text("Location access is needed to download the map for your current area.")
+                    }
+                }
 
                 Section(header: Text("Map Rendering"), footer: Text("Feature toggles control map categories; polygon size filters tiny filled areas.")) {
                     VStack(alignment: .leading) {
@@ -218,6 +238,14 @@ struct SettingsView: View {
                         .foregroundColor(.blue)
                     }
                     .disabled(!bleManager.isConnected || !bleManager.supportsDeviceSettings)
+                }
+
+                Section(header: Text("Offline Maps")) {
+                    NavigationLink {
+                        OfflineMapsView()
+                    } label: {
+                        Label("Map Packs", systemImage: "map")
+                    }
                 }
 
                 Section(header: Text("BLE Debug")) {

@@ -1,0 +1,230 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any
+
+
+class GeometryMode(str, Enum):
+    CUSTOM_BBOX = "custom_bbox"
+    CUSTOM_POLYGON = "custom_polygon"
+    ROUTE_CORRIDOR = "route_corridor"
+    CURATED_REGION = "curated_region"
+
+
+class JobStatus(str, Enum):
+    QUEUED = "queued"
+    VALIDATING = "validating"
+    RESOLVING_SOURCE = "resolving_source"
+    EXTRACTING_PBF = "extracting_pbf"
+    CONVERTING_FEATURES = "converting_features"
+    PACKAGING = "packaging"
+    READY = "ready"
+    FAILED = "failed"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+@dataclass(frozen=True)
+class Bounds:
+    min_lon: float
+    min_lat: float
+    max_lon: float
+    max_lat: float
+
+    @classmethod
+    def from_list(cls, values: list[float] | tuple[float, float, float, float]) -> "Bounds":
+        if len(values) != 4:
+            raise ValueError("bounds must contain [minLon, minLat, maxLon, maxLat]")
+        return cls(float(values[0]), float(values[1]), float(values[2]), float(values[3]))
+
+    def to_list(self) -> list[float]:
+        return [self.min_lon, self.min_lat, self.max_lon, self.max_lat]
+
+
+@dataclass(frozen=True)
+class NormalizedGeometry:
+    mode: GeometryMode
+    bounds: Bounds
+    area_km2: float
+    vertex_count: int
+    geometry: dict[str, Any] | None = None
+    route_point_count: int = 0
+    corridor_width_m: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "mode": self.mode.value,
+            "bounds": self.bounds.to_list(),
+            "areaKm2": self.area_km2,
+            "vertexCount": self.vertex_count,
+            "routePointCount": self.route_point_count,
+        }
+        if self.geometry is not None:
+            data["geometry"] = self.geometry
+        if self.corridor_width_m is not None:
+            data["corridorWidthM"] = self.corridor_width_m
+        return data
+
+
+@dataclass(frozen=True)
+class SourceRegion:
+    id: str
+    provider: str
+    name: str
+    url: str
+    bounds: Bounds
+    local_path: str | None = None
+    published_at: str | None = None
+    checksum: str | None = None
+    license: str = "ODbL-1.0"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SourceRegion":
+        return cls(
+            id=str(data["id"]),
+            provider=str(data["provider"]),
+            name=str(data["name"]),
+            url=str(data["url"]),
+            bounds=Bounds.from_list(data["bounds"]),
+            local_path=data.get("localPath"),
+            published_at=data.get("publishedAt"),
+            checksum=data.get("checksum"),
+            license=str(data.get("license", "ODbL-1.0")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "provider": self.provider,
+            "name": self.name,
+            "url": self.url,
+            "bounds": self.bounds.to_list(),
+            "localPath": self.local_path,
+            "publishedAt": self.published_at,
+            "checksum": self.checksum,
+            "license": self.license,
+        }
+
+
+@dataclass
+class MapJob:
+    job_id: str
+    status: JobStatus
+    request: dict[str, Any]
+    geometry: NormalizedGeometry
+    source_region: SourceRegion
+    created_at: str = field(default_factory=utc_now_iso)
+    updated_at: str = field(default_factory=utc_now_iso)
+    error: str | None = None
+    map_id: str | None = None
+    pack_path: str | None = None
+    pack_bytes: int | None = None
+    attempts: int = 0
+    max_attempts: int = 3
+    worker_id: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    events: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "jobId": self.job_id,
+            "status": self.status.value,
+            "request": self.request,
+            "geometry": self.geometry.to_dict(),
+            "sourceRegion": self.source_region.to_dict(),
+            "createdAt": self.created_at,
+            "updatedAt": self.updated_at,
+            "error": self.error,
+            "mapId": self.map_id,
+            "packPath": self.pack_path,
+            "packBytes": self.pack_bytes,
+            "attempts": self.attempts,
+            "maxAttempts": self.max_attempts,
+            "workerId": self.worker_id,
+            "startedAt": self.started_at,
+            "finishedAt": self.finished_at,
+            "events": self.events,
+            "phaseTimings": self.phase_timings(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MapJob":
+        geometry_data = data["geometry"]
+        geometry = NormalizedGeometry(
+            mode=GeometryMode(geometry_data["mode"]),
+            bounds=Bounds.from_list(geometry_data["bounds"]),
+            area_km2=float(geometry_data["areaKm2"]),
+            vertex_count=int(geometry_data["vertexCount"]),
+            geometry=geometry_data.get("geometry"),
+            route_point_count=int(geometry_data.get("routePointCount", 0)),
+            corridor_width_m=geometry_data.get("corridorWidthM"),
+        )
+        return cls(
+            job_id=str(data["jobId"]),
+            status=JobStatus(data["status"]),
+            request=dict(data["request"]),
+            geometry=geometry,
+            source_region=SourceRegion.from_dict(data["sourceRegion"]),
+            created_at=str(data["createdAt"]),
+            updated_at=str(data["updatedAt"]),
+            error=data.get("error"),
+            map_id=data.get("mapId"),
+            pack_path=data.get("packPath"),
+            pack_bytes=data.get("packBytes"),
+            attempts=int(data.get("attempts", 0)),
+            max_attempts=int(data.get("maxAttempts", 3)),
+            worker_id=data.get("workerId"),
+            started_at=data.get("startedAt"),
+            finished_at=data.get("finishedAt"),
+            events=list(data.get("events", [])),
+        )
+
+    def phase_timings(self) -> list[dict[str, Any]]:
+        transitions: list[tuple[str, str]] = []
+        if self.started_at:
+            transitions.append((JobStatus.VALIDATING.value, self.started_at))
+        for event in self.events:
+            status = event.get("status")
+            at = event.get("at")
+            if isinstance(status, str) and isinstance(at, str):
+                if not transitions or transitions[-1] != (status, at):
+                    transitions.append((status, at))
+
+        timings: list[dict[str, Any]] = []
+        for index, (status, started_at) in enumerate(transitions):
+            finished_at = transitions[index + 1][1] if index + 1 < len(transitions) else self.finished_at
+            timing: dict[str, Any] = {
+                "status": status,
+                "startedAt": started_at,
+                "finishedAt": finished_at,
+            }
+            if finished_at:
+                duration = _duration_seconds(started_at, finished_at)
+                if duration is not None:
+                    timing["durationSeconds"] = duration
+            timings.append(timing)
+        return timings
+
+
+def _parse_utc(value: str) -> datetime | None:
+    try:
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _duration_seconds(started_at: str, finished_at: str) -> float | None:
+    start = _parse_utc(started_at)
+    finish = _parse_utc(finished_at)
+    if start is None or finish is None:
+        return None
+    return max((finish - start).total_seconds(), 0)
