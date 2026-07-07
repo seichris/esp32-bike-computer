@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .downloads import DownloadSigner, DownloadTokenError
+from .geofabrik_sources import GeofabrikSourceProvider
 from .jobs import JobStore, MapJobService
 from .limits import JobLimits
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
@@ -30,7 +31,12 @@ def create_app():
     download_secret = os.environ.get("MAP_PLATFORM_DOWNLOAD_SECRET") or api_token or secrets.token_urlsafe(32)
     download_signer = DownloadSigner(download_secret)
     limits = JobLimits(max_active_jobs=int(os.environ.get("MAP_PLATFORM_MAX_ACTIVE_JOBS", "25")))
-    service = MapJobService(SourceIndex.from_json(source_index_path), JobStore(data_root / "jobs"), limits=limits)
+    source_provider = GeofabrikSourceProvider.from_environment(data_root)
+    service = MapJobService(
+        SourceIndex.from_json(source_index_path, fallback_provider=source_provider),
+        JobStore(data_root / "jobs"),
+        limits=limits,
+    )
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
     pipeline = MapBuildPipeline(
         PipelinePaths(repo_root=repo_root, work_root=data_root / "work", pack_root=data_root / "packs"),
@@ -50,8 +56,11 @@ def create_app():
         return {"status": "ok"}
 
     @app.get("/v1/source-regions")
-    def source_regions() -> dict[str, Any]:
-        return service.source_index.to_dict()
+    def source_regions(includeDynamic: bool = False) -> dict[str, Any]:
+        try:
+            return service.source_index.to_dict(include_dynamic=includeDynamic)
+        except ValueError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @app.post("/v1/map-jobs", dependencies=[Depends(require_api_token)])
     def create_map_job(payload: dict[str, Any]) -> dict[str, Any]:
@@ -97,7 +106,7 @@ def create_app():
 
     @app.post("/v1/source-regions/{region_id}/cache", dependencies=[Depends(require_api_token)])
     def cache_source_region(region_id: str) -> dict[str, Any]:
-        matches = [region for region in service.source_index.regions if region.id == region_id]
+        matches = [region for region in service.source_index.all_regions(include_dynamic=True) if region.id == region_id]
         if not matches:
             raise HTTPException(status_code=404, detail="source region not found")
         try:

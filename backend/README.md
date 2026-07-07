@@ -8,7 +8,9 @@ sources. It implements the production contract described in
 
 - `POST /v1/map-jobs` for curated, custom bbox, custom polygon, and route
   corridor requests.
-- Source-region resolution from `backend/config/source-regions.json`.
+- Source-region resolution from `backend/config/source-regions.json`, with a
+  cached Geofabrik catalog fallback for any requested area covered by
+  Geofabrik.
 - File-backed job storage for local/Coolify deployment.
 - Worker wrapper for `osmium extract` plus `OSM_Extract`.
 - Map-pack manifest generation with file hashes and OSM attribution.
@@ -52,8 +54,9 @@ python -m map_platform.cli worker-loop
 
 The configured source PBF must exist under `backend/data/source-pbf/` before a
 worker can run, or the worker will download it into the configured data root
-through the source cache. The source index stores the Geofabrik URLs to fetch
-into that cache.
+through the source cache. Static sources are stored in the source index; other
+areas are resolved from the cached Geofabrik catalog at job creation time and
+persisted with the job before the worker downloads the matching PBF.
 
 ## Coolify
 
@@ -73,6 +76,14 @@ Useful production environment variables:
 
 - `MAP_PLATFORM_MAX_ACTIVE_JOBS`: maximum queued/running jobs accepted by the
   API, default `25`.
+- `MAP_PLATFORM_DYNAMIC_SOURCE_DISCOVERY`: enable Geofabrik catalog fallback,
+  default `1`.
+- `MAP_PLATFORM_GEOFABRIK_INDEX_URL`: provider catalog URL, default
+  `https://download.geofabrik.de/index-v1.json`.
+- `MAP_PLATFORM_GEOFABRIK_INDEX_CACHE`: catalog cache path, default
+  `$MAP_PLATFORM_DATA_ROOT/source-catalogs/geofabrik-index-v1.json`.
+- `MAP_PLATFORM_GEOFABRIK_INDEX_TTL_SECONDS`: catalog cache TTL, default
+  `86400`.
 
 Tailscale SSH can still be used for bootstrap and incident response when browser
 authorization has been completed, but normal deploys should go through Coolify.
