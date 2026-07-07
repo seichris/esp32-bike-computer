@@ -9,26 +9,38 @@ import CoreLocation
 import Combine
 import Foundation
 
+private enum OfflineMapDefaults {
+    nonisolated static let serverURLKey = "offlineMap.serverURL"
+    nonisolated static let apiTokenKey = "offlineMap.apiToken"
+    nonisolated static let centerLatitudeKey = "offlineMap.centerLatitude"
+    nonisolated static let centerLongitudeKey = "offlineMap.centerLongitude"
+    nonisolated static let sideLengthKey = "offlineMap.sideLengthKm"
+    nonisolated static let legacyServerURLs = [
+        "http://rhi0maej6bwo33hn0im6h4lf.178.18.245.246.sslip.io"
+    ]
+}
+
 @MainActor
 final class OfflineMapManager: ObservableObject {
     @Published var serverURLString: String {
-        didSet { defaults.set(serverURLString, forKey: Self.serverURLKey) }
+        didSet { defaults.set(serverURLString, forKey: OfflineMapDefaults.serverURLKey) }
     }
     @Published var apiToken: String {
-        didSet { defaults.set(apiToken, forKey: Self.apiTokenKey) }
+        didSet { defaults.set(apiToken, forKey: OfflineMapDefaults.apiTokenKey) }
     }
     @Published var centerLatitude: String {
-        didSet { defaults.set(centerLatitude, forKey: Self.centerLatitudeKey) }
+        didSet { defaults.set(centerLatitude, forKey: OfflineMapDefaults.centerLatitudeKey) }
     }
     @Published var centerLongitude: String {
-        didSet { defaults.set(centerLongitude, forKey: Self.centerLongitudeKey) }
+        didSet { defaults.set(centerLongitude, forKey: OfflineMapDefaults.centerLongitudeKey) }
     }
     @Published var sideLengthKm: String {
-        didSet { defaults.set(sideLengthKm, forKey: Self.sideLengthKey) }
+        didSet { defaults.set(sideLengthKm, forKey: OfflineMapDefaults.sideLengthKey) }
     }
     @Published private(set) var currentJob: OfflineMapJob?
     @Published private(set) var downloadURL: URL?
     @Published private(set) var downloadedPackURL: URL?
+    @Published private(set) var cachedPackURLs: [URL] = []
     @Published private(set) var downloadProgress: Double = 0
     @Published private(set) var downloadByteProgress: OfflineMapByteProgress?
     @Published private(set) var transferProgress: Double = 0
@@ -38,26 +50,18 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var statusMessage = ""
     @Published private(set) var errorMessage: String?
 
-    private static let serverURLKey = "offlineMap.serverURL"
-    private static let apiTokenKey = "offlineMap.apiToken"
-    private static let centerLatitudeKey = "offlineMap.centerLatitude"
-    private static let centerLongitudeKey = "offlineMap.centerLongitude"
-    private static let sideLengthKey = "offlineMap.sideLengthKm"
-    private static let legacyServerURLs = [
-        "http://rhi0maej6bwo33hn0im6h4lf.178.18.245.246.sslip.io"
-    ]
-
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.serverURLString = Self.resolvedServerURL(defaults: defaults)
         self.apiToken = Self.resolvedAPIToken(defaults: defaults)
-        self.centerLatitude = defaults.string(forKey: Self.centerLatitudeKey) ?? "35.16755"
-        self.centerLongitude = defaults.string(forKey: Self.centerLongitudeKey) ?? "136.89451"
-        self.sideLengthKm = defaults.string(forKey: Self.sideLengthKey) ?? "25"
-        defaults.set(serverURLString, forKey: Self.serverURLKey)
-        defaults.set(apiToken, forKey: Self.apiTokenKey)
+        self.centerLatitude = defaults.string(forKey: OfflineMapDefaults.centerLatitudeKey) ?? "35.16755"
+        self.centerLongitude = defaults.string(forKey: OfflineMapDefaults.centerLongitudeKey) ?? "136.89451"
+        self.sideLengthKm = defaults.string(forKey: OfflineMapDefaults.sideLengthKey) ?? "25"
+        defaults.set(serverURLString, forKey: OfflineMapDefaults.serverURLKey)
+        defaults.set(apiToken, forKey: OfflineMapDefaults.apiTokenKey)
+        refreshCachedPacks()
     }
 
     func createCustomCutoutJob() {
@@ -70,6 +74,7 @@ final class OfflineMapManager: ObservableObject {
 
     func beginMapAreaSelection() {
         errorMessage = nil
+        selectedMapBounds = nil
         isMapAreaSelectionActive = true
     }
 
@@ -205,8 +210,8 @@ final class OfflineMapManager: ObservableObject {
     }
 
     nonisolated static func resolvedServerURL(defaults: UserDefaults) -> String {
-        let stored = defaults.string(forKey: serverURLKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if stored.isEmpty || legacyServerURLs.contains(stored) {
+        let stored = defaults.string(forKey: OfflineMapDefaults.serverURLKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if stored.isEmpty || OfflineMapDefaults.legacyServerURLs.contains(stored) {
             return OfflineMapServiceConfig.productionServerURLString
         }
         return stored
@@ -214,7 +219,7 @@ final class OfflineMapManager: ObservableObject {
 
     nonisolated static func resolvedAPIToken(defaults: UserDefaults) -> String {
         let bundled = OfflineMapServiceConfig.apiToken
-        let stored = defaults.string(forKey: apiTokenKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let stored = defaults.string(forKey: OfflineMapDefaults.apiTokenKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if stored.isEmpty, !bundled.isEmpty {
             return bundled
         }
@@ -273,6 +278,7 @@ final class OfflineMapManager: ObservableObject {
         }
         try FileManager.default.moveItem(at: temporaryURL, to: destination)
         downloadedPackURL = destination
+        refreshCachedPacks()
         downloadProgress = 1
         downloadByteProgress = nil
         transferProgress = 0
@@ -307,6 +313,11 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func cachedPackURL(mapId: String) throws -> URL {
+        let directory = try cachedPackDirectory()
+        return directory.appendingPathComponent("\(mapId).zip")
+    }
+
+    private func cachedPackDirectory() throws -> URL {
         let directory = try FileManager.default.url(
             for: .cachesDirectory,
             in: .userDomainMask,
@@ -314,7 +325,26 @@ final class OfflineMapManager: ObservableObject {
             create: true
         ).appendingPathComponent("OfflineMapPacks", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent("\(mapId).zip")
+        return directory
+    }
+
+    private func refreshCachedPacks() {
+        do {
+            let directory = try cachedPackDirectory()
+            cachedPackURLs = try FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )
+            .filter { $0.pathExtension.lowercased() == "zip" }
+            .sorted { lhs, rhs in
+                let lhsDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return lhsDate > rhsDate
+            }
+        } catch {
+            cachedPackURLs = []
+        }
     }
 
     private func enableDeviceTransferMode(bleManager: BLEManager) async throws -> URL {
@@ -355,10 +385,6 @@ final class OfflineMapManager: ObservableObject {
         }
         if let failingURL = nsError.userInfo[NSURLErrorFailingURLErrorKey] as? URL {
             parts.append(failingURL.absoluteString)
-        }
-        if let failingURLString = nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String,
-           !parts.contains(failingURLString) {
-            parts.append(failingURLString)
         }
         return parts.joined(separator: "\n")
     }

@@ -496,11 +496,11 @@ struct OfflineMapPlatformClient {
 }
 
 private extension Data {
-    func uint16LE(at offset: Int) -> UInt16 {
+    nonisolated func uint16LE(at offset: Int) -> UInt16 {
         UInt16(self[offset]) | (UInt16(self[offset + 1]) << 8)
     }
 
-    func uint32LE(at offset: Int) -> UInt32 {
+    nonisolated func uint32LE(at offset: Int) -> UInt32 {
         UInt32(self[offset]) |
             (UInt32(self[offset + 1]) << 8) |
             (UInt32(self[offset + 2]) << 16) |

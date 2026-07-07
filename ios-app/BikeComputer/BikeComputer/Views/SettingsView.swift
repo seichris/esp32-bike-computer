@@ -117,11 +117,16 @@ private struct DownloadedMapsSettingsSection: View {
 
     var body: some View {
         Section(header: Text("Downloaded Maps")) {
-            if let localURL = manager.downloadedPackURL {
-                SettingsValueRow(title: "Pack", value: localURL.lastPathComponent)
-            } else {
+            if manager.cachedPackURLs.isEmpty {
                 Text("No maps downloaded yet")
                     .foregroundColor(.secondary)
+            } else {
+                ForEach(manager.cachedPackURLs, id: \.self) { packURL in
+                    SettingsValueRow(
+                        title: packURL == manager.downloadedPackURL ? "Current Pack" : "Pack",
+                        value: packURL.lastPathComponent
+                    )
+                }
             }
 
             if let job = manager.currentJob {

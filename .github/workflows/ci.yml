@@ -36,6 +36,8 @@ jobs:
             BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
             BikeComputer/BikeComputer/Managers/BLEManager.swift \
             BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
+            BikeComputer/BikeComputer/Managers/OfflineMapManager.swift \
+            BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift \
             BikeComputerTests/NavigationProtocolTests.swift \
             -o /tmp/NavigationProtocolTests
           /tmp/NavigationProtocolTests

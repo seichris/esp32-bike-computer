@@ -209,7 +209,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(offlineMapStatusTitle)
                         .font(.subheadline.weight(.semibold))
-                    Text("Open Offline Maps")
+                    Text("Open Map Settings")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -242,7 +242,9 @@ struct ContentView: View {
     // MARK: - Map View
     
     private func mapView(selectionFrame: CGRect?) -> some View {
-        MapViewContainer(
+        let canSelectDestination = !coordinator.isNavigating && !offlineMapManager.isMapAreaSelectionActive
+
+        return MapViewContainer(
             location: coordinator.currentLocation,
             route: coordinator.currentRoute,
             simulatedPosition: coordinator.simulatedPosition,
@@ -257,9 +259,9 @@ struct ContentView: View {
             onOfflineMapSelectionBoundsChanged: { bounds in
                 offlineMapManager.updateMapAreaSelection(bounds: bounds)
             },
-            onDestinationSelected: coordinator.isNavigating ? nil : { coordinate, mapLocation in
+            onDestinationSelected: canSelectDestination ? { coordinate, mapLocation in
                 coordinator.handleDestinationSelection(coordinate: coordinate, mapLocation: mapLocation)
-            }
+            } : nil
         )
     }
 
