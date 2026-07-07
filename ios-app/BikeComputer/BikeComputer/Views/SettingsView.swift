@@ -74,9 +74,6 @@ private struct OfflineMapSelectionSettingsSection: View {
 
     var body: some View {
         Section(header: Text("Map Selection")) {
-            Text("Move the map to frame the area you want to download to your Bike Computer.")
-                .foregroundColor(.secondary)
-
             Button(action: manager.beginMapAreaSelection) {
                 Label("Choose Area", systemImage: "rectangle.dashed")
             }
@@ -96,11 +93,11 @@ private struct OfflineMapSelectionSettingsSection: View {
             }
 
             if !manager.statusMessage.isEmpty {
-                SettingsValueRow(title: "Status", value: manager.statusMessage)
+                StatusValueRow(status: manager.statusMessage, isBusy: manager.isBusy)
             }
 
-            if manager.isBusy {
-                ProgressView(value: manager.downloadProgress > 0 ? manager.downloadProgress : nil)
+            if let sourceSummary {
+                SettingsValueRow(title: "Source", value: sourceSummary)
             }
 
             if let error = manager.errorMessage {
@@ -109,6 +106,14 @@ private struct OfflineMapSelectionSettingsSection: View {
                     .foregroundColor(.red)
             }
         }
+    }
+
+    private var sourceSummary: String? {
+        guard let regionName = manager.currentJob?.sourceRegion?.name else { return nil }
+        if let area = manager.currentJob?.geometry?.areaKm2 {
+            return "\(regionName) \(Int(area.rounded())) km²"
+        }
+        return regionName
     }
 }
 
@@ -125,19 +130,6 @@ private struct DownloadedMapsSettingsSection: View {
                 ForEach(manager.cachedPackURLs, id: \.self) { packURL in
                     DownloadedMapRow(manager: manager, packURL: packURL)
                         .environmentObject(bleManager)
-                }
-            }
-
-            if let job = manager.currentJob {
-                SettingsValueRow(title: "Job", value: job.status)
-                if let mapId = job.mapId {
-                    SettingsValueRow(title: "Map ID", value: mapId)
-                }
-                if let region = job.sourceRegion {
-                    SettingsValueRow(title: "Source", value: region.name)
-                }
-                if let area = job.geometry?.areaKm2 {
-                    SettingsValueRow(title: "Area", value: "\(Int(area.rounded())) km²")
                 }
             }
         }
@@ -542,6 +534,26 @@ private struct SettingsValueRow: View {
             Text(title)
             Spacer()
             Text(value)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
+        }
+    }
+}
+
+private struct StatusValueRow: View {
+    let status: String
+    let isBusy: Bool
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Text("Status")
+            Spacer()
+            if isBusy {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            Text(status)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.trailing)
                 .textSelection(.enabled)
