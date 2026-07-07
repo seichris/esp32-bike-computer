@@ -40,6 +40,7 @@ class MapWorker:
                 JobStatus.READY,
                 map_id=map_id,
                 pack_path=str(archive_path),
+                pack_bytes=archive_path.stat().st_size if archive_path.exists() else None,
                 worker_id=self.worker_id,
                 event="map pack ready",
                 finished=True,

@@ -45,6 +45,7 @@ class JobStore:
         error: str | None = None,
         map_id: str | None = None,
         pack_path: str | None = None,
+        pack_bytes: int | None = None,
         worker_id: str | None = None,
         event: str | None = None,
         finished: bool = False,
@@ -56,6 +57,7 @@ class JobStore:
                 error=error,
                 map_id=map_id,
                 pack_path=pack_path,
+                pack_bytes=pack_bytes,
                 worker_id=worker_id,
                 event=event,
                 finished=finished,
@@ -69,6 +71,7 @@ class JobStore:
         error: str | None = None,
         map_id: str | None = None,
         pack_path: str | None = None,
+        pack_bytes: int | None = None,
         worker_id: str | None = None,
         event: str | None = None,
         finished: bool = False,
@@ -83,6 +86,7 @@ class JobStore:
                 error=error,
                 map_id=map_id,
                 pack_path=pack_path,
+                pack_bytes=pack_bytes,
                 worker_id=worker_id,
                 event=event,
                 finished=finished,
@@ -96,11 +100,13 @@ class JobStore:
         error: str | None = None,
         map_id: str | None = None,
         pack_path: str | None = None,
+        pack_bytes: int | None = None,
         worker_id: str | None = None,
         event: str | None = None,
         finished: bool = False,
     ) -> MapJob:
         job = self.get(job_id)
+        previous_status = job.status
         job.status = status
         job.updated_at = utc_now_iso()
         job.error = error
@@ -112,10 +118,18 @@ class JobStore:
             job.map_id = map_id
         if pack_path is not None:
             job.pack_path = pack_path
+        if pack_bytes is not None:
+            job.pack_bytes = pack_bytes
         if worker_id is not None:
             job.worker_id = worker_id
-        if event:
-            job.events.append({"at": job.updated_at, "status": status.value, "message": event})
+        if event or previous_status != status:
+            job.events.append(
+                {
+                    "at": job.updated_at,
+                    "status": status.value,
+                    "message": event or f"entered {status.value}",
+                }
+            )
         self.save(job)
         return job
 

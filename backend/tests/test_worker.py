@@ -17,7 +17,9 @@ class FakePipeline:
         self.calls += 1
         if self.calls <= self.failures:
             raise RuntimeError("temporary worker failure")
-        return "map-123", Path("/tmp/map-123.zip")
+        pack_path = Path(tempfile.gettempdir()) / f"map-123-{job.job_id}.zip"
+        pack_path.write_bytes(b"zip-data")
+        return "map-123", pack_path
 
 
 class CancellingPipeline:
@@ -53,6 +55,10 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(loaded.status.value, "ready")
             self.assertEqual(loaded.attempts, 1)
             self.assertEqual(loaded.worker_id, "worker-test")
+            self.assertEqual(loaded.pack_bytes, 8)
+            response = loaded.to_dict()
+            self.assertEqual(response["packBytes"], 8)
+            self.assertTrue(any(timing["status"] == "ready" for timing in response["phaseTimings"]))
 
     def test_worker_removes_stale_queue_lock(self):
         with tempfile.TemporaryDirectory() as tmp:

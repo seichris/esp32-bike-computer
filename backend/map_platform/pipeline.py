@@ -162,6 +162,13 @@ def run_job(store, pipeline: MapBuildPipeline, job_id: str) -> MapJob:
 
     try:
         map_id, archive_path = pipeline.build(job, on_status=update)
-        return store.update_status(job_id, JobStatus.READY, map_id=map_id, pack_path=str(archive_path))
+        return store.update_status(
+            job_id,
+            JobStatus.READY,
+            map_id=map_id,
+            pack_path=str(archive_path),
+            pack_bytes=archive_path.stat().st_size if archive_path.exists() else None,
+            finished=True,
+        )
     except Exception as exc:
         return store.update_status(job_id, JobStatus.FAILED, error=str(exc))

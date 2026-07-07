@@ -124,6 +124,7 @@ class MapJob:
     error: str | None = None
     map_id: str | None = None
     pack_path: str | None = None
+    pack_bytes: int | None = None
     attempts: int = 0
     max_attempts: int = 3
     worker_id: str | None = None
@@ -143,12 +144,14 @@ class MapJob:
             "error": self.error,
             "mapId": self.map_id,
             "packPath": self.pack_path,
+            "packBytes": self.pack_bytes,
             "attempts": self.attempts,
             "maxAttempts": self.max_attempts,
             "workerId": self.worker_id,
             "startedAt": self.started_at,
             "finishedAt": self.finished_at,
             "events": self.events,
+            "phaseTimings": self.phase_timings(),
         }
 
     @classmethod
@@ -174,6 +177,7 @@ class MapJob:
             error=data.get("error"),
             map_id=data.get("mapId"),
             pack_path=data.get("packPath"),
+            pack_bytes=data.get("packBytes"),
             attempts=int(data.get("attempts", 0)),
             max_attempts=int(data.get("maxAttempts", 3)),
             worker_id=data.get("workerId"),
@@ -181,3 +185,46 @@ class MapJob:
             finished_at=data.get("finishedAt"),
             events=list(data.get("events", [])),
         )
+
+    def phase_timings(self) -> list[dict[str, Any]]:
+        transitions: list[tuple[str, str]] = []
+        if self.started_at:
+            transitions.append((JobStatus.VALIDATING.value, self.started_at))
+        for event in self.events:
+            status = event.get("status")
+            at = event.get("at")
+            if isinstance(status, str) and isinstance(at, str):
+                if not transitions or transitions[-1] != (status, at):
+                    transitions.append((status, at))
+
+        timings: list[dict[str, Any]] = []
+        for index, (status, started_at) in enumerate(transitions):
+            finished_at = transitions[index + 1][1] if index + 1 < len(transitions) else self.finished_at
+            timing: dict[str, Any] = {
+                "status": status,
+                "startedAt": started_at,
+                "finishedAt": finished_at,
+            }
+            if finished_at:
+                duration = _duration_seconds(started_at, finished_at)
+                if duration is not None:
+                    timing["durationSeconds"] = duration
+            timings.append(timing)
+        return timings
+
+
+def _parse_utc(value: str) -> datetime | None:
+    try:
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _duration_seconds(started_at: str, finished_at: str) -> float | None:
+    start = _parse_utc(started_at)
+    finish = _parse_utc(finished_at)
+    if start is None or finish is None:
+        return None
+    return max((finish - start).total_seconds(), 0)
