@@ -702,19 +702,18 @@ class BLEManager: NSObject, ObservableObject {
     func requestMapTransferMode(enabled: Bool) -> Bool {
         var packet = Data(DeviceBLEProtocol.mapTransferControlPrefix.utf8)
         packet.append(Data((enabled ? "enter" : "exit").utf8))
-        if sendNativeMapTransferPacket(packet, label: enabled ? "map transfer enter" : "map transfer exit") {
-            return true
-        }
-        return sendFallbackMapPacket(packet, label: enabled ? "map transfer enter" : "map transfer exit")
+        let label = enabled ? "map transfer enter" : "map transfer exit"
+        let sentNative = sendNativeMapTransferPacket(packet, label: label)
+        let sentFallback = sendFallbackMapPacket(packet, label: label)
+        return sentNative || sentFallback
     }
 
     @discardableResult
     func requestMapTransferStatus() -> Bool {
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8)
-        if sendNativeMapTransferPacket(packet, label: "map transfer status") {
-            return true
-        }
-        return sendFallbackMapPacket(packet, label: "map transfer status")
+        let sentNative = sendNativeMapTransferPacket(packet, label: "map transfer status")
+        let sentFallback = sendFallbackMapPacket(packet, label: "map transfer status")
+        return sentNative || sentFallback
     }
 
     func sendDebugNavigationPacket() {

@@ -207,16 +207,29 @@ void MapTransferHttpServer::configure(std::string storageRoot, uint16_t port) {
 bool MapTransferHttpServer::setEnabled(bool enabled) {
   if (!configured_)
     configure(storageRoot_, port_);
-  if (enabled && WiFi.status() != WL_CONNECTED) {
-    rememberError("wifi_disconnected", "Wi-Fi is not connected");
-    return false;
-  }
   if (enabled && !enabled_) {
+    if (WiFi.status() != WL_CONNECTED) {
+      apSsid_ = "BikeComputer-Map";
+      WiFi.mode(WIFI_AP);
+      if (!WiFi.softAP(apSsid_.c_str())) {
+        rememberError("wifi_ap", "could not start transfer Wi-Fi");
+        return false;
+      }
+      startedAp_ = true;
+      Serial.printf("MAP_TRANSFER_HTTP: started AP ssid=%s ip=%s\n",
+                    apSsid_.c_str(), WiFi.softAPIP().toString().c_str());
+    }
     server_.begin();
     server_.setNoDelay(true);
   }
   if (!enabled && enabled_) {
     server_.stop();
+    if (startedAp_) {
+      WiFi.softAPdisconnect(true);
+      WiFi.mode(WIFI_OFF);
+      startedAp_ = false;
+      apSsid_.clear();
+    }
   }
   enabled_ = enabled;
   return true;
@@ -233,7 +246,19 @@ void MapTransferHttpServer::process() {
 }
 
 HttpTransferStatus MapTransferHttpServer::status() const {
-  return {configured_, enabled_, port_, lastErrorCode_, lastErrorMessage_};
+  std::string baseUrl;
+  if (enabled_) {
+    IPAddress ip =
+        startedAp_ ? WiFi.softAPIP() : (WiFi.status() == WL_CONNECTED
+                                            ? WiFi.localIP()
+                                            : IPAddress());
+    if (ip != IPAddress()) {
+      baseUrl = std::string("http://") + ip.toString().c_str() + ":" +
+                std::to_string(port_);
+    }
+  }
+  return {configured_, enabled_, port_, baseUrl, apSsid_, lastErrorCode_,
+          lastErrorMessage_};
 }
 
 void MapTransferHttpServer::handleClient(WiFiClient &client) {

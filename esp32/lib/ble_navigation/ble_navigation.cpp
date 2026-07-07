@@ -485,10 +485,12 @@ static std::string mapTransferStatusJson() {
                      ",\"mapBlocks\":" +
                      std::to_string(mapView.debugCachedBlockCount());
 
-  if (transferStatus.enabled && WiFi.status() == WL_CONNECTED) {
-    body += ",\"baseUrl\":\"http://" +
-            jsonEscape(WiFi.localIP().toString().c_str()) + ":" +
-            std::to_string(transferStatus.port) + "\"";
+  if (!transferStatus.baseUrl.empty()) {
+    body += ",\"baseUrl\":\"" + jsonEscape(transferStatus.baseUrl) + "\"";
+  }
+
+  if (!transferStatus.apSsid.empty()) {
+    body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
   }
 
   if (activeStatus.ok) {

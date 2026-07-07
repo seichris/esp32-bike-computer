@@ -11,6 +11,8 @@ struct HttpTransferStatus {
   bool configured = false;
   bool enabled = false;
   uint16_t port = 8080;
+  std::string baseUrl;
+  std::string apSsid;
   std::string lastErrorCode;
   std::string lastErrorMessage;
 };
@@ -27,6 +29,8 @@ private:
   uint16_t port_ = 8080;
   bool configured_ = false;
   bool enabled_ = false;
+  bool startedAp_ = false;
+  std::string apSsid_;
   WiFiServer server_{8080};
   MapTransferInstaller installer_{"/sdcard"};
   std::string lastErrorCode_;
