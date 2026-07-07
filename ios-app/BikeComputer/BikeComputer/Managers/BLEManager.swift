@@ -90,6 +90,10 @@ enum DeviceScreen: Int, CaseIterable, Identifiable {
         allCases.reduce(0) { $0 | $1.bit }
     }
 
+    static var displayOrder: [DeviceScreen] {
+        [.mapPlusNavigation, .rideStats, .map, .navigation]
+    }
+
     static func normalizedMask(_ rawMask: Int) -> Int {
         let mask = rawMask & allScreensMask
         return mask == 0 ? allScreensMask : mask
@@ -97,14 +101,11 @@ enum DeviceScreen: Int, CaseIterable, Identifiable {
 
     static func fallbackDefault(for rawDefault: Int, mask rawMask: Int) -> DeviceScreen {
         let mask = normalizedMask(rawMask)
-        let candidate = DeviceScreen(rawValue: rawDefault) ?? .map
+        let candidate = DeviceScreen(rawValue: rawDefault) ?? .mapPlusNavigation
         if mask & candidate.bit != 0 {
             return candidate
         }
-        if mask & DeviceScreen.map.bit != 0 {
-            return .map
-        }
-        return allCases.first { mask & $0.bit != 0 } ?? .map
+        return displayOrder.first { mask & $0.bit != 0 } ?? .mapPlusNavigation
     }
 }
 
@@ -232,7 +233,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var zoomLevel: Int = 2 // 0-4: 0=super-zoom, 1=closest, 4=farthest
     @Published var tapToSwitchScreens: Bool = false
     @Published var enabledDeviceScreensMask: Int = DeviceScreen.allScreensMask
-    @Published var defaultDeviceScreen: DeviceScreen = .map
+    @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
     @Published var deviceBrightnessPercent: Double = 100
     
     // Feature Visibility
@@ -318,6 +319,7 @@ class BLEManager: NSObject, ObservableObject {
         static let tapToSwitchScreens = "deviceSettings.tapToSwitchScreens"
         static let enabledDeviceScreensMask = "deviceSettings.enabledScreensMask"
         static let defaultDeviceScreen = "deviceSettings.defaultScreen"
+        static let defaultDeviceScreenMigrated = "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1"
         static let deviceBrightnessPercent = "deviceSettings.brightnessPercent"
         static let showBuildings = "mapSettings.showBuildings"
         static let showGreenSpace = "mapSettings.showGreenSpace"
@@ -364,10 +366,19 @@ class BLEManager: NSObject, ObservableObject {
         enabledDeviceScreensMask = DeviceScreen.normalizedMask(
             defaults.object(forKey: SettingsKeys.enabledDeviceScreensMask) as? Int ?? DeviceScreen.allScreensMask
         )
+        let storedDefaultScreen = defaults.object(forKey: SettingsKeys.defaultDeviceScreen) as? Int
+        let shouldMigrateDefaultScreen = !defaults.bool(forKey: SettingsKeys.defaultDeviceScreenMigrated)
+        let rawDefaultScreen = shouldMigrateDefaultScreen && storedDefaultScreen == DeviceScreen.map.rawValue
+            ? DeviceScreen.mapPlusNavigation.rawValue
+            : storedDefaultScreen ?? DeviceScreen.mapPlusNavigation.rawValue
         defaultDeviceScreen = DeviceScreen.fallbackDefault(
-            for: defaults.object(forKey: SettingsKeys.defaultDeviceScreen) as? Int ?? DeviceScreen.map.rawValue,
+            for: rawDefaultScreen,
             mask: enabledDeviceScreensMask
         )
+        if shouldMigrateDefaultScreen {
+            defaults.set(defaultDeviceScreen.rawValue, forKey: SettingsKeys.defaultDeviceScreen)
+            defaults.set(true, forKey: SettingsKeys.defaultDeviceScreenMigrated)
+        }
         deviceBrightnessPercent = defaults.object(forKey: SettingsKeys.deviceBrightnessPercent) as? Double ?? 100
         showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
         let legacyNature = defaults.object(forKey: SettingsKeys.legacyShowNature) as? Bool ?? true
@@ -639,7 +650,7 @@ class BLEManager: NSObject, ObservableObject {
 
     func isOnlyEnabledDeviceScreen(_ screen: DeviceScreen) -> Bool {
         guard isDeviceScreenEnabled(screen) else { return false }
-        return DeviceScreen.allCases.filter { isDeviceScreenEnabled($0) }.count == 1
+        return DeviceScreen.displayOrder.filter { isDeviceScreenEnabled($0) }.count == 1
     }
 
     func setDeviceScreen(_ screen: DeviceScreen, enabled: Bool) {
@@ -665,7 +676,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     var enabledDeviceScreens: [DeviceScreen] {
-        DeviceScreen.allCases.filter { isDeviceScreenEnabled($0) }
+        DeviceScreen.displayOrder.filter { isDeviceScreenEnabled($0) }
     }
 
     func sendEnabledDeviceScreensMask() {

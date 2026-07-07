@@ -506,6 +506,8 @@ struct NavigationProtocolTests {
         assertEqual(DeviceScreen.rideStats.rawValue, 2, "Ride Stats screen protocol value stays stable")
         assertEqual(DeviceScreen.mapPlusNavigation.rawValue, 3, "Map + Navigation screen protocol value stays stable")
         assertEqual(DeviceScreen.mapPlusNavigation.title, "Map + Navigation", "combined map/navigation screen keeps user-facing label")
+        assertEqual(DeviceScreen.displayOrder[0], .mapPlusNavigation, "Map + Navigation is the first device screen in settings")
+        assertEqual(DeviceScreen.displayOrder[1], .rideStats, "Ride Stats is the second device screen in settings")
         assertEqual(DeviceScreen.allScreensMask, 0x0F, "all supported device screens use the low four mask bits")
     }
 
@@ -520,8 +522,8 @@ struct NavigationProtocolTests {
 
         let mapAndStats = DeviceScreen.map.bit | DeviceScreen.rideStats.bit
         assertEqual(DeviceScreen.fallbackDefault(for: DeviceScreen.navigation.rawValue, mask: mapAndStats),
-                    .map,
-                    "disabled default prefers Map when Map is enabled")
+                    .rideStats,
+                    "disabled default follows the device screen display order")
     }
 
     static func testHardwareLabelPreference() {
@@ -714,9 +716,18 @@ struct NavigationProtocolTests {
             "mapSettings.mapRotationMode",
             "mapSettings.zoomLevel",
             "deviceSettings.enabledScreensMask",
-            "deviceSettings.defaultScreen"
+            "deviceSettings.defaultScreen",
+            "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1"
         ]
         keys.forEach { defaults.removeObject(forKey: $0) }
+
+        let freshManager = BLEManager()
+        assertEqual(freshManager.defaultDeviceScreen, .mapPlusNavigation, "fresh installs default to Map + Navigation")
+
+        defaults.set(DeviceScreen.map.rawValue, forKey: "deviceSettings.defaultScreen")
+        defaults.removeObject(forKey: "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1")
+        let migratedManager = BLEManager()
+        assertEqual(migratedManager.defaultDeviceScreen, .mapPlusNavigation, "old Map defaults migrate to Map + Navigation")
 
         let manager = BLEManager()
         manager.mapRotationMode = 1

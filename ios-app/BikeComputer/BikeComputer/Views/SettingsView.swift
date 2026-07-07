@@ -39,9 +39,9 @@ struct SettingsView: View {
                     }
                 }
 
+                DeviceScreensSettingsSection()
                 OfflineMapSelectionSettingsSection(manager: offlineMapManager)
                 DownloadedMapsSettingsSection(manager: offlineMapManager)
-                OfflineMapDeviceTransferSettingsSection(manager: offlineMapManager)
 
                 Section {
                     NavigationLink {
@@ -180,6 +180,32 @@ private struct OfflineMapDeviceTransferSettingsSection: View {
     }
 }
 
+private struct DeviceScreensSettingsSection: View {
+    @EnvironmentObject private var bleManager: BLEManager
+
+    var body: some View {
+        Section(header: Text("Device Screens")) {
+            ForEach(DeviceScreen.displayOrder) { screen in
+                Toggle(screen.title, isOn: Binding(
+                    get: { bleManager.isDeviceScreenEnabled(screen) },
+                    set: { bleManager.setDeviceScreen(screen, enabled: $0) }
+                ))
+                .disabled(bleManager.isOnlyEnabledDeviceScreen(screen))
+            }
+
+            Picker("Default Screen", selection: $bleManager.defaultDeviceScreen) {
+                ForEach(bleManager.enabledDeviceScreens) { screen in
+                    Text(screen.title).tag(screen)
+                }
+            }
+            .onChange(of: bleManager.defaultDeviceScreen) { _ in
+                bleManager.sendDefaultDeviceScreen()
+            }
+        }
+        .disabled(!bleManager.supportsDeviceSettings)
+    }
+}
+
 private struct UICustomizationSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
 
@@ -307,26 +333,6 @@ private struct UICustomizationSettingsView: View {
                 .pickerStyle(.segmented)
                 .onChange(of: bleManager.mapRotationMode) { newValue in
                     bleManager.sendSetting(id: 6, value: Int32(newValue))
-                }
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
-            Section(header: Text("Device Screens")) {
-                ForEach(DeviceScreen.allCases) { screen in
-                    Toggle(screen.title, isOn: Binding(
-                        get: { bleManager.isDeviceScreenEnabled(screen) },
-                        set: { bleManager.setDeviceScreen(screen, enabled: $0) }
-                    ))
-                    .disabled(bleManager.isOnlyEnabledDeviceScreen(screen))
-                }
-
-                Picker("Default Screen", selection: $bleManager.defaultDeviceScreen) {
-                    ForEach(bleManager.enabledDeviceScreens) { screen in
-                        Text(screen.title).tag(screen)
-                    }
-                }
-                .onChange(of: bleManager.defaultDeviceScreen) { _ in
-                    bleManager.sendDefaultDeviceScreen()
                 }
             }
             .disabled(!bleManager.supportsDeviceSettings)
