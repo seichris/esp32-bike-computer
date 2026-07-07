@@ -40,8 +40,10 @@ struct SettingsView: View {
                 }
 
                 DeviceScreensSettingsSection()
-                OfflineMapSelectionSettingsSection(manager: offlineMapManager)
-                DownloadedMapsSettingsSection(manager: offlineMapManager)
+                SavedMapsSettingsSection(manager: offlineMapManager)
+                if offlineMapManager.isBusy {
+                    DownloadingMapsSettingsSection(manager: offlineMapManager)
+                }
 
                 Section {
                     NavigationLink {
@@ -69,16 +71,11 @@ struct SettingsView: View {
     }
 }
 
-private struct OfflineMapSelectionSettingsSection: View {
+private struct DownloadingMapsSettingsSection: View {
     @ObservedObject var manager: OfflineMapManager
 
     var body: some View {
-        Section(header: Text("Map Selection")) {
-            Button(action: manager.beginMapAreaSelection) {
-                Label("Choose Area", systemImage: "rectangle.dashed")
-            }
-            .disabled(manager.isBusy)
-
+        Section(header: Text("Downloading Maps")) {
             if let bounds = manager.selectedMapBounds {
                 SettingsValueRow(
                     title: "Selected Bounds",
@@ -117,14 +114,14 @@ private struct OfflineMapSelectionSettingsSection: View {
     }
 }
 
-private struct DownloadedMapsSettingsSection: View {
+private struct SavedMapsSettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
 
     var body: some View {
-        Section(header: Text("Downloaded Maps")) {
+        Section(header: Text("Saved Maps")) {
             if manager.cachedPackURLs.isEmpty {
-                Text("No maps downloaded yet")
+                Text("0 maps downloaded yet")
                     .foregroundColor(.secondary)
             } else {
                 ForEach(manager.cachedPackURLs, id: \.self) { packURL in
@@ -132,6 +129,11 @@ private struct DownloadedMapsSettingsSection: View {
                         .environmentObject(bleManager)
                 }
             }
+
+            Button(action: manager.beginMapAreaSelection) {
+                Label("Download a new Map", systemImage: "rectangle.dashed")
+            }
+            .disabled(manager.isBusy)
         }
     }
 }
