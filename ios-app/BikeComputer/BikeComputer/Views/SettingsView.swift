@@ -12,17 +12,14 @@ struct SettingsView: View {
     @EnvironmentObject var bleManager: BLEManager
     @Environment(\.openURL) private var openURL
     @ObservedObject private var offlineMapManager: OfflineMapManager
-    @State private var isOfflineMapsPresented: Bool
     let locationAuthorized: Bool
 
     init(
         locationAuthorized: Bool = true,
-        offlineMapManager: OfflineMapManager,
-        initialOfflineMapsPresented: Bool = false
+        offlineMapManager: OfflineMapManager
     ) {
         self.locationAuthorized = locationAuthorized
         self.offlineMapManager = offlineMapManager
-        self._isOfflineMapsPresented = State(initialValue: initialOfflineMapsPresented)
     }
     
     var body: some View {
@@ -42,13 +39,9 @@ struct SettingsView: View {
                     }
                 }
 
-                Section(header: Text("Offline Maps")) {
-                    NavigationLink {
-                        OfflineMapsView(manager: offlineMapManager)
-                    } label: {
-                        Label("Map Packs", systemImage: "map")
-                    }
-                }
+                OfflineMapSelectionSettingsSection(manager: offlineMapManager)
+                DownloadedMapsSettingsSection(manager: offlineMapManager)
+                OfflineMapDeviceTransferSettingsSection(manager: offlineMapManager)
 
                 Section {
                     NavigationLink {
@@ -64,23 +57,120 @@ struct SettingsView: View {
                     }
 
                     NavigationLink {
-                        DeveloperSettingsView()
+                        DeveloperSettingsView(offlineMapManager: offlineMapManager)
                     } label: {
                         Label("Developer Settings", systemImage: "wrench.and.screwdriver")
                     }
                 }
             }
-            .background(
-                NavigationLink(
-                    destination: OfflineMapsView(manager: offlineMapManager),
-                    isActive: $isOfflineMapsPresented
-                ) {
-                    EmptyView()
-                }
-                .hidden()
-            )
             .navigationTitle("Map Settings")
             .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+}
+
+private struct OfflineMapSelectionSettingsSection: View {
+    @ObservedObject var manager: OfflineMapManager
+
+    var body: some View {
+        Section(header: Text("Map Selection")) {
+            Text("Move the map to frame the area you want to download to your Bike Computer.")
+                .foregroundColor(.secondary)
+
+            Button(action: manager.beginMapAreaSelection) {
+                Label("Choose Area", systemImage: "rectangle.dashed")
+            }
+            .disabled(manager.isBusy)
+
+            if let bounds = manager.selectedMapBounds {
+                SettingsValueRow(
+                    title: "Selected Bounds",
+                    value: String(
+                        format: "%.4f, %.4f - %.4f, %.4f",
+                        bounds.minLat,
+                        bounds.minLon,
+                        bounds.maxLat,
+                        bounds.maxLon
+                    )
+                )
+            }
+
+            if !manager.statusMessage.isEmpty {
+                SettingsValueRow(title: "Status", value: manager.statusMessage)
+            }
+
+            if manager.isBusy {
+                ProgressView(value: manager.downloadProgress > 0 ? manager.downloadProgress : nil)
+            }
+
+            if let error = manager.errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
+        }
+    }
+}
+
+private struct DownloadedMapsSettingsSection: View {
+    @ObservedObject var manager: OfflineMapManager
+
+    var body: some View {
+        Section(header: Text("Downloaded Maps")) {
+            if let localURL = manager.downloadedPackURL {
+                SettingsValueRow(title: "Pack", value: localURL.lastPathComponent)
+            } else {
+                Text("No maps downloaded yet")
+                    .foregroundColor(.secondary)
+            }
+
+            if let job = manager.currentJob {
+                SettingsValueRow(title: "Job", value: job.status)
+                if let mapId = job.mapId {
+                    SettingsValueRow(title: "Map ID", value: mapId)
+                }
+                if let region = job.sourceRegion {
+                    SettingsValueRow(title: "Source", value: region.name)
+                }
+                if let area = job.geometry?.areaKm2 {
+                    SettingsValueRow(title: "Area", value: "\(Int(area.rounded())) km²")
+                }
+            }
+        }
+    }
+}
+
+private struct OfflineMapDeviceTransferSettingsSection: View {
+    @EnvironmentObject private var bleManager: BLEManager
+    @ObservedObject var manager: OfflineMapManager
+
+    var body: some View {
+        Section(header: Text("Device Transfer")) {
+            SettingsValueRow(
+                title: "BLE",
+                value: bleManager.isNavigationReady ? "Ready" : "Not Ready"
+            )
+            SettingsValueRow(
+                title: "Transfer",
+                value: bleManager.mapTransferStatusDescription
+            )
+            if let localURL = manager.downloadedPackURL {
+                SettingsValueRow(title: "Pack", value: localURL.lastPathComponent)
+            }
+
+            Button(action: { bleManager.requestMapTransferMode(enabled: true) }) {
+                Label("Enable Transfer Mode", systemImage: "wifi")
+            }
+            .disabled(!bleManager.isNavigationReady)
+
+            Button(action: { manager.transferDownloadedPack(bleManager: bleManager) }) {
+                Label("Upload to Device", systemImage: "sdcard")
+            }
+            .disabled(manager.isBusy || !bleManager.isNavigationReady || manager.downloadedPackURL == nil)
+
+            if manager.transferProgress > 0 && manager.transferProgress < 1 {
+                ProgressView(value: manager.transferProgress)
+            }
         }
     }
 }
@@ -293,6 +383,7 @@ private struct HardwareCustomizationSettingsView: View {
 
 private struct DeveloperSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
+    @ObservedObject var offlineMapManager: OfflineMapManager
 
     var body: some View {
         Form {
@@ -300,6 +391,17 @@ private struct DeveloperSettingsView: View {
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
                 .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 8, trailing: 20))
+
+            Section(header: Text("Map Server")) {
+                SettingsValueRow(title: "Service", value: offlineMapManager.serverURLString)
+                Button {
+                    offlineMapManager.serverURLString = OfflineMapServiceConfig.productionServerURLString
+                } label: {
+                    Label("Use Production Server", systemImage: "checkmark.seal")
+                }
+            }
+
+            OfflineMapDeviceTransferSettingsSection(manager: offlineMapManager)
 
             Section {
                 HStack {
@@ -391,6 +493,22 @@ private struct DeveloperSettingsView: View {
         }
 
         return "Connected"
+    }
+}
+
+private struct SettingsValueRow: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+            Spacer()
+            Text(value)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
+        }
     }
 }
 

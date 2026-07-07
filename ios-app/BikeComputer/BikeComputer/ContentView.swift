@@ -18,7 +18,6 @@ struct ContentView: View {
     @State private var sourceAddress = ""
     @State private var destinationAddress = ""
     @State private var showingSettings = false
-    @State private var openOfflineMapsInSettings = false
     @State private var isSearchPanelExpanded = false
     @State private var dismissedOfflineMapOnboarding = false
     @State private var offlineMapSelectionSideLength: CGFloat?
@@ -74,13 +73,10 @@ struct ContentView: View {
             } message: {
                 Text(coordinator.alert.message)
             }
-            .sheet(isPresented: $showingSettings, onDismiss: {
-                openOfflineMapsInSettings = false
-            }) {
+            .sheet(isPresented: $showingSettings) {
                 SettingsView(
                     locationAuthorized: coordinator.isLocationAuthorized,
-                    offlineMapManager: offlineMapManager,
-                    initialOfflineMapsPresented: openOfflineMapsInSettings
+                    offlineMapManager: offlineMapManager
                 )
                     .environmentObject(coordinator.bleManager)
             }
@@ -120,10 +116,7 @@ struct ContentView: View {
                 onReconnect: { coordinator.reconnect() }
             )
 
-            Button(action: {
-                openOfflineMapsInSettings = false
-                showingSettings = true
-            }) {
+            Button(action: { showingSettings = true }) {
                 Image(systemName: "gearshape.fill")
                     .font(.title3)
                     .foregroundColor(.primary)
@@ -201,7 +194,6 @@ struct ContentView: View {
 
     private var offlineMapStatusChip: some View {
         Button {
-            openOfflineMapsInSettings = true
             showingSettings = true
         } label: {
             HStack(spacing: 10) {
