@@ -19,6 +19,7 @@ struct DeviceTransferSession: Equatable {
     let mode: Mode
     let baseURL: URL
     let accessPointSSID: String?
+    let sessionToken: String?
 }
 
 @MainActor
@@ -50,7 +51,8 @@ final class DeviceTransferManager {
                 let session = DeviceTransferSession(
                     mode: .map,
                     baseURL: baseURL,
-                    accessPointSSID: bleManager.mapTransferAccessPointSSID
+                    accessPointSSID: bleManager.mapTransferAccessPointSSID,
+                    sessionToken: bleManager.deviceTransferSessionToken
                 )
                 await joinDeviceNetworkIfNeeded(session: session,
                                                 statusPath: "map-transfer/status",
@@ -67,6 +69,53 @@ final class DeviceTransferManager {
 
     func exitMapTransfer(bleManager: BLEManager) {
         bleManager.requestMapTransferMode(enabled: false)
+    }
+
+    func enterFirmwareTransfer(
+        bleManager: BLEManager,
+        status: @escaping @MainActor (String) -> Void
+    ) async throws -> DeviceTransferSession {
+        status("requesting firmware transfer mode")
+        guard bleManager.isNavigationReady else {
+            throw FirmwareUpdateError.deviceNotReady
+        }
+
+        guard bleManager.requestDeviceTransferMode(.firmware) else {
+            throw FirmwareUpdateError.transferCommandNotSent
+        }
+        guard bleManager.requestDeviceTransferStatus() else {
+            throw FirmwareUpdateError.transferCommandNotSent
+        }
+        guard await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2) else {
+            throw FirmwareUpdateError.transferCommandNotSent
+        }
+
+        for attempt in 0..<32 {
+            if bleManager.deviceTransferMode == DeviceTransferSession.Mode.firmware.rawValue,
+               let baseURL = bleManager.deviceTransferBaseURL,
+               let token = bleManager.deviceTransferSessionToken,
+               !token.isEmpty {
+                let session = DeviceTransferSession(
+                    mode: .firmware,
+                    baseURL: baseURL,
+                    accessPointSSID: bleManager.deviceTransferAccessPointSSID,
+                    sessionToken: token
+                )
+                await joinDeviceNetworkIfNeeded(session: session,
+                                                statusPath: "firmware-update/status",
+                                                status: status)
+                return session
+            }
+            if attempt % 4 == 3 {
+                bleManager.requestDeviceTransferStatus()
+            }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        throw FirmwareUpdateError.missingTransferSession
+    }
+
+    func exitFirmwareTransfer(bleManager: BLEManager) {
+        bleManager.requestDeviceTransferExit()
     }
 
     private func joinDeviceNetworkIfNeeded(

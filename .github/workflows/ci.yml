@@ -36,6 +36,7 @@ jobs:
             BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
             BikeComputer/BikeComputer/Managers/BLEManager.swift \
             BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
+            BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
             BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
             BikeComputer/BikeComputer/Managers/OfflineMapManager.swift \
             BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift \

@@ -12,6 +12,7 @@ struct SettingsView: View {
     @EnvironmentObject var bleManager: BLEManager
     @Environment(\.openURL) private var openURL
     @ObservedObject private var offlineMapManager: OfflineMapManager
+    @StateObject private var firmwareUpdateManager = FirmwareUpdateManager()
     let locationAuthorized: Bool
 
     init(
@@ -59,7 +60,10 @@ struct SettingsView: View {
                     }
 
                     NavigationLink {
-                        DeveloperSettingsView(offlineMapManager: offlineMapManager)
+                        DeveloperSettingsView(
+                            offlineMapManager: offlineMapManager,
+                            firmwareUpdateManager: firmwareUpdateManager
+                        )
                     } label: {
                         Label("Developer Settings", systemImage: "wrench.and.screwdriver")
                     }
@@ -197,6 +201,91 @@ private struct OfflineMapDeviceTransferSettingsSection: View {
                 ProgressView(value: manager.transferProgress)
             }
         }
+    }
+}
+
+private struct FirmwareUpdateSettingsSection: View {
+    @EnvironmentObject private var bleManager: BLEManager
+    @ObservedObject var manager: FirmwareUpdateManager
+
+    var body: some View {
+        Section(header: Text("Firmware Update")) {
+            SettingsValueRow(
+                title: "Current",
+                value: currentFirmwareSummary
+            )
+            SettingsValueRow(
+                title: "Target",
+                value: bleManager.firmwareTarget.isEmpty ? "unknown" : bleManager.firmwareTarget
+            )
+            SettingsValueRow(
+                title: "Status",
+                value: manager.statusMessage.isEmpty ? bleManager.firmwareUpdateStatus : manager.statusMessage
+            )
+
+            TextField("Manifest Base URL", text: $manager.manifestBaseURLString)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+
+            Toggle("Allow Developer Downgrade", isOn: $manager.allowDeveloperDowngrade)
+
+            if let manifest = manager.latestManifest {
+                SettingsValueRow(
+                    title: "Available",
+                    value: "\(manifest.version) (\(manifest.build))"
+                )
+            }
+
+            if manager.downloadProgress > 0 && manager.downloadProgress < 1 {
+                ProgressView(value: manager.downloadProgress)
+            }
+            if manager.uploadProgress > 0 && manager.uploadProgress < 1 {
+                ProgressView(value: manager.uploadProgress)
+            }
+            if let error = manager.errorMessage ?? bleManager.firmwareUpdateLastError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
+
+            Button {
+                manager.refreshDeviceFirmwareStatus(bleManager: bleManager)
+            } label: {
+                Label("Refresh Firmware Status", systemImage: "arrow.clockwise")
+            }
+            .disabled(!bleManager.isNavigationReady)
+
+            Button {
+                manager.checkForUpdate(bleManager: bleManager)
+            } label: {
+                Label("Check for Firmware Update", systemImage: "square.and.arrow.down")
+            }
+            .disabled(manager.isBusy || !bleManager.isNavigationReady)
+
+            Button {
+                manager.installLatest(bleManager: bleManager)
+            } label: {
+                Label("Install Firmware Update", systemImage: "arrow.up.forward.app")
+            }
+            .disabled(!canInstall)
+        }
+    }
+
+    private var canInstall: Bool {
+        guard !manager.isBusy,
+              bleManager.isNavigationReady,
+              let manifest = manager.latestManifest else {
+            return false
+        }
+        return manager.isUpdateAllowed(manifest, bleManager: bleManager)
+    }
+
+    private var currentFirmwareSummary: String {
+        if bleManager.firmwareVersion.isEmpty && bleManager.firmwareBuild == 0 {
+            return "unknown"
+        }
+        return "\(bleManager.firmwareVersion) (\(bleManager.firmwareBuild))"
     }
 }
 
@@ -415,6 +504,7 @@ private struct HardwareCustomizationSettingsView: View {
 private struct DeveloperSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var offlineMapManager: OfflineMapManager
+    @ObservedObject var firmwareUpdateManager: FirmwareUpdateManager
 
     var body: some View {
         Form {
@@ -433,6 +523,7 @@ private struct DeveloperSettingsView: View {
             }
 
             OfflineMapDeviceTransferSettingsSection(manager: offlineMapManager)
+            FirmwareUpdateSettingsSection(manager: firmwareUpdateManager)
 
             Section {
                 HStack {

@@ -170,7 +170,9 @@ struct NavigationProtocolTests {
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsMapTransferControlFrames()
+        testBLEManagerSendsDeviceTransferControlFrames()
         testBLEManagerParsesMapTransferStatus()
+        testBLEManagerParsesDeviceTransferStatus()
         testBLEManagerSendsBrightnessFallbackSetting()
         testBLEManagerSendsDeviceScreenSettings()
         testBLEManagerPersistsNewMapSettings()
@@ -188,6 +190,7 @@ struct NavigationProtocolTests {
         testOfflineMapManifestDecoding()
         testMapTransferUploadURLEncodesPlusPathComponents()
         testMapTransferDeviceStatusDecodesActivationFailure()
+        testFirmwareManifestDecodingAndHash()
         print("NavigationProtocolTests passed")
     }
 
@@ -490,6 +493,33 @@ struct NavigationProtocolTests {
         assertEqual(status.activation?.error?.message, "sha mismatch for VECTMAP/new-map/1.fmb", "status exposes activation error message")
     }
 
+    static func testFirmwareManifestDecodingAndHash() {
+        let body = Data("""
+        {
+          "schemaVersion": 1,
+          "target": "WAVESHARE_AMOLED_175",
+          "version": "0.4.0",
+          "build": 87,
+          "gitSha": "abcdef123456",
+          "size": 3,
+          "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+          "url": "https://github.com/seichris/open-bike-computer/releases/download/v0.4.0/WAVESHARE_AMOLED_175.bin",
+          "minUpdaterProtocol": 1,
+          "signature": "base64-signature"
+        }
+        """.utf8)
+
+        guard let manifest = try? JSONDecoder().decode(FirmwareReleaseManifest.self, from: body) else {
+            assert(false, "firmware manifest should decode")
+            return
+        }
+
+        assertEqual(manifest.target, "WAVESHARE_AMOLED_175", "manifest exposes target")
+        assertEqual(manifest.build, 87, "manifest exposes build")
+        assert(manifest.isSupportedByApp, "manifest updater protocol is supported")
+        assertEqual(FirmwareUpdateManager.sha256Hex(Data("abc".utf8)), manifest.sha256, "firmware hash verification uses SHA-256 hex")
+    }
+
     static func testNavigationPacketBuilder() {
         let shortPacket = "2|150|Turn left"
         guard let shortData = NavigationPacketBuilder.data(from: shortPacket, maxLength: NavigationPacketBuilder.protocolMaxBytes) else {
@@ -694,6 +724,28 @@ struct NavigationProtocolTests {
         assertEqual(String(data: sentPackets[2], encoding: .utf8), "MTRNexit", "exit command uses MTRN frame")
     }
 
+    static func testBLEManagerSendsDeviceTransferControlFrames() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        assert(manager.requestDeviceTransferMode(.firmware), "firmware transfer enter should queue when BLE is ready")
+        assert(manager.requestDeviceTransferStatus(), "device transfer status should queue when BLE is ready")
+        assert(manager.requestDeviceTransferExit(), "device transfer exit should queue when BLE is ready")
+
+        assertEqual(sentPackets.count, 3, "device transfer control should write three packets")
+        assertEqual(String(data: sentPackets[0], encoding: .utf8), "DTRNenter|firmware", "firmware enter command uses DTRN frame")
+        assertEqual(String(data: sentPackets[1], encoding: .utf8), "DSTS", "status command uses DSTS frame")
+        assertEqual(String(data: sentPackets[2], encoding: .utf8), "DTRNexit", "exit command uses DTRN frame")
+    }
+
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
@@ -709,6 +761,27 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceMapFoundForCurrentLocation, false, "status parser exposes current map coverage")
         assertEqual(manager.deviceMapBlockCount, 0, "status parser exposes current map block count")
         assertEqual(manager.mapTransferLastError, "previous: previous upload failed", "status parser exposes last transfer error")
+    }
+
+    static func testBLEManagerParsesDeviceTransferStatus() {
+        let manager = BLEManager()
+        let json = """
+        {"configured":true,"enabled":true,"port":8080,"mode":"firmware","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"abc123","firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_175","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        """
+        let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
+
+        assert(manager.handleDeviceTransferStatusNotification(packet), "DSTS notification should be consumed")
+        assertEqual(manager.deviceTransferMode, "firmware", "status parser exposes transfer mode")
+        assertEqual(manager.deviceTransferBaseURL?.absoluteString, "http://192.168.4.1:8080", "status parser exposes base URL")
+        assertEqual(manager.deviceTransferAccessPointSSID, "BikeComputer-Transfer", "status parser exposes SSID")
+        assertEqual(manager.deviceTransferSessionToken, "abc123", "status parser exposes session token")
+        assertEqual(manager.firmwareTarget, "WAVESHARE_AMOLED_175", "status parser exposes firmware target")
+        assertEqual(manager.firmwareVersion, "0.2.2", "status parser exposes firmware version")
+        assertEqual(manager.firmwareBuild, 86, "status parser exposes firmware build")
+        assertEqual(manager.firmwareUpdateStatus, "receiving", "status parser exposes firmware update status")
+        assertEqual(manager.firmwareUpdateReceivedBytes, 1024, "status parser exposes received bytes")
+        assertEqual(manager.firmwareUpdateTotalBytes, 2048, "status parser exposes total bytes")
+        assertEqual(manager.firmwareUpdateLastError, "previous: previous update failed", "status parser exposes firmware error")
     }
 
     static func testBLEManagerSendsBrightnessFallbackSetting() {

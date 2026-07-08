@@ -179,9 +179,12 @@ class BikeComputerCoordinator: ObservableObject {
             .removeDuplicates()
             .filter { $0 }
             .sink { [weak self] _ in
-                guard let self, let location = self.locationManager.currentLocation else { return }
-                self.navEngine.processExternalLocation(location)
+                guard let self else { return }
+                if let location = self.locationManager.currentLocation {
+                    self.navEngine.processExternalLocation(location)
+                }
                 self.requestMapTransferStatusAfterDeviceRefresh()
+                self.bleManager.requestDeviceTransferStatus()
             }
             .store(in: &cancellables)
 
