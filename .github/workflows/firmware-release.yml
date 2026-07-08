@@ -71,6 +71,7 @@ jobs:
             exit 1
           fi
           mkdir -p release-assets public/firmware
+          git_sha="$(git rev-parse --short=12 HEAD)"
           find dist -name '*.bin' -exec cp {} release-assets/ \;
           for target in WAVESHARE_AMOLED_175 WAVESHARE_AMOLED_206; do
             python tools/firmware_manifest.py \
@@ -78,7 +79,7 @@ jobs:
               --target "${target}" \
               --repository "${{ github.repository }}" \
               --tag "${GITHUB_REF_NAME}" \
-              --git-sha "${GITHUB_SHA::12}" \
+              --git-sha "${git_sha}" \
               --private-key-base64 "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" \
               --output "public/firmware/${target}/manifest.json"
             cp "public/firmware/${target}/manifest.json" "release-assets/${target}.manifest.json"
