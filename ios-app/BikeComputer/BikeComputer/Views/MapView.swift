@@ -29,7 +29,9 @@ struct MapViewContainer: UIViewRepresentable {
     let simulatedPosition: CLLocationCoordinate2D?
     let isSimulationMode: Bool
     let isNavigating: Bool
+    let offlineMapSelectionFrame: CGRect?
     let onMapTapped: (() -> Void)?
+    let onOfflineMapSelectionBoundsChanged: ((OfflineMapBounds) -> Void)?
     let onDestinationSelected: ((CLLocationCoordinate2D, CLLocation?) -> Void)?
     
     func makeUIView(context: Context) -> MKMapView {
@@ -61,6 +63,7 @@ struct MapViewContainer: UIViewRepresentable {
         
         // Store the callback in coordinator
         context.coordinator.onMapTapped = onMapTapped
+        context.coordinator.onOfflineMapSelectionBoundsChanged = onOfflineMapSelectionBoundsChanged
         context.coordinator.onDestinationSelected = onDestinationSelected
         
         return mapView
@@ -70,8 +73,11 @@ struct MapViewContainer: UIViewRepresentable {
         // Store reference to map view in coordinator
         context.coordinator.mapView = uiView
         context.coordinator.onMapTapped = onMapTapped
+        context.coordinator.offlineMapSelectionFrame = offlineMapSelectionFrame
+        context.coordinator.onOfflineMapSelectionBoundsChanged = onOfflineMapSelectionBoundsChanged
         context.coordinator.onDestinationSelected = onDestinationSelected
         context.coordinator.updateControlVisibility(isNavigating: isNavigating)
+        context.coordinator.updateOfflineMapSelectionBounds()
         
         // Only set initial region once if not already set
         if let location = location, 
@@ -189,6 +195,8 @@ struct MapViewContainer: UIViewRepresentable {
         var lastRoute: MKRoute?
         var mapView: MKMapView?
         var onMapTapped: (() -> Void)?
+        var offlineMapSelectionFrame: CGRect?
+        var onOfflineMapSelectionBoundsChanged: ((OfflineMapBounds) -> Void)?
         var onDestinationSelected: ((CLLocationCoordinate2D, CLLocation?) -> Void)?
         var hasSetInitialRegion = false
         private var compassButton: MKCompassButton?
@@ -223,6 +231,28 @@ struct MapViewContainer: UIViewRepresentable {
         func updateControlVisibility(isNavigating: Bool) {
             compassButton?.compassVisibility = isNavigating ? .visible : .adaptive
             trackingButton?.isHidden = !isNavigating
+        }
+
+        func updateOfflineMapSelectionBounds() {
+            guard let mapView,
+                  let frame = offlineMapSelectionFrame,
+                  frame.width > 0,
+                  frame.height > 0 else {
+                return
+            }
+
+            let topLeft = mapView.convert(CGPoint(x: frame.minX, y: frame.minY), toCoordinateFrom: mapView)
+            let bottomRight = mapView.convert(CGPoint(x: frame.maxX, y: frame.maxY), toCoordinateFrom: mapView)
+            let bounds = OfflineMapBounds(
+                minLon: min(topLeft.longitude, bottomRight.longitude),
+                minLat: min(topLeft.latitude, bottomRight.latitude),
+                maxLon: max(topLeft.longitude, bottomRight.longitude),
+                maxLat: max(topLeft.latitude, bottomRight.latitude)
+            )
+
+            DispatchQueue.main.async { [onOfflineMapSelectionBoundsChanged] in
+                onOfflineMapSelectionBoundsChanged?(bounds)
+            }
         }
 
         func configureRouteCamera(
@@ -274,6 +304,10 @@ struct MapViewContainer: UIViewRepresentable {
         func resetNavigationCamera() {
             lastNavigationCoordinate = nil
             lastNavigationHeading = 0
+        }
+
+        func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            updateOfflineMapSelectionBounds()
         }
 
         @objc func handleTap(_ gestureRecognizer: UITapGestureRecognizer) {

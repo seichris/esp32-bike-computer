@@ -90,6 +90,10 @@ enum DeviceScreen: Int, CaseIterable, Identifiable {
         allCases.reduce(0) { $0 | $1.bit }
     }
 
+    static var displayOrder: [DeviceScreen] {
+        [.mapPlusNavigation, .rideStats, .map, .navigation]
+    }
+
     static func normalizedMask(_ rawMask: Int) -> Int {
         let mask = rawMask & allScreensMask
         return mask == 0 ? allScreensMask : mask
@@ -97,14 +101,11 @@ enum DeviceScreen: Int, CaseIterable, Identifiable {
 
     static func fallbackDefault(for rawDefault: Int, mask rawMask: Int) -> DeviceScreen {
         let mask = normalizedMask(rawMask)
-        let candidate = DeviceScreen(rawValue: rawDefault) ?? .map
+        let candidate = DeviceScreen(rawValue: rawDefault) ?? .mapPlusNavigation
         if mask & candidate.bit != 0 {
             return candidate
         }
-        if mask & DeviceScreen.map.bit != 0 {
-            return .map
-        }
-        return allCases.first { mask & $0.bit != 0 } ?? .map
+        return displayOrder.first { mask & $0.bit != 0 } ?? .mapPlusNavigation
     }
 }
 
@@ -214,6 +215,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var debugEvents: [String] = []
     @Published var mapTransferModeEnabled: Bool = false
     @Published var mapTransferBaseURL: URL?
+    @Published var mapTransferAccessPointSSID: String?
     @Published var mapTransferActiveMapId: String = ""
     @Published var mapTransferLastError: String?
     @Published var mapTransferStatusDescription: String = "unknown"
@@ -232,7 +234,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var zoomLevel: Int = 2 // 0-4: 0=super-zoom, 1=closest, 4=farthest
     @Published var tapToSwitchScreens: Bool = false
     @Published var enabledDeviceScreensMask: Int = DeviceScreen.allScreensMask
-    @Published var defaultDeviceScreen: DeviceScreen = .map
+    @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
     @Published var deviceBrightnessPercent: Double = 100
     
     // Feature Visibility
@@ -318,6 +320,7 @@ class BLEManager: NSObject, ObservableObject {
         static let tapToSwitchScreens = "deviceSettings.tapToSwitchScreens"
         static let enabledDeviceScreensMask = "deviceSettings.enabledScreensMask"
         static let defaultDeviceScreen = "deviceSettings.defaultScreen"
+        static let defaultDeviceScreenMigrated = "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1"
         static let deviceBrightnessPercent = "deviceSettings.brightnessPercent"
         static let showBuildings = "mapSettings.showBuildings"
         static let showGreenSpace = "mapSettings.showGreenSpace"
@@ -364,10 +367,19 @@ class BLEManager: NSObject, ObservableObject {
         enabledDeviceScreensMask = DeviceScreen.normalizedMask(
             defaults.object(forKey: SettingsKeys.enabledDeviceScreensMask) as? Int ?? DeviceScreen.allScreensMask
         )
+        let storedDefaultScreen = defaults.object(forKey: SettingsKeys.defaultDeviceScreen) as? Int
+        let shouldMigrateDefaultScreen = !defaults.bool(forKey: SettingsKeys.defaultDeviceScreenMigrated)
+        let rawDefaultScreen = shouldMigrateDefaultScreen && storedDefaultScreen == DeviceScreen.map.rawValue
+            ? DeviceScreen.mapPlusNavigation.rawValue
+            : storedDefaultScreen ?? DeviceScreen.mapPlusNavigation.rawValue
         defaultDeviceScreen = DeviceScreen.fallbackDefault(
-            for: defaults.object(forKey: SettingsKeys.defaultDeviceScreen) as? Int ?? DeviceScreen.map.rawValue,
+            for: rawDefaultScreen,
             mask: enabledDeviceScreensMask
         )
+        if shouldMigrateDefaultScreen {
+            defaults.set(defaultDeviceScreen.rawValue, forKey: SettingsKeys.defaultDeviceScreen)
+            defaults.set(true, forKey: SettingsKeys.defaultDeviceScreenMigrated)
+        }
         deviceBrightnessPercent = defaults.object(forKey: SettingsKeys.deviceBrightnessPercent) as? Double ?? 100
         showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
         let legacyNature = defaults.object(forKey: SettingsKeys.legacyShowNature) as? Bool ?? true
@@ -639,7 +651,7 @@ class BLEManager: NSObject, ObservableObject {
 
     func isOnlyEnabledDeviceScreen(_ screen: DeviceScreen) -> Bool {
         guard isDeviceScreenEnabled(screen) else { return false }
-        return DeviceScreen.allCases.filter { isDeviceScreenEnabled($0) }.count == 1
+        return DeviceScreen.displayOrder.filter { isDeviceScreenEnabled($0) }.count == 1
     }
 
     func setDeviceScreen(_ screen: DeviceScreen, enabled: Bool) {
@@ -665,7 +677,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     var enabledDeviceScreens: [DeviceScreen] {
-        DeviceScreen.allCases.filter { isDeviceScreenEnabled($0) }
+        DeviceScreen.displayOrder.filter { isDeviceScreenEnabled($0) }
     }
 
     func sendEnabledDeviceScreensMask() {
@@ -691,12 +703,18 @@ class BLEManager: NSObject, ObservableObject {
     func requestMapTransferMode(enabled: Bool) -> Bool {
         var packet = Data(DeviceBLEProtocol.mapTransferControlPrefix.utf8)
         packet.append(Data((enabled ? "enter" : "exit").utf8))
-        return sendFallbackMapPacket(packet, label: enabled ? "map transfer enter" : "map transfer exit")
+        let label = enabled ? "map transfer enter" : "map transfer exit"
+        let sentNative = sendNativeMapTransferPacket(packet, label: label)
+        let sentFallback = sendFallbackMapPacket(packet, label: label)
+        return sentNative || sentFallback
     }
 
     @discardableResult
     func requestMapTransferStatus() -> Bool {
-        sendFallbackMapPacket(Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8), label: "map transfer status")
+        let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8)
+        let sentNative = sendNativeMapTransferPacket(packet, label: "map transfer status")
+        let sentFallback = sendFallbackMapPacket(packet, label: "map transfer status")
+        return sentNative || sentFallback
     }
 
     func sendDebugNavigationPacket() {
@@ -773,6 +791,7 @@ class BLEManager: NSObject, ObservableObject {
         isNavigationReady = false
         mapTransferModeEnabled = false
         mapTransferBaseURL = nil
+        mapTransferAccessPointSSID = nil
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
         deviceHasSDCard = nil
@@ -1116,6 +1135,39 @@ class BLEManager: NSObject, ObservableObject {
         return true
     }
 
+    @discardableResult
+    private func sendNativeMapTransferPacket(_ data: Data, label: String) -> Bool {
+        guard isConnected,
+              isNavigationReady,
+              let peripheral = connectedPeripheral,
+              let characteristic = settingsCharacteristic,
+              data.count <= peripheral.maximumWriteValueLength(for: .withoutResponse) else {
+            return false
+        }
+
+        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+        log("Sent native \(label): \(data.count) bytes")
+        return true
+    }
+
+    func waitForNavigationWritesToDrain(timeoutSeconds: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while navigationWriteQueue.count > 0 {
+            if let endpoint = navigationWriteEndpoint {
+                flushPendingNavigationWrites(endpoint: endpoint)
+            }
+            if navigationWriteQueue.count == 0 {
+                return true
+            }
+            if Date() >= deadline {
+                log("Navigation write queue did not drain before timeout")
+                return false
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return true
+    }
+
     private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
         navigationWriteQueue.flush(canSend: endpoint.canSend) { write in
             endpoint.write(write.data)
@@ -1269,6 +1321,7 @@ extension BLEManager: CBCentralManagerDelegate {
         isNavigationReady = false
         mapTransferModeEnabled = false
         mapTransferBaseURL = nil
+        mapTransferAccessPointSSID = nil
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
         deviceHasSDCard = nil
@@ -1553,6 +1606,7 @@ extension BLEManager: CBPeripheralDelegate {
         } else {
             mapTransferBaseURL = nil
         }
+        mapTransferAccessPointSSID = object["apSsid"] as? String
         mapTransferActiveMapId = object["activeMapId"] as? String ?? ""
         deviceHasSDCard = object["sdPresent"] as? Bool
         deviceMapFoundForCurrentLocation = object["mapFound"] as? Bool

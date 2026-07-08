@@ -164,7 +164,12 @@ enum OfflineMapPlatformError: LocalizedError {
     case invalidBaseURL
     case missingMapId
     case missingDownloadURL
+    case transferCommandNotSent
     case missingTransferBaseURL
+    case deviceSDCardUnavailable
+    case mapActivationTimedOut
+    case mapActivationFailed(String)
+    case transferWiFiJoinFailed(String, String)
     case invalidPack(String)
     case unsupportedPackCompression(String)
     case invalidResponse
@@ -178,8 +183,18 @@ enum OfflineMapPlatformError: LocalizedError {
             return "Map pack is not ready"
         case .missingDownloadURL:
             return "Download URL is not ready"
+        case .transferCommandNotSent:
+            return "Device did not accept the map transfer command over BLE"
         case .missingTransferBaseURL:
             return "Device map transfer mode is not ready"
+        case .deviceSDCardUnavailable:
+            return "Device SD card is not mounted"
+        case .mapActivationTimedOut:
+            return "Timed out while activating map on device"
+        case .mapActivationFailed(let message):
+            return "Map activation failed: \(message)"
+        case .transferWiFiJoinFailed(let ssid, let message):
+            return "Could not join device Wi-Fi \(ssid): \(message)"
         case .invalidPack(let message):
             return "Invalid map pack: \(message)"
         case .unsupportedPackCompression(let path):
@@ -196,6 +211,35 @@ struct OfflineMapPackEntry: Equatable {
     let path: String
     let offset: UInt64
     let byteCount: Int
+}
+
+struct OfflineMapPackManifest: Decodable, Equatable {
+    struct Source: Decodable, Equatable {
+        let region: String?
+        let url: String?
+    }
+
+    let mapId: String?
+    let displayName: String?
+    let source: Source?
+}
+
+nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
+    struct TransferError: Decodable, Equatable {
+        let code: String?
+        let message: String?
+    }
+
+    struct Activation: Decodable, Equatable {
+        let status: String?
+        let sessionId: String?
+        let mapId: String?
+        let error: TransferError?
+    }
+
+    let enabled: Bool?
+    let activeMapId: String?
+    let activation: Activation?
 }
 
 struct OfflineMapPackArchive {
@@ -230,6 +274,13 @@ struct OfflineMapPackArchive {
             throw OfflineMapPlatformError.invalidPack("truncated entry \(entry.path)")
         }
         return data
+    }
+
+    func manifest() throws -> OfflineMapPackManifest {
+        guard let manifestEntry else {
+            throw OfflineMapPlatformError.invalidPack("manifest.json is missing")
+        }
+        return try JSONDecoder().decode(OfflineMapPackManifest.self, from: data(for: manifestEntry))
     }
 
     private nonisolated static func readEntries(url: URL) throws -> [OfflineMapPackEntry] {
@@ -336,7 +387,7 @@ struct MapTransferDeviceClient {
     nonisolated func upload(
         archive: OfflineMapPackArchive,
         sessionId: String,
-        progress: @escaping @MainActor (_ completed: Int, _ total: Int, _ path: String) -> Void
+        progress: @escaping @MainActor (_ completed: Int, _ total: Int, _ path: String, _ didUpload: Bool) -> Void
     ) async throws {
         guard let manifest = archive.manifestEntry else {
             throw OfflineMapPlatformError.invalidPack("manifest.json is missing")
@@ -344,9 +395,13 @@ struct MapTransferDeviceClient {
 
         let uploadEntries = [manifest] + archive.mapFileEntries.sorted { $0.path < $1.path }
         for (index, entry) in uploadEntries.enumerated() {
+            if try await stagedByteCount(sessionId: sessionId, path: entry.path) == entry.byteCount {
+                await progress(index + 1, uploadEntries.count, entry.path, false)
+                continue
+            }
             let data = try archive.data(for: entry)
             try await put(sessionId: sessionId, path: entry.path, data: data)
-            await progress(index + 1, uploadEntries.count, entry.path)
+            await progress(index + 1, uploadEntries.count, entry.path, true)
         }
     }
 
@@ -357,7 +412,17 @@ struct MapTransferDeviceClient {
             relativePath: "activate"
         ))
         request.httpMethod = "POST"
+        request.timeoutInterval = 15
         _ = try await send(request: request, data: nil)
+    }
+
+    nonisolated func status() async throws -> MapTransferDeviceStatus {
+        var request = URLRequest(url: Self.statusURL(baseURL: baseURL))
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 2
+        let data = try await send(request: request, data: nil)
+        return try JSONDecoder().decode(MapTransferDeviceStatus.self, from: data)
     }
 
     private nonisolated func put(sessionId: String, path: String, data: Data) async throws {
@@ -368,7 +433,35 @@ struct MapTransferDeviceClient {
         ))
         request.httpMethod = "PUT"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 30
         _ = try await send(request: request, data: data)
+    }
+
+    private nonisolated func stagedByteCount(sessionId: String, path: String) async throws -> Int? {
+        var request = URLRequest(url: Self.uploadURL(
+            baseURL: baseURL,
+            sessionId: sessionId,
+            relativePath: path
+        ))
+        request.httpMethod = "HEAD"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 3
+
+        let response = try await session.data(for: request)
+        guard let http = response.1 as? HTTPURLResponse else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        if http.statusCode == 404 {
+            return nil
+        }
+        guard 200..<300 ~= http.statusCode else {
+            return nil
+        }
+        guard let value = http.value(forHTTPHeaderField: "Content-Length"),
+              let count = Int(value) else {
+            return nil
+        }
+        return count
     }
 
     private nonisolated func send(request: URLRequest, data: Data?) async throws -> Data {
@@ -394,6 +487,11 @@ struct MapTransferDeviceClient {
             .map(percentEncodedPathComponent)
             .joined(separator: "/")
         return URL(string: "\(base)/\(encodedSegments)")!
+    }
+
+    nonisolated static func statusURL(baseURL: URL) -> URL {
+        let base = baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return URL(string: "\(base)/map-transfer/status")!
     }
 
     private nonisolated static func percentEncodedPathComponent(_ value: String) -> String {
@@ -496,11 +594,11 @@ struct OfflineMapPlatformClient {
 }
 
 private extension Data {
-    func uint16LE(at offset: Int) -> UInt16 {
+    nonisolated func uint16LE(at offset: Int) -> UInt16 {
         UInt16(self[offset]) | (UInt16(self[offset + 1]) << 8)
     }
 
-    func uint32LE(at offset: Int) -> UInt32 {
+    nonisolated func uint32LE(at offset: Int) -> UInt32 {
         UInt32(self[offset]) |
             (UInt32(self[offset + 1]) << 8) |
             (UInt32(self[offset + 2]) << 16) |

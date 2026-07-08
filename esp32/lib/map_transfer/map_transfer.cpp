@@ -694,7 +694,7 @@ bool MapTransferInstaller::fileSha256Hex(const std::string &path,
   if (!input)
     return false;
   Sha256 sha;
-  std::array<uint8_t, 4096> buffer = {};
+  std::array<uint8_t, 1024> buffer = {};
   while (input.good()) {
     input.read(reinterpret_cast<char *>(buffer.data()), buffer.size());
     std::streamsize n = input.gcount();

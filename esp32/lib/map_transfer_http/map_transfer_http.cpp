@@ -8,6 +8,7 @@
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
+#include <freertos/task.h>
 
 namespace map_transfer {
 namespace {
@@ -15,6 +16,11 @@ namespace {
 constexpr const char *kStatusPath = "/map-transfer/status";
 constexpr const char *kSessionPrefix = "/map-transfer/sessions/";
 constexpr uint64_t kMaxUploadBytes = 128ULL * 1024ULL * 1024ULL;
+
+struct ActivationTaskContext {
+  MapTransferHttpServer *server = nullptr;
+  std::string sessionId;
+};
 
 static std::string joinPath(const std::string &a, const std::string &b) {
   if (a.empty())
@@ -93,6 +99,14 @@ static bool safeUploadPath(const std::string &path) {
   if (path == "manifest.json")
     return true;
   return startsWith(path, "VECTMAP/") && safeRelativePath(path);
+}
+
+static bool fileSize(const std::string &path, uint64_t &size) {
+  struct stat st;
+  if (::stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+    return false;
+  size = static_cast<uint64_t>(st.st_size);
+  return true;
 }
 
 static bool mkdirs(const std::string &path) {
@@ -201,25 +215,61 @@ void MapTransferHttpServer::configure(std::string storageRoot, uint16_t port) {
   port_ = port;
   server_ = WiFiServer(port_);
   installer_ = MapTransferInstaller(storageRoot_);
+  if (stateMutex_ == nullptr)
+    stateMutex_ = xSemaphoreCreateMutex();
   configured_ = true;
 }
 
 bool MapTransferHttpServer::setEnabled(bool enabled) {
   if (!configured_)
     configure(storageRoot_, port_);
-  if (enabled && WiFi.status() != WL_CONNECTED) {
-    rememberError("wifi_disconnected", "Wi-Fi is not connected");
-    return false;
-  }
-  if (enabled && !enabled_) {
+  lockState();
+  const bool wasEnabled = enabled_;
+  const bool wasStartedAp = startedAp_;
+  unlockState();
+
+  if (enabled && !wasEnabled) {
+    if (WiFi.status() != WL_CONNECTED) {
+      const std::string apSsid = "BikeComputer-Map";
+      WiFi.mode(WIFI_AP);
+      if (!WiFi.softAP(apSsid.c_str())) {
+        lockState();
+        rememberError("wifi_ap", "could not start transfer Wi-Fi");
+        unlockState();
+        return false;
+      }
+      lockState();
+      startedAp_ = true;
+      apSsid_ = apSsid;
+      unlockState();
+      Serial.printf("MAP_TRANSFER_HTTP: started AP ssid=%s ip=%s\n",
+                    apSsid.c_str(), WiFi.softAPIP().toString().c_str());
+    }
     server_.begin();
     server_.setNoDelay(true);
   }
-  if (!enabled && enabled_) {
+  if (!enabled && wasEnabled) {
     server_.stop();
+    if (wasStartedAp) {
+      WiFi.softAPdisconnect(true);
+      WiFi.mode(WIFI_OFF);
+      lockState();
+      startedAp_ = false;
+      apSsid_.clear();
+      unlockState();
+    }
   }
+  lockState();
   enabled_ = enabled;
+  unlockState();
   return true;
+}
+
+void MapTransferHttpServer::setLastError(const std::string &code,
+                                         const std::string &message) {
+  lockState();
+  rememberError(code, message);
+  unlockState();
 }
 
 void MapTransferHttpServer::process() {
@@ -233,7 +283,29 @@ void MapTransferHttpServer::process() {
 }
 
 HttpTransferStatus MapTransferHttpServer::status() const {
-  return {configured_, enabled_, port_, lastErrorCode_, lastErrorMessage_};
+  lockState();
+  const bool configured = configured_;
+  const bool enabled = enabled_;
+  const bool startedAp = startedAp_;
+  const uint16_t port = port_;
+  const std::string apSsid = apSsid_;
+  const std::string lastErrorCode = lastErrorCode_;
+  const std::string lastErrorMessage = lastErrorMessage_;
+  unlockState();
+
+  std::string baseUrl;
+  if (enabled) {
+    IPAddress ip =
+        startedAp ? WiFi.softAPIP() : (WiFi.status() == WL_CONNECTED
+                                           ? WiFi.localIP()
+                                           : IPAddress());
+    if (ip != IPAddress()) {
+      baseUrl = std::string("http://") + ip.toString().c_str() + ":" +
+                std::to_string(port);
+    }
+  }
+  return {configured, enabled, port, baseUrl, apSsid, lastErrorCode,
+          lastErrorMessage};
 }
 
 void MapTransferHttpServer::handleClient(WiFiClient &client) {
@@ -274,11 +346,37 @@ void MapTransferHttpServer::handleClient(WiFiClient &client) {
     sendError(client, 403, "transfer_disabled", "map transfer mode is disabled");
     return;
   }
+  Serial.printf("MAP_TRANSFER_HTTP: %s %s length=%llu\n", method.c_str(),
+                path.c_str(), static_cast<unsigned long long>(contentLength));
+  if (method == "HEAD" && handleHead(path, client))
+    return;
   if (method == "PUT" && handlePut(path, contentLength, client))
     return;
   if (method == "POST" && handleActivate(path, client))
     return;
   sendError(client, 404, "not_found", "map transfer endpoint not found");
+}
+
+bool MapTransferHttpServer::handleHead(const std::string &path,
+                                       WiFiClient &client) {
+  std::string sessionId;
+  std::string relativePath;
+  if (!parseSessionPath(path, sessionId, relativePath))
+    return false;
+  if (!safeUploadPath(relativePath)) {
+    sendHead(client, 400);
+    return true;
+  }
+
+  const std::string stagedPath =
+      joinPath(installer_.stagingRoot(sessionId), relativePath);
+  uint64_t size = 0;
+  if (!fileSize(stagedPath, size)) {
+    sendHead(client, 404);
+    return true;
+  }
+  sendHead(client, 200, size);
+  return true;
 }
 
 bool MapTransferHttpServer::handlePut(const std::string &path,
@@ -343,6 +441,9 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     return true;
   }
 
+  Serial.printf("MAP_TRANSFER_HTTP: staged session=%s path=%s bytes=%llu\n",
+                sessionId.c_str(), relativePath.c_str(),
+                static_cast<unsigned long long>(contentLength));
   sendJson(client, 200,
            std::string("{\"ok\":true,\"sessionId\":\"") +
                jsonEscape(sessionId) + "\",\"path\":\"" +
@@ -359,51 +460,99 @@ bool MapTransferHttpServer::handleActivate(const std::string &path,
   if (action != "activate")
     return false;
 
-  MapManifest manifest;
-  InstallStatus validated = installer_.validateStagedMap(sessionId, manifest);
-  if (!validated.ok) {
-    sendError(client, 400, validated.code, validated.message);
+  lockState();
+  if (activationRunning_) {
+    const bool sameSession = activationSessionId_ == sessionId;
+    unlockState();
+    if (sameSession) {
+      sendJson(client, 202,
+               std::string("{\"ok\":true,\"status\":\"activating\",\"sessionId\":\"") +
+                   jsonEscape(sessionId) + "\"}");
+      return true;
+    }
+    sendError(client, 409, "activation_busy",
+              "another map activation is already running");
     return true;
   }
-  InstallStatus activated = installer_.activateStagedMap(sessionId, manifest);
-  if (!activated.ok) {
-    sendError(client, 500, activated.code, activated.message);
+  activationRunning_ = true;
+  activationSessionId_ = sessionId;
+  activationStatus_ = "activating";
+  activationMapId_.clear();
+  activationErrorCode_.clear();
+  activationErrorMessage_.clear();
+  unlockState();
+
+  auto *context = new ActivationTaskContext{this, sessionId};
+  BaseType_t created = xTaskCreate(activationTaskThunk, "map_activate", 16384,
+                                   context, 1, nullptr);
+  if (created != pdPASS) {
+    delete context;
+    finishActivation("failed", "", "activation_task",
+                     "could not start activation task");
+    sendError(client, 500, "activation_task",
+              "could not start activation task");
     return true;
   }
-  sendJson(client, 200,
-           std::string("{\"ok\":true,\"sessionId\":\"") +
-               jsonEscape(sessionId) + "\",\"mapId\":\"" +
-               jsonEscape(manifest.mapId) + "\"}");
+
+  Serial.printf("MAP_TRANSFER_HTTP: activation queued session=%s\n",
+                sessionId.c_str());
+  sendJson(client, 202,
+           std::string("{\"ok\":true,\"status\":\"activating\",\"sessionId\":\"") +
+               jsonEscape(sessionId) + "\"}");
   return true;
 }
 
 void MapTransferHttpServer::handleStatus(WiFiClient &client) {
   std::string activeMapId;
   InstallStatus active = installer_.readActiveMapId(activeMapId);
+  lockState();
+  const bool configured = configured_;
+  const bool enabled = enabled_;
+  const uint16_t port = port_;
+  const std::string lastErrorCode = lastErrorCode_;
+  const std::string lastErrorMessage = lastErrorMessage_;
+  unlockState();
+
   std::string body = std::string("{\"configured\":") +
-                     (configured_ ? "true" : "false") + ",\"enabled\":" +
-                     (enabled_ ? "true" : "false") + ",\"port\":" +
-                     std::to_string(port_);
+                     (configured ? "true" : "false") + ",\"enabled\":" +
+                     (enabled ? "true" : "false") + ",\"port\":" +
+                     std::to_string(port);
   if (active.ok) {
     body += ",\"activeMapId\":\"" + jsonEscape(activeMapId) + "\"";
   } else {
     body += ",\"activeError\":{\"code\":\"" + jsonEscape(active.code) +
             "\",\"message\":\"" + jsonEscape(active.message) + "\"}";
   }
-  if (!lastErrorCode_.empty()) {
-    body += ",\"lastError\":{\"code\":\"" + jsonEscape(lastErrorCode_) +
-            "\",\"message\":\"" + jsonEscape(lastErrorMessage_) + "\"}";
+  body += ",\"activation\":" + activationStatusJson();
+  if (!lastErrorCode.empty()) {
+    body += ",\"lastError\":{\"code\":\"" + jsonEscape(lastErrorCode) +
+            "\",\"message\":\"" + jsonEscape(lastErrorMessage) + "\"}";
   }
   body += "}";
   sendJson(client, 200, body);
 }
 
-void MapTransferHttpServer::sendJson(WiFiClient &client, int status,
-                                     const std::string &body) {
+void MapTransferHttpServer::sendHead(WiFiClient &client, int status,
+                                     uint64_t contentLength) {
   const char *reason = status == 200   ? "OK"
                        : status == 400 ? "Bad Request"
                        : status == 403 ? "Forbidden"
                        : status == 404 ? "Not Found"
+                                       : "Internal Server Error";
+  client.printf("HTTP/1.1 %d %s\r\n", status, reason);
+  client.print("Connection: close\r\n");
+  client.printf("Content-Length: %llu\r\n\r\n",
+                static_cast<unsigned long long>(contentLength));
+}
+
+void MapTransferHttpServer::sendJson(WiFiClient &client, int status,
+                                     const std::string &body) {
+  const char *reason = status == 200   ? "OK"
+                       : status == 202 ? "Accepted"
+                       : status == 400 ? "Bad Request"
+                       : status == 403 ? "Forbidden"
+                       : status == 404 ? "Not Found"
+                       : status == 409 ? "Conflict"
                        : status == 408 ? "Request Timeout"
                        : status == 413 ? "Payload Too Large"
                                        : "Internal Server Error";
@@ -418,7 +567,9 @@ void MapTransferHttpServer::sendJson(WiFiClient &client, int status,
 void MapTransferHttpServer::sendError(WiFiClient &client, int status,
                                       const std::string &code,
                                       const std::string &message) {
+  lockState();
   rememberError(code, message);
+  unlockState();
   sendJson(client, status,
            std::string("{\"ok\":false,\"error\":{\"code\":\"") +
                jsonEscape(code) + "\",\"message\":\"" + jsonEscape(message) +
@@ -429,6 +580,89 @@ void MapTransferHttpServer::rememberError(const std::string &code,
                                           const std::string &message) {
   lastErrorCode_ = code;
   lastErrorMessage_ = message;
+}
+
+void MapTransferHttpServer::lockState() const {
+  if (stateMutex_ != nullptr)
+    xSemaphoreTake(stateMutex_, portMAX_DELAY);
+}
+
+void MapTransferHttpServer::unlockState() const {
+  if (stateMutex_ != nullptr)
+    xSemaphoreGive(stateMutex_);
+}
+
+std::string MapTransferHttpServer::activationStatusJson() const {
+  lockState();
+  std::string body = std::string("{\"status\":\"") +
+                     jsonEscape(activationStatus_) + "\"";
+  if (!activationSessionId_.empty())
+    body += ",\"sessionId\":\"" + jsonEscape(activationSessionId_) + "\"";
+  if (!activationMapId_.empty())
+    body += ",\"mapId\":\"" + jsonEscape(activationMapId_) + "\"";
+  if (!activationErrorCode_.empty()) {
+    body += ",\"error\":{\"code\":\"" + jsonEscape(activationErrorCode_) +
+            "\",\"message\":\"" + jsonEscape(activationErrorMessage_) + "\"}";
+  }
+  body += "}";
+  unlockState();
+  return body;
+}
+
+void MapTransferHttpServer::finishActivation(const std::string &status,
+                                             const std::string &mapId,
+                                             const std::string &errorCode,
+                                             const std::string &errorMessage) {
+  lockState();
+  activationRunning_ = false;
+  activationStatus_ = status;
+  activationMapId_ = mapId;
+  activationErrorCode_ = errorCode;
+  activationErrorMessage_ = errorMessage;
+  if (!errorCode.empty()) {
+    lastErrorCode_ = errorCode;
+    lastErrorMessage_ = errorMessage;
+  }
+  unlockState();
+}
+
+void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
+  Serial.printf("MAP_TRANSFER_HTTP: activate start session=%s\n",
+                sessionId.c_str());
+  MapManifest manifest;
+  InstallStatus validated = installer_.validateStagedMap(sessionId, manifest);
+  if (!validated.ok) {
+    Serial.printf("MAP_TRANSFER_HTTP: activate validation failed code=%s message=%s\n",
+                  validated.code.c_str(), validated.message.c_str());
+    finishActivation("failed", "", validated.code, validated.message);
+    return;
+  }
+
+  InstallStatus activated = installer_.activateStagedMap(sessionId, manifest);
+  if (!activated.ok) {
+    Serial.printf("MAP_TRANSFER_HTTP: activate failed code=%s message=%s\n",
+                  activated.code.c_str(), activated.message.c_str());
+    finishActivation("failed", manifest.mapId, activated.code,
+                     activated.message);
+    return;
+  }
+
+  Serial.printf("MAP_TRANSFER_HTTP: activated mapId=%s session=%s\n",
+                manifest.mapId.c_str(), sessionId.c_str());
+  finishActivation("installed", manifest.mapId, "", "");
+}
+
+void MapTransferHttpServer::activationTaskThunk(void *arg) {
+  auto *context = static_cast<ActivationTaskContext *>(arg);
+  if (context != nullptr && context->server != nullptr) {
+    MapTransferHttpServer *server = context->server;
+    std::string sessionId = context->sessionId;
+    delete context;
+    server->runActivationTask(sessionId);
+  } else {
+    delete context;
+  }
+  vTaskDelete(nullptr);
 }
 
 } // namespace map_transfer

@@ -53,6 +53,7 @@ static volatile bool navDataUpdated = false;
 static bool bleSessionAuthenticated = false;
 static char pendingAuthNonce[33] = "";
 static NimBLECharacteristic *authCharacteristic = nullptr;
+static NimBLECharacteristic *mapTransferStatusCharacteristic = nullptr;
 static BLEDebugStats bleDebugStats;
 static uint16_t activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
 static bool unauthTimeoutDisconnectRequested = false;
@@ -77,20 +78,23 @@ static uint8_t normalizedDefaultScreen(int32_t rawDefault,
   uint8_t defaultScreen =
       rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_MAP_PLUS_NAVIGATION
           ? (uint8_t)rawDefault
-          : (uint8_t)DEVICE_SCREEN_MAP;
+          : (uint8_t)DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
   if (enabledScreensMask & deviceScreenBit(defaultScreen)) {
     return defaultScreen;
+  }
+  if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_MAP_PLUS_NAVIGATION)) {
+    return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
+  }
+  if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_RIDE_STATS)) {
+    return DEVICE_SCREEN_RIDE_STATS;
   }
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_MAP)) {
     return DEVICE_SCREEN_MAP;
   }
-  for (uint8_t screen = DEVICE_SCREEN_MAP;
-       screen <= DEVICE_SCREEN_MAP_PLUS_NAVIGATION; screen++) {
-    if (enabledScreensMask & deviceScreenBit(screen)) {
-      return screen;
-    }
+  if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_NAVIGATION)) {
+    return DEVICE_SCREEN_NAVIGATION;
   }
-  return DEVICE_SCREEN_MAP;
+  return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
 }
 
 static void clearCurrentNavigationData() {
@@ -484,10 +488,12 @@ static std::string mapTransferStatusJson() {
                      ",\"mapBlocks\":" +
                      std::to_string(mapView.debugCachedBlockCount());
 
-  if (transferStatus.enabled && WiFi.status() == WL_CONNECTED) {
-    body += ",\"baseUrl\":\"http://" +
-            jsonEscape(WiFi.localIP().toString().c_str()) + ":" +
-            std::to_string(transferStatus.port) + "\"";
+  if (!transferStatus.baseUrl.empty()) {
+    body += ",\"baseUrl\":\"" + jsonEscape(transferStatus.baseUrl) + "\"";
+  }
+
+  if (!transferStatus.apSsid.empty()) {
+    body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
   }
 
   if (activeStatus.ok) {
@@ -509,6 +515,9 @@ static std::string mapTransferStatusJson() {
 
 static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
   if (pChar == nullptr) {
+    pChar = mapTransferStatusCharacteristic;
+  }
+  if (pChar == nullptr) {
     return;
   }
 
@@ -528,6 +537,13 @@ static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
   }
 
   if (command == "enter") {
+    if (!storage.getSdLoaded()) {
+      mapTransferHttp.setLastError("sd_unavailable",
+                                   "SD card is not mounted");
+      Serial.println("BLE Map Transfer: enter rejected, SD card is not mounted");
+      notifyMapTransferStatus(pChar);
+      return;
+    }
     bool enabled = mapTransferHttp.setEnabled(true);
     Serial.printf("BLE Map Transfer: enter requested, enabled=%d\n", enabled);
     notifyMapTransferStatus(pChar);
@@ -1010,6 +1026,25 @@ class MySettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
     std::string value = pChar->getValue();
+
+    if (hasPrefix(value, "MTRN")) {
+      if (!requireAuthenticated("native map transfer control")) {
+        return;
+      }
+      handleMapTransferControlPayload((const uint8_t *)value.data() + 4,
+                                      value.length() - 4,
+                                      mapTransferStatusCharacteristic);
+      return;
+    }
+
+    if (hasPrefix(value, "MSTS")) {
+      if (!requireAuthenticated("native map transfer status")) {
+        return;
+      }
+      notifyMapTransferStatus(mapTransferStatusCharacteristic);
+      return;
+    }
+
     if (!requireAuthenticated("map setting")) {
       return;
     }
@@ -1054,7 +1089,7 @@ static void loadSettingsFromNVS() {
       normalizedEnabledScreensMask(prefs.getUChar("screenMask",
                                                  DEVICE_SCREEN_SUPPORTED_MASK));
   mapRenderSettings.defaultScreen = normalizedDefaultScreen(
-      prefs.getUChar("defaultScreen", DEVICE_SCREEN_MAP),
+      prefs.getUChar("defaultScreen", DEVICE_SCREEN_MAP_PLUS_NAVIGATION),
       mapRenderSettings.enabledScreensMask);
   mapRenderSettings.visibilityMask = prefs.getUInt("visMask", 0xFFFFFFFF);
 
@@ -1102,6 +1137,7 @@ void BLENavigationServer::init(const char *deviceName) {
       NIMBLE_PROPERTY::WRITE_NR |
           NIMBLE_PROPERTY::NOTIFY // Added NOTIFY support just in case
   );
+  mapTransferStatusCharacteristic = pNavCharacteristic;
   pNavCharacteristic->setCallbacks(new MyNavCharacteristicCallbacks());
 
   // Create local auth characteristic required by the current iOS app before it

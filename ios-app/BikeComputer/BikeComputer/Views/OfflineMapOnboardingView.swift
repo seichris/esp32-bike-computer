@@ -15,6 +15,7 @@ struct OfflineMapOnboardingView: View {
     let location: CLLocation?
     let isLocationAuthorized: Bool
     let onRequestLocation: () -> Void
+    let onChooseArea: () -> Void
     let onClose: () -> Void
 
     @Environment(\.openURL) private var openURL
@@ -116,12 +117,8 @@ struct OfflineMapOnboardingView: View {
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
                 } else {
-                    Button {
-                        if let location {
-                            manager.installCurrentLocationMap(location: location, bleManager: bleManager)
-                        }
-                    } label: {
-                        Label("Download Current Area", systemImage: "arrow.down.circle")
+                    Button(action: onChooseArea) {
+                        Label("Choose Area", systemImage: "rectangle.dashed")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
@@ -162,7 +159,7 @@ private enum OfflineMapOnboardingStep {
         case .device:
             return "Connect Your Bike Computer"
         case .download:
-            return "Download This Area"
+            return "Download Map"
         }
     }
 
@@ -173,7 +170,7 @@ private enum OfflineMapOnboardingStep {
         case .device:
             return "Boot the device and keep it nearby. The app will continue when BLE is connected."
         case .download:
-            return "Create an offline map for your current location and upload it directly to the device SD card."
+            return "Download your current area to your Bike Computer."
         }
     }
 }
