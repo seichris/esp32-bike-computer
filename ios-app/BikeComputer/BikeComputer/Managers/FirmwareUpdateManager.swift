@@ -19,6 +19,7 @@ enum FirmwareUpdateError: LocalizedError, Equatable {
     case unsupportedUpdaterProtocol
     case targetMismatch
     case downgradeNotAllowed
+    case invalidManifestSignature
     case downloadSizeMismatch
     case downloadHashMismatch
     case serverError(String)
@@ -43,6 +44,8 @@ enum FirmwareUpdateError: LocalizedError, Equatable {
             return "Firmware target does not match this device"
         case .downgradeNotAllowed:
             return "Firmware downgrade is disabled"
+        case .invalidManifestSignature:
+            return "Firmware manifest signature is invalid"
         case .downloadSizeMismatch:
             return "Downloaded firmware size does not match the manifest"
         case .downloadHashMismatch:
@@ -88,6 +91,37 @@ struct FirmwareDeviceStatus: Decodable, Equatable {
 struct FirmwareStatusError: Codable, Equatable {
     let code: String
     let message: String
+}
+
+enum FirmwareManifestSignatureVerifier {
+    static let publicKeyBase64 = "BLaIQlnOfdWu7uvpUR2V/Nhbk92m95BL+MP2ovOCAGkf4N0eDhMNH4cTiD8g6qm0IgAi2/xe0sNOMvCMGYwPlCs="
+
+    static func verify(_ manifest: FirmwareReleaseManifest,
+                       publicKeyBase64: String = publicKeyBase64) -> Bool {
+        guard let signature = manifest.signature,
+              let publicKeyData = Data(base64Encoded: publicKeyBase64),
+              let signatureData = Data(base64Encoded: signature),
+              let publicKey = try? P256.Signing.PublicKey(x963Representation: publicKeyData),
+              let signature = try? P256.Signing.ECDSASignature(derRepresentation: signatureData) else {
+            return false
+        }
+        let payload = canonicalPayload(for: manifest)
+        return publicKey.isValidSignature(signature, for: Data(payload.utf8))
+    }
+
+    static func canonicalPayload(for manifest: FirmwareReleaseManifest) -> String {
+        [
+            "schemaVersion=\(manifest.schemaVersion)",
+            "target=\(manifest.target)",
+            "version=\(manifest.version)",
+            "build=\(manifest.build)",
+            "gitSha=\(manifest.gitSha ?? "")",
+            "size=\(manifest.size)",
+            "sha256=\(manifest.sha256)",
+            "url=\(manifest.url.absoluteString)",
+            "minUpdaterProtocol=\(manifest.minUpdaterProtocol)"
+        ].joined(separator: "\n") + "\n"
+    }
 }
 
 @MainActor
@@ -211,6 +245,9 @@ final class FirmwareUpdateManager: ObservableObject {
         guard manifest.target == bleManager.firmwareTarget else {
             throw FirmwareUpdateError.targetMismatch
         }
+        guard FirmwareManifestSignatureVerifier.verify(manifest) else {
+            throw FirmwareUpdateError.invalidManifestSignature
+        }
         return manifest
     }
 
@@ -274,11 +311,14 @@ struct FirmwareUpdateDeviceClient {
     func begin(manifest: FirmwareReleaseManifest,
                allowDowngrade: Bool) async throws -> FirmwareDeviceStatus {
         let body: [String: Any] = [
+            "schemaVersion": manifest.schemaVersion,
             "version": manifest.version,
             "build": manifest.build,
             "target": manifest.target,
+            "gitSha": manifest.gitSha ?? "",
             "size": manifest.size,
             "sha256": manifest.sha256,
+            "minUpdaterProtocol": manifest.minUpdaterProtocol,
             "manifestSignature": manifest.signature ?? "",
             "releaseUrl": manifest.url.absoluteString,
             "allowDowngrade": allowDowngrade

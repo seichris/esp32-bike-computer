@@ -306,9 +306,11 @@ Minimum acceptable security:
 - ESP32 verifies target, size, SHA-256, and signature before finalization.
 - ESP32 refuses cross-target images.
 
-Preferred signing:
+Manifest signing:
 
-- Generate an Ed25519 signing key for release manifests.
+- Generate a P-256 signing key for release manifests. P-256 is used here because
+  it is supported by both Python `cryptography` in GitHub Actions and Apple's
+  CryptoKit verifier in the iOS app.
 - Store the public key in firmware and iOS.
 - Store the private key only in GitHub Actions secrets or an offline release
   process.

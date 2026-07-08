@@ -1,0 +1,97 @@
+name: Firmware Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - WAVESHARE_AMOLED_175
+          - WAVESHARE_AMOLED_206
+    defaults:
+      run:
+        working-directory: esp32
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade platformio
+      - name: Build firmware
+        run: pio run -e "${{ matrix.target }}"
+      - name: Stage firmware image
+        run: |
+          mkdir -p dist
+          cp ".pio/build/${{ matrix.target }}/firmware.bin" "dist/${{ matrix.target }}.bin"
+          shasum -a 256 "dist/${{ matrix.target }}.bin"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.target }}
+          path: esp32/dist/${{ matrix.target }}.bin
+          if-no-files-found: error
+
+  publish:
+    name: Publish Firmware
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY: ${{ secrets.FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install manifest dependencies
+        run: python -m pip install --upgrade cryptography
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Generate signed manifests
+        run: |
+          set -euo pipefail
+          if [ -z "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" ]; then
+            echo "FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY is required" >&2
+            exit 1
+          fi
+          mkdir -p release-assets public/firmware
+          find dist -name '*.bin' -exec cp {} release-assets/ \;
+          for target in WAVESHARE_AMOLED_175 WAVESHARE_AMOLED_206; do
+            python tools/firmware_manifest.py \
+              --firmware "release-assets/${target}.bin" \
+              --target "${target}" \
+              --repository "${{ github.repository }}" \
+              --tag "${GITHUB_REF_NAME}" \
+              --git-sha "${GITHUB_SHA::12}" \
+              --private-key-base64 "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" \
+              --output "public/firmware/${target}/manifest.json"
+            cp "public/firmware/${target}/manifest.json" "release-assets/${target}.manifest.json"
+          done
+      - name: Publish GitHub release assets
+        run: |
+          set -euo pipefail
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
+          fi
+          gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - id: deployment
+        uses: actions/deploy-pages@v4

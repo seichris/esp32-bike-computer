@@ -505,7 +505,7 @@ struct NavigationProtocolTests {
           "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
           "url": "https://github.com/seichris/open-bike-computer/releases/download/v0.4.0/WAVESHARE_AMOLED_175.bin",
           "minUpdaterProtocol": 1,
-          "signature": "base64-signature"
+          "signature": "MEUCIQCoFhwd6SnmvltHkUu5jfNQce/pPk87c84AcHt2u9DmDQIgfwklONo1MEyfgfX0VhlTDyi/B+dGZdsvckb/rFEGOM8="
         }
         """.utf8)
 
@@ -518,6 +518,33 @@ struct NavigationProtocolTests {
         assertEqual(manifest.build, 87, "manifest exposes build")
         assert(manifest.isSupportedByApp, "manifest updater protocol is supported")
         assertEqual(FirmwareUpdateManager.sha256Hex(Data("abc".utf8)), manifest.sha256, "firmware hash verification uses SHA-256 hex")
+        assert(
+            FirmwareManifestSignatureVerifier.verify(
+                manifest,
+                publicKeyBase64: "BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU="
+            ),
+            "firmware manifest signature verifies over canonical release metadata"
+        )
+
+        let tampered = FirmwareReleaseManifest(
+            schemaVersion: manifest.schemaVersion,
+            target: manifest.target,
+            version: manifest.version,
+            build: manifest.build + 1,
+            gitSha: manifest.gitSha,
+            size: manifest.size,
+            sha256: manifest.sha256,
+            url: manifest.url,
+            minUpdaterProtocol: manifest.minUpdaterProtocol,
+            signature: manifest.signature
+        )
+        assert(
+            !FirmwareManifestSignatureVerifier.verify(
+                tampered,
+                publicKeyBase64: "BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU="
+            ),
+            "firmware manifest signature rejects tampered metadata"
+        )
     }
 
     static func testNavigationPacketBuilder() {

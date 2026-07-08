@@ -4,10 +4,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <esp_app_format.h>
 #include <esp_ota_ops.h>
+#include <mbedtls/base64.h>
+#include <mbedtls/md.h>
+#include <mbedtls/pk.h>
 #include <mbedtls/sha256.h>
 #include <sstream>
+#include <vector>
 
 namespace firmware_update {
 namespace {
@@ -18,6 +23,11 @@ static constexpr const char *kImagePath = "/firmware-update/image";
 static constexpr const char *kFinalizePath = "/firmware-update/finalize";
 static constexpr const char *kCancelPath = "/firmware-update/cancel";
 static constexpr uint64_t kMaxBeginBodyBytes = 2048;
+static constexpr const char *kManifestSigningPublicKeyPem =
+    "-----BEGIN PUBLIC KEY-----\n"
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEtohCWc591a7u6+lRHZX82FuT3ab3\n"
+    "kEv4w/ai84IAaR/g3R4OEw0fhxOIPyDqqbQiACLb/F7Sw04y8IwZjA+UKw==\n"
+    "-----END PUBLIC KEY-----\n";
 
 static std::string jsonEscape(const std::string &value) {
   std::string out;
@@ -176,6 +186,74 @@ static std::string sha256Hex(const uint8_t digest[32]) {
   return out;
 }
 
+static bool base64Decode(const std::string &value, std::vector<uint8_t> &out) {
+  size_t decodedLength = 0;
+  int result = mbedtls_base64_decode(
+      nullptr, 0, &decodedLength,
+      reinterpret_cast<const unsigned char *>(value.data()), value.size());
+  if (result != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL || decodedLength == 0)
+    return false;
+  out.resize(decodedLength);
+  result = mbedtls_base64_decode(
+      out.data(), out.size(), &decodedLength,
+      reinterpret_cast<const unsigned char *>(value.data()), value.size());
+  if (result != 0)
+    return false;
+  out.resize(decodedLength);
+  return true;
+}
+
+static std::string manifestPayload(uint32_t schemaVersion,
+                                   const std::string &target,
+                                   const std::string &version, uint32_t build,
+                                   const std::string &gitSha, uint32_t size,
+                                   const std::string &sha256,
+                                   const std::string &releaseUrl,
+                                   uint32_t minUpdaterProtocol) {
+  std::ostringstream payload;
+  payload << "schemaVersion=" << schemaVersion << "\n"
+          << "target=" << target << "\n"
+          << "version=" << version << "\n"
+          << "build=" << build << "\n"
+          << "gitSha=" << gitSha << "\n"
+          << "size=" << size << "\n"
+          << "sha256=" << sha256 << "\n"
+          << "url=" << releaseUrl << "\n"
+          << "minUpdaterProtocol=" << minUpdaterProtocol << "\n";
+  return payload.str();
+}
+
+static bool verifyManifestSignature(const std::string &payload,
+                                    const std::string &signatureBase64) {
+  std::vector<uint8_t> signature;
+  if (!base64Decode(signatureBase64, signature))
+    return false;
+
+  uint8_t digest[32];
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha);
+  mbedtls_sha256_starts(&sha, 0);
+  mbedtls_sha256_update(
+      &sha, reinterpret_cast<const unsigned char *>(payload.data()),
+      payload.size());
+  mbedtls_sha256_finish(&sha, digest);
+  mbedtls_sha256_free(&sha);
+
+  mbedtls_pk_context publicKey;
+  mbedtls_pk_init(&publicKey);
+  int result = mbedtls_pk_parse_public_key(
+      &publicKey,
+      reinterpret_cast<const unsigned char *>(kManifestSigningPublicKeyPem),
+      strlen(kManifestSigningPublicKeyPem) + 1);
+  if (result == 0) {
+    result = mbedtls_pk_verify(&publicKey, MBEDTLS_MD_SHA256, digest,
+                               sizeof(digest), signature.data(),
+                               signature.size());
+  }
+  mbedtls_pk_free(&publicKey);
+  return result == 0;
+}
+
 } // namespace
 
 void FirmwareUpdateHttpServer::configure(
@@ -330,25 +408,50 @@ void FirmwareUpdateHttpServer::handleBegin(
   std::string version;
   std::string target;
   std::string sha256;
+  std::string gitSha;
+  std::string releaseUrl;
+  std::string manifestSignature;
+  uint32_t schemaVersion = 0;
   uint32_t build = 0;
   uint32_t size = 0;
+  uint32_t minUpdaterProtocol = 0;
   bool allowDowngrade = false;
-  if (!findJsonString(body, "version", version) ||
+  if (!findJsonUint(body, "schemaVersion", schemaVersion) ||
+      !findJsonString(body, "version", version) ||
       !findJsonString(body, "target", target) ||
+      !findJsonString(body, "gitSha", gitSha) ||
       !findJsonString(body, "sha256", sha256) ||
+      !findJsonString(body, "releaseUrl", releaseUrl) ||
+      !findJsonString(body, "manifestSignature", manifestSignature) ||
       !findJsonUint(body, "build", build) ||
-      !findJsonUint(body, "size", size)) {
+      !findJsonUint(body, "size", size) ||
+      !findJsonUint(body, "minUpdaterProtocol", minUpdaterProtocol)) {
     fail(client, 400, "begin_body_invalid", "missing firmware metadata");
     return;
   }
   findJsonBool(body, "allowDowngrade", allowDowngrade);
 
+  if (schemaVersion != 1 ||
+      minUpdaterProtocol > firmware_metadata::kUpdaterProtocolVersion) {
+    fail(client, 400, "manifest_unsupported",
+         "firmware manifest is not supported");
+    return;
+  }
   if (target != firmware_metadata::target()) {
     fail(client, 400, "target_mismatch", "firmware target does not match");
     return;
   }
-  if (version.empty() || !isHexSha256(sha256)) {
+  if (version.empty() || gitSha.empty() || releaseUrl.empty() ||
+      !isHexSha256(sha256)) {
     fail(client, 400, "metadata_invalid", "firmware metadata is invalid");
+    return;
+  }
+  const std::string signedPayload =
+      manifestPayload(schemaVersion, target, version, build, gitSha, size,
+                      sha256, releaseUrl, minUpdaterProtocol);
+  if (!verifyManifestSignature(signedPayload, manifestSignature)) {
+    fail(client, 400, "manifest_signature_invalid",
+         "firmware manifest signature is invalid");
     return;
   }
   if (build <= firmware_metadata::build() && !allowDowngrade) {
