@@ -13,7 +13,8 @@ using HttpTransferStatus = device_transfer::HttpTransferStatus;
 
 class MapTransferHttpServer : private device_transfer::HttpRequestHandler {
 public:
-  void configure(std::string storageRoot = "/sdcard", uint16_t port = 8080);
+  void configure(std::string storageRoot = "/sdcard", uint16_t port = 8080,
+                 device_transfer::HttpTransferServer *sharedServer = nullptr);
   bool setEnabled(bool enabled);
   void setLastError(const std::string &code, const std::string &message);
   void process();
@@ -21,7 +22,9 @@ public:
 
 private:
   std::string storageRoot_ = "/sdcard";
-  device_transfer::HttpTransferServer transferServer_;
+  device_transfer::HttpTransferServer ownedTransferServer_;
+  device_transfer::HttpTransferServer *transferServer_ =
+      &ownedTransferServer_;
   MapTransferInstaller installer_{"/sdcard"};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
   bool activationRunning_ = false;

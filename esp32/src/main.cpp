@@ -59,6 +59,8 @@ extern xSemaphoreHandle gpsMutex;
 #include "power.hpp"
 
 #include "maps.hpp"
+#include "device_transfer_http.hpp"
+#include "firmware_update_http.hpp"
 #include "map_transfer.hpp"
 #include "map_transfer_http.hpp"
 
@@ -80,7 +82,9 @@ extern Storage storage;
 extern Battery battery;
 extern Power power;
 extern Maps mapView;
+device_transfer::HttpTransferServer deviceTransferHttp;
 map_transfer::MapTransferHttpServer mapTransferHttp;
+firmware_update::FirmwareUpdateHttpServer firmwareUpdateHttp;
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 static void processWaveshareBootButton() {
@@ -425,7 +429,9 @@ void setup() {
                     activeStatus.code.c_str(), activeStatus.message.c_str());
     }
   }
-  mapTransferHttp.configure("/sdcard");
+  deviceTransferHttp.configure(8080, "BikeComputer-Transfer");
+  mapTransferHttp.configure("/sdcard", 8080, &deviceTransferHttp);
+  firmwareUpdateHttp.configure(&deviceTransferHttp);
 
   createGpxFolders();
 
@@ -492,6 +498,7 @@ void setup() {
   lv_screen_load(waitingScreen);
 
   log_i("Setup Complete");
+  firmwareUpdateHttp.markRunningAppValid();
 }
 
 /**
@@ -547,5 +554,5 @@ void loop() {
   }
 #endif
 
-  mapTransferHttp.process();
+  deviceTransferHttp.process();
 }

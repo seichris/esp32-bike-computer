@@ -36,6 +36,8 @@ enum DeviceBLEProtocol {
     static let settingsFallbackPrefix = "MSET"
     static let mapTransferControlPrefix = "MTRN"
     static let mapTransferStatusPrefix = "MSTS"
+    static let deviceTransferControlPrefix = "DTRN"
+    static let deviceTransferStatusPrefix = "DSTS"
 
     static let brightnessSettingID: UInt8 = 12
     static let enabledScreensSettingID: UInt8 = 13

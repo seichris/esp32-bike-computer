@@ -168,35 +168,45 @@ static std::string jsonEscape(const std::string &value) {
 
 } // namespace
 
-void MapTransferHttpServer::configure(std::string storageRoot, uint16_t port) {
+void MapTransferHttpServer::configure(
+    std::string storageRoot, uint16_t port,
+    device_transfer::HttpTransferServer *sharedServer) {
   storageRoot_ = std::move(storageRoot);
   if (!storageRoot_.empty() && storageRoot_.back() == '/')
     storageRoot_.pop_back();
   installer_ = MapTransferInstaller(storageRoot_);
   if (stateMutex_ == nullptr)
     stateMutex_ = xSemaphoreCreateMutex();
-  transferServer_.configure(this, port, "BikeComputer-Map");
+  transferServer_ = sharedServer == nullptr ? &ownedTransferServer_ : sharedServer;
+  if (sharedServer == nullptr)
+    transferServer_->configure(port, "BikeComputer-Transfer");
+  transferServer_->registerHandler("/map-transfer", this);
 }
 
 bool MapTransferHttpServer::setEnabled(bool enabled) {
-  return transferServer_.setEnabled(enabled);
+  return transferServer_->setEnabled(enabled, enabled ? "map" : "");
 }
 
 void MapTransferHttpServer::setLastError(const std::string &code,
                                          const std::string &message) {
-  transferServer_.setLastError(code, message);
+  transferServer_->setLastError(code, message);
 }
 
-void MapTransferHttpServer::process() { transferServer_.process(); }
+void MapTransferHttpServer::process() { transferServer_->process(); }
 
 HttpTransferStatus MapTransferHttpServer::status() const {
-  return transferServer_.status();
+  return transferServer_->status();
 }
 
 bool MapTransferHttpServer::handleRequest(
     const device_transfer::HttpRequest &request, WiFiClient &client) {
   if (request.method == "GET" && request.path == kStatusPath) {
     handleStatus(client);
+    return true;
+  }
+  if (status().mode != "map") {
+    sendError(client, 403, "transfer_mode_mismatch",
+              "map transfer mode is not active");
     return true;
   }
   Serial.printf("MAP_TRANSFER_HTTP: %s %s length=%llu\n",
@@ -402,7 +412,7 @@ void MapTransferHttpServer::sendJson(WiFiClient &client, int status,
 void MapTransferHttpServer::sendError(WiFiClient &client, int status,
                                       const std::string &code,
                                       const std::string &message) {
-  transferServer_.setLastError(code, message);
+  transferServer_->setLastError(code, message);
   device_transfer::sendHttpError(client, status, code, message);
 }
 
@@ -445,7 +455,7 @@ void MapTransferHttpServer::finishActivation(const std::string &status,
   activationErrorMessage_ = errorMessage;
   unlockState();
   if (!errorCode.empty()) {
-    transferServer_.setLastError(errorCode, errorMessage);
+    transferServer_->setLastError(errorCode, errorMessage);
   }
 }
 
