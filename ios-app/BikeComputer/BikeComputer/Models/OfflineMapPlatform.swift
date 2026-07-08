@@ -386,6 +386,7 @@ struct MapTransferDeviceClient {
             relativePath: "activate"
         ))
         request.httpMethod = "POST"
+        request.timeoutInterval = 45
         _ = try await send(request: request, data: nil)
     }
 
@@ -393,6 +394,7 @@ struct MapTransferDeviceClient {
         var request = URLRequest(url: Self.statusURL(baseURL: baseURL))
         request.httpMethod = "GET"
         request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 2
         let data = try await send(request: request, data: nil)
         return try JSONDecoder().decode(MapTransferDeviceStatus.self, from: data)
     }
@@ -405,6 +407,7 @@ struct MapTransferDeviceClient {
         ))
         request.httpMethod = "PUT"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 30
         _ = try await send(request: request, data: data)
     }
 
