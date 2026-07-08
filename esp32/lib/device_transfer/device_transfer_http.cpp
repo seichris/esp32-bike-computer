@@ -110,6 +110,8 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
   const bool configured = configured_;
   const bool wasEnabled = enabled_;
   const bool wasStartedAp = startedAp_;
+  const std::string previousMode = mode_;
+  const std::string previousSessionToken = sessionToken_;
   const std::string apSsid = apSsid_;
   unlockState();
 
@@ -152,7 +154,9 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
   enabled_ = enabled;
   mode_ = enabled ? std::move(mode) : "";
   if (enabled) {
-    sessionToken_ = generateSessionToken();
+    if (!wasEnabled || previousMode != mode_ || previousSessionToken.empty()) {
+      sessionToken_ = generateSessionToken();
+    }
   } else {
     sessionToken_.clear();
   }

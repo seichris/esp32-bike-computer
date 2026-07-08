@@ -228,6 +228,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var firmwareTarget: String = ""
     @Published var firmwareVersion: String = ""
     @Published var firmwareBuild: Int = 0
+    @Published var firmwareGitSha: String = ""
     @Published var firmwareUpdateStatus: String = "unknown"
     @Published var firmwareUpdateReceivedBytes: Int = 0
     @Published var firmwareUpdateTotalBytes: Int = 0
@@ -1668,6 +1669,7 @@ extension BLEManager: CBPeripheralDelegate {
             firmwareTarget = firmware["target"] as? String ?? firmwareTarget
             firmwareVersion = firmware["version"] as? String ?? firmwareVersion
             firmwareBuild = firmware["build"] as? Int ?? firmwareBuild
+            firmwareGitSha = firmware["gitSha"] as? String ?? firmwareGitSha
             firmwareUpdateReceivedBytes = firmware["receivedBytes"] as? Int ?? 0
             firmwareUpdateTotalBytes = firmware["totalBytes"] as? Int ?? 0
             if let lastError = firmware["lastError"] as? [String: Any] {

@@ -81,6 +81,7 @@ struct FirmwareDeviceStatus: Decodable, Equatable {
     let target: String
     let runningVersion: String
     let runningBuild: Int
+    let runningGitSha: String?
     let runningPartition: String
     let inactivePartition: String
     let otaState: String
@@ -100,6 +101,7 @@ struct PendingFirmwareUpdate: Codable, Equatable {
     let target: String
     let version: String
     let build: Int
+    let gitSha: String
     let startedAt: Date
     var status: String
 }
@@ -149,6 +151,7 @@ final class FirmwareUpdateManager: ObservableObject {
     @Published private(set) var uploadProgress: Double = 0
     @Published private(set) var statusMessage: String = ""
     @Published private(set) var errorMessage: String?
+    @Published private(set) var lastManifestURLString: String = ""
     @Published private(set) var isBusy = false
 
     private enum Defaults {
@@ -175,6 +178,7 @@ final class FirmwareUpdateManager: ObservableObject {
     func checkForUpdate(bleManager: BLEManager) {
         Task {
             await runBusy {
+                self.statusMessage = "checking firmware manifest"
                 let manifest = try await self.fetchLatestManifest(bleManager: bleManager)
                 self.latestManifest = manifest
                 self.statusMessage = self.isUpdateAllowed(manifest, bleManager: bleManager) ? "firmware update available" : "firmware is current"
@@ -264,6 +268,7 @@ final class FirmwareUpdateManager: ObservableObject {
         let manifestURL = baseURL
             .appendingPathComponent(bleManager.firmwareTarget)
             .appendingPathComponent("manifest.json")
+        lastManifestURLString = manifestURL.absoluteString
         let (data, response) = try await session.data(from: manifestURL)
         try Self.validateHTTP(response)
         let manifest = try JSONDecoder().decode(FirmwareReleaseManifest.self, from: data)
@@ -341,7 +346,8 @@ final class FirmwareUpdateManager: ObservableObject {
         guard let pending = loadPendingUpdate() else { return }
         if bleManager.firmwareTarget == pending.target &&
             bleManager.firmwareVersion == pending.version &&
-            bleManager.firmwareBuild == pending.build {
+            bleManager.firmwareBuild == pending.build &&
+            bleManager.firmwareGitSha == pending.gitSha {
             statusMessage = "firmware update installed"
             clearPendingUpdate()
         } else if let error = bleManager.firmwareUpdateLastError {
@@ -356,13 +362,15 @@ final class FirmwareUpdateManager: ObservableObject {
                                  bleManager: BLEManager) -> Bool {
         bleManager.firmwareTarget == manifest.target &&
         bleManager.firmwareVersion == manifest.version &&
-        bleManager.firmwareBuild == manifest.build
+        bleManager.firmwareBuild == manifest.build &&
+        bleManager.firmwareGitSha == manifest.gitSha
     }
 
     private func persistPendingUpdate(manifest: FirmwareReleaseManifest, status: String) {
         let pending = PendingFirmwareUpdate(target: manifest.target,
                                             version: manifest.version,
                                             build: manifest.build,
+                                            gitSha: manifest.gitSha,
                                             startedAt: Date(),
                                             status: status)
         savePendingUpdate(pending)
@@ -398,6 +406,7 @@ final class FirmwareUpdateManager: ObservableObject {
             try await operation()
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            statusMessage = errorMessage ?? "firmware update failed"
             updatePendingStatus(errorMessage ?? "firmware update failed")
         }
         isBusy = false

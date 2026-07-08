@@ -17,6 +17,7 @@ struct FirmwareUpdateStatus {
   std::string target;
   std::string runningVersion;
   uint32_t runningBuild = 0;
+  std::string runningGitSha;
   std::string runningPartition;
   std::string inactivePartition;
   uint32_t maxImageBytes = 0;

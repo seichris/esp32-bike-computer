@@ -214,6 +214,12 @@ private struct FirmwareUpdateSettingsSection: View {
                 title: "Current",
                 value: currentFirmwareSummary
             )
+            if !bleManager.firmwareGitSha.isEmpty {
+                SettingsValueRow(
+                    title: "Current SHA",
+                    value: String(bleManager.firmwareGitSha.prefix(12))
+                )
+            }
             SettingsValueRow(
                 title: "Target",
                 value: bleManager.firmwareTarget.isEmpty ? "unknown" : bleManager.firmwareTarget
@@ -229,6 +235,13 @@ private struct FirmwareUpdateSettingsSection: View {
                 .keyboardType(.URL)
 
             Toggle("Allow Developer Downgrade", isOn: $manager.allowDeveloperDowngrade)
+
+            if !manager.lastManifestURLString.isEmpty {
+                SettingsValueRow(
+                    title: "Manifest",
+                    value: manager.lastManifestURLString
+                )
+            }
 
             if let manifest = manager.latestManifest {
                 SettingsValueRow(

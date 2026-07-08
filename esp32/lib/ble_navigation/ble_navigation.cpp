@@ -554,6 +554,7 @@ static std::string genericTransferStatusJson() {
           jsonEscape(firmwareStatus.target) + "\",\"version\":\"" +
           jsonEscape(firmwareStatus.runningVersion) + "\",\"build\":" +
           std::to_string(firmwareStatus.runningBuild) +
+          ",\"gitSha\":\"" + jsonEscape(firmwareStatus.runningGitSha) + "\"" +
           ",\"updaterProtocol\":" +
           std::to_string(firmware_metadata::kUpdaterProtocolVersion) +
           ",\"receivedBytes\":" +

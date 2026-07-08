@@ -292,6 +292,7 @@ FirmwareUpdateStatus FirmwareUpdateHttpServer::status() const {
   snapshot.target = firmware_metadata::target();
   snapshot.runningVersion = firmware_metadata::version();
   snapshot.runningBuild = firmware_metadata::build();
+  snapshot.runningGitSha = firmware_metadata::gitSha();
   snapshot.runningPartition = partitionLabel(running);
   snapshot.inactivePartition = partitionLabel(inactive);
   snapshot.maxImageBytes = inactive == nullptr ? 0 : inactive->size;
@@ -313,6 +314,9 @@ std::string FirmwareUpdateHttpServer::statusJson() const {
                      jsonEscape(snapshot.runningVersion) +
                      "\",\"runningBuild\":" +
                      std::to_string(snapshot.runningBuild) +
+                     ",\"runningGitSha\":\"" +
+                     jsonEscape(snapshot.runningGitSha) +
+                     "\"" +
                      ",\"runningPartition\":\"" +
                      jsonEscape(snapshot.runningPartition) +
                      "\",\"inactivePartition\":\"" +
