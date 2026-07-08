@@ -1,10 +1,10 @@
 #include "map_transfer_http.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
@@ -44,27 +44,6 @@ static std::string dirnameOf(const std::string &path) {
 static bool startsWith(const std::string &value, const std::string &prefix) {
   return value.size() >= prefix.size() &&
          value.compare(0, prefix.size(), prefix) == 0;
-}
-
-static std::string trim(const std::string &value) {
-  size_t begin = 0;
-  while (begin < value.size() &&
-         std::isspace(static_cast<unsigned char>(value[begin]))) {
-    begin++;
-  }
-  size_t end = value.size();
-  while (end > begin &&
-         std::isspace(static_cast<unsigned char>(value[end - 1]))) {
-    end--;
-  }
-  return value.substr(begin, end - begin);
-}
-
-static std::string lower(std::string value) {
-  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
-  });
-  return value;
 }
 
 static bool safeId(const std::string &value) {
@@ -156,25 +135,6 @@ static std::string urlDecode(const std::string &value) {
   return out;
 }
 
-static bool readLine(WiFiClient &client, std::string &line,
-                     uint32_t timeoutMs = 2000) {
-  line.clear();
-  uint32_t started = millis();
-  while (millis() - started < timeoutMs) {
-    while (client.available()) {
-      char c = static_cast<char>(client.read());
-      if (c == '\r')
-        continue;
-      if (c == '\n')
-        return true;
-      if (line.size() < 512)
-        line.push_back(c);
-    }
-    delay(1);
-  }
-  return false;
-}
-
 static bool parseSessionPath(const std::string &path, std::string &sessionId,
                              std::string &relativePath) {
   if (!startsWith(path, kSessionPrefix))
@@ -212,149 +172,44 @@ void MapTransferHttpServer::configure(std::string storageRoot, uint16_t port) {
   storageRoot_ = std::move(storageRoot);
   if (!storageRoot_.empty() && storageRoot_.back() == '/')
     storageRoot_.pop_back();
-  port_ = port;
-  server_ = WiFiServer(port_);
   installer_ = MapTransferInstaller(storageRoot_);
   if (stateMutex_ == nullptr)
     stateMutex_ = xSemaphoreCreateMutex();
-  configured_ = true;
+  transferServer_.configure(this, port, "BikeComputer-Map");
 }
 
 bool MapTransferHttpServer::setEnabled(bool enabled) {
-  if (!configured_)
-    configure(storageRoot_, port_);
-  lockState();
-  const bool wasEnabled = enabled_;
-  const bool wasStartedAp = startedAp_;
-  unlockState();
-
-  if (enabled && !wasEnabled) {
-    if (WiFi.status() != WL_CONNECTED) {
-      const std::string apSsid = "BikeComputer-Map";
-      WiFi.mode(WIFI_AP);
-      if (!WiFi.softAP(apSsid.c_str())) {
-        lockState();
-        rememberError("wifi_ap", "could not start transfer Wi-Fi");
-        unlockState();
-        return false;
-      }
-      lockState();
-      startedAp_ = true;
-      apSsid_ = apSsid;
-      unlockState();
-      Serial.printf("MAP_TRANSFER_HTTP: started AP ssid=%s ip=%s\n",
-                    apSsid.c_str(), WiFi.softAPIP().toString().c_str());
-    }
-    server_.begin();
-    server_.setNoDelay(true);
-  }
-  if (!enabled && wasEnabled) {
-    server_.stop();
-    if (wasStartedAp) {
-      WiFi.softAPdisconnect(true);
-      WiFi.mode(WIFI_OFF);
-      lockState();
-      startedAp_ = false;
-      apSsid_.clear();
-      unlockState();
-    }
-  }
-  lockState();
-  enabled_ = enabled;
-  unlockState();
-  return true;
+  return transferServer_.setEnabled(enabled);
 }
 
 void MapTransferHttpServer::setLastError(const std::string &code,
                                          const std::string &message) {
-  lockState();
-  rememberError(code, message);
-  unlockState();
+  transferServer_.setLastError(code, message);
 }
 
-void MapTransferHttpServer::process() {
-  if (!enabled_)
-    return;
-  WiFiClient client = server_.accept();
-  if (!client)
-    return;
-  handleClient(client);
-  client.stop();
-}
+void MapTransferHttpServer::process() { transferServer_.process(); }
 
 HttpTransferStatus MapTransferHttpServer::status() const {
-  lockState();
-  const bool configured = configured_;
-  const bool enabled = enabled_;
-  const bool startedAp = startedAp_;
-  const uint16_t port = port_;
-  const std::string apSsid = apSsid_;
-  const std::string lastErrorCode = lastErrorCode_;
-  const std::string lastErrorMessage = lastErrorMessage_;
-  unlockState();
-
-  std::string baseUrl;
-  if (enabled) {
-    IPAddress ip =
-        startedAp ? WiFi.softAPIP() : (WiFi.status() == WL_CONNECTED
-                                           ? WiFi.localIP()
-                                           : IPAddress());
-    if (ip != IPAddress()) {
-      baseUrl = std::string("http://") + ip.toString().c_str() + ":" +
-                std::to_string(port);
-    }
-  }
-  return {configured, enabled, port, baseUrl, apSsid, lastErrorCode,
-          lastErrorMessage};
+  return transferServer_.status();
 }
 
-void MapTransferHttpServer::handleClient(WiFiClient &client) {
-  std::string requestLine;
-  if (!readLine(client, requestLine)) {
-    sendError(client, 408, "timeout", "request timed out");
-    return;
-  }
-  std::stringstream requestStream(requestLine);
-  std::string method;
-  std::string path;
-  std::string version;
-  requestStream >> method >> path >> version;
-  if (method.empty() || path.empty()) {
-    sendError(client, 400, "bad_request", "invalid request line");
-    return;
-  }
-
-  uint64_t contentLength = 0;
-  std::string line;
-  while (readLine(client, line)) {
-    if (line.empty())
-      break;
-    size_t colon = line.find(':');
-    if (colon == std::string::npos)
-      continue;
-    std::string name = lower(trim(line.substr(0, colon)));
-    std::string value = trim(line.substr(colon + 1));
-    if (name == "content-length")
-      contentLength = strtoull(value.c_str(), nullptr, 10);
-  }
-
-  if (method == "GET" && path == kStatusPath) {
+bool MapTransferHttpServer::handleRequest(
+    const device_transfer::HttpRequest &request, WiFiClient &client) {
+  if (request.method == "GET" && request.path == kStatusPath) {
     handleStatus(client);
-    return;
+    return true;
   }
-  if (!enabled_) {
-    sendError(client, 403, "transfer_disabled", "map transfer mode is disabled");
-    return;
-  }
-  Serial.printf("MAP_TRANSFER_HTTP: %s %s length=%llu\n", method.c_str(),
-                path.c_str(), static_cast<unsigned long long>(contentLength));
-  if (method == "HEAD" && handleHead(path, client))
-    return;
-  if (method == "PUT" && handlePut(path, contentLength, client))
-    return;
-  if (method == "POST" && handleActivate(path, client))
-    return;
-  sendError(client, 404, "not_found", "map transfer endpoint not found");
+  Serial.printf("MAP_TRANSFER_HTTP: %s %s length=%llu\n",
+                request.method.c_str(), request.path.c_str(),
+                static_cast<unsigned long long>(request.contentLength));
+  if (request.method == "HEAD" && handleHead(request.path, client))
+    return true;
+  if (request.method == "PUT" &&
+      handlePut(request.path, request.contentLength, client))
+    return true;
+  if (request.method == "POST" && handleActivate(request.path, client))
+    return true;
+  return false;
 }
 
 bool MapTransferHttpServer::handleHead(const std::string &path,
@@ -505,18 +360,19 @@ bool MapTransferHttpServer::handleActivate(const std::string &path,
 void MapTransferHttpServer::handleStatus(WiFiClient &client) {
   std::string activeMapId;
   InstallStatus active = installer_.readActiveMapId(activeMapId);
-  lockState();
-  const bool configured = configured_;
-  const bool enabled = enabled_;
-  const uint16_t port = port_;
-  const std::string lastErrorCode = lastErrorCode_;
-  const std::string lastErrorMessage = lastErrorMessage_;
-  unlockState();
+  HttpTransferStatus transferStatus = status();
 
   std::string body = std::string("{\"configured\":") +
-                     (configured ? "true" : "false") + ",\"enabled\":" +
-                     (enabled ? "true" : "false") + ",\"port\":" +
-                     std::to_string(port);
+                     (transferStatus.configured ? "true" : "false") +
+                     ",\"enabled\":" +
+                     (transferStatus.enabled ? "true" : "false") +
+                     ",\"port\":" + std::to_string(transferStatus.port);
+  if (!transferStatus.baseUrl.empty()) {
+    body += ",\"baseUrl\":\"" + jsonEscape(transferStatus.baseUrl) + "\"";
+  }
+  if (!transferStatus.apSsid.empty()) {
+    body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
+  }
   if (active.ok) {
     body += ",\"activeMapId\":\"" + jsonEscape(activeMapId) + "\"";
   } else {
@@ -524,9 +380,10 @@ void MapTransferHttpServer::handleStatus(WiFiClient &client) {
             "\",\"message\":\"" + jsonEscape(active.message) + "\"}";
   }
   body += ",\"activation\":" + activationStatusJson();
-  if (!lastErrorCode.empty()) {
-    body += ",\"lastError\":{\"code\":\"" + jsonEscape(lastErrorCode) +
-            "\",\"message\":\"" + jsonEscape(lastErrorMessage) + "\"}";
+  if (!transferStatus.lastErrorCode.empty()) {
+    body += ",\"lastError\":{\"code\":\"" +
+            jsonEscape(transferStatus.lastErrorCode) + "\",\"message\":\"" +
+            jsonEscape(transferStatus.lastErrorMessage) + "\"}";
   }
   body += "}";
   sendJson(client, 200, body);
@@ -534,52 +391,19 @@ void MapTransferHttpServer::handleStatus(WiFiClient &client) {
 
 void MapTransferHttpServer::sendHead(WiFiClient &client, int status,
                                      uint64_t contentLength) {
-  const char *reason = status == 200   ? "OK"
-                       : status == 400 ? "Bad Request"
-                       : status == 403 ? "Forbidden"
-                       : status == 404 ? "Not Found"
-                                       : "Internal Server Error";
-  client.printf("HTTP/1.1 %d %s\r\n", status, reason);
-  client.print("Connection: close\r\n");
-  client.printf("Content-Length: %llu\r\n\r\n",
-                static_cast<unsigned long long>(contentLength));
+  device_transfer::sendHttpHead(client, status, contentLength);
 }
 
 void MapTransferHttpServer::sendJson(WiFiClient &client, int status,
                                      const std::string &body) {
-  const char *reason = status == 200   ? "OK"
-                       : status == 202 ? "Accepted"
-                       : status == 400 ? "Bad Request"
-                       : status == 403 ? "Forbidden"
-                       : status == 404 ? "Not Found"
-                       : status == 409 ? "Conflict"
-                       : status == 408 ? "Request Timeout"
-                       : status == 413 ? "Payload Too Large"
-                                       : "Internal Server Error";
-  client.printf("HTTP/1.1 %d %s\r\n", status, reason);
-  client.print("Content-Type: application/json\r\n");
-  client.print("Connection: close\r\n");
-  client.printf("Content-Length: %u\r\n\r\n",
-                static_cast<unsigned>(body.size()));
-  client.print(body.c_str());
+  device_transfer::sendHttpJson(client, status, body);
 }
 
 void MapTransferHttpServer::sendError(WiFiClient &client, int status,
                                       const std::string &code,
                                       const std::string &message) {
-  lockState();
-  rememberError(code, message);
-  unlockState();
-  sendJson(client, status,
-           std::string("{\"ok\":false,\"error\":{\"code\":\"") +
-               jsonEscape(code) + "\",\"message\":\"" + jsonEscape(message) +
-               "\"}}");
-}
-
-void MapTransferHttpServer::rememberError(const std::string &code,
-                                          const std::string &message) {
-  lastErrorCode_ = code;
-  lastErrorMessage_ = message;
+  transferServer_.setLastError(code, message);
+  device_transfer::sendHttpError(client, status, code, message);
 }
 
 void MapTransferHttpServer::lockState() const {
@@ -619,11 +443,10 @@ void MapTransferHttpServer::finishActivation(const std::string &status,
   activationMapId_ = mapId;
   activationErrorCode_ = errorCode;
   activationErrorMessage_ = errorMessage;
-  if (!errorCode.empty()) {
-    lastErrorCode_ = errorCode;
-    lastErrorMessage_ = errorMessage;
-  }
   unlockState();
+  if (!errorCode.empty()) {
+    transferServer_.setLastError(errorCode, errorMessage);
+  }
 }
 
 void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {

@@ -1,25 +1,17 @@
 #pragma once
 
 #include <Arduino.h>
-#include <WiFi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include "../device_transfer/device_transfer_http.hpp"
 #include "map_transfer.hpp"
 
 namespace map_transfer {
 
-struct HttpTransferStatus {
-  bool configured = false;
-  bool enabled = false;
-  uint16_t port = 8080;
-  std::string baseUrl;
-  std::string apSsid;
-  std::string lastErrorCode;
-  std::string lastErrorMessage;
-};
+using HttpTransferStatus = device_transfer::HttpTransferStatus;
 
-class MapTransferHttpServer {
+class MapTransferHttpServer : private device_transfer::HttpRequestHandler {
 public:
   void configure(std::string storageRoot = "/sdcard", uint16_t port = 8080);
   bool setEnabled(bool enabled);
@@ -29,16 +21,9 @@ public:
 
 private:
   std::string storageRoot_ = "/sdcard";
-  uint16_t port_ = 8080;
-  bool configured_ = false;
-  bool enabled_ = false;
-  bool startedAp_ = false;
-  std::string apSsid_;
-  WiFiServer server_{8080};
+  device_transfer::HttpTransferServer transferServer_;
   MapTransferInstaller installer_{"/sdcard"};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
-  std::string lastErrorCode_;
-  std::string lastErrorMessage_;
   bool activationRunning_ = false;
   std::string activationSessionId_;
   std::string activationStatus_ = "idle";
@@ -46,7 +31,8 @@ private:
   std::string activationErrorCode_;
   std::string activationErrorMessage_;
 
-  void handleClient(WiFiClient &client);
+  bool handleRequest(const device_transfer::HttpRequest &request,
+                     WiFiClient &client) override;
   bool handlePut(const std::string &path, uint64_t contentLength,
                  WiFiClient &client);
   bool handleHead(const std::string &path, WiFiClient &client);
@@ -56,7 +42,6 @@ private:
   void sendJson(WiFiClient &client, int status, const std::string &body);
   void sendError(WiFiClient &client, int status, const std::string &code,
                  const std::string &message);
-  void rememberError(const std::string &code, const std::string &message);
   void lockState() const;
   void unlockState() const;
   std::string activationStatusJson() const;

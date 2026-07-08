@@ -8,9 +8,6 @@
 import CoreLocation
 import Combine
 import Foundation
-#if os(iOS)
-import NetworkExtension
-#endif
 
 private enum OfflineMapDefaults {
     nonisolated static let serverURLKey = "offlineMap.serverURL"
@@ -56,6 +53,7 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var errorMessage: String?
 
     private let defaults: UserDefaults
+    private let deviceTransferManager = DeviceTransferManager()
     private var packDisplayNames: [String: String]
 
     init(defaults: UserDefaults = .standard) {
@@ -352,16 +350,17 @@ final class OfflineMapManager: ObservableObject {
             try OfflineMapPackArchive(url: packURL)
         }.value
         let expectedMapId = try? archive.manifest().mapId
-        statusMessage = "requesting device transfer mode"
-        let baseURL = try await enableDeviceTransferMode(bleManager: bleManager)
-        await joinDeviceTransferNetworkIfNeeded(bleManager: bleManager,
-                                                baseURL: baseURL)
+        let transferSession = try await deviceTransferManager.enterMapTransfer(
+            bleManager: bleManager
+        ) { message in
+            self.statusMessage = message
+        }
         defer {
-            bleManager.requestMapTransferMode(enabled: false)
+            deviceTransferManager.exitMapTransfer(bleManager: bleManager)
         }
         downloadedPackURL = packURL
         let sessionId = transferSessionId(for: expectedMapId)
-        let client = MapTransferDeviceClient(baseURL: baseURL)
+        let client = MapTransferDeviceClient(baseURL: transferSession.baseURL)
         transferProgress = 0
         statusMessage = "uploading to device"
         try await client.upload(archive: archive, sessionId: sessionId) { completed, total, path, didUpload in
@@ -538,93 +537,6 @@ final class OfflineMapManager: ObservableObject {
             return Self.cleanDisplayName(value)
         }
         return nil
-    }
-
-    private func enableDeviceTransferMode(bleManager: BLEManager) async throws -> URL {
-        guard bleManager.isNavigationReady else {
-            throw OfflineMapPlatformError.missingTransferBaseURL
-        }
-
-        guard bleManager.requestMapTransferMode(enabled: true) else {
-            throw OfflineMapPlatformError.missingTransferBaseURL
-        }
-        guard bleManager.requestMapTransferStatus() else {
-            throw OfflineMapPlatformError.missingTransferBaseURL
-        }
-        guard await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2) else {
-            throw OfflineMapPlatformError.transferCommandNotSent
-        }
-        for attempt in 0..<32 {
-            if bleManager.deviceHasSDCard == false {
-                throw OfflineMapPlatformError.deviceSDCardUnavailable
-            }
-            if bleManager.mapTransferModeEnabled, let baseURL = bleManager.mapTransferBaseURL {
-                return baseURL
-            }
-            if attempt % 4 == 3 {
-                bleManager.requestMapTransferStatus()
-            }
-            try await Task.sleep(nanoseconds: 250_000_000)
-        }
-        throw OfflineMapPlatformError.missingTransferBaseURL
-    }
-
-    private func joinDeviceTransferNetworkIfNeeded(bleManager: BLEManager,
-                                                   baseURL: URL) async {
-        guard baseURL.host == "192.168.4.1",
-              let ssid = bleManager.mapTransferAccessPointSSID,
-              !ssid.isEmpty else {
-            return
-        }
-
-#if os(iOS)
-        statusMessage = "joining device Wi-Fi"
-        let configuration = NEHotspotConfiguration(ssid: ssid)
-        configuration.joinOnce = true
-
-        do {
-            try await withCheckedThrowingContinuation { continuation in
-                NEHotspotConfigurationManager.shared.apply(configuration) { error in
-                    if let error = error as NSError? {
-                        let message = error.localizedDescription
-                        if message.localizedCaseInsensitiveContains("already") {
-                            continuation.resume()
-                        } else {
-                            continuation.resume(throwing: error)
-                        }
-                        return
-                    }
-                    continuation.resume()
-                }
-            }
-        } catch {
-            if await isDeviceTransferServerReachable(baseURL: baseURL) {
-                return
-            }
-            statusMessage = "using device Wi-Fi"
-            return
-        }
-
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
-        if await isDeviceTransferServerReachable(baseURL: baseURL) {
-            return
-        }
-        statusMessage = "using device Wi-Fi"
-#endif
-    }
-
-    private func isDeviceTransferServerReachable(baseURL: URL) async -> Bool {
-        let url = baseURL.appendingPathComponent("map-transfer/status")
-        var request = URLRequest(url: url)
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = 3
-
-        do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            return (response as? HTTPURLResponse)?.statusCode == 200
-        } catch {
-            return false
-        }
     }
 
     private func runBusy(_ operation: @MainActor @escaping () async throws -> Void) async {
