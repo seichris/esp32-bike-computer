@@ -351,6 +351,7 @@ final class OfflineMapManager: ObservableObject {
         let archive = try await Task.detached(priority: .userInitiated) {
             try OfflineMapPackArchive(url: packURL)
         }.value
+        let expectedMapId = try? archive.manifest().mapId
         statusMessage = "requesting device transfer mode"
         let baseURL = try await enableDeviceTransferMode(bleManager: bleManager)
         await joinDeviceTransferNetworkIfNeeded(bleManager: bleManager,
@@ -368,10 +369,55 @@ final class OfflineMapManager: ObservableObject {
             self.statusMessage = "uploaded \(completed)/\(total): \(path)"
         }
         statusMessage = "activating map"
-        try await client.activate(sessionId: sessionId)
+        do {
+            try await client.activate(sessionId: sessionId)
+        } catch {
+            if isActivationResponseLoss(error),
+               await confirmActivatedMap(expectedMapId: expectedMapId,
+                                         client: client,
+                                         bleManager: bleManager) {
+                transferProgress = 1
+                statusMessage = "map installed"
+                bleManager.requestMapTransferStatus()
+                return
+            }
+            throw error
+        }
         transferProgress = 1
         statusMessage = "map installed"
         bleManager.requestMapTransferStatus()
+    }
+
+    private func isActivationResponseLoss(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain &&
+            nsError.code == NSURLErrorNetworkConnectionLost
+    }
+
+    private func confirmActivatedMap(expectedMapId: String?,
+                                     client: MapTransferDeviceClient,
+                                     bleManager: BLEManager) async -> Bool {
+        guard let expectedMapId, !expectedMapId.isEmpty else {
+            return false
+        }
+
+        statusMessage = "checking installed map"
+        for _ in 0..<10 {
+            if let status = try? await client.status(),
+               status.activeMapId == expectedMapId {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+
+        for _ in 0..<20 {
+            bleManager.requestMapTransferStatus()
+            if bleManager.mapTransferActiveMapId == expectedMapId {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return bleManager.mapTransferActiveMapId == expectedMapId
     }
 
     private func displayNameForCurrentJob() -> String? {

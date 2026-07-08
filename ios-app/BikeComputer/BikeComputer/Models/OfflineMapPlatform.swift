@@ -210,8 +210,14 @@ struct OfflineMapPackManifest: Decodable, Equatable {
         let url: String?
     }
 
+    let mapId: String?
     let displayName: String?
     let source: Source?
+}
+
+struct MapTransferDeviceStatus: Decodable, Equatable {
+    let enabled: Bool?
+    let activeMapId: String?
 }
 
 struct OfflineMapPackArchive {
@@ -383,6 +389,14 @@ struct MapTransferDeviceClient {
         _ = try await send(request: request, data: nil)
     }
 
+    nonisolated func status() async throws -> MapTransferDeviceStatus {
+        var request = URLRequest(url: Self.statusURL(baseURL: baseURL))
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let data = try await send(request: request, data: nil)
+        return try JSONDecoder().decode(MapTransferDeviceStatus.self, from: data)
+    }
+
     private nonisolated func put(sessionId: String, path: String, data: Data) async throws {
         var request = URLRequest(url: Self.uploadURL(
             baseURL: baseURL,
@@ -417,6 +431,11 @@ struct MapTransferDeviceClient {
             .map(percentEncodedPathComponent)
             .joined(separator: "/")
         return URL(string: "\(base)/\(encodedSegments)")!
+    }
+
+    nonisolated static func statusURL(baseURL: URL) -> URL {
+        let base = baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return URL(string: "\(base)/map-transfer/status")!
     }
 
     private nonisolated static func percentEncodedPathComponent(_ value: String) -> String {
