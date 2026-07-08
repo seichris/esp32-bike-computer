@@ -191,6 +191,7 @@ struct NavigationProtocolTests {
         testMapTransferUploadURLEncodesPlusPathComponents()
         testMapTransferDeviceStatusDecodesActivationFailure()
         testFirmwareManifestDecodingAndHash()
+        testFirmwareUpdateManagerRestoresPendingStatus()
         print("NavigationProtocolTests passed")
     }
 
@@ -545,6 +546,31 @@ struct NavigationProtocolTests {
             ),
             "firmware manifest signature rejects tampered metadata"
         )
+    }
+
+    @MainActor
+    static func testFirmwareUpdateManagerRestoresPendingStatus() {
+        let suiteName = "FirmwareUpdateManagerTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            assert(false, "test defaults should be available")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let pending = PendingFirmwareUpdate(
+            target: "WAVESHARE_AMOLED_175",
+            version: "0.4.0",
+            build: 87,
+            startedAt: Date(timeIntervalSince1970: 10),
+            status: "device rebooting"
+        )
+        let data = try? JSONEncoder().encode(pending)
+        defaults.set(data, forKey: "firmware.pendingUpdate")
+
+        let manager = FirmwareUpdateManager(defaults: defaults)
+        assertEqual(manager.statusMessage,
+                    "device rebooting",
+                    "firmware manager restores pending reboot status after app relaunch")
     }
 
     static func testNavigationPacketBuilder() {

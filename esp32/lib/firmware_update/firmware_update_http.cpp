@@ -581,9 +581,20 @@ void FirmwareUpdateHttpServer::handleFinalize(WiFiClient &client) {
   const bool ready = status_ == "received" && otaOpen_;
   const esp_ota_handle_t handle = otaHandle_;
   const esp_partition_t *updatePartition = updatePartition_;
+  const std::string expectedSha256 = expectedSha256_;
+  const std::string actualSha256 = actualSha256_;
+  const std::string pendingVersion = pendingVersion_;
+  const uint32_t pendingBuild = pendingBuild_;
   unlockState();
   if (!ready || updatePartition == nullptr) {
     fail(client, 409, "finalize_not_ready", "firmware image is not ready");
+    return;
+  }
+  if (expectedSha256.empty() || actualSha256 != expectedSha256 ||
+      pendingVersion.empty() || pendingBuild == 0) {
+    resetUploadState();
+    fail(client, 409, "finalize_metadata_invalid",
+         "verified firmware metadata is missing or inconsistent");
     return;
   }
 
@@ -617,8 +628,11 @@ void FirmwareUpdateHttpServer::handleFinalize(WiFiClient &client) {
   status_ = "finalizing";
   unlockState();
   device_transfer::sendHttpJson(client, 202, statusJson());
-  Serial.printf("FIRMWARE_UPDATE: boot partition set to %s version=%s; rebooting\n",
-                updatePartition->label, appDescription.version);
+  Serial.printf("FIRMWARE_UPDATE: boot partition set to %s manifest=%s(%u) "
+                "app=%s project=%s; rebooting\n",
+                updatePartition->label, pendingVersion.c_str(),
+                static_cast<unsigned>(pendingBuild), appDescription.version,
+                appDescription.project_name);
   delay(750);
   ESP.restart();
 }

@@ -20,6 +20,7 @@ enum FirmwareUpdateError: LocalizedError, Equatable {
     case targetMismatch
     case downgradeNotAllowed
     case invalidManifestSignature
+    case postRebootVerificationFailed
     case downloadSizeMismatch
     case downloadHashMismatch
     case serverError(String)
@@ -46,6 +47,8 @@ enum FirmwareUpdateError: LocalizedError, Equatable {
             return "Firmware downgrade is disabled"
         case .invalidManifestSignature:
             return "Firmware manifest signature is invalid"
+        case .postRebootVerificationFailed:
+            return "Device did not report the updated firmware after reboot"
         case .downloadSizeMismatch:
             return "Downloaded firmware size does not match the manifest"
         case .downloadHashMismatch:
@@ -91,6 +94,14 @@ struct FirmwareDeviceStatus: Decodable, Equatable {
 struct FirmwareStatusError: Codable, Equatable {
     let code: String
     let message: String
+}
+
+struct PendingFirmwareUpdate: Codable, Equatable {
+    let target: String
+    let version: String
+    let build: Int
+    let startedAt: Date
+    var status: String
 }
 
 enum FirmwareManifestSignatureVerifier {
@@ -143,6 +154,7 @@ final class FirmwareUpdateManager: ObservableObject {
     private enum Defaults {
         static let manifestBaseURLKey = "firmware.manifestBaseURL"
         static let allowDowngradeKey = "firmware.allowDeveloperDowngrade"
+        static let pendingUpdateKey = "firmware.pendingUpdate"
         static let defaultManifestBaseURL = "https://seichris.github.io/open-bike-computer/firmware"
     }
 
@@ -155,6 +167,9 @@ final class FirmwareUpdateManager: ObservableObject {
         self.session = session
         self.manifestBaseURLString = defaults.string(forKey: Defaults.manifestBaseURLKey) ?? Defaults.defaultManifestBaseURL
         self.allowDeveloperDowngrade = defaults.bool(forKey: Defaults.allowDowngradeKey)
+        if let pending = loadPendingUpdate() {
+            self.statusMessage = pending.status
+        }
     }
 
     func checkForUpdate(bleManager: BLEManager) {
@@ -179,6 +194,7 @@ final class FirmwareUpdateManager: ObservableObject {
                 try self.validateInstall(manifest, bleManager: bleManager)
                 self.latestManifest = manifest
                 self.statusMessage = "downloading firmware"
+                self.persistPendingUpdate(manifest: manifest, status: self.statusMessage)
                 self.downloadProgress = 0
                 self.uploadProgress = 0
                 let image = try await self.downloadFirmware(manifest: manifest)
@@ -203,23 +219,35 @@ final class FirmwareUpdateManager: ObservableObject {
                     session: self.session
                 )
                 self.statusMessage = "preparing device update"
+                self.updatePendingStatus(self.statusMessage)
                 self.deviceStatus = try await client.begin(manifest: manifest,
                                                            allowDowngrade: self.allowDeveloperDowngrade)
                 self.statusMessage = "uploading firmware"
+                self.updatePendingStatus(self.statusMessage)
                 self.uploadProgress = 0
                 self.deviceStatus = try await client.upload(image: image) { progress in
                     self.uploadProgress = progress
                 }
                 self.statusMessage = "finalizing firmware"
+                self.updatePendingStatus(self.statusMessage)
                 self.deviceStatus = try await client.finalize()
                 finalized = true
                 self.statusMessage = "device rebooting"
+                self.updatePendingStatus(self.statusMessage)
+                try await self.waitForPostRebootVerification(bleManager: bleManager,
+                                                             manifest: manifest)
+                self.statusMessage = "firmware update installed"
+                self.clearPendingUpdate()
             }
         }
     }
 
     func refreshDeviceFirmwareStatus(bleManager: BLEManager) {
         bleManager.requestDeviceTransferStatus()
+        Task {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            self.reconcilePendingUpdate(bleManager: bleManager)
+        }
     }
 
     private func fetchLatestManifest(bleManager: BLEManager) async throws -> FirmwareReleaseManifest {
@@ -280,6 +308,82 @@ final class FirmwareUpdateManager: ObservableObject {
         }
     }
 
+    private func waitForPostRebootVerification(bleManager: BLEManager,
+                                               manifest: FirmwareReleaseManifest) async throws {
+        var sawDeviceUnavailable = !bleManager.isNavigationReady
+        for attempt in 0..<90 {
+            if bleManager.isNavigationReady {
+                bleManager.requestDeviceTransferStatus()
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                if sawDeviceUnavailable && isDeviceRunning(manifest, bleManager: bleManager) {
+                    return
+                }
+            } else {
+                sawDeviceUnavailable = true
+                if attempt % 4 == 0 {
+                    bleManager.reconnectToLastDevice()
+                }
+            }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        updatePendingStatus("firmware update status unknown")
+        throw FirmwareUpdateError.postRebootVerificationFailed
+    }
+
+    private func reconcilePendingUpdate(bleManager: BLEManager) {
+        guard let pending = loadPendingUpdate() else { return }
+        if bleManager.firmwareTarget == pending.target &&
+            bleManager.firmwareVersion == pending.version &&
+            bleManager.firmwareBuild == pending.build {
+            statusMessage = "firmware update installed"
+            clearPendingUpdate()
+        } else if let error = bleManager.firmwareUpdateLastError {
+            statusMessage = "firmware update failed: \(error)"
+            updatePendingStatus(statusMessage)
+        } else {
+            statusMessage = pending.status
+        }
+    }
+
+    private func isDeviceRunning(_ manifest: FirmwareReleaseManifest,
+                                 bleManager: BLEManager) -> Bool {
+        bleManager.firmwareTarget == manifest.target &&
+        bleManager.firmwareVersion == manifest.version &&
+        bleManager.firmwareBuild == manifest.build
+    }
+
+    private func persistPendingUpdate(manifest: FirmwareReleaseManifest, status: String) {
+        let pending = PendingFirmwareUpdate(target: manifest.target,
+                                            version: manifest.version,
+                                            build: manifest.build,
+                                            startedAt: Date(),
+                                            status: status)
+        savePendingUpdate(pending)
+    }
+
+    private func updatePendingStatus(_ status: String) {
+        guard var pending = loadPendingUpdate() else { return }
+        pending.status = status
+        savePendingUpdate(pending)
+    }
+
+    private func loadPendingUpdate() -> PendingFirmwareUpdate? {
+        guard let data = defaults.data(forKey: Defaults.pendingUpdateKey) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(PendingFirmwareUpdate.self, from: data)
+    }
+
+    private func savePendingUpdate(_ pending: PendingFirmwareUpdate) {
+        if let data = try? JSONEncoder().encode(pending) {
+            defaults.set(data, forKey: Defaults.pendingUpdateKey)
+        }
+    }
+
+    private func clearPendingUpdate() {
+        defaults.removeObject(forKey: Defaults.pendingUpdateKey)
+    }
+
     private func runBusy(_ operation: @MainActor @escaping () async throws -> Void) async {
         isBusy = true
         errorMessage = nil
@@ -287,6 +391,7 @@ final class FirmwareUpdateManager: ObservableObject {
             try await operation()
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            updatePendingStatus(errorMessage ?? "firmware update failed")
         }
         isBusy = false
     }

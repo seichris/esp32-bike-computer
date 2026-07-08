@@ -182,11 +182,14 @@ Body:
 
 ```json
 {
+  "schemaVersion": 1,
   "version": "0.4.0",
   "build": 43,
   "target": "WAVESHARE_AMOLED_175",
+  "gitSha": "abc123",
   "size": 2178944,
   "sha256": "hex",
+  "minUpdaterProtocol": 1,
   "manifestSignature": "base64",
   "releaseUrl": "https://github.com/...",
   "allowDowngrade": false
