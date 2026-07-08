@@ -397,6 +397,10 @@ long-term trust boundary.
 
 ### Hardware Tests
 
+Run the detailed checklist in
+[`firmware-ota-hardware-validation.md`](firmware-ota-hardware-validation.md)
+before promoting OTA beyond developer validation.
+
 - Waveshare ESP32-S3 AMOLED 1.75 with SD card inserted.
 - Waveshare ESP32-S3 AMOLED 1.75 without SD card inserted.
 - Waveshare ESP32-S3 AMOLED 2.06 with target-matched firmware.
