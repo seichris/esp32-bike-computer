@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include "map_transfer.hpp"
 
@@ -34,8 +36,15 @@ private:
   std::string apSsid_;
   WiFiServer server_{8080};
   MapTransferInstaller installer_{"/sdcard"};
+  mutable SemaphoreHandle_t stateMutex_ = nullptr;
   std::string lastErrorCode_;
   std::string lastErrorMessage_;
+  bool activationRunning_ = false;
+  std::string activationSessionId_;
+  std::string activationStatus_ = "idle";
+  std::string activationMapId_;
+  std::string activationErrorCode_;
+  std::string activationErrorMessage_;
 
   void handleClient(WiFiClient &client);
   bool handlePut(const std::string &path, uint64_t contentLength,
@@ -48,6 +57,14 @@ private:
   void sendError(WiFiClient &client, int status, const std::string &code,
                  const std::string &message);
   void rememberError(const std::string &code, const std::string &message);
+  void lockState() const;
+  void unlockState() const;
+  std::string activationStatusJson() const;
+  void finishActivation(const std::string &status, const std::string &mapId,
+                        const std::string &errorCode,
+                        const std::string &errorMessage);
+  void runActivationTask(const std::string &sessionId);
+  static void activationTaskThunk(void *arg);
 };
 
 } // namespace map_transfer

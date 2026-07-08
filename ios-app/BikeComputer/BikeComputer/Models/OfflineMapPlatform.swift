@@ -167,6 +167,7 @@ enum OfflineMapPlatformError: LocalizedError {
     case transferCommandNotSent
     case missingTransferBaseURL
     case deviceSDCardUnavailable
+    case mapActivationTimedOut
     case transferWiFiJoinFailed(String, String)
     case invalidPack(String)
     case unsupportedPackCompression(String)
@@ -187,6 +188,8 @@ enum OfflineMapPlatformError: LocalizedError {
             return "Device map transfer mode is not ready"
         case .deviceSDCardUnavailable:
             return "Device SD card is not mounted"
+        case .mapActivationTimedOut:
+            return "Timed out while activating map on device"
         case .transferWiFiJoinFailed(let ssid, let message):
             return "Could not join device Wi-Fi \(ssid): \(message)"
         case .invalidPack(let message):
@@ -393,7 +396,7 @@ struct MapTransferDeviceClient {
             relativePath: "activate"
         ))
         request.httpMethod = "POST"
-        request.timeoutInterval = 45
+        request.timeoutInterval = 15
         _ = try await send(request: request, data: nil)
     }
 

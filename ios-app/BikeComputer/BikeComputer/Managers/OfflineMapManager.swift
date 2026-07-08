@@ -384,6 +384,11 @@ final class OfflineMapManager: ObservableObject {
             }
             throw error
         }
+        guard await confirmActivatedMap(expectedMapId: expectedMapId,
+                                        client: client,
+                                        bleManager: bleManager) else {
+            throw OfflineMapPlatformError.mapActivationTimedOut
+        }
         transferProgress = 1
         statusMessage = "map installed"
         bleManager.requestMapTransferStatus()
@@ -418,20 +423,19 @@ final class OfflineMapManager: ObservableObject {
         }
 
         statusMessage = "checking installed map"
-        for _ in 0..<10 {
+        for attempt in 0..<240 {
             if let status = try? await client.status(),
                status.activeMapId == expectedMapId {
                 return true
             }
-            try? await Task.sleep(nanoseconds: 500_000_000)
-        }
-
-        for _ in 0..<20 {
             bleManager.requestMapTransferStatus()
             if bleManager.mapTransferActiveMapId == expectedMapId {
                 return true
             }
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            if attempt % 10 == 9 {
+                statusMessage = "checking installed map"
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
         }
         return bleManager.mapTransferActiveMapId == expectedMapId
     }
