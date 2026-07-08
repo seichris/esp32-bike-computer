@@ -18,6 +18,9 @@ separate protocols on top of that layer.
 - Use BLE only for authenticated control/status. Use Wi-Fi/HTTP for bulk data.
 - Reuse the existing ESP32 SoftAP/iOS join flow, but do not reuse the map
   upload endpoint for firmware writes.
+- Build and publish target-specific firmware images for each supported board
+  target. The 1.75 and 2.06 Waveshare devices should not share one OTA binary
+  unless the firmware is later refactored for safe runtime board detection.
 - Treat firmware as security-sensitive: verify integrity before upload and
   before boot, and prefer signed release metadata over unsigned hashes.
 - Preserve USB flashing as the recovery path for bootloader, partition-table,
@@ -70,6 +73,9 @@ Add `esp32/lib/device_transfer/`:
 
 - Owns Wi-Fi mode transitions, temporary SoftAP lifecycle, HTTP server lifecycle,
   shared status, and last-error reporting.
+- Uses one shared local HTTP server and port for all transfer features. Feature
+  handlers are selected by path, for example `/map-transfer/...` and
+  `/firmware-update/...`.
 - Supports transfer modes:
   - `none`
   - `map`
@@ -90,7 +96,9 @@ Add `esp32/lib/device_transfer/`:
 
 Map transfer can continue to serve `/map-transfer/...`; firmware OTA gets its
 own `/firmware-update/...` endpoints. The shared layer routes requests by path
-to the active feature handler.
+to the active feature handler on the same HTTP server and port. This keeps the
+iOS network join/reachability flow stable while allowing feature-specific
+protocols and state machines.
 
 ### iOS
 
@@ -180,13 +188,17 @@ Body:
   "size": 2178944,
   "sha256": "hex",
   "manifestSignature": "base64",
-  "releaseUrl": "https://github.com/..."
+  "releaseUrl": "https://github.com/...",
+  "allowDowngrade": false
 }
 ```
 
 Behavior:
 
 - Validate target, version/build policy, size, and signature.
+- Reject downgrades by default. Allow them only when the iOS app sends
+  `allowDowngrade: true` from a developer-only flow and the image is otherwise
+  signed, target-matched, and valid.
 - Ensure image fits the inactive OTA partition.
 - Initialize OTA writer with `esp_ota_begin`.
 - Move status to `receiving`.
@@ -204,8 +216,8 @@ Recommended v1 behavior:
 - Move status to `received` when complete.
 
 Full retry is acceptable for v1 because the firmware image should be small
-enough to transfer quickly over local Wi-Fi. Add chunk offset resume later only
-if field testing shows it is needed.
+enough to transfer quickly over local Wi-Fi. Do not implement resumable chunk
+uploads in v1; restart the full image upload after interruption.
 
 ### `POST /firmware-update/finalize`
 
@@ -226,22 +238,34 @@ Abort an in-progress upload, call OTA cleanup, and return status to `idle`.
 Embed firmware identity in the app image:
 
 - target/environment, for example `WAVESHARE_AMOLED_175`
-- semantic version
-- monotonically increasing build number
+- semantic version for user-facing release identity
+- monotonically increasing build number for update ordering
 - git SHA
 - build timestamp
 - protocol version
 
-Expose this over BLE status so iOS can decide whether an update applies.
+Use both semantic version and build number. The semantic version is what users
+see. The build number is the authoritative ordering key for normal update
+checks, with explicit developer-downgrade support as described above.
+
+Expose this metadata over BLE status so iOS can decide whether an update
+applies.
 
 ## Release Hosting
 
 Use GitHub-native release hosting:
 
 - GitHub Actions builds firmware on tags and pull requests.
-- Tagged builds attach `WAVESHARE_AMOLED_175.bin` to GitHub Releases.
-- The workflow computes SHA-256 and signs the manifest.
-- GitHub Pages hosts the latest manifest at a stable HTTPS URL.
+- PR builds compile both target environments to catch regressions:
+  - `WAVESHARE_AMOLED_175`
+  - `WAVESHARE_AMOLED_206`
+- Tagged builds attach target-specific firmware assets to GitHub Releases:
+  - `WAVESHARE_AMOLED_175.bin`
+  - `WAVESHARE_AMOLED_206.bin`
+- The workflow computes SHA-256 and signs one manifest per target.
+- GitHub Pages hosts each latest manifest at a stable target-specific HTTPS URL:
+  - `/firmware/WAVESHARE_AMOLED_175/manifest.json`
+  - `/firmware/WAVESHARE_AMOLED_206/manifest.json`
 
 Example manifest:
 
@@ -263,11 +287,19 @@ Example manifest:
 iOS should verify the signature before offering the update. ESP32 should verify
 the same manifest fields and image hash before finalizing the OTA write.
 
+The iOS app must choose the manifest from the connected device's reported
+`target`. The ESP32 must reject any manifest or image whose target does not
+match its compiled firmware target.
+
 ## Security Model
 
 Minimum acceptable security:
 
 - BLE transfer commands require the existing authenticated session.
+- The v1 SoftAP can remain open. This is acceptable because transfer mode is
+  short-lived, entered only through authenticated BLE control, and firmware trust
+  comes from target-matched signed manifests plus image hash verification rather
+  than Wi-Fi secrecy.
 - Firmware transfer mode returns a short-lived session token.
 - Every firmware HTTP request includes `X-BikeComputer-Transfer-Token`.
 - iOS verifies the signed manifest before upload.
@@ -294,7 +326,8 @@ long-term trust boundary.
 5. Add `firmware_update` OTA state machine using ESP-IDF OTA APIs.
 6. Add `/firmware-update/status`, `/begin`, `/image`, `/finalize`, and
    `/cancel` endpoints.
-7. Add SHA-256 streaming verification and target/build checks.
+7. Add SHA-256 streaming verification, target/build checks, and
+   developer-controlled downgrade allowance.
 8. Enable boot validation and rollback handling:
    - mark the new app valid only after core boot checks pass.
    - report pending/rollback state over BLE.
@@ -318,17 +351,21 @@ long-term trust boundary.
    - available update.
    - update progress.
    - post-reboot success/failure.
-6. Persist update state so the app can resume status checks after foregrounding
+6. Add a developer-only downgrade toggle or action. Downgrade must still require
+   a signed, target-matched release image.
+7. Persist update state so the app can resume status checks after foregrounding
    or device reboot.
 
 ## GitHub Actions Tasks
 
-1. Add an ESP32 firmware build workflow for `WAVESHARE_AMOLED_175`.
+1. Add an ESP32 firmware build workflow for:
+   - `WAVESHARE_AMOLED_175`
+   - `WAVESHARE_AMOLED_206`
 2. Build on PRs to catch compile regressions.
-3. Build on version tags and upload `.bin` release assets.
+3. Build on version tags and upload target-specific `.bin` release assets.
 4. Generate SHA-256 metadata.
-5. Sign the manifest.
-6. Publish/update GitHub Pages manifest.
+5. Sign target-specific manifests.
+6. Publish/update target-specific GitHub Pages manifests.
 7. Keep release artifacts target-specific and avoid ambiguous asset names.
 
 ## Validation Plan
@@ -339,6 +376,7 @@ long-term trust boundary.
 - iOS transfer URL construction and token headers.
 - ESP32 path parsing, token validation, and size/hash validation.
 - Firmware target mismatch rejection.
+- Normal version/build update ordering and developer downgrade allowance.
 
 ### Integration Tests
 
@@ -347,6 +385,8 @@ long-term trust boundary.
 - Interrupted upload leaves the device on the old firmware.
 - Hash mismatch is rejected and old firmware remains active.
 - Wrong target image is rejected.
+- Developer downgrade to an older signed build succeeds only through the
+  developer flow.
 - App reconnects after reboot and reports updated version.
 - New firmware marks itself valid only after health checks.
 
@@ -354,6 +394,9 @@ long-term trust boundary.
 
 - Waveshare ESP32-S3 AMOLED 1.75 with SD card inserted.
 - Waveshare ESP32-S3 AMOLED 1.75 without SD card inserted.
+- Waveshare ESP32-S3 AMOLED 2.06 with target-matched firmware.
+- Cross-target update attempt from 1.75 to 2.06 firmware and 2.06 to 1.75
+  firmware.
 - iPhone foreground update.
 - iPhone lock/foreground interruption during upload.
 - Poor signal or forced Wi-Fi disconnect during upload.
@@ -369,14 +412,3 @@ long-term trust boundary.
 6. Enable firmware upload/finalize for developer builds.
 7. Field test rollback and interruption behavior.
 8. Promote to normal Settings UI after repeated successful hardware updates.
-
-## Open Decisions
-
-- Exact release versioning scheme: semantic version only, build number only, or
-  both.
-- Whether firmware downgrade should be allowed behind a developer toggle.
-- Whether v1 needs resumable chunk uploads or full-image retry is sufficient.
-- Whether the firmware SoftAP should use an app-provided temporary WPA2
-  password instead of an open network.
-- Whether map transfer and firmware update should share the same HTTP port or
-  use feature-specific ports under the shared lifecycle.
