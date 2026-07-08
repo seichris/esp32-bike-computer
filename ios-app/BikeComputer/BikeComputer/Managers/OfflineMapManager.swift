@@ -360,7 +360,7 @@ final class OfflineMapManager: ObservableObject {
             bleManager.requestMapTransferMode(enabled: false)
         }
         downloadedPackURL = packURL
-        let sessionId = UUID().uuidString.lowercased()
+        let sessionId = transferSessionId(for: expectedMapId)
         let client = MapTransferDeviceClient(baseURL: baseURL)
         transferProgress = 0
         statusMessage = "uploading to device"
@@ -392,6 +392,21 @@ final class OfflineMapManager: ObservableObject {
         let nsError = error as NSError
         return nsError.domain == NSURLErrorDomain &&
             nsError.code == NSURLErrorNetworkConnectionLost
+    }
+
+    private func transferSessionId(for mapId: String?) -> String {
+        guard let mapId else {
+            return UUID().uuidString.lowercased()
+        }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+        let sanitized = mapId.unicodeScalars.map { scalar in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        let value = String(sanitized).trimmingCharacters(in: CharacterSet(charactersIn: ".-"))
+        if value.isEmpty {
+            return UUID().uuidString.lowercased()
+        }
+        return String(value.prefix(72))
     }
 
     private func confirmActivatedMap(expectedMapId: String?,
