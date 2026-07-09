@@ -10,9 +10,10 @@
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "axp2101.hpp"
-#endif
-
+#include "hal.hpp"
+#else
 extern const uint8_t BOARD_BOOT_PIN;
+#endif
 
 /**
  * @brief Power Class constructor

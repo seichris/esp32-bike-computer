@@ -139,7 +139,6 @@ static uint32_t lvglHandlerCount = 0;
 static uint32_t lastLvglHandlerMs = 0;
 static uint32_t lastLvglHandlerDurationUs = 0;
 static uint32_t maxLvglHandlerDurationUs = 0;
-
 #include "lvglSetup.hpp"
 #include "settings.hpp"
 #include "tasks.hpp"
@@ -296,6 +295,58 @@ static void logSystemDebugHeartbeat() {
                 (unsigned long)bleStats.gpsPacketCount,
                 (unsigned long)bleStats.settingsPacketCount);
 #endif
+}
+
+static void processDisconnectedShutdown() {
+  static uint32_t disconnectedSinceMs = 0;
+  static uint32_t lastTimeoutSeconds = 120;
+  static bool shutdownAnnounced = false;
+
+  if (bleNavServer.isConnected()) {
+    disconnectedSinceMs = 0;
+    lastTimeoutSeconds = mapRenderSettings.disconnectedSleepTimeoutSeconds;
+    shutdownAnnounced = false;
+    return;
+  }
+
+  const uint32_t timeoutSeconds =
+      mapRenderSettings.disconnectedSleepTimeoutSeconds;
+  if (timeoutSeconds == 0) {
+    disconnectedSinceMs = 0;
+    lastTimeoutSeconds = 0;
+    shutdownAnnounced = false;
+    return;
+  }
+
+  if (timeoutSeconds != lastTimeoutSeconds) {
+    disconnectedSinceMs = 0;
+    lastTimeoutSeconds = timeoutSeconds;
+    shutdownAnnounced = false;
+  }
+
+  const uint32_t now = millis();
+  if (disconnectedSinceMs == 0) {
+    disconnectedSinceMs = now;
+    Serial.printf("Power: app not connected; shutdown in %lu seconds if still "
+                  "disconnected\n",
+                  (unsigned long)timeoutSeconds);
+    return;
+  }
+
+  if (now - disconnectedSinceMs < timeoutSeconds * 1000UL) {
+    return;
+  }
+
+  if (!shutdownAnnounced) {
+    shutdownAnnounced = true;
+    Serial.printf("Power: app was disconnected for %lu seconds; entering deep "
+                  "sleep\n",
+                  (unsigned long)timeoutSeconds);
+    Serial.println("Power: press BOOT to wake the device");
+    Serial.flush();
+  }
+
+  power.deviceShutdown();
 }
 
 /**
@@ -538,6 +589,7 @@ void loop() {
 
   // Process BLE events
   bleNavServer.process();
+  processDisconnectedShutdown();
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   waveshare_board::imu::process();

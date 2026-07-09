@@ -102,6 +102,13 @@ static uint8_t normalizedDefaultScreen(int32_t rawDefault,
   return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
 }
 
+static uint32_t normalizedDisconnectedSleepTimeoutSeconds(int64_t rawSeconds) {
+  if (rawSeconds <= 0) {
+    return 0;
+  }
+  return (uint32_t)std::min(std::max(rawSeconds, (int64_t)60), (int64_t)600);
+}
+
 static void clearCurrentNavigationData() {
   currentNavData = {0, 0, ""};
   navDataUpdated = true;
@@ -942,6 +949,19 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.printf("BLE Settings: defaultScreen = %d (saved)\n",
                   mapRenderSettings.defaultScreen);
     break;
+  case 15: {
+    mapRenderSettings.disconnectedSleepTimeoutSeconds =
+        normalizedDisconnectedSleepTimeoutSeconds(settingValue);
+    settingsPrefs.begin("mapSettings", false);
+    settingsPrefs.putUInt("discSleepSec",
+                          mapRenderSettings.disconnectedSleepTimeoutSeconds);
+    settingsPrefs.end();
+    Serial.printf("BLE Settings: disconnectedSleepTimeoutSeconds = %lu "
+                  "(saved, 0=never)\n",
+                  (unsigned long)
+                      mapRenderSettings.disconnectedSleepTimeoutSeconds);
+    break;
+  }
   case 4:
     mapRenderSettings.displayRotation =
         (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)3);
@@ -1260,6 +1280,9 @@ static void loadSettingsFromNVS() {
   mapRenderSettings.defaultScreen = normalizedDefaultScreen(
       prefs.getUChar("defaultScreen", DEVICE_SCREEN_MAP_PLUS_NAVIGATION),
       mapRenderSettings.enabledScreensMask);
+  mapRenderSettings.disconnectedSleepTimeoutSeconds =
+      normalizedDisconnectedSleepTimeoutSeconds(
+          prefs.getUInt("discSleepSec", 120));
   mapRenderSettings.visibilityMask = prefs.getUInt("visMask", 0xFFFFFFFF);
 
   prefs.end();
@@ -1267,7 +1290,7 @@ static void loadSettingsFromNVS() {
   Serial.printf("BLE: Loaded settings from NVS - minPolySize=%d, "
                 "detailLevel=%d, routeWidth=%d, streetBoost=%d, "
                 "markerScale=%d, rotation=%d, tapSwitch=%d, "
-                "screenMask=0x%02X, defaultScreen=%d\n",
+                "screenMask=0x%02X, defaultScreen=%d, discSleepSec=%lu\n",
                 mapRenderSettings.minPolygonSize, mapRenderSettings.detailLevel,
                 mapRenderSettings.routeLineWidth,
                 mapRenderSettings.streetLineWidthBoost,
@@ -1275,7 +1298,9 @@ static void loadSettingsFromNVS() {
                 mapRenderSettings.displayRotation,
                 mapRenderSettings.tapToSwitchScreens,
                 mapRenderSettings.enabledScreensMask,
-                mapRenderSettings.defaultScreen);
+                mapRenderSettings.defaultScreen,
+                (unsigned long)
+                    mapRenderSettings.disconnectedSleepTimeoutSeconds);
 }
 
 void BLENavigationServer::init(const char *deviceName) {
