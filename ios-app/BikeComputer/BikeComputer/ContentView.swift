@@ -77,7 +77,8 @@ struct ContentView: View {
             .sheet(isPresented: $showingSettings) {
                 SettingsView(
                     locationAuthorized: coordinator.isLocationAuthorized,
-                    offlineMapManager: offlineMapManager
+                    offlineMapManager: offlineMapManager,
+                    firmwareUpdateManager: coordinator.firmwareUpdateManager
                 )
                     .environmentObject(coordinator.bleManager)
             }

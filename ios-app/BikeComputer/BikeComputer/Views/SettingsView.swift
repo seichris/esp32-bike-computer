@@ -12,15 +12,17 @@ struct SettingsView: View {
     @EnvironmentObject var bleManager: BLEManager
     @Environment(\.openURL) private var openURL
     @ObservedObject private var offlineMapManager: OfflineMapManager
-    @StateObject private var firmwareUpdateManager = FirmwareUpdateManager()
+    @ObservedObject private var firmwareUpdateManager: FirmwareUpdateManager
     let locationAuthorized: Bool
 
     init(
         locationAuthorized: Bool = true,
-        offlineMapManager: OfflineMapManager
+        offlineMapManager: OfflineMapManager,
+        firmwareUpdateManager: FirmwareUpdateManager
     ) {
         self.locationAuthorized = locationAuthorized
         self.offlineMapManager = offlineMapManager
+        self.firmwareUpdateManager = firmwareUpdateManager
     }
     
     var body: some View {
@@ -40,6 +42,7 @@ struct SettingsView: View {
                     }
                 }
 
+                MainFirmwareUpdateSection(manager: firmwareUpdateManager)
                 DeviceScreensSettingsSection()
                 SavedMapsSettingsSection(manager: offlineMapManager)
                 if offlineMapManager.isBusy || offlineMapManager.errorMessage != nil {
@@ -71,6 +74,45 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+}
+
+private struct MainFirmwareUpdateSection: View {
+    @EnvironmentObject private var bleManager: BLEManager
+    @ObservedObject var manager: FirmwareUpdateManager
+
+    var body: some View {
+        if let manifest = manager.latestManifest,
+           manager.isNewerUpdateAvailable(manifest, bleManager: bleManager) {
+            Section(header: Text("Firmware Update")) {
+                SettingsValueRow(
+                    title: "Available",
+                    value: "\(manifest.version) (\(manifest.build))"
+                )
+
+                if manager.isBusy, !manager.statusMessage.isEmpty {
+                    StatusValueRow(status: manager.statusMessage, isBusy: true)
+                }
+                if manager.downloadProgress > 0 && manager.downloadProgress < 1 {
+                    ProgressView(value: manager.downloadProgress)
+                }
+                if manager.uploadProgress > 0 && manager.uploadProgress < 1 {
+                    ProgressView(value: manager.uploadProgress)
+                }
+                if let error = manager.errorMessage {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+
+                Button {
+                    manager.installLatest(bleManager: bleManager)
+                } label: {
+                    Label("Install Update", systemImage: "arrow.up.forward.app")
+                }
+                .disabled(manager.isBusy || !bleManager.isNavigationReady)
+            }
         }
     }
 }
@@ -668,6 +710,9 @@ private struct StatusValueRow: View {
 }
 
 #Preview {
-    SettingsView(offlineMapManager: OfflineMapManager())
+    SettingsView(
+        offlineMapManager: OfflineMapManager(),
+        firmwareUpdateManager: FirmwareUpdateManager()
+    )
         .environmentObject(BLEManager())
 }

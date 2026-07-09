@@ -164,6 +164,7 @@ final class FirmwareUpdateManager: ObservableObject {
     private let defaults: UserDefaults
     private let session: URLSession
     private let deviceTransferManager = DeviceTransferManager()
+    private var lastAutomaticCheckDeviceKey: String?
 
     init(defaults: UserDefaults = .standard, session: URLSession = .shared) {
         self.defaults = defaults
@@ -182,6 +183,22 @@ final class FirmwareUpdateManager: ObservableObject {
                 let manifest = try await self.fetchLatestManifest(bleManager: bleManager)
                 self.latestManifest = manifest
                 self.statusMessage = self.availabilityMessage(for: manifest, bleManager: bleManager)
+            }
+        }
+    }
+
+    func checkForUpdateAutomatically(bleManager: BLEManager) {
+        guard !isBusy, bleManager.isNavigationReady else { return }
+        let deviceKey = automaticCheckDeviceKey(bleManager: bleManager)
+        guard !deviceKey.isEmpty, deviceKey != lastAutomaticCheckDeviceKey else { return }
+        lastAutomaticCheckDeviceKey = deviceKey
+
+        Task {
+            await runQuietly {
+                let manifest = try await self.fetchLatestManifest(bleManager: bleManager)
+                self.latestManifest = manifest
+                self.statusMessage = self.availabilityMessage(for: manifest, bleManager: bleManager)
+                self.errorMessage = nil
             }
         }
     }
@@ -311,6 +328,11 @@ final class FirmwareUpdateManager: ObservableObject {
         return manifest.build > bleManager.firmwareBuild || allowDeveloperDowngrade
     }
 
+    func isNewerUpdateAvailable(_ manifest: FirmwareReleaseManifest, bleManager: BLEManager) -> Bool {
+        manifest.target == bleManager.firmwareTarget &&
+        manifest.build > bleManager.firmwareBuild
+    }
+
     func availabilityMessage(for manifest: FirmwareReleaseManifest, bleManager: BLEManager) -> String {
         guard manifest.target == bleManager.firmwareTarget else {
             return "firmware target mismatch"
@@ -332,6 +354,21 @@ final class FirmwareUpdateManager: ObservableObject {
         manifest.version == bleManager.firmwareVersion &&
         manifest.build == bleManager.firmwareBuild &&
         manifest.gitSha == bleManager.firmwareGitSha
+    }
+
+    private func automaticCheckDeviceKey(bleManager: BLEManager) -> String {
+        guard !bleManager.firmwareTarget.isEmpty,
+              !bleManager.firmwareVersion.isEmpty,
+              bleManager.firmwareBuild > 0,
+              !bleManager.firmwareGitSha.isEmpty else {
+            return ""
+        }
+        return [
+            bleManager.firmwareTarget,
+            bleManager.firmwareVersion,
+            String(bleManager.firmwareBuild),
+            bleManager.firmwareGitSha
+        ].joined(separator: "|")
     }
 
     private func downloadFirmware(manifest: FirmwareReleaseManifest) async throws -> Data {
@@ -439,6 +476,14 @@ final class FirmwareUpdateManager: ObservableObject {
             updatePendingStatus(errorMessage ?? "firmware update failed")
         }
         isBusy = false
+    }
+
+    private func runQuietly(_ operation: @MainActor @escaping () async throws -> Void) async {
+        do {
+            try await operation()
+        } catch {
+            print("Firmware auto-check failed: \((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)")
+        }
     }
 
     private static func validateHTTP(_ response: URLResponse) throws {

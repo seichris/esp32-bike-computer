@@ -658,6 +658,8 @@ struct NavigationProtocolTests {
         manager.allowDeveloperDowngrade = true
         assert(!manager.isUpdateAllowed(current, bleManager: bleManager),
                "exactly installed firmware should not be installable as an update even with developer downgrade enabled")
+        assert(!manager.isNewerUpdateAvailable(current, bleManager: bleManager),
+               "exactly installed firmware should not show in the main update prompt")
         assertEqual(manager.availabilityMessage(for: current, bleManager: bleManager),
                     "firmware is current",
                     "exactly installed firmware reports current")
@@ -676,6 +678,8 @@ struct NavigationProtocolTests {
         )
         assert(manager.isUpdateAllowed(newer, bleManager: bleManager),
                "newer build should be installable")
+        assert(manager.isNewerUpdateAvailable(newer, bleManager: bleManager),
+               "newer build should show in the main update prompt")
         assertEqual(manager.availabilityMessage(for: newer, bleManager: bleManager),
                     "firmware update available",
                     "newer build reports update available")
@@ -694,6 +698,8 @@ struct NavigationProtocolTests {
         )
         assert(manager.isUpdateAllowed(older, bleManager: bleManager),
                "older build remains installable behind developer downgrade")
+        assert(!manager.isNewerUpdateAvailable(older, bleManager: bleManager),
+               "developer downgrade should not show in the main update prompt")
         assertEqual(manager.availabilityMessage(for: older, bleManager: bleManager),
                     "developer firmware install available",
                     "developer downgrade is not labeled as a normal update")
