@@ -552,7 +552,7 @@ private struct HardwareCustomizationSettingsView: View {
             .disabled(!bleManager.supportsDeviceSettings)
 
             Section(header: Text("Power")) {
-                Picker("Disconnected Sleep", selection: $bleManager.disconnectedSleepTimeout) {
+                Picker("Disconnected Sleep After", selection: $bleManager.disconnectedSleepTimeout) {
                     ForEach(DisconnectedSleepTimeout.allCases) { timeout in
                         Text(timeout.title).tag(timeout)
                     }
