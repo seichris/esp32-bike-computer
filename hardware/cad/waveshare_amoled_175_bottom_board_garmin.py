@@ -15,7 +15,6 @@ import waveshare_amoled_175_bottom_plate
 BOTTOM_PLATE_STL = OUT_DIR / "waveshare_amoled_175_bottom_board.stl"
 GARMIN_STL = OUT_DIR / "garmin-mount.stl"
 COMBINED_STL_PATH = OUT_DIR / "waveshare_amoled_175_bottom_board_garmin.stl"
-TIGHT_TOP_HOLES_STL_PATH = OUT_DIR / "waveshare_amoled_175_bottom_board_garmin_top_holes_tighter.stl"
 GARMIN_UPPER_SOURCE_CUT_ABOVE_PLATE = 3.00
 TOP_CONNECTOR_TOP_INSET_MM = 0.50
 
@@ -249,17 +248,17 @@ def build_scene(bottom_plate_stl=BOTTOM_PLATE_STL, combined_stl_path=COMBINED_ST
     combined.select_set(False)
 
 
-def build_tight_top_holes_variant():
+def build_canonical_garmin_plate():
     with tempfile.TemporaryDirectory() as tmp_dir:
-        tight_bottom_plate_stl = Path(tmp_dir) / "waveshare_amoled_175_bottom_board_top_holes_tighter.stl"
+        bottom_plate_stl = Path(tmp_dir) / "waveshare_amoled_175_bottom_board_garmin_input.stl"
         waveshare_amoled_175_bottom_plate.build_model(
-            stl_path=tight_bottom_plate_stl,
+            stl_path=bottom_plate_stl,
             top_connector_top_inset_mm=TOP_CONNECTOR_TOP_INSET_MM,
             save_blend=False,
         )
         build_scene(
-            bottom_plate_stl=tight_bottom_plate_stl,
-            combined_stl_path=TIGHT_TOP_HOLES_STL_PATH,
+            bottom_plate_stl=bottom_plate_stl,
+            combined_stl_path=COMBINED_STL_PATH,
             variant_note=(
                 "Top edge of each top connector cutout moved inward by "
                 f"{TOP_CONNECTOR_TOP_INSET_MM:.2f} mm"
@@ -268,5 +267,4 @@ def build_tight_top_holes_variant():
 
 
 if __name__ == "__main__":
-    build_scene()
-    build_tight_top_holes_variant()
+    build_canonical_garmin_plate()
