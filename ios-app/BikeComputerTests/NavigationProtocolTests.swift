@@ -613,6 +613,7 @@ struct NavigationProtocolTests {
             target: "WAVESHARE_AMOLED_175",
             version: "0.4.0",
             build: 87,
+            gitSha: "abcdef123456",
             startedAt: Date(timeIntervalSince1970: 10),
             status: "device rebooting"
         )

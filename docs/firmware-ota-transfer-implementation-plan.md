@@ -10,6 +10,41 @@ The long-term design is to generalize the PR38 map-transfer plumbing into a
 shared device-transfer layer, then implement map transfer and firmware OTA as
 separate protocols on top of that layer.
 
+## Implementation Status
+
+Status as of 2026-07-09:
+
+- Implemented the shared ESP32/iOS device-transfer layer and migrated map
+  upload setup onto it.
+- Implemented firmware-specific BLE transfer mode, local HTTP endpoints,
+  inactive-partition OTA write/finalize, SHA-256 validation, target/build
+  checks, developer downgrade allowance, reboot, and BLE reconnect
+  verification.
+- Implemented firmware metadata generation and BLE status reporting, including
+  target, semantic version, build number, git SHA, build timestamp, and updater
+  protocol version.
+- Implemented iOS manifest fetching, P-256 signature verification, image
+  download/hash verification, SoftAP upload, finalize, pending update
+  persistence, post-reboot version/build/git SHA verification, Settings UI, and
+  developer downgrade toggle.
+- Implemented GitHub Actions CI builds for both Waveshare targets and tagged
+  release builds that publish target-specific `.bin` files plus signed
+  manifests.
+- Enabled GitHub Pages for workflow deployments so tagged releases can publish
+  stable latest-manifest URLs under `/firmware/<target>/manifest.json`.
+- Validated foreground OTA on `WAVESHARE_AMOLED_206`: the iPhone installed
+  release `v0.2.4`, the ESP32 rebooted into `0.2.4 (88)`, BLE reconnected, and
+  the map UI returned without the prior BLE-startup crash.
+
+Remaining before promoting beyond developer validation:
+
+- Run the full hardware checklist on `WAVESHARE_AMOLED_175`, including with and
+  without an SD card.
+- Validate interrupted upload retry, wrong-target rejection, hash mismatch
+  rejection, developer downgrade, and USB recovery on real hardware.
+- Keep firmware update entry points developer-scoped until the above failure
+  path tests pass repeatedly.
+
 ## Design Principles
 
 - Keep internet access, GitHub release downloads, TLS, and large-file caching on
@@ -323,27 +358,27 @@ long-term trust boundary.
 
 ## ESP32 Implementation Tasks
 
-1. Add firmware version/build metadata constants and BLE status reporting.
-2. Add `device_transfer` shared server/lifecycle layer.
-3. Move map-transfer Wi-Fi/HTTP lifecycle into `device_transfer` while keeping
+- [x] Add firmware version/build metadata constants and BLE status reporting.
+- [x] Add `device_transfer` shared server/lifecycle layer.
+- [x] Move map-transfer Wi-Fi/HTTP lifecycle into `device_transfer` while keeping
    map-specific endpoints and installer behavior intact.
-4. Add generic BLE transfer commands and keep `MTRN`/`MSTS` compatibility.
-5. Add `firmware_update` OTA state machine using ESP-IDF OTA APIs.
-6. Add `/firmware-update/status`, `/begin`, `/image`, `/finalize`, and
+- [x] Add generic BLE transfer commands and keep `MTRN`/`MSTS` compatibility.
+- [x] Add `firmware_update` OTA state machine using ESP-IDF OTA APIs.
+- [x] Add `/firmware-update/status`, `/begin`, `/image`, `/finalize`, and
    `/cancel` endpoints.
-7. Add SHA-256 streaming verification, target/build checks, and
+- [x] Add SHA-256 streaming verification, target/build checks, and
    developer-controlled downgrade allowance.
-8. Enable boot validation and rollback handling:
+- [x] Enable boot validation and rollback handling:
    - mark the new app valid only after core boot checks pass.
    - report pending/rollback state over BLE.
-9. Add serial logs with stable error codes for every OTA failure path.
+- [x] Add serial logs with stable error codes for OTA failure paths.
 
 ## iOS Implementation Tasks
 
-1. Add `DeviceTransferManager` and `DeviceTransferSession`.
-2. Refactor offline map transfer to use the shared manager.
-3. Add `FirmwareReleaseManifest` model and signature/hash verification.
-4. Add `FirmwareUpdateManager`:
+- [x] Add `DeviceTransferManager` and `DeviceTransferSession`.
+- [x] Refactor offline map transfer to use the shared manager.
+- [x] Add `FirmwareReleaseManifest` model and signature/hash verification.
+- [x] Add `FirmwareUpdateManager`:
    - check latest manifest.
    - compare against connected device metadata.
    - download firmware with progress.
@@ -351,27 +386,27 @@ long-term trust boundary.
    - enter firmware transfer mode.
    - upload image over local HTTP.
    - finalize and wait for BLE reconnect.
-5. Add Settings UI for:
+- [x] Add Settings UI for:
    - current firmware version/build.
    - available update.
    - update progress.
    - post-reboot success/failure.
-6. Add a developer-only downgrade toggle or action. Downgrade must still require
+- [x] Add a developer-only downgrade toggle or action. Downgrade must still require
    a signed, target-matched release image.
-7. Persist update state so the app can resume status checks after foregrounding
+- [x] Persist update state so the app can resume status checks after foregrounding
    or device reboot.
 
 ## GitHub Actions Tasks
 
-1. Add an ESP32 firmware build workflow for:
+- [x] Add an ESP32 firmware build workflow for:
    - `WAVESHARE_AMOLED_175`
    - `WAVESHARE_AMOLED_206`
-2. Build on PRs to catch compile regressions.
-3. Build on version tags and upload target-specific `.bin` release assets.
-4. Generate SHA-256 metadata.
-5. Sign target-specific manifests.
-6. Publish/update target-specific GitHub Pages manifests.
-7. Keep release artifacts target-specific and avoid ambiguous asset names.
+- [x] Build on PRs to catch compile regressions.
+- [x] Build on version tags and upload target-specific `.bin` release assets.
+- [x] Generate SHA-256 metadata.
+- [x] Sign target-specific manifests.
+- [x] Publish/update target-specific GitHub Pages manifests.
+- [x] Keep release artifacts target-specific and avoid ambiguous asset names.
 
 ## Validation Plan
 
@@ -387,6 +422,8 @@ long-term trust boundary.
 
 - Existing map transfer still works after the shared transfer refactor.
 - Firmware update succeeds from iPhone over ESP32 SoftAP.
+  - `WAVESHARE_AMOLED_206` foreground update passed on 2026-07-09 with
+    release `v0.2.4`.
 - Interrupted upload leaves the device on the old firmware.
 - Hash mismatch is rejected and old firmware remains active.
 - Wrong target image is rejected.
