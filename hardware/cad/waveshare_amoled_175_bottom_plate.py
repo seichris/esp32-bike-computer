@@ -109,6 +109,44 @@ def add_frustum(name, top_radius, bottom_radius, z_top, z_bottom, loc_xy, vertic
     return obj
 
 
+def add_rectangular_frustum(name, top_dimensions, bottom_dimensions, z_top, z_bottom, loc_xy, mat=None):
+    x, y = loc_xy
+    top_w, top_l = top_dimensions
+    bottom_w, bottom_l = bottom_dimensions
+    tw = top_w / 2.0
+    tl = top_l / 2.0
+    bw = bottom_w / 2.0
+    bl = bottom_l / 2.0
+
+    verts = [
+        (x - tw, y - tl, z_top),
+        (x + tw, y - tl, z_top),
+        (x + tw, y + tl, z_top),
+        (x - tw, y + tl, z_top),
+        (x - bw, y - bl, z_bottom),
+        (x + bw, y - bl, z_bottom),
+        (x + bw, y + bl, z_bottom),
+        (x - bw, y + bl, z_bottom),
+    ]
+    faces = [
+        (0, 1, 2, 3),
+        (7, 6, 5, 4),
+        (0, 4, 5, 1),
+        (1, 5, 6, 2),
+        (2, 6, 7, 3),
+        (3, 7, 4, 0),
+    ]
+
+    mesh = bpy.data.meshes.new(name + "Mesh")
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    if mat:
+        obj.data.materials.append(mat)
+    return obj
+
+
 def add_cube(name, dimensions, loc, mat=None):
     bpy.ops.mesh.primitive_cube_add(size=1.0, location=loc)
     obj = bpy.context.object
@@ -134,6 +172,15 @@ def bool_difference(target, cutter, name):
     mod = target.modifiers.new(name, "BOOLEAN")
     mod.operation = "DIFFERENCE"
     mod.object = cutter
+    mod.solver = "EXACT"
+    bpy.ops.object.modifier_apply(modifier=mod.name)
+
+
+def bool_union(target, part, name):
+    bpy.context.view_layer.objects.active = target
+    mod = target.modifiers.new(name, "BOOLEAN")
+    mod.operation = "UNION"
+    mod.object = part
     mod.solver = "EXACT"
     bpy.ops.object.modifier_apply(modifier=mod.name)
 
@@ -174,6 +221,10 @@ def build_model(
     top_connector_top_inset_mm=0.0,
     include_screw_holes=True,
     include_rectangular_cutouts=True,
+    right_connector_ramped_cutout=False,
+    right_connector_cover_plate=False,
+    right_connector_cover_thickness_mm=0.5,
+    right_connector_cover_overlap_mm=0.5,
     save_blend=True,
 ):
     clean_scene()
@@ -256,6 +307,53 @@ def build_model(
             bool_difference(plate, conn_cut, "rear_connector_access_cutout")
             cutters.append(conn_cut)
 
+    if right_connector_ramped_cutout:
+        top_connector_len = PARAMS["connector_cutout_len"] - top_connector_top_inset_mm
+        if top_connector_len <= 0:
+            raise ValueError("top_connector_top_inset_mm must be smaller than connector_cutout_len")
+
+        top_connector_center_y = PARAMS["top_connector_center_y"] - top_connector_top_inset_mm / 2.0
+        right_connector_x = PARAMS["top_connector_spacing_x"] / 2.0
+        underside_width = PARAMS["connector_cutout_width"]
+        underside_len = top_connector_len
+        underside_center_y = top_connector_center_y
+        if right_connector_cover_plate:
+            underside_width += 3.0
+            underside_len += 1.5
+            underside_center_y -= 0.75
+
+        ramp_side_inset = t * math.tan(
+            math.radians(PARAMS["screw_countersink_angle_deg"] / 2.0)
+        )
+        top_width = underside_width - 2.0 * ramp_side_inset
+        top_len = underside_len - 2.0 * ramp_side_inset
+        if top_width <= 0 or top_len <= 0:
+            raise ValueError("right connector ramp leaves no through-hole opening")
+
+        ramp = add_rectangular_frustum(
+            "right_connector_full_depth_ramped_cutout_cutter",
+            (top_width, top_len),
+            (underside_width, underside_len),
+            t + 0.03,
+            -0.03,
+            (right_connector_x, underside_center_y),
+            cutter_mat,
+        )
+        bool_difference(plate, ramp, "right_connector_full_depth_ramped_cutout")
+        cutters.append(ramp)
+
+        if right_connector_cover_plate:
+            cover_overlap = right_connector_cover_overlap_mm
+            cover_thickness = right_connector_cover_thickness_mm
+            cover = add_cube(
+                "right_connector_top_cover_plate",
+                (top_width + 2.0 * cover_overlap, top_len + 2.0 * cover_overlap, cover_thickness),
+                (right_connector_x, underside_center_y, t + cover_thickness / 2.0 - 0.02),
+                plate_mat,
+            )
+            bool_union(plate, cover, "right_connector_top_cover_plate")
+            cutters.append(cover)
+
     for cutter in cutters:
         cutter.hide_viewport = True
         cutter.hide_render = True
@@ -289,6 +387,10 @@ def build_model(
     root["top_connector_top_inset_mm"] = top_connector_top_inset_mm
     root["include_screw_holes"] = include_screw_holes
     root["include_rectangular_cutouts"] = include_rectangular_cutouts
+    root["right_connector_ramped_cutout"] = right_connector_ramped_cutout
+    root["right_connector_cover_plate"] = right_connector_cover_plate
+    root["right_connector_cover_thickness_mm"] = right_connector_cover_thickness_mm
+    root["right_connector_cover_overlap_mm"] = right_connector_cover_overlap_mm
 
     camera_data = bpy.data.cameras.new("Camera")
     camera = bpy.data.objects.new("Camera", camera_data)

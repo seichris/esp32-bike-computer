@@ -16,6 +16,7 @@ BOTTOM_PLATE_STL = OUT_DIR / "waveshare_amoled_175_bottom_board.stl"
 GARMIN_STL = OUT_DIR / "garmin-mount.stl"
 COMBINED_STL_PATH = OUT_DIR / "waveshare_amoled_175_bottom_board_garmin.stl"
 NO_HOLES_STL_PATH = OUT_DIR / "waveshare_amoled_175_bottom_board_garmin_no_holes.stl"
+BATTERY_BUMP_STL_PATH = OUT_DIR / "waveshare_amoled_175_bottom_board_garmin_battery_bump.stl"
 GARMIN_UPPER_SOURCE_CUT_ABOVE_PLATE = 3.00
 TOP_CONNECTOR_TOP_INSET_MM = 0.50
 
@@ -161,6 +162,7 @@ def build_scene(bottom_plate_stl=BOTTOM_PLATE_STL, combined_stl_path=COMBINED_ST
     place_bottom_on_z(plate, 0.0)
 
     _, plate_max = bounds_world(plate)
+    plate_mount_z = waveshare_amoled_175_bottom_plate.PARAMS["plate_thickness"]
 
     garmin = import_stl(GARMIN_STL, "garmin_male_original_hidden")
     garmin.data.materials.append(garmin_mat)
@@ -177,18 +179,18 @@ def build_scene(bottom_plate_stl=BOTTOM_PLATE_STL, combined_stl_path=COMBINED_ST
     bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
     garmin.select_set(False)
     center_xy(garmin)
-    place_bottom_on_z(garmin, plate_max.z)
+    place_bottom_on_z(garmin, plate_mount_z)
     bpy.context.view_layer.update()
     rotated_garmin_bounds = format_bounds(bounds_world(garmin))
 
-    upper_source_cut_z = plate_max.z + GARMIN_UPPER_SOURCE_CUT_ABOVE_PLATE
+    upper_source_cut_z = plate_mount_z + GARMIN_UPPER_SOURCE_CUT_ABOVE_PLATE
     garmin_upper = copy_mesh_faces_above_world_z(
         garmin,
         "garmin_male_locking_features",
         upper_source_cut_z,
         garmin_mat,
     )
-    move_bottom_to_z(garmin_upper, plate_max.z)
+    move_bottom_to_z(garmin_upper, plate_mount_z)
     garmin.hide_viewport = True
     garmin.hide_render = True
 
@@ -200,7 +202,8 @@ def build_scene(bottom_plate_stl=BOTTOM_PLATE_STL, combined_stl_path=COMBINED_ST
     root = bpy.data.objects.new("assembly_dimensions", None)
     bpy.context.collection.objects.link(root)
     root["bottom_plate_dia_mm"] = 51.0
-    root["bottom_plate_thickness_mm"] = round(plate_max.z, 3)
+    root["bottom_plate_thickness_mm"] = round(plate_mount_z, 3)
+    root["bottom_plate_bounds_height_mm"] = round(plate_max.z, 3)
     root["bottom_plate_source_stl"] = str(bottom_plate_stl)
     root["garmin_source_stl"] = str(GARMIN_STL)
     root["garmin_native_bounds_mm"] = native_garmin_bounds
@@ -284,6 +287,28 @@ def build_no_holes_garmin_plate():
         )
 
 
+def build_battery_bump_garmin_plate():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        bottom_plate_stl = Path(tmp_dir) / "waveshare_amoled_175_bottom_board_battery_bump.stl"
+        waveshare_amoled_175_bottom_plate.build_model(
+            stl_path=bottom_plate_stl,
+            top_connector_top_inset_mm=TOP_CONNECTOR_TOP_INSET_MM,
+            include_screw_holes=True,
+            include_rectangular_cutouts=False,
+            right_connector_ramped_cutout=True,
+            right_connector_cover_plate=True,
+            save_blend=False,
+        )
+        build_scene(
+            bottom_plate_stl=bottom_plate_stl,
+            combined_stl_path=BATTERY_BUMP_STL_PATH,
+            variant_note=(
+                "Closed rectangular cutouts with a raised battery-plug bump over the right connector"
+            ),
+        )
+
+
 if __name__ == "__main__":
     build_canonical_garmin_plate()
     build_no_holes_garmin_plate()
+    build_battery_bump_garmin_plate()

@@ -9,6 +9,7 @@ This folder contains the source and printable CAD files for the Waveshare ESP32-
 - `waveshare_amoled_175_bottom_board_garmin.py`: Blender Python source that combines the plain bottom plate with the Garmin mount locking features.
 - `waveshare_amoled_175_bottom_board_garmin.stl`: Printable bottom plate with the Garmin mount, using the tested no-extra-base design and 0.5 mm tighter top connector cutouts.
 - `waveshare_amoled_175_bottom_board_garmin_no_holes.stl`: Printable Garmin bottom plate variant with the three rectangular cutouts closed and screw holes retained.
+- `waveshare_amoled_175_bottom_board_garmin_battery_bump.stl`: Printable Garmin bottom plate variant with the rectangular cutouts closed and a raised bump over the battery connector, so the battery can still be plugged in.
 - `*.png`: Rendered previews generated from the STL files.
 
 ## Screws
@@ -16,6 +17,7 @@ This folder contains the source and printable CAD files for the Waveshare ESP32-
 - `waveshare_amoled_175_bottom_board.stl`: uses three M2x3.5 screws.
 - `waveshare_amoled_175_bottom_board_garmin.stl`: uses three M2x6 screws.
 - `waveshare_amoled_175_bottom_board_garmin_no_holes.stl`: uses three M2x6 screws.
+- `waveshare_amoled_175_bottom_board_garmin_battery_bump.stl`: uses three M2x6 screws.
 
 ## STL Previews
 
@@ -25,6 +27,7 @@ This folder contains the source and printable CAD files for the Waveshare ESP32-
 | `garmin-mount.stl` | ![Garmin male mount source geometry](garmin-mount.png) |
 | `waveshare_amoled_175_bottom_board_garmin.stl` = `waveshare_amoled_175_bottom_board.stl` + `garmin-mount.stl` | ![Waveshare bottom plate with Garmin mount](waveshare_amoled_175_bottom_board_garmin.png) |
 | `waveshare_amoled_175_bottom_board_garmin_no_holes.stl` = `waveshare_amoled_175_bottom_board_garmin.stl` with the three rectangular cutouts closed | ![Waveshare bottom plate with Garmin mount and closed rectangular cutouts](waveshare_amoled_175_bottom_board_garmin_no_holes.png) |
+| `waveshare_amoled_175_bottom_board_garmin_battery_bump.stl` = closed-hole Garmin plate with a raised battery-plug bump | ![Waveshare bottom plate with Garmin mount and raised battery connector bump](waveshare_amoled_175_bottom_board_garmin_battery_bump.png) |
 
 Regenerate the printable files from this folder with Blender:
 
