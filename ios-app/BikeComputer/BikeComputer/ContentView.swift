@@ -250,6 +250,7 @@ struct ContentView: View {
         return MapViewContainer(
             location: coordinator.currentLocation,
             route: coordinator.currentRoute,
+            fallbackRoutePolyline: coordinator.currentFallbackRoutePolyline,
             simulatedPosition: coordinator.simulatedPosition,
             isSimulationMode: coordinator.isSimulationMode,
             isNavigating: coordinator.isNavigating,

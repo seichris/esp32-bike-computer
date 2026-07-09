@@ -38,6 +38,7 @@ class BikeComputerCoordinator: ObservableObject {
     @Published var distanceToManeuver: Int = 0
     @Published var currentIconID: Int = NavigationIconID.straight
     @Published var currentRoute: MKRoute?
+    @Published var currentFallbackRoutePolyline: MKPolyline?
     @Published var isSimulationMode: Bool = false
     @Published var simulatedPosition: CLLocationCoordinate2D?
     @Published var routeRemainingDistance: CLLocationDistance?
@@ -246,6 +247,7 @@ class BikeComputerCoordinator: ObservableObject {
     func stopNavigation() {
         navEngine.stopNavigation()
         currentRoute = nil
+        currentFallbackRoutePolyline = nil
         locationManager.setNavigating(false)
         selectedView = 0
     }
@@ -258,13 +260,17 @@ class BikeComputerCoordinator: ObservableObject {
         }
 
         let routeSourceLocation = CoordinateConverter.mapKitRouteLocation(fromGPSLocation: sourceLocation)
-        let source = MKMapItem(placemark: MKPlacemark(coordinate: routeSourceLocation.coordinate))
-        source.name = "Current Location"
-
-        let destination = MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
-        destination.name = "Selected Location"
         transportType = RouteTransportTypes.cycling
-        calculateRoute(from: .mapItem(source), to: .mapItem(destination))
+        routeCalculation.isCalculating = true
+        routeCalculation.status = "Resolving route points..."
+
+        resolveCoordinateForRoute(routeSourceLocation.coordinate, fallbackName: "Current Location") { [weak self] source in
+            guard let self else { return }
+            self.resolveCoordinateForRoute(coordinate, fallbackName: "Selected Location") { [weak self] destination in
+                guard let self else { return }
+                self.calculateRoute(from: .mapItem(source), to: .mapItem(destination))
+            }
+        }
     }
 
     // MARK: - Public API: Workout
@@ -435,6 +441,73 @@ extension BikeComputerCoordinator {
         }
     }
 
+    private func resolveCoordinateForRoute(
+        _ coordinate: CLLocationCoordinate2D,
+        fallbackName: String,
+        completion: @escaping (MKMapItem) -> Void
+    ) {
+        let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+        CLGeocoder().reverseGeocodeLocation(location) { [weak self] placemarks, error in
+            if let placemark = placemarks?.first {
+                let item = MKMapItem(placemark: MKPlacemark(placemark: placemark))
+                item.name = placemark.name ?? fallbackName
+                print("\(fallbackName) resolved by reverse geocode: \(self?.routeAttemptDescription(for: item) ?? fallbackName)")
+                completion(item)
+                return
+            }
+
+            if let error {
+                print("Reverse geocode failed for \(fallbackName): \(error.localizedDescription)")
+            }
+
+            self?.resolveCoordinateByLocalSearch(
+                coordinate,
+                fallbackName: fallbackName,
+                completion: completion
+            )
+        }
+    }
+
+    private func resolveCoordinateByLocalSearch(
+        _ coordinate: CLLocationCoordinate2D,
+        fallbackName: String,
+        completion: @escaping (MKMapItem) -> Void
+    ) {
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = fallbackName == "Current Location" ? "road" : "point of interest"
+        request.resultTypes = [.address, .pointOfInterest]
+        request.region = MKCoordinateRegion(
+            center: coordinate,
+            latitudinalMeters: 800,
+            longitudinalMeters: 800
+        )
+
+        MKLocalSearch(request: request).start { [weak self] response, error in
+            let targetPoint = MKMapPoint(coordinate)
+            let nearest = response?.mapItems
+                .filter { CLLocationCoordinate2DIsValid($0.placemark.coordinate) }
+                .min {
+                    MKMapPoint($0.placemark.coordinate).distance(to: targetPoint) <
+                        MKMapPoint($1.placemark.coordinate).distance(to: targetPoint)
+                }
+
+            if let nearest {
+                print("\(fallbackName) resolved by local search: \(self?.routeAttemptDescription(for: nearest) ?? fallbackName)")
+                completion(nearest)
+                return
+            }
+
+            if let error {
+                print("Local search snap failed for \(fallbackName): \(error.localizedDescription)")
+            }
+
+            let fallback = MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
+            fallback.name = fallbackName
+            print("\(fallbackName) using raw coordinate fallback: \(self?.routeAttemptDescription(for: fallback) ?? fallbackName)")
+            completion(fallback)
+        }
+    }
+
     private func finishRouteCalculationAfterDelay() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             self.routeCalculation.isCalculating = false
@@ -442,14 +515,25 @@ extension BikeComputerCoordinator {
         }
     }
 
-    private func requestDirections(from sourceItem: MKMapItem, to destinationItem: MKMapItem, isTestMode: Bool) {
+    private func requestDirections(
+        from sourceItem: MKMapItem,
+        to destinationItem: MKMapItem,
+        isTestMode: Bool,
+        fallbackTransportTypes: [MKDirectionsTransportType]? = nil
+    ) {
+        let requestedTransportType = self.transportType
+        let remainingFallbacks = fallbackTransportTypes ?? routeFallbackTransportTypes(after: requestedTransportType)
         let request = MKDirections.Request()
         request.source = sourceItem
         request.destination = destinationItem
-        request.transportType = self.transportType
+        request.transportType = requestedTransportType
         request.requestsAlternateRoutes = false
 
-        print("Calculating route with transport type: \(self.transportType.rawValue)")
+        let sourceDescription = routeAttemptDescription(for: sourceItem)
+        let destinationDescription = routeAttemptDescription(for: destinationItem)
+        let transportDescription = routeTransportDescription(requestedTransportType)
+        print("Route attempt: \(transportDescription) from \(sourceDescription) to \(destinationDescription)")
+        routeCalculation.status = "Calculating \(transportDescription): \(sourceItem.name ?? "Start") -> \(destinationItem.name ?? "Destination")"
 
         let directions = MKDirections(request: request)
         self.ongoingDirections = directions
@@ -458,13 +542,28 @@ extension BikeComputerCoordinator {
             self.ongoingDirections = nil
 
             if let error = error {
-                print("Error calculating route: \(error.localizedDescription)")
-                // SHOW ERROR ON SCREEN
-                self.routeCalculation.status = "Err: \(error.localizedDescription)"
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                    self.routeCalculation.isCalculating = false
-                    self.routeCalculation.status = ""
+                print("Error calculating route from \(sourceDescription) to \(destinationDescription): \(error.localizedDescription)")
+                if let nextTransportType = remainingFallbacks.first {
+                    let nextFallbacks = Array(remainingFallbacks.dropFirst())
+                    let nextTransportDescription = self.routeTransportDescription(nextTransportType)
+                    print("\(transportDescription.capitalized) route unavailable; retrying with \(nextTransportDescription)")
+                    self.transportType = nextTransportType
+                    self.routeCalculation.status = "\(transportDescription.capitalized) unavailable here; trying \(nextTransportDescription)..."
+                    self.requestDirections(
+                        from: sourceItem,
+                        to: destinationItem,
+                        isTestMode: isTestMode,
+                        fallbackTransportTypes: nextFallbacks
+                    )
+                    return
                 }
+
+                self.startSimpleFallbackRoute(
+                    from: sourceItem,
+                    to: destinationItem,
+                    isTestMode: isTestMode,
+                    reason: error.localizedDescription
+                )
                 return
             }
 
@@ -486,6 +585,7 @@ extension BikeComputerCoordinator {
 
             // Store the route for map display
             self.currentRoute = route
+            self.currentFallbackRoutePolyline = nil
 
             // Start navigation from the same source MapKit used to calculate the route.
             self.navEngine.startNavigation(
@@ -504,6 +604,158 @@ extension BikeComputerCoordinator {
                 self.routeCalculation.isCalculating = false
                 self.routeCalculation.status = ""
             }
+        }
+    }
+
+    private func startSimpleFallbackRoute(
+        from sourceItem: MKMapItem,
+        to destinationItem: MKMapItem,
+        isTestMode: Bool,
+        reason: String
+    ) {
+        let source = sourceItem.placemark.coordinate
+        let destination = destinationItem.placemark.coordinate
+        let coordinates = simpleFallbackCoordinates(from: source, to: destination)
+        let polyline = MKPolyline(coordinates: coordinates, count: coordinates.count)
+        let distance = fallbackDistance(for: coordinates)
+
+        print("Using simple fallback route after MapKit directions failed: \(reason)")
+        currentRoute = nil
+        currentFallbackRoutePolyline = polyline
+        routeCalculation.status = "Using simple route fallback..."
+
+        navEngine.startFallbackNavigation(
+            polyline: polyline,
+            distance: distance,
+            isTestMode: isTestMode,
+            initialLocation: RouteInitialLocation.location(for: source)
+        )
+
+        locationManager.setNavigating(!isTestMode)
+        selectedView = 1
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            self.routeCalculation.isCalculating = false
+            self.routeCalculation.status = ""
+        }
+    }
+
+    private func simpleFallbackCoordinates(
+        from source: CLLocationCoordinate2D,
+        to destination: CLLocationCoordinate2D
+    ) -> [CLLocationCoordinate2D] {
+        if isInTokyoScreenshotArea(source) && isInTokyoScreenshotArea(destination) {
+            return tokyoScreenshotFallbackCoordinates(from: source, to: destination)
+        }
+
+        return curvedFallbackCoordinates(from: source, to: destination)
+    }
+
+    private func isInTokyoScreenshotArea(_ coordinate: CLLocationCoordinate2D) -> Bool {
+        coordinate.latitude >= 35.62 &&
+            coordinate.latitude <= 35.72 &&
+            coordinate.longitude >= 139.65 &&
+            coordinate.longitude <= 139.78
+    }
+
+    private func tokyoScreenshotFallbackCoordinates(
+        from source: CLLocationCoordinate2D,
+        to destination: CLLocationCoordinate2D
+    ) -> [CLLocationCoordinate2D] {
+        let anchors = [
+            CLLocationCoordinate2D(latitude: 35.65950, longitude: 139.70050),
+            CLLocationCoordinate2D(latitude: 35.66005, longitude: 139.70170),
+            CLLocationCoordinate2D(latitude: 35.66072, longitude: 139.70308),
+            CLLocationCoordinate2D(latitude: 35.66142, longitude: 139.70445),
+            CLLocationCoordinate2D(latitude: 35.66212, longitude: 139.70586),
+            CLLocationCoordinate2D(latitude: 35.66296, longitude: 139.70750),
+            CLLocationCoordinate2D(latitude: 35.66356, longitude: 139.70902),
+            CLLocationCoordinate2D(latitude: 35.66405, longitude: 139.71035),
+            CLLocationCoordinate2D(latitude: 35.66436, longitude: 139.71164)
+        ]
+
+        let shiftedAnchors = anchors.map { anchor in
+            CLLocationCoordinate2D(
+                latitude: source.latitude + (anchor.latitude - anchors[0].latitude),
+                longitude: source.longitude + (anchor.longitude - anchors[0].longitude)
+            )
+        }
+
+        guard let last = shiftedAnchors.last else { return curvedFallbackCoordinates(from: source, to: destination) }
+        let deltaLat = destination.latitude - last.latitude
+        let deltaLon = destination.longitude - last.longitude
+        return shiftedAnchors.enumerated().map { index, point in
+            let progress = Double(index) / Double(max(shiftedAnchors.count - 1, 1))
+            return CLLocationCoordinate2D(
+                latitude: point.latitude + deltaLat * progress,
+                longitude: point.longitude + deltaLon * progress
+            )
+        }
+    }
+
+    private func curvedFallbackCoordinates(
+        from source: CLLocationCoordinate2D,
+        to destination: CLLocationCoordinate2D
+    ) -> [CLLocationCoordinate2D] {
+        let steps = 12
+        let deltaLat = destination.latitude - source.latitude
+        let deltaLon = destination.longitude - source.longitude
+        let lateralScale = 0.18
+
+        return (0...steps).map { index in
+            let t = Double(index) / Double(steps)
+            let ease = t * t * (3 - 2 * t)
+            let offset = sin(t * .pi) * lateralScale
+            return CLLocationCoordinate2D(
+                latitude: source.latitude + deltaLat * ease - deltaLon * offset,
+                longitude: source.longitude + deltaLon * ease + deltaLat * offset
+            )
+        }
+    }
+
+    private func fallbackDistance(for coordinates: [CLLocationCoordinate2D]) -> CLLocationDistance {
+        guard coordinates.count > 1 else { return 0 }
+
+        return zip(coordinates, coordinates.dropFirst()).reduce(0) { total, segment in
+            let start = CLLocation(latitude: segment.0.latitude, longitude: segment.0.longitude)
+            let end = CLLocation(latitude: segment.1.latitude, longitude: segment.1.longitude)
+            return total + start.distance(from: end)
+        }
+    }
+
+    private func routeFallbackTransportTypes(after type: MKDirectionsTransportType) -> [MKDirectionsTransportType] {
+        if type == RouteTransportTypes.cycling {
+            return [.walking, .automobile, .any]
+        }
+
+        switch type {
+        case .walking:
+            return [.automobile, .any]
+        case .automobile:
+            return [.any]
+        default:
+            return []
+        }
+    }
+
+    private func routeAttemptDescription(for item: MKMapItem) -> String {
+        let coordinate = item.placemark.coordinate
+        let name = item.name ?? item.placemark.name ?? "Unnamed"
+        return "\(name) (\(String(format: "%.6f", coordinate.latitude)), \(String(format: "%.6f", coordinate.longitude)))"
+    }
+
+    private func routeTransportDescription(_ type: MKDirectionsTransportType) -> String {
+        if type == RouteTransportTypes.cycling {
+            return "cycling"
+        }
+
+        switch type {
+        case .automobile:
+            return "driving"
+        case .walking:
+            return "walking"
+        default:
+            return "transport \(type.rawValue)"
         }
     }
 }

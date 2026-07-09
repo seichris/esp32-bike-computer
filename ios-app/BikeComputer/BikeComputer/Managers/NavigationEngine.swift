@@ -123,6 +123,47 @@ class NavigationEngine: NSObject, ObservableObject {
             sendInitialDeviceGpsPosition(initialLocation, convertFromMapKitRoute: true)
         }
     }
+
+    func startFallbackNavigation(
+        polyline: MKPolyline,
+        distance: CLLocationDistance,
+        isTestMode: Bool = false,
+        initialLocation: CLLocation? = nil
+    ) {
+        currentRoute = nil
+        currentStepIndex = 0
+        isSimulationMode = isTestMode
+        isNavigating = true
+
+        sendTracker.reset()
+        initialNavigationLocation = initialLocation
+        hasAcceptedLiveLocation = initialLocation == nil
+        lastSentGeometryHash = 0
+        lastGeometrySendTime = .distantPast
+        resetRideTelemetry(startingAt: initialLocation)
+
+        routeRemainingDistance = distance
+        let expectedTravelTime = max(distance / 4.5, 60)
+        routeRemainingTime = expectedTravelTime
+        expectedArrivalDate = Date().addingTimeInterval(expectedTravelTime)
+
+        let snapshot = NavigationManeuverSnapshot(
+            iconID: NavigationIconID.straight,
+            distance: Int(distance.rounded()),
+            instruction: "Continue to destination"
+        )
+        currentSnapshot = snapshot
+        currentInstruction = snapshot.instruction
+        distanceToManeuver = snapshot.distance
+        currentIconID = snapshot.iconID
+
+        if let initialLocation {
+            sendInitialDeviceGpsPosition(initialLocation, convertFromMapKitRoute: true)
+        }
+        sendNavigationDataToESP32(snapshot)
+
+        print("Fallback navigation started with \(polyline.pointCount) points (Test Mode: \(isTestMode))")
+    }
     
     /// Stop navigation
     func stopNavigation() {

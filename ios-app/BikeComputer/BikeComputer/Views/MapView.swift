@@ -26,6 +26,7 @@ class SimulatedPositionAnnotation: MKPointAnnotation {}
 struct MapViewContainer: UIViewRepresentable {
     let location: CLLocation?
     let route: MKRoute?
+    let fallbackRoutePolyline: MKPolyline?
     let simulatedPosition: CLLocationCoordinate2D?
     let isSimulationMode: Bool
     let isNavigating: Bool
@@ -79,9 +80,9 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.updateControlVisibility(isNavigating: isNavigating)
         context.coordinator.updateOfflineMapSelectionBounds()
         
-        // Only set initial region once if not already set
+        // Only set initial region once if not already set, then recover from large
+        // simulator/location jumps while the map is still following the user.
         if let location = location, 
-           !context.coordinator.hasSetInitialRegion,
            context.coordinator.lastRoute == nil {
              // Use simulated position if available and in simulation mode
              var center = (isSimulationMode && simulatedPosition != nil) ? simulatedPosition! : location.coordinate
@@ -94,12 +95,17 @@ struct MapViewContainer: UIViewRepresentable {
                  center = converted
              }
              
-            let region = MKCoordinateRegion(
-                center: center,
-                span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
-            )
-            uiView.setRegion(region, animated: false)
-            context.coordinator.hasSetInitialRegion = true
+            let shouldSetRegion = !context.coordinator.hasSetInitialRegion ||
+                context.coordinator.shouldRecenterForLocationJump(mapView: uiView, center: center)
+
+            if shouldSetRegion {
+                let region = MKCoordinateRegion(
+                    center: center,
+                    span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+                )
+                uiView.setRegion(region, animated: context.coordinator.hasSetInitialRegion)
+                context.coordinator.hasSetInitialRegion = true
+            }
         }
         
         // Update route overlay
@@ -124,10 +130,26 @@ struct MapViewContainer: UIViewRepresentable {
             uiView.removeAnnotations(existingSimAnnotations)
             
             context.coordinator.lastRoute = route
-        } else if route == nil && context.coordinator.lastRoute != nil {
+            context.coordinator.lastFallbackRoutePolyline = nil
+        } else if route == nil,
+                  let fallbackRoutePolyline,
+                  context.coordinator.lastFallbackRoutePolyline !== fallbackRoutePolyline {
+            uiView.removeOverlays(uiView.overlays)
+            uiView.addOverlay(fallbackRoutePolyline, level: .aboveRoads)
+            uiView.setVisibleMapRect(
+                fallbackRoutePolyline.boundingMapRect,
+                edgePadding: UIEdgeInsets(top: 110, left: 40, bottom: 220, right: 40),
+                animated: true
+            )
+            context.coordinator.lastRoute = nil
+            context.coordinator.lastFallbackRoutePolyline = fallbackRoutePolyline
+        } else if route == nil &&
+                  fallbackRoutePolyline == nil &&
+                  (context.coordinator.lastRoute != nil || context.coordinator.lastFallbackRoutePolyline != nil) {
             // Clear route when navigation stops
             uiView.removeOverlays(uiView.overlays)
             context.coordinator.lastRoute = nil
+            context.coordinator.lastFallbackRoutePolyline = nil
             
             // Remove any destination annotations
             let destinationAnnotations = uiView.annotations.filter { $0 is DestinationAnnotation }
@@ -193,6 +215,7 @@ struct MapViewContainer: UIViewRepresentable {
     
     class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         var lastRoute: MKRoute?
+        var lastFallbackRoutePolyline: MKPolyline?
         var mapView: MKMapView?
         var onMapTapped: (() -> Void)?
         var offlineMapSelectionFrame: CGRect?
@@ -203,6 +226,14 @@ struct MapViewContainer: UIViewRepresentable {
         private var trackingButton: MKUserTrackingButton?
         private var lastNavigationCoordinate: CLLocationCoordinate2D?
         private var lastNavigationHeading: CLLocationDirection = 0
+
+        func shouldRecenterForLocationJump(mapView: MKMapView, center: CLLocationCoordinate2D) -> Bool {
+            guard mapView.userTrackingMode == .follow else { return false }
+
+            let mapCenter = CLLocation(latitude: mapView.centerCoordinate.latitude, longitude: mapView.centerCoordinate.longitude)
+            let target = CLLocation(latitude: center.latitude, longitude: center.longitude)
+            return mapCenter.distance(from: target) > 5_000
+        }
 
         func installMapControls(on mapView: MKMapView) {
             guard compassButton == nil else { return }
