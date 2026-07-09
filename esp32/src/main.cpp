@@ -139,6 +139,8 @@ static uint32_t lvglHandlerCount = 0;
 static uint32_t lastLvglHandlerMs = 0;
 static uint32_t lastLvglHandlerDurationUs = 0;
 static uint32_t maxLvglHandlerDurationUs = 0;
+static constexpr uint32_t APP_CONNECTION_SHUTDOWN_TIMEOUT_MS =
+    2UL * 60UL * 1000UL;
 
 #include "lvglSetup.hpp"
 #include "settings.hpp"
@@ -296,6 +298,38 @@ static void logSystemDebugHeartbeat() {
                 (unsigned long)bleStats.gpsPacketCount,
                 (unsigned long)bleStats.settingsPacketCount);
 #endif
+}
+
+static void processDisconnectedShutdown() {
+  static uint32_t disconnectedSinceMs = 0;
+  static bool shutdownAnnounced = false;
+
+  if (bleNavServer.isConnected()) {
+    disconnectedSinceMs = 0;
+    shutdownAnnounced = false;
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (disconnectedSinceMs == 0) {
+    disconnectedSinceMs = now;
+    Serial.printf("Power: app not connected; shutdown in %lu seconds if still disconnected\n",
+                  APP_CONNECTION_SHUTDOWN_TIMEOUT_MS / 1000UL);
+    return;
+  }
+
+  if (now - disconnectedSinceMs < APP_CONNECTION_SHUTDOWN_TIMEOUT_MS) {
+    return;
+  }
+
+  if (!shutdownAnnounced) {
+    shutdownAnnounced = true;
+    Serial.println("Power: app was disconnected for 2 minutes; entering deep sleep");
+    Serial.println("Power: press BOOT to wake the device");
+    Serial.flush();
+  }
+
+  power.deviceShutdown();
 }
 
 /**
@@ -538,6 +572,7 @@ void loop() {
 
   // Process BLE events
   bleNavServer.process();
+  processDisconnectedShutdown();
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   waveshare_board::imu::process();

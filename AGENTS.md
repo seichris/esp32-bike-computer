@@ -23,6 +23,11 @@ empty monitor.
 
 #### ESP32 on Chris's Mac over USB-C
 
+Before the first device action in a thread (build/upload/serial capture/device
+debugging), ask which physical device is currently connected. Do not assume
+`WAVESHARE_AMOLED_175` vs `WAVESHARE_AMOLED_206`; flashing the wrong
+environment can leave the screen black even when upload succeeds.
+
 Observed working device/port:
 - ESP32-S3 USB CDC/JTAG enumerated as `/dev/cu.usbmodem2101`.
 - `pio device list` described it as `USB JTAG/serial debug unit` with VID:PID `303A:1001`.
