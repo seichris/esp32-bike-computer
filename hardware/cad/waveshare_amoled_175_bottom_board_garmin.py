@@ -1,4 +1,6 @@
 import math
+import sys
+import tempfile
 from pathlib import Path
 
 import bpy
@@ -6,14 +8,15 @@ from mathutils import Vector
 
 
 OUT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(OUT_DIR))
+
+import waveshare_amoled_175_bottom_plate
+
 BOTTOM_PLATE_STL = OUT_DIR / "waveshare_amoled_175_bottom_board.stl"
-GARMIN_STL = Path("/Users/chris/Downloads/BODY-MALE.stl")
-BLEND_PATH = OUT_DIR / "waveshare_amoled_175_bottom_board_garmin.blend"
+GARMIN_STL = OUT_DIR / "garmin-mount.stl"
 COMBINED_STL_PATH = OUT_DIR / "waveshare_amoled_175_bottom_board_garmin.stl"
-NO_BASE_STL_PATH = OUT_DIR / "waveshare_amoled_175_bottom_board_garmin_no_base.stl"
-GARMIN_FLAT_BASE_DIA = 31.0
-GARMIN_FLAT_BASE_HEIGHT = 1.00
 GARMIN_UPPER_SOURCE_CUT_ABOVE_PLATE = 3.00
+TOP_CONNECTOR_TOP_INSET_MM = 0.50
 
 
 def clean_scene():
@@ -55,6 +58,12 @@ def bounds_world(obj):
     return mins, maxs
 
 
+def format_bounds(bounds):
+    mins, maxs = bounds
+    size = maxs - mins
+    return f"{size.x:.3f} x {size.y:.3f} x {size.z:.3f}"
+
+
 def center_xy(obj):
     mins, maxs = bounds_world(obj)
     obj.location.x -= (mins.x + maxs.x) / 2.0
@@ -85,9 +94,8 @@ def copy_mesh_faces_above_world_z(source, name, min_z, mat=None, floor_tolerance
 
     for polygon in source.data.polygons:
         if all(world_verts[index].z >= min_z for index in polygon.vertices):
-            # Drop coplanar cut-floor faces. The replacement flat base already
-            # owns that horizontal plane; keeping STL faces there causes
-            # z-fighting artifacts in Blender's viewport.
+            # Drop coplanar cut-floor faces. The bottom plate owns that contact
+            # plane; keeping the cut face causes z-fighting artifacts in Blender.
             if all(world_verts[index].z <= min_z + floor_tolerance for index in polygon.vertices):
                 continue
             face = []
@@ -115,20 +123,6 @@ def move_bottom_to_z(obj, z):
     bpy.context.view_layer.update()
 
 
-def add_flat_cylinder(name, radius, height, z_bottom, mat=None):
-    bpy.ops.mesh.primitive_cylinder_add(
-        vertices=192,
-        radius=radius,
-        depth=height,
-        location=(0, 0, z_bottom + height / 2.0),
-    )
-    obj = bpy.context.object
-    obj.name = name
-    if mat:
-        obj.data.materials.append(mat)
-    return obj
-
-
 def create_joined_duplicate(name, parts, hidden=True):
     bpy.ops.object.select_all(action="DESELECT")
     hide_states = [(obj, obj.hide_viewport) for obj in parts]
@@ -151,7 +145,7 @@ def create_joined_duplicate(name, parts, hidden=True):
     return combined
 
 
-def build_scene():
+def build_scene(bottom_plate_stl=BOTTOM_PLATE_STL, combined_stl_path=COMBINED_STL_PATH, variant_note=""):
     clean_scene()
     setup_units()
 
@@ -159,7 +153,7 @@ def build_scene():
     garmin_mat = material("garmin_male_mount_blue_reference", (0.05, 0.19, 0.55, 1.0))
     note_mat = material("scene_note_gray", (0.22, 0.22, 0.22, 1.0))
 
-    plate = import_stl(BOTTOM_PLATE_STL, "waveshare_bottom_plate_usb_front")
+    plate = import_stl(bottom_plate_stl, "waveshare_bottom_plate_usb_front")
     plate.data.materials.append(plate_mat)
     set_origin_to_bounds_center(plate)
     center_xy(plate)
@@ -170,10 +164,11 @@ def build_scene():
     garmin = import_stl(GARMIN_STL, "garmin_male_original_hidden")
     garmin.data.materials.append(garmin_mat)
     set_origin_to_bounds_center(garmin)
+    native_garmin_bounds = format_bounds(bounds_world(garmin))
 
-    # Native BODY-MALE.stl bounds are about X=32, Y=6, Z=32 mm. Rotate it so
-    # the 6 mm thickness protrudes outward from the bottom plate, then rotate
-    # 90 degrees in-plane so a mounted device's USB/front side points to -Y.
+    # Native Garmin mount bounds are about X=32, Y=6, Z=32 mm. Rotate it so the
+    # 6 mm thickness protrudes outward from the bottom plate, then rotate 90
+    # degrees in-plane so a mounted device's USB/front side points to -Y.
     garmin.rotation_euler = (math.radians(-90), 0, math.radians(90))
     bpy.context.view_layer.update()
     bpy.context.view_layer.objects.active = garmin
@@ -183,8 +178,8 @@ def build_scene():
     center_xy(garmin)
     place_bottom_on_z(garmin, plate_max.z)
     bpy.context.view_layer.update()
+    rotated_garmin_bounds = format_bounds(bounds_world(garmin))
 
-    base_top_z = plate_max.z + GARMIN_FLAT_BASE_HEIGHT
     upper_source_cut_z = plate_max.z + GARMIN_UPPER_SOURCE_CUT_ABOVE_PLATE
     garmin_upper = copy_mesh_faces_above_world_z(
         garmin,
@@ -192,49 +187,29 @@ def build_scene():
         upper_source_cut_z,
         garmin_mat,
     )
-    move_bottom_to_z(garmin_upper, base_top_z)
-    garmin_upper_no_base = copy_mesh_faces_above_world_z(
-        garmin,
-        "garmin_male_locking_features_no_base",
-        upper_source_cut_z,
-        garmin_mat,
-    )
-    move_bottom_to_z(garmin_upper_no_base, plate_max.z)
-    garmin_base = add_flat_cylinder(
-        "garmin_male_flat_base_31mm_diameter",
-        GARMIN_FLAT_BASE_DIA / 2.0,
-        GARMIN_FLAT_BASE_HEIGHT,
-        plate_max.z,
-        garmin_mat,
-    )
+    move_bottom_to_z(garmin_upper, plate_max.z)
     garmin.hide_viewport = True
     garmin.hide_render = True
-    _, garmin_max = bounds_world(garmin_upper)
 
     combined = create_joined_duplicate(
         "printable_combined_bottom_plate_garmin",
-        [plate, garmin_base, garmin_upper],
+        [plate, garmin_upper],
     )
-    combined_no_base = create_joined_duplicate(
-        "printable_combined_bottom_plate_garmin_no_base",
-        [plate, garmin_upper_no_base],
-    )
-    garmin_upper_no_base.hide_viewport = True
-    garmin_upper_no_base.hide_render = True
 
     root = bpy.data.objects.new("assembly_dimensions", None)
     bpy.context.collection.objects.link(root)
     root["bottom_plate_dia_mm"] = 51.0
     root["bottom_plate_thickness_mm"] = round(plate_max.z, 3)
-    root["garmin_native_bounds_mm"] = "31.995 x 6.000 x 32.000"
-    root["garmin_flat_base_dia_mm"] = GARMIN_FLAT_BASE_DIA
-    root["garmin_flat_base_height_mm"] = GARMIN_FLAT_BASE_HEIGHT
+    root["bottom_plate_source_stl"] = str(bottom_plate_stl)
+    root["garmin_source_stl"] = str(GARMIN_STL)
+    root["garmin_native_bounds_mm"] = native_garmin_bounds
     root["garmin_upper_source_cut_z_mm"] = round(upper_source_cut_z, 3)
-    root["garmin_rotated_original_bounds_mm"] = "31.995 x 32.000 x 6.000"
+    root["garmin_rotated_original_bounds_mm"] = rotated_garmin_bounds
     root["garmin_rotation_euler_deg"] = "-90, 0, 90"
     root["usb_front_direction"] = "-Y"
-    root["printable_combined_stl"] = str(COMBINED_STL_PATH)
-    root["printable_no_base_stl"] = str(NO_BASE_STL_PATH)
+    root["printable_combined_stl"] = str(combined_stl_path)
+    if variant_note:
+        root["variant_note"] = variant_note
 
     note = add_text(
         "orientation_note",
@@ -264,21 +239,32 @@ def build_scene():
     bpy.context.scene.view_settings.view_transform = "Filmic"
     bpy.context.scene.view_settings.look = "Medium High Contrast"
 
-    bpy.ops.wm.save_as_mainfile(filepath=str(BLEND_PATH))
     bpy.ops.object.select_all(action="DESELECT")
     combined.hide_viewport = False
     combined.select_set(True)
     bpy.context.view_layer.objects.active = combined
-    bpy.ops.wm.stl_export(filepath=str(COMBINED_STL_PATH), export_selected_objects=True)
+    bpy.ops.wm.stl_export(filepath=str(combined_stl_path), export_selected_objects=True)
     combined.hide_viewport = True
     combined.select_set(False)
 
-    combined_no_base.hide_viewport = False
-    combined_no_base.select_set(True)
-    bpy.context.view_layer.objects.active = combined_no_base
-    bpy.ops.wm.stl_export(filepath=str(NO_BASE_STL_PATH), export_selected_objects=True)
-    combined_no_base.hide_viewport = True
+
+def build_canonical_garmin_plate():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        bottom_plate_stl = Path(tmp_dir) / "waveshare_amoled_175_bottom_board_garmin_input.stl"
+        waveshare_amoled_175_bottom_plate.build_model(
+            stl_path=bottom_plate_stl,
+            top_connector_top_inset_mm=TOP_CONNECTOR_TOP_INSET_MM,
+            save_blend=False,
+        )
+        build_scene(
+            bottom_plate_stl=bottom_plate_stl,
+            combined_stl_path=COMBINED_STL_PATH,
+            variant_note=(
+                "Top edge of each top connector cutout moved inward by "
+                f"{TOP_CONNECTOR_TOP_INSET_MM:.2f} mm"
+            ),
+        )
 
 
 if __name__ == "__main__":
-    build_scene()
+    build_canonical_garmin_plate()
