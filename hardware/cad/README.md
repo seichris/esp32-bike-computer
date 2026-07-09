@@ -10,6 +10,11 @@ This folder contains the source and printable CAD files for the Waveshare ESP32-
 - `waveshare_amoled_175_bottom_board_garmin.stl`: Printable bottom plate with the Garmin mount, using the tested no-extra-base design.
 - `*.png`: Rendered previews generated from the STL files.
 
+## Screws
+
+- `waveshare_amoled_175_bottom_board.stl`: uses three M2x3.5 screws.
+- `waveshare_amoled_175_bottom_board_garmin.stl`: uses three M2x6 screws.
+
 ## STL Previews
 
 | STL | Preview |
