@@ -14,6 +14,7 @@ import CoreLocation
 
 /// Main coordinator for the Bike Computer app
 /// Manages BLE, Navigation, Location, and HealthKit subsystems
+@MainActor
 class BikeComputerCoordinator: ObservableObject {
 
     // MARK: - Private Managers (Implementation Details)
