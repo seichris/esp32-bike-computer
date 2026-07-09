@@ -102,6 +102,13 @@ static uint8_t normalizedDefaultScreen(int32_t rawDefault,
   return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
 }
 
+static uint32_t normalizedDisconnectedSleepTimeoutSeconds(int64_t rawSeconds) {
+  if (rawSeconds <= 0) {
+    return 0;
+  }
+  return (uint32_t)std::min(std::max(rawSeconds, (int64_t)60), (int64_t)600);
+}
+
 static void clearCurrentNavigationData() {
   currentNavData = {0, 0, ""};
   navDataUpdated = true;
@@ -943,13 +950,8 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
                   mapRenderSettings.defaultScreen);
     break;
   case 15: {
-    if (settingValue <= 0) {
-      mapRenderSettings.disconnectedSleepTimeoutSeconds = 0;
-    } else {
-      mapRenderSettings.disconnectedSleepTimeoutSeconds =
-          (uint32_t)std::min(std::max(settingValue, (int32_t)60),
-                             (int32_t)600);
-    }
+    mapRenderSettings.disconnectedSleepTimeoutSeconds =
+        normalizedDisconnectedSleepTimeoutSeconds(settingValue);
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUInt("discSleepSec",
                           mapRenderSettings.disconnectedSleepTimeoutSeconds);
@@ -1279,7 +1281,8 @@ static void loadSettingsFromNVS() {
       prefs.getUChar("defaultScreen", DEVICE_SCREEN_MAP_PLUS_NAVIGATION),
       mapRenderSettings.enabledScreensMask);
   mapRenderSettings.disconnectedSleepTimeoutSeconds =
-      prefs.getUInt("discSleepSec", 120);
+      normalizedDisconnectedSleepTimeoutSeconds(
+          prefs.getUInt("discSleepSec", 120));
   mapRenderSettings.visibilityMask = prefs.getUInt("visMask", 0xFFFFFFFF);
 
   prefs.end();
