@@ -5,6 +5,8 @@
 import os.path
 from platformio import util
 import shutil
+import subprocess
+from datetime import datetime, timezone
 from SCons.Script import DefaultEnvironment
 
 try:
@@ -22,6 +24,16 @@ srcdir = env.get("PROJECTSRC_DIR")
 flavor = env.get("PIOENV")
 revision = config.get("common","revision")
 version = config.get("common", "version")
+build_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+try:
+    git_sha = subprocess.check_output(
+        ["git", "rev-parse", "--short=12", "HEAD"],
+        cwd=env.get("PROJECT_DIR"),
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).strip()
+except Exception:
+    git_sha = "unknown"
 
 dfl_lat = os.environ.get('ICENAV3_LAT')
 dfl_lon = os.environ.get('ICENAV3_LON')
@@ -34,6 +46,8 @@ env.Append(BUILD_FLAGS=[
     u'-DREVISION=' + revision + '',
     u'-DVERSION=\\"' + version + '\\"',
     u'-DFLAVOR=\\"' + flavor + '\\"',
+    u'-DGIT_SHA=\\"' + git_sha + '\\"',
+    u'-DBUILD_TIMESTAMP=\\"' + build_timestamp + '\\"',
     u'-D'+ flavor + '=1'
     ])
 

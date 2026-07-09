@@ -10,6 +10,9 @@
 #include "../gui/src/waitingScr.hpp"
 #include "../gui/src/globalGuiDef.h"
 #include "../maps/src/maps.hpp"
+#include "../device_transfer/device_transfer_http.hpp"
+#include "../firmware_metadata/firmware_metadata.hpp"
+#include "../firmware_update/firmware_update_http.hpp"
 #include "../map_transfer_http/map_transfer_http.hpp"
 #include "../route_overlay/route_overlay.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -27,7 +30,9 @@
 #include <WiFi.h>
 
 extern Gps gps;
+extern device_transfer::HttpTransferServer deviceTransferHttp;
 extern map_transfer::MapTransferHttpServer mapTransferHttp;
+extern firmware_update::FirmwareUpdateHttpServer firmwareUpdateHttp;
 extern Maps mapView;
 extern Storage storage;
 
@@ -495,6 +500,10 @@ static std::string mapTransferStatusJson() {
   if (!transferStatus.apSsid.empty()) {
     body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
   }
+  if (!transferStatus.sessionToken.empty()) {
+    body += ",\"sessionToken\":\"" + jsonEscape(transferStatus.sessionToken) +
+            "\"";
+  }
 
   if (activeStatus.ok) {
     body += ",\"activeMapId\":\"" + jsonEscape(activeMapId) + "\"";
@@ -513,6 +522,53 @@ static std::string mapTransferStatusJson() {
   return body;
 }
 
+static std::string genericTransferStatusJson() {
+  device_transfer::HttpTransferStatus transferStatus =
+      deviceTransferHttp.status();
+  std::string body = std::string("{\"configured\":") +
+                     (transferStatus.configured ? "true" : "false") +
+                     ",\"enabled\":" +
+                     (transferStatus.enabled ? "true" : "false") +
+                     ",\"port\":" + std::to_string(transferStatus.port) +
+                     ",\"mode\":\"" + jsonEscape(transferStatus.mode) + "\"";
+
+  if (!transferStatus.baseUrl.empty()) {
+    body += ",\"baseUrl\":\"" + jsonEscape(transferStatus.baseUrl) + "\"";
+  }
+  if (!transferStatus.apSsid.empty()) {
+    body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
+  }
+  if (!transferStatus.sessionToken.empty()) {
+    body += ",\"sessionToken\":\"" + jsonEscape(transferStatus.sessionToken) +
+            "\"";
+  }
+  if (!transferStatus.lastErrorCode.empty()) {
+    body += ",\"lastError\":{\"code\":\"" +
+            jsonEscape(transferStatus.lastErrorCode) + "\",\"message\":\"" +
+            jsonEscape(transferStatus.lastErrorMessage) + "\"}";
+  }
+  firmware_update::FirmwareUpdateStatus firmwareStatus =
+      firmwareUpdateHttp.status();
+  body += ",\"firmware\":{\"status\":\"" +
+          jsonEscape(firmwareStatus.status) + "\",\"target\":\"" +
+          jsonEscape(firmwareStatus.target) + "\",\"version\":\"" +
+          jsonEscape(firmwareStatus.runningVersion) + "\",\"build\":" +
+          std::to_string(firmwareStatus.runningBuild) +
+          ",\"gitSha\":\"" + jsonEscape(firmwareStatus.runningGitSha) + "\"" +
+          ",\"updaterProtocol\":" +
+          std::to_string(firmware_metadata::kUpdaterProtocolVersion) +
+          ",\"receivedBytes\":" +
+          std::to_string(firmwareStatus.receivedBytes) +
+          ",\"totalBytes\":" + std::to_string(firmwareStatus.totalBytes);
+  if (!firmwareStatus.errorCode.empty()) {
+    body += ",\"lastError\":{\"code\":\"" +
+            jsonEscape(firmwareStatus.errorCode) + "\",\"message\":\"" +
+            jsonEscape(firmwareStatus.errorMessage) + "\"}";
+  }
+  body += "}}";
+  return body;
+}
+
 static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
   if (pChar == nullptr) {
     pChar = mapTransferStatusCharacteristic;
@@ -528,6 +584,21 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
                 (unsigned)response.size());
 }
 
+static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
+  if (pChar == nullptr) {
+    pChar = mapTransferStatusCharacteristic;
+  }
+  if (pChar == nullptr) {
+    return;
+  }
+
+  std::string response = "DSTS" + genericTransferStatusJson();
+  pChar->setValue((uint8_t *)response.data(), response.size());
+  pChar->notify();
+  Serial.printf("BLE Device Transfer: status notified (%u bytes)\n",
+                (unsigned)response.size());
+}
+
 static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
                                             NimBLECharacteristic *pChar) {
   std::string command;
@@ -537,6 +608,16 @@ static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
   }
 
   if (command == "enter") {
+    device_transfer::HttpTransferStatus transferStatus =
+        deviceTransferHttp.status();
+    if (transferStatus.enabled && !transferStatus.mode.empty() &&
+        transferStatus.mode != "map") {
+      mapTransferHttp.setLastError("transfer_busy",
+                                   "another transfer mode is active");
+      Serial.println("BLE Map Transfer: enter rejected, transfer is busy");
+      notifyMapTransferStatus(pChar);
+      return;
+    }
     if (!storage.getSdLoaded()) {
       mapTransferHttp.setLastError("sd_unavailable",
                                    "SD card is not mounted");
@@ -551,8 +632,12 @@ static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
   }
 
   if (command == "exit") {
-    bool disabled = mapTransferHttp.setEnabled(false);
-    Serial.printf("BLE Map Transfer: exit requested, disabled=%d\n", disabled);
+    bool disabled = true;
+    if (deviceTransferHttp.status().mode == "map") {
+      disabled = mapTransferHttp.setEnabled(false);
+    }
+    Serial.printf("BLE Map Transfer: exit requested, disabled=%d\n",
+                  disabled);
     notifyMapTransferStatus(pChar);
     return;
   }
@@ -560,6 +645,53 @@ static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
   Serial.printf("BLE Map Transfer: rejected unknown command '%s'\n",
                 command.c_str());
   notifyMapTransferStatus(pChar);
+}
+
+static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
+                                                NimBLECharacteristic *pChar) {
+  std::string command;
+  if (data != nullptr && len > 0) {
+    command.assign(reinterpret_cast<const char *>(data), len);
+    command = trimAscii(command);
+  }
+
+  if (command == "enter|map") {
+    handleMapTransferControlPayload(reinterpret_cast<const uint8_t *>("enter"),
+                                    strlen("enter"), pChar);
+    notifyGenericTransferStatus(pChar);
+    return;
+  }
+
+  if (command == "enter|firmware") {
+    device_transfer::HttpTransferStatus transferStatus =
+        deviceTransferHttp.status();
+    if (transferStatus.enabled && !transferStatus.mode.empty() &&
+        transferStatus.mode != "firmware") {
+      firmwareUpdateHttp.setLastError("transfer_busy",
+                                      "another transfer mode is active");
+      Serial.println(
+          "BLE Device Transfer: firmware enter rejected, transfer is busy");
+      notifyGenericTransferStatus(pChar);
+      return;
+    }
+    bool enabled = firmwareUpdateHttp.setEnabled(true);
+    Serial.printf("BLE Device Transfer: firmware enter requested, enabled=%d\n",
+                  enabled);
+    notifyGenericTransferStatus(pChar);
+    return;
+  }
+
+  if (command == "exit") {
+    mapTransferHttp.setEnabled(false);
+    firmwareUpdateHttp.setEnabled(false);
+    Serial.println("BLE Device Transfer: exit requested");
+    notifyGenericTransferStatus(pChar);
+    return;
+  }
+
+  Serial.printf("BLE Device Transfer: rejected unknown command '%s'\n",
+                command.c_str());
+  notifyGenericTransferStatus(pChar);
 }
 
 static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
@@ -911,7 +1043,9 @@ public:
   }
 
   void onDisconnect(NimBLEServer *pServer) override {
-    mapTransferHttp.setEnabled(false);
+    if (deviceTransferHttp.status().mode == "map") {
+      mapTransferHttp.setEnabled(false);
+    }
     server->connected = false;
     bleSessionAuthenticated = false;
     unauthTimeoutDisconnectRequested = false;
@@ -980,6 +1114,23 @@ public:
       return;
     }
 
+    if (hasPrefix(value, "DTRN")) {
+      if (!requireAuthenticated("device transfer control")) {
+        return;
+      }
+      handleGenericTransferControlPayload((const uint8_t *)value.data() + 4,
+                                          value.length() - 4, pChar);
+      return;
+    }
+
+    if (hasPrefix(value, "DSTS")) {
+      if (!requireAuthenticated("device transfer status")) {
+        return;
+      }
+      notifyGenericTransferStatus(pChar);
+      return;
+    }
+
     if (!requireAuthenticated("navigation instruction")) {
       return;
     }
@@ -1042,6 +1193,24 @@ public:
         return;
       }
       notifyMapTransferStatus(mapTransferStatusCharacteristic);
+      return;
+    }
+
+    if (hasPrefix(value, "DTRN")) {
+      if (!requireAuthenticated("native device transfer control")) {
+        return;
+      }
+      handleGenericTransferControlPayload((const uint8_t *)value.data() + 4,
+                                          value.length() - 4,
+                                          mapTransferStatusCharacteristic);
+      return;
+    }
+
+    if (hasPrefix(value, "DSTS")) {
+      if (!requireAuthenticated("native device transfer status")) {
+        return;
+      }
+      notifyGenericTransferStatus(mapTransferStatusCharacteristic);
       return;
     }
 

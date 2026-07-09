@@ -36,6 +36,8 @@ enum DeviceBLEProtocol {
     static let settingsFallbackPrefix = "MSET"
     static let mapTransferControlPrefix = "MTRN"
     static let mapTransferStatusPrefix = "MSTS"
+    static let deviceTransferControlPrefix = "DTRN"
+    static let deviceTransferStatusPrefix = "DSTS"
 
     static let brightnessSettingID: UInt8 = 12
     static let enabledScreensSettingID: UInt8 = 13
@@ -219,6 +221,18 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferActiveMapId: String = ""
     @Published var mapTransferLastError: String?
     @Published var mapTransferStatusDescription: String = "unknown"
+    @Published var deviceTransferMode: String = ""
+    @Published var deviceTransferBaseURL: URL?
+    @Published var deviceTransferAccessPointSSID: String?
+    @Published var deviceTransferSessionToken: String?
+    @Published var firmwareTarget: String = ""
+    @Published var firmwareVersion: String = ""
+    @Published var firmwareBuild: Int = 0
+    @Published var firmwareGitSha: String = ""
+    @Published var firmwareUpdateStatus: String = "unknown"
+    @Published var firmwareUpdateReceivedBytes: Int = 0
+    @Published var firmwareUpdateTotalBytes: Int = 0
+    @Published var firmwareUpdateLastError: String?
     @Published var deviceHasSDCard: Bool?
     @Published var deviceMapFoundForCurrentLocation: Bool?
     @Published var deviceMapBlockCount: Int = 0
@@ -717,6 +731,32 @@ class BLEManager: NSObject, ObservableObject {
         return sentNative || sentFallback
     }
 
+    @discardableResult
+    func requestDeviceTransferMode(_ mode: DeviceTransferSession.Mode) -> Bool {
+        var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
+        packet.append(Data("enter|\(mode.rawValue)".utf8))
+        let sentNative = sendNativeMapTransferPacket(packet, label: "\(mode.rawValue) transfer enter")
+        let sentFallback = sendFallbackMapPacket(packet, label: "\(mode.rawValue) transfer enter")
+        return sentNative || sentFallback
+    }
+
+    @discardableResult
+    func requestDeviceTransferExit() -> Bool {
+        var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
+        packet.append(Data("exit".utf8))
+        let sentNative = sendNativeMapTransferPacket(packet, label: "device transfer exit")
+        let sentFallback = sendFallbackMapPacket(packet, label: "device transfer exit")
+        return sentNative || sentFallback
+    }
+
+    @discardableResult
+    func requestDeviceTransferStatus() -> Bool {
+        let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8)
+        let sentNative = sendNativeMapTransferPacket(packet, label: "device transfer status")
+        let sentFallback = sendFallbackMapPacket(packet, label: "device transfer status")
+        return sentNative || sentFallback
+    }
+
     func sendDebugNavigationPacket() {
         let packet = "\(NavigationIconID.left)|123|Debug turn left"
         guard sendNavigationData(packet) else {
@@ -789,11 +829,7 @@ class BLEManager: NSObject, ObservableObject {
         settingsCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
-        mapTransferModeEnabled = false
-        mapTransferBaseURL = nil
-        mapTransferAccessPointSSID = nil
-        mapTransferLastError = nil
-        mapTransferStatusDescription = "unknown"
+        clearTransferState()
         deviceHasSDCard = nil
         deviceMapFoundForCurrentLocation = nil
         deviceMapBlockCount = 0
@@ -873,7 +909,24 @@ class BLEManager: NSObject, ObservableObject {
         authRetryTimer = nil
         authTimeoutTimer?.invalidate()
         authTimeoutTimer = nil
+        clearTransferState()
         stopMonitoringRSSI()
+    }
+
+    private func clearTransferState() {
+        mapTransferModeEnabled = false
+        mapTransferBaseURL = nil
+        mapTransferAccessPointSSID = nil
+        mapTransferLastError = nil
+        mapTransferStatusDescription = "unknown"
+        deviceTransferMode = ""
+        deviceTransferBaseURL = nil
+        deviceTransferAccessPointSSID = nil
+        deviceTransferSessionToken = nil
+        firmwareUpdateStatus = "unknown"
+        firmwareUpdateReceivedBytes = 0
+        firmwareUpdateTotalBytes = 0
+        firmwareUpdateLastError = nil
     }
 
     private func updateTrustedPeripheralDescription() {
@@ -1319,11 +1372,7 @@ extension BLEManager: CBCentralManagerDelegate {
         settingsCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
-        mapTransferModeEnabled = false
-        mapTransferBaseURL = nil
-        mapTransferAccessPointSSID = nil
-        mapTransferLastError = nil
-        mapTransferStatusDescription = "unknown"
+        clearTransferState()
         deviceHasSDCard = nil
         deviceMapFoundForCurrentLocation = nil
         deviceMapBlockCount = 0
@@ -1558,6 +1607,11 @@ extension BLEManager: CBPeripheralDelegate {
         }
 
         if characteristic.uuid == characteristicUUID,
+           handleDeviceTransferStatusNotification(data) {
+            return
+        }
+
+        if characteristic.uuid == characteristicUUID,
            handleMapTransferStatusNotification(data) {
             return
         }
@@ -1584,6 +1638,51 @@ extension BLEManager: CBPeripheralDelegate {
             model: deviceInformation[modelNumberCharacteristicUUID],
             hardware: deviceInformation[hardwareRevisionCharacteristicUUID]
         )
+    }
+
+    @discardableResult
+    func handleDeviceTransferStatusNotification(_ data: Data) -> Bool {
+        guard data.count >= 4,
+              String(data: data.prefix(4), encoding: .utf8) == DeviceBLEProtocol.deviceTransferStatusPrefix else {
+            return false
+        }
+
+        let body = data.dropFirst(4)
+        guard let object = try? JSONSerialization.jsonObject(with: Data(body)) as? [String: Any] else {
+            firmwareUpdateStatus = "invalid status"
+            log("Received invalid device transfer status payload")
+            return true
+        }
+
+        let enabled = object["enabled"] as? Bool ?? false
+        deviceTransferMode = object["mode"] as? String ?? ""
+        if let baseURLString = object["baseUrl"] as? String {
+            deviceTransferBaseURL = URL(string: baseURLString)
+        } else {
+            deviceTransferBaseURL = nil
+        }
+        deviceTransferAccessPointSSID = object["apSsid"] as? String
+        deviceTransferSessionToken = object["sessionToken"] as? String
+
+        if let firmware = object["firmware"] as? [String: Any] {
+            firmwareUpdateStatus = firmware["status"] as? String ?? (enabled ? "unknown" : "idle")
+            firmwareTarget = firmware["target"] as? String ?? firmwareTarget
+            firmwareVersion = firmware["version"] as? String ?? firmwareVersion
+            firmwareBuild = firmware["build"] as? Int ?? firmwareBuild
+            firmwareGitSha = firmware["gitSha"] as? String ?? firmwareGitSha
+            firmwareUpdateReceivedBytes = firmware["receivedBytes"] as? Int ?? 0
+            firmwareUpdateTotalBytes = firmware["totalBytes"] as? Int ?? 0
+            if let lastError = firmware["lastError"] as? [String: Any] {
+                let code = lastError["code"] as? String ?? "error"
+                let message = lastError["message"] as? String ?? ""
+                firmwareUpdateLastError = message.isEmpty ? code : "\(code): \(message)"
+            } else {
+                firmwareUpdateLastError = nil
+            }
+        }
+
+        log("Device transfer status: \(deviceTransferMode.isEmpty ? "none" : deviceTransferMode)")
+        return true
     }
 
     @discardableResult

@@ -11,6 +11,8 @@ cd "${REPO_DIR}"
 xcrun swiftc \
   -o "${OUT}" \
   ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
   ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift \
   ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \

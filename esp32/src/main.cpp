@@ -59,6 +59,8 @@ extern xSemaphoreHandle gpsMutex;
 #include "power.hpp"
 
 #include "maps.hpp"
+#include "device_transfer_http.hpp"
+#include "firmware_update_http.hpp"
 #include "map_transfer.hpp"
 #include "map_transfer_http.hpp"
 
@@ -80,7 +82,9 @@ extern Storage storage;
 extern Battery battery;
 extern Power power;
 extern Maps mapView;
+device_transfer::HttpTransferServer deviceTransferHttp;
 map_transfer::MapTransferHttpServer mapTransferHttp;
+firmware_update::FirmwareUpdateHttpServer firmwareUpdateHttp;
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 static void processWaveshareBootButton() {
@@ -346,9 +350,11 @@ void setup() {
 #endif
 
 #ifdef WAVESHARE_AMOLED_206
-  // The 2.06 vendor demos bring the CO5300 up before touching the PMU/I2C
-  // stack. Keep that order so display recovery stays close to the proven
-  // HelloWorld baseline.
+  // OTA rollback/recovery can leave the PMU display rail off. Bring the rail
+  // up before CO5300 init so the panel does not stay black after a bad image.
+  waveshare_board::recoverI2CBus();
+  waveshare_board::i2c::configureBus();
+  waveshare_board::enablePowerRails();
   initTFT();
 #ifdef WAVESHARE_DISPLAY_PROBE
   Serial.println("Waveshare 2.06 display probe complete; holding before I2C/PMU/SD/LVGL/BLE/touch init");
@@ -356,18 +362,20 @@ void setup() {
     delay(1000);
   }
 #endif
-  waveshare_board::recoverI2CBus();
 #endif
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175)
   waveshare_board::i2c::configureBus();
-#else
+#elif !defined(WAVESHARE_AMOLED_206)
   Wire.setPins(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.begin();
 #endif
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175)
   waveshare_board::enablePowerRails();
+#endif
+
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #ifdef WAVESHARE_DISPLAY_PROBE
   Serial.println("Waveshare display probe: skipping RTC and IMU init");
 #else
@@ -425,7 +433,9 @@ void setup() {
                     activeStatus.code.c_str(), activeStatus.message.c_str());
     }
   }
-  mapTransferHttp.configure("/sdcard");
+  deviceTransferHttp.configure(8080, "BikeComputer-Transfer");
+  mapTransferHttp.configure("/sdcard", 8080, &deviceTransferHttp);
+  firmwareUpdateHttp.configure(&deviceTransferHttp);
 
   createGpxFolders();
 
@@ -492,6 +502,7 @@ void setup() {
   lv_screen_load(waitingScreen);
 
   log_i("Setup Complete");
+  firmwareUpdateHttp.markRunningAppValid();
 }
 
 /**
@@ -547,5 +558,5 @@ void loop() {
   }
 #endif
 
-  mapTransferHttp.process();
+  deviceTransferHttp.process();
 }

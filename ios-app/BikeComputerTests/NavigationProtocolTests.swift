@@ -129,6 +129,57 @@ final class TestBLEManager: BLEManager {
     }
 }
 
+final class FirmwareRequestCaptureProtocol: URLProtocol {
+    static var handler: ((URLRequest, Data) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        do {
+            guard let handler = Self.handler else {
+                throw FirmwareUpdateError.serverError("missing test handler")
+            }
+            let (response, data) = try handler(request, Self.bodyData(from: request))
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+
+    private static func bodyData(from request: URLRequest) -> Data {
+        if let body = request.httpBody {
+            return body
+        }
+        guard let stream = request.httpBodyStream else {
+            return Data()
+        }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let bufferSize = 4096
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let count = stream.read(buffer, maxLength: bufferSize)
+            if count <= 0 {
+                break
+            }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
+}
+
 final class TestRouteStep: MKRoute.Step {
     private let storedInstructions: String
     private let storedPolyline: MKPolyline
@@ -197,7 +248,9 @@ struct NavigationProtocolTests {
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsMapTransferControlFrames()
+        testBLEManagerSendsDeviceTransferControlFrames()
         testBLEManagerParsesMapTransferStatus()
+        testBLEManagerParsesDeviceTransferStatus()
         testBLEManagerSendsBrightnessFallbackSetting()
         testBLEManagerSendsDeviceScreenSettings()
         testBLEManagerPersistsNewMapSettings()
@@ -216,6 +269,10 @@ struct NavigationProtocolTests {
         testOfflineMapManifestDecoding()
         testMapTransferUploadURLEncodesPlusPathComponents()
         testMapTransferDeviceStatusDecodesActivationFailure()
+        testFirmwareManifestDecodingAndHash()
+        testFirmwareUpdateManagerRestoresPendingStatus()
+        testFirmwareUpdateAvailabilitySemantics()
+        testFirmwareDeviceClientSendsSignedBeginRequest()
         print("NavigationProtocolTests passed")
     }
 
@@ -518,6 +575,252 @@ struct NavigationProtocolTests {
         assertEqual(status.activation?.error?.message, "sha mismatch for VECTMAP/new-map/1.fmb", "status exposes activation error message")
     }
 
+    static func testFirmwareManifestDecodingAndHash() {
+        let body = Data("""
+        {
+          "schemaVersion": 1,
+          "target": "WAVESHARE_AMOLED_175",
+          "version": "0.4.0",
+          "build": 87,
+          "gitSha": "abcdef123456",
+          "size": 3,
+          "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+          "url": "https://github.com/seichris/open-bike-computer/releases/download/v0.4.0/WAVESHARE_AMOLED_175.bin",
+          "minUpdaterProtocol": 1,
+          "signature": "MEUCIQCoFhwd6SnmvltHkUu5jfNQce/pPk87c84AcHt2u9DmDQIgfwklONo1MEyfgfX0VhlTDyi/B+dGZdsvckb/rFEGOM8="
+        }
+        """.utf8)
+
+        guard let manifest = try? JSONDecoder().decode(FirmwareReleaseManifest.self, from: body) else {
+            assert(false, "firmware manifest should decode")
+            return
+        }
+
+        assertEqual(manifest.target, "WAVESHARE_AMOLED_175", "manifest exposes target")
+        assertEqual(manifest.build, 87, "manifest exposes build")
+        assert(manifest.isSupportedByApp, "manifest updater protocol is supported")
+        assertEqual(FirmwareUpdateManager.sha256Hex(Data("abc".utf8)), manifest.sha256, "firmware hash verification uses SHA-256 hex")
+        assert(
+            FirmwareManifestSignatureVerifier.verify(
+                manifest,
+                publicKeyBase64: "BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU="
+            ),
+            "firmware manifest signature verifies over canonical release metadata"
+        )
+
+        let tampered = FirmwareReleaseManifest(
+            schemaVersion: manifest.schemaVersion,
+            target: manifest.target,
+            version: manifest.version,
+            build: manifest.build + 1,
+            gitSha: manifest.gitSha,
+            size: manifest.size,
+            sha256: manifest.sha256,
+            url: manifest.url,
+            minUpdaterProtocol: manifest.minUpdaterProtocol,
+            signature: manifest.signature
+        )
+        assert(
+            !FirmwareManifestSignatureVerifier.verify(
+                tampered,
+                publicKeyBase64: "BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU="
+            ),
+            "firmware manifest signature rejects tampered metadata"
+        )
+    }
+
+    @MainActor
+    static func testFirmwareUpdateManagerRestoresPendingStatus() {
+        let suiteName = "FirmwareUpdateManagerTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            assert(false, "test defaults should be available")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let pending = PendingFirmwareUpdate(
+            target: "WAVESHARE_AMOLED_175",
+            version: "0.4.0",
+            build: 87,
+            gitSha: "abcdef123456",
+            startedAt: Date(timeIntervalSince1970: 10),
+            status: "device rebooting"
+        )
+        let data = try? JSONEncoder().encode(pending)
+        defaults.set(data, forKey: "firmware.pendingUpdate")
+
+        let manager = FirmwareUpdateManager(defaults: defaults)
+        assertEqual(manager.statusMessage,
+                    "device rebooting",
+                    "firmware manager restores pending reboot status after app relaunch")
+    }
+
+    @MainActor
+    static func testFirmwareUpdateAvailabilitySemantics() {
+        let suiteName = "FirmwareUpdateAvailabilityTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            assert(false, "test defaults should be available")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let manager = FirmwareUpdateManager(defaults: defaults)
+        let bleManager = BLEManager()
+        bleManager.firmwareTarget = "WAVESHARE_AMOLED_206"
+        bleManager.firmwareVersion = "0.2.4"
+        bleManager.firmwareBuild = 88
+        bleManager.firmwareGitSha = "abcdef123456"
+
+        let current = FirmwareReleaseManifest(
+            schemaVersion: 1,
+            target: "WAVESHARE_AMOLED_206",
+            version: "0.2.4",
+            build: 88,
+            gitSha: "abcdef123456",
+            size: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            url: URL(string: "https://github.com/seichris/open-bike-computer/releases/download/v0.2.4/WAVESHARE_AMOLED_206.bin")!,
+            minUpdaterProtocol: 1,
+            signature: "signature"
+        )
+        manager.allowDeveloperDowngrade = true
+        assert(!manager.isUpdateAllowed(current, bleManager: bleManager),
+               "exactly installed firmware should not be installable as an update even with developer downgrade enabled")
+        assert(!manager.isNewerUpdateAvailable(current, bleManager: bleManager),
+               "exactly installed firmware should not show in the main update prompt")
+        assertEqual(manager.availabilityMessage(for: current, bleManager: bleManager),
+                    "firmware is current",
+                    "exactly installed firmware reports current")
+
+        let newer = FirmwareReleaseManifest(
+            schemaVersion: current.schemaVersion,
+            target: current.target,
+            version: "0.2.5",
+            build: 89,
+            gitSha: "bbbbbb123456",
+            size: current.size,
+            sha256: current.sha256,
+            url: current.url,
+            minUpdaterProtocol: current.minUpdaterProtocol,
+            signature: current.signature
+        )
+        assert(manager.isUpdateAllowed(newer, bleManager: bleManager),
+               "newer build should be installable")
+        assert(manager.isNewerUpdateAvailable(newer, bleManager: bleManager),
+               "newer build should show in the main update prompt")
+        assertEqual(manager.availabilityMessage(for: newer, bleManager: bleManager),
+                    "firmware update available",
+                    "newer build reports update available")
+
+        let older = FirmwareReleaseManifest(
+            schemaVersion: current.schemaVersion,
+            target: current.target,
+            version: "0.2.3",
+            build: 87,
+            gitSha: "aaaaaa123456",
+            size: current.size,
+            sha256: current.sha256,
+            url: current.url,
+            minUpdaterProtocol: current.minUpdaterProtocol,
+            signature: current.signature
+        )
+        assert(manager.isUpdateAllowed(older, bleManager: bleManager),
+               "older build remains installable behind developer downgrade")
+        assert(!manager.isNewerUpdateAvailable(older, bleManager: bleManager),
+               "developer downgrade should not show in the main update prompt")
+        assertEqual(manager.availabilityMessage(for: older, bleManager: bleManager),
+                    "developer firmware install available",
+                    "developer downgrade is not labeled as a normal update")
+    }
+
+    static func testFirmwareDeviceClientSendsSignedBeginRequest() {
+        let manifest = FirmwareReleaseManifest(
+            schemaVersion: 1,
+            target: "WAVESHARE_AMOLED_175",
+            version: "0.4.0",
+            build: 87,
+            gitSha: "abcdef123456",
+            size: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            url: URL(string: "https://github.com/seichris/open-bike-computer/releases/download/v0.4.0/WAVESHARE_AMOLED_175.bin")!,
+            minUpdaterProtocol: 1,
+            signature: "MEUCIQCoFhwd6SnmvltHkUu5jfNQce/pPk87c84AcHt2u9DmDQIgfwklONo1MEyfgfX0VhlTDyi/B+dGZdsvckb/rFEGOM8="
+        )
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            FirmwareRequestCaptureProtocol.handler = nil
+        }
+
+        FirmwareRequestCaptureProtocol.handler = { request, body in
+            assertEqual(request.httpMethod, "POST", "begin request uses POST")
+            assertEqual(request.url?.path, "/firmware-update/begin", "begin request uses firmware path")
+            assertEqual(request.value(forHTTPHeaderField: "X-BikeComputer-Transfer-Token"), "token-123", "begin request includes transfer token")
+            assertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json", "begin request declares JSON")
+            guard let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+                assert(false, "begin request body should be JSON")
+                throw FirmwareUpdateError.invalidManifest
+            }
+            assertEqual(object["target"] as? String, manifest.target, "begin request sends target")
+            assertEqual(object["gitSha"] as? String, manifest.gitSha, "begin request sends git SHA")
+            assertEqual(object["manifestSignature"] as? String, manifest.signature, "begin request sends manifest signature")
+            assertEqual(object["releaseUrl"] as? String, manifest.url.absoluteString, "begin request sends release URL")
+            assertEqual(object["allowDowngrade"] as? Bool, true, "begin request sends developer downgrade flag")
+
+            let data = Data("""
+            {
+              "status": "receiving",
+              "target": "WAVESHARE_AMOLED_175",
+              "runningVersion": "0.2.2",
+              "runningBuild": 86,
+              "runningPartition": "ota_0",
+              "inactivePartition": "ota_1",
+              "otaState": "valid",
+              "maxImageBytes": 3145728,
+              "receivedBytes": 0,
+              "totalBytes": 3,
+              "sha256": null,
+              "lastError": null
+            }
+            """.utf8)
+            let response = HTTPURLResponse(url: request.url!,
+                                           statusCode: 200,
+                                           httpVersion: nil,
+                                           headerFields: nil)!
+            return (response, data)
+        }
+
+        runAsyncTest {
+            let client = FirmwareUpdateDeviceClient(
+                baseURL: URL(string: "http://192.168.4.1:8080")!,
+                sessionToken: "token-123",
+                session: session
+            )
+            let status = try await client.begin(manifest: manifest, allowDowngrade: true)
+            assertEqual(status.status, "receiving", "begin response decodes firmware status")
+            assertEqual(status.totalBytes, 3, "begin response decodes expected byte count")
+        }
+    }
+
+    static func runAsyncTest(_ operation: @escaping () async throws -> Void) {
+        let semaphore = DispatchSemaphore(value: 0)
+        var failure: Error?
+        Task {
+            do {
+                try await operation()
+            } catch {
+                failure = error
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        if let failure {
+            assert(false, "async test failed: \(failure)")
+        }
+    }
+
     static func testNavigationPacketBuilder() {
         let shortPacket = "2|150|Turn left"
         guard let shortData = NavigationPacketBuilder.data(from: shortPacket, maxLength: NavigationPacketBuilder.protocolMaxBytes) else {
@@ -588,6 +891,8 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.settingsFallbackPrefix, "MSET", "settings fallback remains framed over navigation writes")
         assertEqual(DeviceBLEProtocol.mapTransferControlPrefix, "MTRN", "map transfer control remains framed over navigation writes")
         assertEqual(DeviceBLEProtocol.mapTransferStatusPrefix, "MSTS", "map transfer status remains framed over navigation notifications")
+        assertEqual(DeviceBLEProtocol.deviceTransferControlPrefix, "DTRN", "generic transfer control remains firmware-compatible")
+        assertEqual(DeviceBLEProtocol.deviceTransferStatusPrefix, "DSTS", "generic transfer status remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.brightnessSettingID, 12, "brightness uses firmware setting ID 12")
         assertEqual(DeviceBLEProtocol.enabledScreensSettingID, 13, "enabled screens use firmware setting ID 13")
         assertEqual(DeviceBLEProtocol.defaultScreenSettingID, 14, "default screen uses firmware setting ID 14")
@@ -720,6 +1025,28 @@ struct NavigationProtocolTests {
         assertEqual(String(data: sentPackets[2], encoding: .utf8), "MTRNexit", "exit command uses MTRN frame")
     }
 
+    static func testBLEManagerSendsDeviceTransferControlFrames() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        assert(manager.requestDeviceTransferMode(.firmware), "firmware transfer enter should queue when BLE is ready")
+        assert(manager.requestDeviceTransferStatus(), "device transfer status should queue when BLE is ready")
+        assert(manager.requestDeviceTransferExit(), "device transfer exit should queue when BLE is ready")
+
+        assertEqual(sentPackets.count, 3, "device transfer control should write three packets")
+        assertEqual(String(data: sentPackets[0], encoding: .utf8), "DTRNenter|firmware", "firmware enter command uses DTRN frame")
+        assertEqual(String(data: sentPackets[1], encoding: .utf8), "DSTS", "status command uses DSTS frame")
+        assertEqual(String(data: sentPackets[2], encoding: .utf8), "DTRNexit", "exit command uses DTRN frame")
+    }
+
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
@@ -735,6 +1062,27 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceMapFoundForCurrentLocation, false, "status parser exposes current map coverage")
         assertEqual(manager.deviceMapBlockCount, 0, "status parser exposes current map block count")
         assertEqual(manager.mapTransferLastError, "previous: previous upload failed", "status parser exposes last transfer error")
+    }
+
+    static func testBLEManagerParsesDeviceTransferStatus() {
+        let manager = BLEManager()
+        let json = """
+        {"configured":true,"enabled":true,"port":8080,"mode":"firmware","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"abc123","firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_175","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        """
+        let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
+
+        assert(manager.handleDeviceTransferStatusNotification(packet), "DSTS notification should be consumed")
+        assertEqual(manager.deviceTransferMode, "firmware", "status parser exposes transfer mode")
+        assertEqual(manager.deviceTransferBaseURL?.absoluteString, "http://192.168.4.1:8080", "status parser exposes base URL")
+        assertEqual(manager.deviceTransferAccessPointSSID, "BikeComputer-Transfer", "status parser exposes SSID")
+        assertEqual(manager.deviceTransferSessionToken, "abc123", "status parser exposes session token")
+        assertEqual(manager.firmwareTarget, "WAVESHARE_AMOLED_175", "status parser exposes firmware target")
+        assertEqual(manager.firmwareVersion, "0.2.2", "status parser exposes firmware version")
+        assertEqual(manager.firmwareBuild, 86, "status parser exposes firmware build")
+        assertEqual(manager.firmwareUpdateStatus, "receiving", "status parser exposes firmware update status")
+        assertEqual(manager.firmwareUpdateReceivedBytes, 1024, "status parser exposes received bytes")
+        assertEqual(manager.firmwareUpdateTotalBytes, 2048, "status parser exposes total bytes")
+        assertEqual(manager.firmwareUpdateLastError, "previous: previous update failed", "status parser exposes firmware error")
     }
 
     static func testBLEManagerSendsBrightnessFallbackSetting() {

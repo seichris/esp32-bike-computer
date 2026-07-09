@@ -19,6 +19,7 @@ class BikeComputerCoordinator: ObservableObject {
     // MARK: - Private Managers (Implementation Details)
 
     let bleManager = BLEManager()  // Accessible for settings view
+    let firmwareUpdateManager = FirmwareUpdateManager()
     private let navEngine = NavigationEngine()
     private let locationManager = CurrentLocationManager()
     private let healthKitManager = HealthKitManager()
@@ -179,9 +180,13 @@ class BikeComputerCoordinator: ObservableObject {
             .removeDuplicates()
             .filter { $0 }
             .sink { [weak self] _ in
-                guard let self, let location = self.locationManager.currentLocation else { return }
-                self.navEngine.processExternalLocation(location)
+                guard let self else { return }
+                if let location = self.locationManager.currentLocation {
+                    self.navEngine.processExternalLocation(location)
+                }
                 self.requestMapTransferStatusAfterDeviceRefresh()
+                self.bleManager.requestDeviceTransferStatus()
+                self.scheduleFirmwareUpdateCheckAfterDeviceRefresh()
             }
             .store(in: &cancellables)
 
@@ -293,6 +298,33 @@ class BikeComputerCoordinator: ObservableObject {
             guard let self, self.bleManager.isNavigationReady else { return }
             self.bleManager.requestMapTransferStatus()
         }
+    }
+
+    private func scheduleFirmwareUpdateCheckAfterDeviceRefresh() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            self?.runAutomaticFirmwareUpdateCheck(attempt: 0)
+        }
+    }
+
+    private func runAutomaticFirmwareUpdateCheck(attempt: Int) {
+        guard bleManager.isNavigationReady else { return }
+        guard isFirmwareMetadataReadyForUpdateCheck else {
+            if attempt < 5 {
+                bleManager.requestDeviceTransferStatus()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    self?.runAutomaticFirmwareUpdateCheck(attempt: attempt + 1)
+                }
+            }
+            return
+        }
+        firmwareUpdateManager.checkForUpdateAutomatically(bleManager: bleManager)
+    }
+
+    private var isFirmwareMetadataReadyForUpdateCheck: Bool {
+        !bleManager.firmwareTarget.isEmpty &&
+        !bleManager.firmwareVersion.isEmpty &&
+        bleManager.firmwareBuild > 0 &&
+        !bleManager.firmwareGitSha.isEmpty
     }
 
     // MARK: - Public API: UI State
