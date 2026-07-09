@@ -164,7 +164,7 @@ final class FirmwareUpdateManager: ObservableObject {
     private let defaults: UserDefaults
     private let session: URLSession
     private let deviceTransferManager = DeviceTransferManager()
-    private var lastAutomaticCheckDeviceKey: String?
+    private var lastSuccessfulAutomaticCheckDeviceKey: String?
 
     init(defaults: UserDefaults = .standard, session: URLSession = .shared) {
         self.defaults = defaults
@@ -190,8 +190,8 @@ final class FirmwareUpdateManager: ObservableObject {
     func checkForUpdateAutomatically(bleManager: BLEManager) {
         guard !isBusy, bleManager.isNavigationReady else { return }
         let deviceKey = automaticCheckDeviceKey(bleManager: bleManager)
-        guard !deviceKey.isEmpty, deviceKey != lastAutomaticCheckDeviceKey else { return }
-        lastAutomaticCheckDeviceKey = deviceKey
+        guard !deviceKey.isEmpty,
+              deviceKey != lastSuccessfulAutomaticCheckDeviceKey else { return }
 
         Task {
             await runQuietly {
@@ -199,6 +199,7 @@ final class FirmwareUpdateManager: ObservableObject {
                 self.latestManifest = manifest
                 self.statusMessage = self.availabilityMessage(for: manifest, bleManager: bleManager)
                 self.errorMessage = nil
+                self.lastSuccessfulAutomaticCheckDeviceKey = deviceKey
             }
         }
     }
