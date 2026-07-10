@@ -2,7 +2,7 @@
 
 # Open Source Bike Computer
 
-Navigate your bike rides with a ~$30 open source bike computer.
+Navigate your bike rides with LED screen bike computer.
 
 - **Paired iOS app**: Plan routes, record workout metrics, and stream turn-by-turn navigation, GPS, map settings, and ride telemetry to the handlebar display over BLE.
 - **Supported hardware**:
