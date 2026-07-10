@@ -41,8 +41,10 @@ enum DeviceBLEProtocol {
     static let deviceCapabilitiesPrefix = "CAPS"
     static let soundPlayPrefix = "SNDP"
     static let powerButtonHonkPrefix = "SNDH"
+    static let powerButtonHonkStatusPrefix = "SNHA"
     static let deviceSoundsCapabilityMask: UInt8 = 1 << 0
     static let powerButtonHonkCapabilityMask: UInt8 = 1 << 1
+    static let powerButtonHonkAcknowledgementCapabilityMask: UInt8 = 1 << 2
 
     static let brightnessSettingID: UInt8 = 12
     static let enabledScreensSettingID: UInt8 = 13
@@ -72,6 +74,18 @@ enum DeviceBLEProtocol {
     }
 }
 
+enum DevicePacketRouting {
+    static func sendPreferredThenFallback(
+        preferred: () -> Bool,
+        fallback: () -> Bool
+    ) -> Bool {
+        if preferred() {
+            return true
+        }
+        return fallback()
+    }
+}
+
 enum DeviceSound: UInt8, CaseIterable, Identifiable {
     case bellDing = 1
     case plasticBicycleHorn = 2
@@ -96,9 +110,19 @@ enum DeviceSound: UInt8, CaseIterable, Identifiable {
         return packet
     }
 
-    func powerButtonHonkPacket(enabled: Bool, volumePercent: Double) -> Data {
+    func powerButtonHonkPacket(
+        enabled: Bool,
+        volumePercent: Double,
+        requestID: UInt32? = nil
+    ) -> Data {
         let volume = UInt8(Self.normalizedVolumePercent(volumePercent).rounded())
         var packet = Data(DeviceBLEProtocol.powerButtonHonkPrefix.utf8)
+        if let requestID {
+            packet.append(UInt8(truncatingIfNeeded: requestID))
+            packet.append(UInt8(truncatingIfNeeded: requestID >> 8))
+            packet.append(UInt8(truncatingIfNeeded: requestID >> 16))
+            packet.append(UInt8(truncatingIfNeeded: requestID >> 24))
+        }
         packet.append(enabled ? 1 : 0)
         packet.append(rawValue)
         packet.append(volume)
@@ -310,6 +334,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published var supportsDeviceSettings: Bool = false
     @Published var supportsDeviceSounds: Bool = false
     @Published var supportsPowerButtonHonk: Bool = false
+    @Published var supportsPowerButtonHonkAcknowledgement: Bool = false
+    @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
     @Published var hardwareLabel: String = ""
@@ -420,6 +446,12 @@ class BLEManager: NSObject, ObservableObject {
     private var connectionTimeoutTimer: Timer?
     private var authRetryTimer: Timer?
     private var authTimeoutTimer: Timer?
+    private var pendingPowerButtonHonkPacket: Data?
+    private var powerButtonHonkAttempt = 0
+    private var nextPowerButtonHonkRequestID: UInt32 = 1
+    private var powerButtonHonkRetryWorkItem: DispatchWorkItem?
+    private var powerButtonHonkAckTimeout: TimeInterval = 1.0
+    private var powerButtonHonkFailureRetryDelay: TimeInterval = 0.1
     private var shouldPairAfterDisconnect: Bool = false
     private var suppressNextReconnect: Bool = false
     private var hasActiveBLESession: Bool {
@@ -853,10 +885,10 @@ class BLEManager: NSObject, ObservableObject {
         let volume = packet.last ?? UInt8(DeviceSound.defaultVolumePercent)
 
         let label = "sound \(sound.rawValue) at \(volume)%"
-        if sendNativeMapTransferPacket(packet, label: label) {
-            return true
-        }
-        return sendFallbackMapPacket(packet, label: label)
+        return DevicePacketRouting.sendPreferredThenFallback(
+            preferred: { sendNativeMapTransferPacket(packet, label: label) },
+            fallback: { sendFallbackMapPacket(packet, label: label) }
+        )
     }
 
     @discardableResult
@@ -866,21 +898,114 @@ class BLEManager: NSObject, ObservableObject {
 
     @discardableResult
     func sendPowerButtonHonkConfiguration() -> Bool {
-        saveSettings()
         guard supportsPowerButtonHonk else {
             log("Cannot configure PWR honk: connected device does not advertise support")
             return false
         }
 
+        let requestID: UInt32?
+        if supportsPowerButtonHonkAcknowledgement {
+            requestID = nextPowerButtonHonkRequestID
+            nextPowerButtonHonkRequestID &+= 1
+            if nextPowerButtonHonkRequestID == 0 {
+                nextPowerButtonHonkRequestID = 1
+            }
+        } else {
+            requestID = nil
+        }
         let packet = selectedDeviceSound.powerButtonHonkPacket(
             enabled: isPowerButtonHonkEnabled,
-            volumePercent: deviceSoundVolumePercent
+            volumePercent: deviceSoundVolumePercent,
+            requestID: requestID
         )
-        let label = "PWR honk \(isPowerButtonHonkEnabled ? "enabled" : "disabled")"
-        if sendNativeMapTransferPacket(packet, label: label) {
-            return true
+        powerButtonHonkConfigurationError = nil
+        clearPendingPowerButtonHonkConfiguration()
+        guard supportsPowerButtonHonkAcknowledgement else {
+            let sent = routePowerButtonHonkConfiguration(packet)
+            if !sent {
+                reportPowerButtonHonkConfigurationFailure(
+                    "PWR honk configuration could not be sent"
+                )
+            }
+            return sent
         }
-        return sendFallbackMapPacket(packet, label: label)
+
+        pendingPowerButtonHonkPacket = packet
+        powerButtonHonkAttempt = 0
+        let sent = transmitPowerButtonHonkConfiguration(packet)
+        if !sent {
+            reportPowerButtonHonkConfigurationFailure(
+                "PWR honk configuration could not be sent"
+            )
+        }
+        return sent
+    }
+
+    func deviceSoundVolumeEditingChanged(_ isEditing: Bool) {
+        guard !isEditing, isPowerButtonHonkEnabled else { return }
+        sendPowerButtonHonkConfiguration()
+    }
+
+    private func transmitPowerButtonHonkConfiguration(_ packet: Data) -> Bool {
+        let sent = routePowerButtonHonkConfiguration(packet)
+        if sent {
+            schedulePowerButtonHonkRetry(
+                for: packet,
+                after: powerButtonHonkAckTimeout
+            )
+        }
+        return sent
+    }
+
+    private func routePowerButtonHonkConfiguration(_ packet: Data) -> Bool {
+        let enabled = packet.count >= 3 && packet[packet.count - 3] == 1
+        let label = "PWR honk \(enabled ? "enabled" : "disabled")"
+        return DevicePacketRouting.sendPreferredThenFallback(
+            preferred: { sendNativeMapTransferPacket(packet, label: label) },
+            fallback: { sendFallbackMapPacket(packet, label: label) }
+        )
+    }
+
+    private func schedulePowerButtonHonkRetry(
+        for packet: Data,
+        after delay: TimeInterval
+    ) {
+        powerButtonHonkRetryWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.pendingPowerButtonHonkPacket == packet else { return }
+            guard PowerButtonHonkRetry.shouldRetry(
+                isNavigationReady: self.isNavigationReady,
+                attempt: self.powerButtonHonkAttempt
+            ) else {
+                self.reportPowerButtonHonkConfigurationFailure(
+                    "PWR honk configuration was not acknowledged"
+                )
+                return
+            }
+
+            self.powerButtonHonkAttempt += 1
+            if !self.transmitPowerButtonHonkConfiguration(packet) {
+                self.reportPowerButtonHonkConfigurationFailure(
+                    "PWR honk configuration retry could not be sent"
+                )
+            }
+        }
+        powerButtonHonkRetryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func reportPowerButtonHonkConfigurationFailure(_ logMessage: String) {
+        log(logMessage)
+        powerButtonHonkConfigurationError =
+            "Could not apply PWR honk settings on the device."
+        clearPendingPowerButtonHonkConfiguration()
+    }
+
+    private func clearPendingPowerButtonHonkConfiguration() {
+        powerButtonHonkRetryWorkItem?.cancel()
+        powerButtonHonkRetryWorkItem = nil
+        pendingPowerButtonHonkPacket = nil
+        powerButtonHonkAttempt = 0
     }
 
     @discardableResult
@@ -930,9 +1055,14 @@ class BLEManager: NSObject, ObservableObject {
     @discardableResult
     func requestDeviceCapabilities() -> Bool {
         let packet = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8)
-        let sentNative = sendNativeMapTransferPacket(packet, label: "device capabilities")
-        let sentFallback = sendFallbackMapPacket(packet, label: "device capabilities")
-        return sentNative || sentFallback
+        return DevicePacketRouting.sendPreferredThenFallback(
+            preferred: {
+                sendNativeMapTransferPacket(packet, label: "device capabilities")
+            },
+            fallback: {
+                sendFallbackMapPacket(packet, label: "device capabilities")
+            }
+        )
     }
 
     func sendDebugNavigationPacket() {
@@ -1111,7 +1241,10 @@ class BLEManager: NSObject, ObservableObject {
         firmwareUpdateLastError = nil
         supportsDeviceSounds = false
         supportsPowerButtonHonk = false
+        supportsPowerButtonHonkAcknowledgement = false
+        powerButtonHonkConfigurationError = nil
         hasReceivedDeviceCapabilities = false
+        clearPendingPowerButtonHonkConfiguration()
     }
 
     private func updateTrustedPeripheralDescription() {
@@ -1149,8 +1282,16 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
-    func installNavigationWriteEndpoint(_ endpoint: NavigationWriteEndpoint) {
+    func installNavigationWriteEndpoint(_ endpoint: NavigationWriteEndpoint?) {
         navigationWriteEndpoint = endpoint
+    }
+
+    func installPowerButtonHonkRetryTiming(
+        ackTimeout: TimeInterval,
+        failureRetryDelay: TimeInterval
+    ) {
+        powerButtonHonkAckTimeout = max(0, ackTimeout)
+        powerButtonHonkFailureRetryDelay = max(0, failureRetryDelay)
     }
 
     private func scheduleAuthenticationRetry(for peripheral: CBPeripheral) {
@@ -1797,17 +1938,7 @@ extension BLEManager: CBPeripheralDelegate {
         }
 
         if characteristic.uuid == characteristicUUID,
-           handleDeviceCapabilitiesNotification(data) {
-            return
-        }
-
-        if characteristic.uuid == characteristicUUID,
-           handleDeviceTransferStatusNotification(data) {
-            return
-        }
-
-        if characteristic.uuid == characteristicUUID,
-           handleMapTransferStatusNotification(data) {
+           handleNavigationCharacteristicNotification(data) {
             return
         }
 
@@ -1845,7 +1976,9 @@ extension BLEManager: CBPeripheralDelegate {
         guard data.count == 5 else {
             supportsDeviceSounds = false
             supportsPowerButtonHonk = false
+            supportsPowerButtonHonkAcknowledgement = false
             hasReceivedDeviceCapabilities = false
+            clearPendingPowerButtonHonkConfiguration()
             log("Received invalid device capabilities payload")
             return true
         }
@@ -1854,16 +1987,92 @@ extension BLEManager: CBPeripheralDelegate {
         let hasDeviceSounds = flags & DeviceBLEProtocol.deviceSoundsCapabilityMask != 0
         let hasPowerButtonHonk = hasDeviceSounds &&
             flags & DeviceBLEProtocol.powerButtonHonkCapabilityMask != 0
+        let hasPowerButtonHonkAcknowledgement = hasPowerButtonHonk &&
+            flags & DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask != 0
+        let shouldSynchronizePowerButtonHonk = hasPowerButtonHonk &&
+            (!hasReceivedDeviceCapabilities || !supportsPowerButtonHonk)
         supportsDeviceSounds = hasDeviceSounds
         supportsPowerButtonHonk = hasPowerButtonHonk
+        supportsPowerButtonHonkAcknowledgement = hasPowerButtonHonkAcknowledgement
+        if !hasPowerButtonHonkAcknowledgement {
+            clearPendingPowerButtonHonkConfiguration()
+        }
         hasReceivedDeviceCapabilities = true
         log("Device capabilities: flags=0x\(String(format: "%02X", flags))")
-        if hasPowerButtonHonk {
+        if shouldSynchronizePowerButtonHonk {
             // @Published updates in willSet. Defer until the support flag is
             // observable so the guarded send uses the negotiated capability.
             DispatchQueue.main.async { [weak self] in
                 _ = self?.sendPowerButtonHonkConfiguration()
             }
+        }
+        return true
+    }
+
+    @discardableResult
+    func handleNavigationCharacteristicNotification(_ data: Data) -> Bool {
+        if handlePowerButtonHonkStatusNotification(data) {
+            return true
+        }
+        if handleDeviceCapabilitiesNotification(data) {
+            return true
+        }
+        if handleDeviceTransferStatusNotification(data) {
+            return true
+        }
+        return handleMapTransferStatusNotification(data)
+    }
+
+    @discardableResult
+    func handlePowerButtonHonkStatusNotification(_ data: Data) -> Bool {
+        guard data.count >= 4,
+              String(data: data.prefix(4), encoding: .utf8) ==
+                DeviceBLEProtocol.powerButtonHonkStatusPrefix else {
+            return false
+        }
+
+        let appliedIndex: Int
+        let configStartIndex: Int
+        var acknowledgedPacket = Data(DeviceBLEProtocol.powerButtonHonkPrefix.utf8)
+        switch data.count {
+        case 8:
+            appliedIndex = 4
+            configStartIndex = 5
+        case 12:
+            acknowledgedPacket.append(data.subdata(in: 4..<8))
+            appliedIndex = 8
+            configStartIndex = 9
+        default:
+            log("Received invalid PWR honk apply status")
+            return true
+        }
+
+        guard data[appliedIndex] <= 1,
+              data[configStartIndex] <= 1,
+              DeviceSound(rawValue: data[configStartIndex + 1]) != nil,
+              data[configStartIndex + 2] <= 100 else {
+            log("Received invalid PWR honk apply status")
+            return true
+        }
+
+        acknowledgedPacket.append(
+            data.subdata(in: configStartIndex..<(configStartIndex + 3))
+        )
+        guard acknowledgedPacket == pendingPowerButtonHonkPacket else {
+            log("Ignored stale PWR honk apply status")
+            return true
+        }
+
+        if data[appliedIndex] == 1 {
+            log("PWR honk configuration acknowledged")
+            powerButtonHonkConfigurationError = nil
+            clearPendingPowerButtonHonkConfiguration()
+        } else {
+            log("Device rejected PWR honk configuration; retrying")
+            schedulePowerButtonHonkRetry(
+                for: acknowledgedPacket,
+                after: powerButtonHonkFailureRetryDelay
+            )
         }
         return true
     }

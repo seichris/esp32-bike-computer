@@ -8,6 +8,14 @@ namespace waveshare_board::speaker {
 constexpr uint8_t DEFAULT_VOLUME_PERCENT = 70;
 constexpr uint8_t CAPABILITY_DEVICE_SOUNDS = 1U << 0;
 constexpr uint8_t CAPABILITY_POWER_BUTTON_HONK = 1U << 1;
+constexpr uint8_t CAPABILITY_POWER_BUTTON_HONK_ACK = 1U << 2;
+constexpr size_t POWER_BUTTON_HONK_PAYLOAD_SIZE = 3;
+constexpr size_t POWER_BUTTON_HONK_REQUEST_ID_SIZE = 4;
+constexpr size_t POWER_BUTTON_HONK_COMMAND_PAYLOAD_SIZE =
+    POWER_BUTTON_HONK_REQUEST_ID_SIZE + POWER_BUTTON_HONK_PAYLOAD_SIZE;
+constexpr size_t POWER_BUTTON_HONK_LEGACY_STATUS_SIZE = 8;
+constexpr size_t POWER_BUTTON_HONK_STATUS_SIZE =
+    4 + POWER_BUTTON_HONK_REQUEST_ID_SIZE + 1 + POWER_BUTTON_HONK_PAYLOAD_SIZE;
 
 enum class Sound : uint8_t {
   BellDing = 1,
@@ -26,6 +34,18 @@ struct PowerButtonHonkConfig {
   Sound sound;
   uint8_t volumePercent;
 };
+
+struct PowerButtonHonkCommand {
+  PowerButtonHonkConfig config;
+  uint32_t requestId;
+  bool hasRequestId;
+};
+
+inline bool samePowerButtonHonkConfig(const PowerButtonHonkConfig &lhs,
+                                      const PowerButtonHonkConfig &rhs) {
+  return lhs.enabled == rhs.enabled && lhs.sound == rhs.sound &&
+         lhs.volumePercent == rhs.volumePercent;
+}
 
 enum class PlayCommandResult {
   NotMatched,
@@ -46,12 +66,19 @@ inline bool isKnownSound(Sound sound) {
 }
 
 inline uint8_t capabilityFlags(bool deviceSoundsAvailable,
-                               bool powerButtonHonkAvailable = false) {
+                               bool powerButtonHonkAvailable = false,
+                               bool powerButtonHonkAckAvailable = false) {
   if (!deviceSoundsAvailable) {
     return 0;
   }
-  return CAPABILITY_DEVICE_SOUNDS |
-         (powerButtonHonkAvailable ? CAPABILITY_POWER_BUTTON_HONK : 0);
+  uint8_t flags = CAPABILITY_DEVICE_SOUNDS;
+  if (powerButtonHonkAvailable) {
+    flags |= CAPABILITY_POWER_BUTTON_HONK;
+    if (powerButtonHonkAckAvailable) {
+      flags |= CAPABILITY_POWER_BUTTON_HONK_ACK;
+    }
+  }
+  return flags;
 }
 
 inline bool decodePlayPayload(const uint8_t *data, size_t length,
@@ -95,7 +122,8 @@ inline PlayCommandResult classifyPlayCommand(const uint8_t *data, size_t length,
 
 inline bool decodePowerButtonHonkPayload(const uint8_t *data, size_t length,
                                          PowerButtonHonkConfig &config) {
-  if (data == nullptr || length != 3 || data[0] > 1) {
+  if (data == nullptr || length != POWER_BUTTON_HONK_PAYLOAD_SIZE ||
+      data[0] > 1) {
     return false;
   }
 
@@ -108,9 +136,76 @@ inline bool decodePowerButtonHonkPayload(const uint8_t *data, size_t length,
   return true;
 }
 
+inline bool encodePowerButtonHonkPayload(const PowerButtonHonkConfig &config,
+                                         uint8_t *data, size_t length) {
+  if (data == nullptr || length != POWER_BUTTON_HONK_PAYLOAD_SIZE ||
+      !isKnownSound(config.sound) || config.volumePercent > 100) {
+    return false;
+  }
+
+  data[0] = config.enabled ? 1 : 0;
+  data[1] = static_cast<uint8_t>(config.sound);
+  data[2] = config.volumePercent;
+  return true;
+}
+
+inline bool decodePowerButtonHonkCommandPayload(
+    const uint8_t *data, size_t length, PowerButtonHonkCommand &command) {
+  if (data == nullptr) {
+    return false;
+  }
+  if (length == POWER_BUTTON_HONK_PAYLOAD_SIZE) {
+    command.requestId = 0;
+    command.hasRequestId = false;
+    return decodePowerButtonHonkPayload(data, length, command.config);
+  }
+  if (length != POWER_BUTTON_HONK_COMMAND_PAYLOAD_SIZE) {
+    return false;
+  }
+
+  command.requestId = static_cast<uint32_t>(data[0]) |
+                      (static_cast<uint32_t>(data[1]) << 8) |
+                      (static_cast<uint32_t>(data[2]) << 16) |
+                      (static_cast<uint32_t>(data[3]) << 24);
+  command.hasRequestId = true;
+  return decodePowerButtonHonkPayload(
+      data + POWER_BUTTON_HONK_REQUEST_ID_SIZE,
+      length - POWER_BUTTON_HONK_REQUEST_ID_SIZE, command.config);
+}
+
+inline size_t powerButtonHonkStatusSize(
+    const PowerButtonHonkCommand &command) {
+  return command.hasRequestId ? POWER_BUTTON_HONK_STATUS_SIZE
+                              : POWER_BUTTON_HONK_LEGACY_STATUS_SIZE;
+}
+
+inline bool encodePowerButtonHonkStatus(const PowerButtonHonkCommand &command,
+                                        bool applied, uint8_t *data,
+                                        size_t length) {
+  const size_t expectedLength = powerButtonHonkStatusSize(command);
+  if (data == nullptr || length != expectedLength) {
+    return false;
+  }
+
+  data[0] = 'S';
+  data[1] = 'N';
+  data[2] = 'H';
+  data[3] = 'A';
+  size_t offset = 4;
+  if (command.hasRequestId) {
+    data[offset++] = static_cast<uint8_t>(command.requestId);
+    data[offset++] = static_cast<uint8_t>(command.requestId >> 8);
+    data[offset++] = static_cast<uint8_t>(command.requestId >> 16);
+    data[offset++] = static_cast<uint8_t>(command.requestId >> 24);
+  }
+  data[offset++] = applied ? 1 : 0;
+  return encodePowerButtonHonkPayload(command.config, data + offset,
+                                      length - offset);
+}
+
 inline PlayCommandResult classifyPowerButtonHonkCommand(
     const uint8_t *data, size_t length, bool authenticated,
-    PowerButtonHonkConfig &config) {
+    PowerButtonHonkCommand &command) {
   constexpr uint8_t prefix[] = {'S', 'N', 'D', 'H'};
   if (data == nullptr || length < sizeof(prefix)) {
     return PlayCommandResult::NotMatched;
@@ -123,8 +218,8 @@ inline PlayCommandResult classifyPowerButtonHonkCommand(
   if (!authenticated) {
     return PlayCommandResult::RejectedUnauthenticated;
   }
-  if (!decodePowerButtonHonkPayload(data + sizeof(prefix),
-                                    length - sizeof(prefix), config)) {
+  if (!decodePowerButtonHonkCommandPayload(
+          data + sizeof(prefix), length - sizeof(prefix), command)) {
     return PlayCommandResult::RejectedMalformed;
   }
   return PlayCommandResult::Accepted;

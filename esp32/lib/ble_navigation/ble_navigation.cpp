@@ -508,14 +508,20 @@ static bool handleSoundPlayCommand(const std::string &value,
   return true;
 }
 
+static void notifyPowerButtonHonkStatus(
+    NimBLECharacteristic *pChar,
+    const waveshare_board::speaker::PowerButtonHonkCommand &command,
+    bool applied);
+
 static bool handlePowerButtonHonkCommand(const std::string &value,
                                          const char *authLabel,
-                                         const char *source) {
-  waveshare_board::speaker::PowerButtonHonkConfig config{};
+                                         const char *source,
+                                         NimBLECharacteristic *statusChar) {
+  waveshare_board::speaker::PowerButtonHonkCommand command{};
   const auto result =
       waveshare_board::speaker::classifyPowerButtonHonkCommand(
           reinterpret_cast<const uint8_t *>(value.data()), value.length(),
-          bleSessionAuthenticated, config);
+          bleSessionAuthenticated, command);
   if (result == waveshare_board::speaker::PlayCommandResult::NotMatched) {
     return false;
   }
@@ -530,15 +536,19 @@ static bool handlePowerButtonHonkCommand(const std::string &value,
                   source == nullptr ? "unknown" : source);
     return true;
   }
-  if (!waveshare_board::speaker::configurePowerButtonHonk(config)) {
+  const bool applied =
+      waveshare_board::speaker::configurePowerButtonHonk(command.config);
+  notifyPowerButtonHonkStatus(statusChar, command, applied);
+  if (!applied) {
     Serial.printf("BLE Sound: failed to configure PWR honk from %s\n",
                   source == nullptr ? "unknown" : source);
     return true;
   }
   Serial.printf("BLE Sound: configured PWR honk enabled=%d sound=%u volume=%u "
                 "from %s\n",
-                config.enabled ? 1 : 0,
-                static_cast<unsigned>(config.sound), config.volumePercent,
+                command.config.enabled ? 1 : 0,
+                static_cast<unsigned>(command.config.sound),
+                command.config.volumePercent,
                 source == nullptr ? "unknown" : source);
   return true;
 }
@@ -698,11 +708,36 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar) {
       'C', 'A', 'P', 'S',
       waveshare_board::speaker::capabilityFlags(
           waveshare_board::speaker::isAvailable(),
+          waveshare_board::speaker::isPowerButtonHonkAvailable(),
           waveshare_board::speaker::isPowerButtonHonkAvailable()),
   };
   pChar->setValue(response, sizeof(response));
   pChar->notify();
   Serial.printf("BLE Capabilities: notified flags=0x%02X\n", response[4]);
+}
+
+static void notifyPowerButtonHonkStatus(
+    NimBLECharacteristic *pChar,
+    const waveshare_board::speaker::PowerButtonHonkCommand &command,
+    bool applied) {
+  if (pChar == nullptr) {
+    pChar = mapTransferStatusCharacteristic;
+  }
+  if (pChar == nullptr) {
+    return;
+  }
+
+  uint8_t response[waveshare_board::speaker::POWER_BUTTON_HONK_STATUS_SIZE]{};
+  const size_t responseSize =
+      waveshare_board::speaker::powerButtonHonkStatusSize(command);
+  if (!waveshare_board::speaker::encodePowerButtonHonkStatus(
+          command, applied, response, responseSize)) {
+    return;
+  }
+  pChar->setValue(response, responseSize);
+  pChar->notify();
+  Serial.printf("BLE Sound: PWR honk apply status notified success=%d\n",
+                applied ? 1 : 0);
 }
 
 static bool handleDeviceCapabilitiesCommand(const std::string &value,
@@ -1272,7 +1307,7 @@ public:
     }
 
     if (handlePowerButtonHonkCommand(value, "PWR honk configuration",
-                                     "fallback")) {
+                                     "fallback", pChar)) {
       return;
     }
 
@@ -1370,7 +1405,8 @@ public:
     }
 
     if (handlePowerButtonHonkCommand(value, "native PWR honk configuration",
-                                     "native")) {
+                                     "native",
+                                     mapTransferStatusCharacteristic)) {
       return;
     }
 

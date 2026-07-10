@@ -18,6 +18,7 @@
 #include <esp_codec_dev_types.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <math.h>
 
@@ -61,6 +62,7 @@ const audio_codec_data_if_t *dataInterface = nullptr;
 const audio_codec_gpio_if_t *gpioInterface = nullptr;
 esp_codec_dev_handle_t speakerDevice = nullptr;
 QueueHandle_t soundQueue = nullptr;
+SemaphoreHandle_t powerButtonConfigMutex = nullptr;
 bool initialized = false;
 bool powerButtonHonkAvailable = false;
 bool powerButtonMonitoringConfigured = false;
@@ -71,7 +73,9 @@ uint32_t lastPowerButtonConfigureAttemptMs = 0;
 
 constexpr uint32_t POWER_BUTTON_POLL_INTERVAL_MS = 100;
 constexpr uint32_t POWER_BUTTON_CONFIGURE_RETRY_MS = 5000;
+constexpr uint32_t POWER_BUTTON_CONFIG_LOCK_TIMEOUT_MS = 250;
 constexpr char POWER_BUTTON_PREFERENCES_NAMESPACE[] = "deviceSounds";
+constexpr char POWER_BUTTON_CONFIG_KEY[] = "pwrConfig";
 constexpr char POWER_BUTTON_ENABLED_KEY[] = "pwrHonk";
 constexpr char POWER_BUTTON_SOUND_KEY[] = "pwrSound";
 constexpr char POWER_BUTTON_VOLUME_KEY[] = "pwrVolume";
@@ -81,11 +85,44 @@ struct QueuedPlaybackRequest {
   uint8_t volumePercent;
 };
 
+class PowerButtonConfigLock {
+public:
+  explicit PowerButtonConfigLock(TickType_t timeoutTicks)
+      : locked(powerButtonConfigMutex != nullptr &&
+               xSemaphoreTake(powerButtonConfigMutex, timeoutTicks) == pdTRUE) {
+  }
+
+  ~PowerButtonConfigLock() {
+    if (locked) {
+      xSemaphoreGive(powerButtonConfigMutex);
+    }
+  }
+
+  bool ok() const { return locked; }
+
+private:
+  bool locked;
+};
+
 void loadPowerButtonHonkConfig() {
   Preferences preferences;
-  if (!preferences.begin(POWER_BUTTON_PREFERENCES_NAMESPACE, false)) {
+  if (!preferences.begin(POWER_BUTTON_PREFERENCES_NAMESPACE, true)) {
     Serial.println("Speaker: unable to read PWR honk preferences");
     return;
+  }
+
+  uint8_t storedConfig[POWER_BUTTON_HONK_PAYLOAD_SIZE]{};
+  if (preferences.getBytesLength(POWER_BUTTON_CONFIG_KEY) ==
+          sizeof(storedConfig) &&
+      preferences.getBytes(POWER_BUTTON_CONFIG_KEY, storedConfig,
+                           sizeof(storedConfig)) == sizeof(storedConfig)) {
+    PowerButtonHonkConfig decodedConfig{};
+    if (decodePowerButtonHonkPayload(storedConfig, sizeof(storedConfig),
+                                     decodedConfig)) {
+      powerButtonHonkConfig = decodedConfig;
+      preferences.end();
+      return;
+    }
   }
 
   const Sound storedSound = static_cast<Sound>(
@@ -105,23 +142,29 @@ void loadPowerButtonHonkConfig() {
 }
 
 bool persistPowerButtonHonkConfig() {
+  uint8_t storedConfig[POWER_BUTTON_HONK_PAYLOAD_SIZE]{};
+  if (!encodePowerButtonHonkPayload(powerButtonHonkConfig, storedConfig,
+                                    sizeof(storedConfig))) {
+    return false;
+  }
+
   Preferences preferences;
   if (!preferences.begin(POWER_BUTTON_PREFERENCES_NAMESPACE, false)) {
     return false;
   }
-  const bool stored =
-      preferences.putBool(POWER_BUTTON_ENABLED_KEY,
-                          powerButtonHonkConfig.enabled) > 0 &&
-      preferences.putUChar(
-          POWER_BUTTON_SOUND_KEY,
-          static_cast<uint8_t>(powerButtonHonkConfig.sound)) > 0 &&
-      preferences.putUChar(POWER_BUTTON_VOLUME_KEY,
-                           powerButtonHonkConfig.volumePercent) > 0;
+  const bool stored = preferences.putBytes(
+                          POWER_BUTTON_CONFIG_KEY, storedConfig,
+                          sizeof(storedConfig)) == sizeof(storedConfig);
+  if (stored) {
+    preferences.remove(POWER_BUTTON_ENABLED_KEY);
+    preferences.remove(POWER_BUTTON_SOUND_KEY);
+    preferences.remove(POWER_BUTTON_VOLUME_KEY);
+  }
   preferences.end();
   return stored;
 }
 
-bool configurePowerButtonMonitoring() {
+bool configurePowerButtonMonitoringLocked() {
   if (!powerButtonHonkAvailable) {
     return false;
   }
@@ -455,8 +498,17 @@ bool begin() {
     return false;
   }
 
+  powerButtonConfigMutex = xSemaphoreCreateMutex();
+  if (powerButtonConfigMutex == nullptr) {
+    Serial.println("Speaker: failed to create PWR configuration mutex");
+  }
+
   if (xTaskCreate(speakerTask, "speaker", 6144, nullptr, 2, nullptr) !=
       pdPASS) {
+    if (powerButtonConfigMutex != nullptr) {
+      vSemaphoreDelete(powerButtonConfigMutex);
+      powerButtonConfigMutex = nullptr;
+    }
     vQueueDelete(soundQueue);
     soundQueue = nullptr;
     Serial.println("Speaker: failed to create playback task");
@@ -466,9 +518,12 @@ bool begin() {
   Serial.println("Speaker: playback task ready");
 
   loadPowerButtonHonkConfig();
-  powerButtonHonkAvailable = axp2101::isAvailable();
+  powerButtonHonkAvailable =
+      axp2101::isAvailable() && powerButtonConfigMutex != nullptr;
   if (powerButtonHonkAvailable) {
-    if (!configurePowerButtonMonitoring()) {
+    PowerButtonConfigLock lock(
+        pdMS_TO_TICKS(POWER_BUTTON_CONFIG_LOCK_TIMEOUT_MS));
+    if (!lock.ok() || !configurePowerButtonMonitoringLocked()) {
       Serial.println("Speaker: PWR honk monitoring setup will retry");
     }
     Serial.printf("Speaker: PWR honk %s sound %u at %u%%\n",
@@ -502,11 +557,22 @@ bool configurePowerButtonHonk(const PowerButtonHonkConfig &config) {
     return false;
   }
 
+  PowerButtonConfigLock lock(
+      pdMS_TO_TICKS(POWER_BUTTON_CONFIG_LOCK_TIMEOUT_MS));
+  if (!lock.ok()) {
+    return false;
+  }
+
+  if (samePowerButtonHonkConfig(config, powerButtonHonkConfig) &&
+      powerButtonMonitoringConfigured) {
+    return true;
+  }
+
   const PowerButtonHonkConfig previousConfig = powerButtonHonkConfig;
   powerButtonHonkConfig = config;
-  if (!configurePowerButtonMonitoring()) {
+  if (!configurePowerButtonMonitoringLocked()) {
     powerButtonHonkConfig = previousConfig;
-    if (!configurePowerButtonMonitoring()) {
+    if (!configurePowerButtonMonitoringLocked()) {
       Serial.println("Speaker: failed to restore previous PWR honk state");
     }
     return false;
@@ -514,7 +580,7 @@ bool configurePowerButtonHonk(const PowerButtonHonkConfig &config) {
   if (!persistPowerButtonHonkConfig()) {
     Serial.println("Speaker: failed to persist PWR honk configuration");
     powerButtonHonkConfig = previousConfig;
-    if (!configurePowerButtonMonitoring()) {
+    if (!configurePowerButtonMonitoringLocked()) {
       Serial.println("Speaker: failed to restore previous PWR honk state");
     }
     return false;
@@ -531,11 +597,16 @@ void processPowerButtonHonk() {
     return;
   }
 
+  PowerButtonConfigLock lock(0);
+  if (!lock.ok()) {
+    return;
+  }
+
   const uint32_t now = millis();
   if (!powerButtonMonitoringConfigured) {
     if (now - lastPowerButtonConfigureAttemptMs >=
         POWER_BUTTON_CONFIGURE_RETRY_MS) {
-      configurePowerButtonMonitoring();
+      configurePowerButtonMonitoringLocked();
     }
     return;
   }

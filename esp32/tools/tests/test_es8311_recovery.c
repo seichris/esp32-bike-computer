@@ -6,6 +6,7 @@
 #include "../../lib/esp_codec_dev/src/device/es8311/es8311.c"
 
 static uint8_t registers[256];
+static int failed_read_register = -1;
 static int failed_write_register = -1;
 
 static bool control_is_open(const audio_codec_ctrl_if_t *control)
@@ -20,6 +21,9 @@ static int control_read(const audio_codec_ctrl_if_t *control, int reg,
     (void) control;
     assert(reg_length == 1);
     assert(data_length == 1);
+    if (reg == failed_read_register) {
+        return ESP_CODEC_DEV_DRV_ERR;
+    }
     *(uint8_t *) data = registers[reg & 0xFF];
     return ESP_CODEC_DEV_OK;
 }
@@ -59,6 +63,10 @@ int main(void)
 {
     memset(registers, 0, sizeof(registers));
 
+    failed_read_register = ES8311_SYSTEM_REG0D;
+    assert(new_codec() == NULL);
+
+    failed_read_register = -1;
     failed_write_register = ES8311_SYSTEM_REG10;
     assert(new_codec() == NULL);
 
@@ -73,6 +81,10 @@ int main(void)
         .mclk_multiple = 256,
     };
 
+    failed_read_register = ES8311_CLK_MANAGER_REG02;
+    assert(codec->set_fs(codec, &format) != ESP_CODEC_DEV_OK);
+
+    failed_read_register = -1;
     failed_write_register = ES8311_CLK_MANAGER_REG05;
     assert(codec->set_fs(codec, &format) != ESP_CODEC_DEV_OK);
 
@@ -80,6 +92,12 @@ int main(void)
     assert(codec->set_fs(codec, &format) == ESP_CODEC_DEV_OK);
     assert(paired_8311.dac == NULL);
 
+    failed_read_register = ES8311_SDPIN_REG09;
+    assert(codec->enable(codec, true) != ESP_CODEC_DEV_OK);
+    assert(paired_8311.dac == NULL);
+    assert(!((audio_codec_es8311_t *) codec)->enabled);
+
+    failed_read_register = -1;
     failed_write_register = ES8311_RESET_REG00;
     assert(codec->enable(codec, true) != ESP_CODEC_DEV_OK);
     assert(paired_8311.dac == NULL);

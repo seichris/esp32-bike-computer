@@ -148,9 +148,28 @@ authenticated frame on the same command routes:
 ```
 
 `Enabled` is `0` or `1`. The sound and volume use the same ranges as `SNDP`.
+This legacy frame remains the one-shot format for firmware without capability
+bit `2`. ACK-capable firmware uses a tracked frame:
+
+```text
+"SNDH" | RequestID: UInt32LE | Enabled: UInt8 | SoundID: UInt8 | VolumePercent: UInt8
+```
+
 Firmware persists the complete configuration and queues the configured sound
 after an AXP2101 short-press event, so the button works without an active app
 connection. The AXP2101's six-second hardware power-off behavior is unchanged.
+Firmware echoes the request ID when acknowledging tracked requests on the
+navigation notification characteristic:
+
+```text
+"SNHA" | RequestID: UInt32LE | Applied: UInt8 | Enabled: UInt8 | SoundID: UInt8 | VolumePercent: UInt8
+```
+
+`Applied` is `1` only after the PMU setting and complete persisted configuration
+have both succeeded. The request ID prevents a delayed acknowledgement for an
+older identical configuration from completing the current request. iOS retries
+a failed or missing acknowledgement up to three total attempts. Legacy requests
+receive the same status frame without `RequestID` for protocol compatibility.
 
 Capability discovery uses a bounded authenticated frame on either command
 route so it fits every supported BLE MTU:
@@ -161,9 +180,12 @@ ESP32 -> iOS: "CAPS" | Flags: UInt8
 ```
 
 Flag bit `0` reports runtime device-sound availability after the speaker queue
-and task start successfully. Flag bit `1` reports PWR-button honk support. The
-app retries discovery after each connection, enables controls only when their
-bits are set, and synchronizes the persisted PWR configuration after discovery.
+and task start successfully. Flag bit `1` reports PWR-button honk support. Flag
+bit `2` reports `SNHA` acknowledgement support; iOS only retries PWR
+configuration when this bit is set, preserving one-shot writes for older
+firmware. The app retries discovery after each connection, enables controls
+only when their bits are set, and synchronizes the persisted PWR configuration
+after discovery.
 
 ## OSM Map Blocks
 

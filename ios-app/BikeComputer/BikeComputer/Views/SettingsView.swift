@@ -104,20 +104,31 @@ private struct DeviceSoundsSettingsSection: View {
                     Text("\(Int(bleManager.deviceSoundVolumePercent))%")
                         .foregroundColor(.secondary)
                 }
-                Slider(value: $bleManager.deviceSoundVolumePercent, in: 0...100, step: 5)
+                Slider(
+                    value: $bleManager.deviceSoundVolumePercent,
+                    in: 0...100,
+                    step: 5,
+                    onEditingChanged: { isEditing in
+                        bleManager.deviceSoundVolumeEditingChanged(isEditing)
+                    }
+                )
                     .onChange(of: bleManager.deviceSoundVolumePercent) { _ in
                         bleManager.saveSettings()
-                        if bleManager.isPowerButtonHonkEnabled {
-                            bleManager.sendPowerButtonHonkConfiguration()
-                        }
                     }
             }
 
             Toggle("Use PWR Button as Honk", isOn: $bleManager.isPowerButtonHonkEnabled)
                 .disabled(!bleManager.supportsPowerButtonHonk)
                 .onChange(of: bleManager.isPowerButtonHonkEnabled) { _ in
+                    bleManager.saveSettings()
                     bleManager.sendPowerButtonHonkConfiguration()
                 }
+
+            if let error = bleManager.powerButtonHonkConfigurationError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
         }
     }
 }
