@@ -42,6 +42,14 @@ func powerButtonHonkStatus(for packet: Data, applied: UInt8) -> Data {
     return status
 }
 
+func waitForMainLoop(timeout: TimeInterval, condition: () -> Bool) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() && Date() < deadline {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    }
+    return condition()
+}
+
 func appendUInt16LE(_ value: UInt16, to data: inout Data) {
     data.append(UInt8(value & 0xFF))
     data.append(UInt8((value >> 8) & 0xFF))
@@ -1427,11 +1435,11 @@ struct NavigationProtocolTests {
         ))
         assert(manager.sendPowerButtonHonkConfiguration(),
                "missing-ACK timeout test sends the initial configuration")
-        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        assert(waitForMainLoop(timeout: 1) {
+            manager.powerButtonHonkConfigurationError != nil
+        }, "missing acknowledgement reaches terminal failure")
         assertEqual(sentPackets.count, 3,
                     "missing acknowledgement retries three total attempts")
-        assert(manager.powerButtonHonkConfigurationError != nil,
-               "missing acknowledgement exhaustion is visible")
 
         sentPackets.removeAll()
         assert(manager.sendPowerButtonHonkConfiguration(),
@@ -1440,11 +1448,11 @@ struct NavigationProtocolTests {
         manager.installNavigationWriteEndpoint(nil)
         assert(manager.handleNavigationCharacteristicNotification(failedStatus),
                "navigation notification dispatcher routes PWR failure status")
-        RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        assert(waitForMainLoop(timeout: 1) {
+            manager.powerButtonHonkConfigurationError != nil
+        }, "retry transport failure reaches terminal failure")
         assertEqual(sentPackets.count, 1,
                     "failed retry transport does not report an unsent packet")
-        assert(manager.powerButtonHonkConfigurationError != nil,
-               "retry transport failure is visible")
     }
 
     static func testBLEManagerSendsDeviceCapabilityFallback() {
