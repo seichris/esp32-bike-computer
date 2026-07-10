@@ -5,10 +5,15 @@
 
 using waveshare_board::speaker::PlaybackRequest;
 using waveshare_board::speaker::Sound;
+using waveshare_board::speaker::CAPABILITY_DEVICE_SOUNDS;
+using waveshare_board::speaker::capabilityFlags;
 using waveshare_board::speaker::decodePlayPayload;
 
 int main() {
   PlaybackRequest request{};
+
+  assert(capabilityFlags(false) == 0);
+  assert(capabilityFlags(true) == CAPABILITY_DEVICE_SOUNDS);
 
   const uint8_t legacy[] = {2};
   assert(decodePlayPayload(legacy, sizeof(legacy), request));
