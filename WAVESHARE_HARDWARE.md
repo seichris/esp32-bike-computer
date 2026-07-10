@@ -172,63 +172,30 @@ Connected-device SD findings:
 
 | Signal / Function | GPIO / Device | Notes |
 |---|---:|---|
-| I2S MCLK | GPIO 16 | Confirmed by the working Waveshare BSP/`esp_codec_dev` path |
-| I2S SCLK / BCLK | GPIO 41 | Confirmed by clean PCM playback |
-| I2S LRCK / WS | GPIO 45 | Confirmed by clean PCM playback |
-| I2S DSDIN / speaker DAC data in | GPIO 40 | ESP32 I2S `dout`; confirmed by clean PCM playback |
-| I2S ASDOUT / mic ADC data out | GPIO 42 | ESP32 I2S `din`; speaker playback allocates the RX channel too |
-| PA control | GPIO 46 | Active high; managed by the ES8311 codec configuration |
-| Codec | ES8311 at I2C `0x18` | Shared I2C control plus I2S audio |
-| Mic ADC/front-end | ES7210 | Schematic and product page; not yet brought up here |
+| I2S MCLK | GPIO 16 | Master clock |
+| I2S SCLK / BCLK | GPIO 41 | Bit clock |
+| I2S LRCK / WS | GPIO 45 | Word select |
+| I2S DSDIN | GPIO 40 | ESP32 `dout` to speaker DAC |
+| I2S ASDOUT | GPIO 42 | Codec/microphone data to ESP32 `din` |
+| PA control | GPIO 46 | Active high |
+| Speaker codec | ES8311 at I2C `0x18` | I2C control and I2S audio |
+| Microphone front-end | ES7210 | Separate microphone path |
 
-The pin order above is important. Early interpretations of the vendor Arduino
-`i2s.setPins()` call incorrectly treated the pins as `MCLK=41`, `BCLK=45`,
-`WS=40`, and `DOUT=16`. That configuration produced silence or `pf pfff`
-artifacts. The reproducible speaker configuration is:
+GPIO41 is audio BCLK on the 2.06; SD CS is GPIO17. Speaker playback uses the
+ESP-IDF standard I2S driver and Espressif `esp_codec_dev` with:
 
-```text
-I2C: SDA=15, SCL=14, ES8311 address=0x18
-I2S: MCLK=16, BCLK=41, WS=45, DOUT=40, DIN=42
-PA:  GPIO46, active high
-```
+- ESP32 I2S master and ES8311 slave DAC mode with MCLK enabled.
+- Signed 16-bit little-endian stereo PCM at 16 kHz and 256x MCLK.
+- Volume through `esp_codec_dev_set_out_vol()`, range `0...100`, default `70`.
+- PCM output through `esp_codec_dev_write()` followed by a short silence drain.
 
-GPIO41 is therefore the 2.06 audio bit clock. It was SD CS on the 1.75 board;
-the 2.06 SD CS is GPIO17.
+The implementation is in `esp32/lib/speaker/`, with codec sources in
+`esp32/lib/esp_codec_dev/`. It uses the shared mutex-protected I2C bus,
+initializes the codec on first playback, and processes requests through a
+four-entry FreeRTOS queue outside the BLE callback. PCM recordings are embedded
+with PlatformIO `board_build.embed_files`.
 
-#### Working Speaker Stack
-
-The reliable path uses the ESP-IDF standard I2S driver and Espressif
-`esp_codec_dev` with its ES8311 codec driver. Manual ES8311 register sequences
-and Arduino `ESP_I2S` experiments were not reliable on this board.
-
-The working codec configuration is:
-
-- ESP32 I2S master and ES8311 slave.
-- ES8311 DAC output mode with MCLK enabled.
-- 16-bit samples, two channels, 16 kHz sample rate, and 256x MCLK multiple.
-- Speaker volume set through `esp_codec_dev_set_out_vol()`, not by writing the
-  ES8311 DAC volume register directly.
-- Nominal codec API volume range is `0` to `100`; production playback defaults
-  to `70`. Values above `100` are unsupported and require a deliberate
-  hardware gain-stage review.
-- Write PCM with `esp_codec_dev_write()` and append a short block of silence so
-  the end of the sample drains cleanly through I2S.
-
-Production firmware vendors the required codec sources in
-`esp32/lib/esp_codec_dev/` and implements playback in `esp32/lib/speaker/`.
-The codec is initialized lazily on the first sound request. Its control
-interface uses the board's shared, mutex-protected I2C helpers rather than
-installing a competing I2C driver on GPIO14/GPIO15.
-
-Playback runs in a dedicated FreeRTOS task behind a four-entry queue. BLE write
-callbacks only enqueue a sound ID and volume, keeping codec initialization,
-volume changes, and blocking PCM writes out of the NimBLE callback.
-
-#### PCM Assets And Commands
-
-Recorded assets must be raw signed 16-bit little-endian PCM, 16 kHz, stereo.
-They are embedded into the firmware image with PlatformIO
-`board_build.embed_files`. The generated bell uses the same sample format.
+#### Sounds And BLE
 
 | Sound ID | App label | Implementation |
 |---:|---|---|
@@ -237,33 +204,22 @@ They are embedded into the firmware image with PlatformIO
 | `3` | Rotating Bicycle Bell | Embedded PCM recording |
 | `5` | Squeeze Horn | Embedded PCM recording |
 
-The authenticated BLE playback command is ASCII `SNDP`, one binary `UInt8`
-sound ID, and one binary `UInt8` volume percentage in the range `0...100`. A
-legacy request with no volume byte uses the default `70%`. The command is
-accepted on the native settings characteristic, with the navigation
-characteristic retained as a compatibility fallback.
+Authenticated playback uses:
+
+```text
+"SNDP" | SoundID: UInt8 | VolumePercent: UInt8
+```
+
+`VolumePercent` is `0...100`. A legacy frame without it uses `70%`. The command
+uses settings characteristic `2A73`, with navigation characteristic `2A6E` as
+a compatibility fallback.
 
 The iOS app stores the selected sound and volume locally. The selector and
 volume slider are under **Hardware Customization > Device Sounds**. Pressing
 the sound button at the center-right of the main map sends the selected sound
-and volume to the bike computer.
-
-#### Audio Bring-Up Diagnostics
-
-Healthy production boot prints `Speaker: playback task ready`. The first sound
-request should then print `Speaker: ES8311 ready at 70% default volume`
-followed by `Speaker: playing sound N at V% volume`.
-
-- Clean PCM, not `pf pfff`, is the success criterion. Short or long `pffff`
-  noises are PA/clock/data artifacts and do not indicate partial codec success.
-- If the codec probe fails, verify ES8311 address `0x18`, the shared I2C bus,
-  and that no second I2C driver owns GPIO14/GPIO15.
-- If playback is silent or noisy, verify the complete confirmed pin tuple above
-  before changing codec registers.
-- An audio-only test firmware may leave the AMOLED black because it does not
-  initialize the display. A black screen in that test does not by itself mean
-  audio initialization failed.
-- A full USB/battery power removal is useful after failed pin or codec tests.
+and volume to the bike computer. Healthy serial output includes
+`Speaker: playback task ready`, `Speaker: ES8311 ready at 70% default volume`,
+and `Speaker: playing sound N at V% volume`.
 
 ### Buttons, External Pads, And Power
 
@@ -326,11 +282,8 @@ card, and factory firmware.
   direct GPIO9.
 - Do not copy 1.75" display CLK/RST pins. 2.06 uses CLK GPIO11 and reset GPIO8.
 - Do not use 1.75" SD CS GPIO41. 2.06 SD CS is GPIO17; GPIO41 is audio BCLK.
-- Do not use the early, misread audio tuple `MCLK=41, BCLK=45, WS=40,
-  DOUT=16`. The confirmed tuple is `MCLK=16, BCLK=41, WS=45, DOUT=40,
-  DIN=42`, with PA on GPIO46.
-- Use `esp_codec_dev` and the ES8311 driver for speaker playback. Do not treat
-  `pf pfff` artifacts from manual register or pin-guess tests as valid audio.
+- Use `esp_codec_dev` and the ES8311 driver with the audio pin assignments
+  documented above.
 - If the display is black, first flash the standalone vendor-shaped HelloWorld
   or color-cycle test before debugging app code. The verified baseline is
   CO5300 `410x502`, gap `(22,0,0,0)`, rotation `0`, QSPI pins
