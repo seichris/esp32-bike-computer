@@ -22,7 +22,6 @@ namespace {
 
 constexpr uint32_t SAMPLE_RATE = 16000;
 constexpr uint8_t CHANNELS = 2;
-constexpr int VOLUME_PERCENT = 60;
 constexpr uint8_t ES8311_I2C_ADDRESS = 0x18;
 
 constexpr gpio_num_t I2S_MCLK = GPIO_NUM_16;
@@ -56,6 +55,11 @@ const audio_codec_if_t *codecInterface = nullptr;
 esp_codec_dev_handle_t speakerDevice = nullptr;
 QueueHandle_t soundQueue = nullptr;
 bool initialized = false;
+
+struct PlaybackRequest {
+  uint8_t sound;
+  uint8_t volumePercent;
+};
 
 int wireControlOpen(const audio_codec_ctrl_if_t *, void *, int) {
   return ESP_CODEC_DEV_OK;
@@ -193,7 +197,7 @@ bool initializeCodec() {
   sampleInfo.sample_rate = SAMPLE_RATE;
   sampleInfo.mclk_multiple = 256;
 
-  if (esp_codec_dev_set_out_vol(speakerDevice, VOLUME_PERCENT) !=
+  if (esp_codec_dev_set_out_vol(speakerDevice, DEFAULT_VOLUME_PERCENT) !=
           ESP_CODEC_DEV_OK ||
       esp_codec_dev_open(speakerDevice, &sampleInfo) != ESP_CODEC_DEV_OK) {
     Serial.println("Speaker: failed to open codec device");
@@ -201,7 +205,8 @@ bool initializeCodec() {
   }
 
   initialized = true;
-  Serial.printf("Speaker: ES8311 ready at %d%% volume\n", VOLUME_PERCENT);
+  Serial.printf("Speaker: ES8311 ready at %u%% default volume\n",
+                DEFAULT_VOLUME_PERCENT);
   return true;
 }
 
@@ -292,21 +297,29 @@ bool playNow(Sound sound) {
 }
 
 void speakerTask(void *) {
-  uint8_t rawSound = 0;
+  PlaybackRequest request{};
   while (true) {
-    if (xQueueReceive(soundQueue, &rawSound, portMAX_DELAY) != pdTRUE) {
+    if (xQueueReceive(soundQueue, &request, portMAX_DELAY) != pdTRUE) {
       continue;
     }
 
-    Sound sound = static_cast<Sound>(rawSound);
+    Sound sound = static_cast<Sound>(request.sound);
     if (!initializeCodec()) {
       Serial.println("Speaker: playback skipped because initialization failed");
       continue;
     }
 
-    Serial.printf("Speaker: playing sound %u\n", rawSound);
+    if (esp_codec_dev_set_out_vol(speakerDevice, request.volumePercent) !=
+        ESP_CODEC_DEV_OK) {
+      Serial.printf("Speaker: failed to set volume to %u%%\n",
+                    request.volumePercent);
+      continue;
+    }
+
+    Serial.printf("Speaker: playing sound %u at %u%% volume\n", request.sound,
+                  request.volumePercent);
     if (!playNow(sound)) {
-      Serial.printf("Speaker: sound %u playback failed\n", rawSound);
+      Serial.printf("Speaker: sound %u playback failed\n", request.sound);
     }
   }
 }
@@ -329,7 +342,7 @@ bool begin() {
     return true;
   }
 
-  soundQueue = xQueueCreate(4, sizeof(uint8_t));
+  soundQueue = xQueueCreate(4, sizeof(PlaybackRequest));
   if (soundQueue == nullptr) {
     Serial.println("Speaker: failed to create playback queue");
     return false;
@@ -347,13 +360,13 @@ bool begin() {
   return true;
 }
 
-bool requestPlay(Sound sound) {
-  if (!isSupported(sound) || soundQueue == nullptr) {
+bool requestPlay(Sound sound, uint8_t volumePercent) {
+  if (!isSupported(sound) || volumePercent > 100 || soundQueue == nullptr) {
     return false;
   }
 
-  uint8_t rawSound = static_cast<uint8_t>(sound);
-  return xQueueSend(soundQueue, &rawSound, 0) == pdTRUE;
+  PlaybackRequest request{static_cast<uint8_t>(sound), volumePercent};
+  return xQueueSend(soundQueue, &request, 0) == pdTRUE;
 }
 
 } // namespace waveshare_board::speaker
@@ -363,7 +376,7 @@ bool requestPlay(Sound sound) {
 namespace waveshare_board::speaker {
 
 bool begin() { return false; }
-bool requestPlay(Sound) { return false; }
+bool requestPlay(Sound, uint8_t) { return false; }
 bool isSupported(Sound) { return false; }
 
 } // namespace waveshare_board::speaker

@@ -93,7 +93,8 @@ Confirmed tested volumes:
 
 - `30%`: clean three honks.
 - `40%`: flashed and serial-confirmed.
-- `60%`: audition sampler confirmed and selected for production playback.
+- `60%`: audition sampler confirmed.
+- `70%`: current production default; each app request can select `0...100%`.
 
 Going above `100%` is not supported through the normal API and should not be used without a deliberate gain-stage review.
 
@@ -166,6 +167,8 @@ keeps ES8311 initialization and PCM writes out of the NimBLE callback. The
 codec is initialized lazily on the first request and uses the shared Waveshare
 I2C helpers for register access.
 
-The authenticated BLE command is `SNDP` followed by one `UInt8` sound ID. The
-iOS Settings screen exposes one button for each supported sound. Production
-volume is currently fixed at 60%.
+The authenticated BLE command is `SNDP` followed by a `UInt8` sound ID and a
+`UInt8` volume percentage in the range `0...100`. Legacy requests containing
+only the sound ID use the `70%` default. The app stores the selection under
+**Hardware Customization > Device Sounds** and the center-right button on the
+main map sends the selected sound and volume.

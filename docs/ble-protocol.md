@@ -120,7 +120,7 @@ settings characteristic (`2A73`) or the navigation fallback characteristic
 (`2A6E`):
 
 ```text
-"SNDP" | SoundID: UInt8
+"SNDP" | SoundID: UInt8 | VolumePercent: UInt8
 ```
 
 Supported sound IDs on `WAVESHARE_AMOLED_206`:
@@ -132,8 +132,13 @@ Supported sound IDs on `WAVESHARE_AMOLED_206`:
 | `3` | Rotating bicycle bell |
 | `5` | Squeeze horn |
 
+`VolumePercent` must be in the inclusive range `0...100`. For compatibility,
+the firmware also accepts the older frame containing only `SoundID` and uses
+the default volume of `70`.
+
 Playback requests are queued by the firmware and run outside the BLE callback.
-Unsupported IDs and sound commands received before authentication are rejected.
+Unsupported IDs, invalid volumes, and sound commands received before
+authentication are rejected.
 
 ## OSM Map Blocks
 

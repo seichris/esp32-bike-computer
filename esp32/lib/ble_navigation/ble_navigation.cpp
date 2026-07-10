@@ -466,8 +466,9 @@ static std::string trimAscii(const std::string &value) {
 
 static void handleSoundPlayPayload(const uint8_t *data, size_t len,
                                    const char *source) {
-  if (data == nullptr || len != 1) {
-    Serial.printf("BLE Sound: rejected %s payload, expected one sound ID byte\n",
+  if (data == nullptr || (len != 1 && len != 2)) {
+    Serial.printf("BLE Sound: rejected %s payload, expected sound ID and "
+                  "optional volume bytes\n",
                   source == nullptr ? "unknown" : source);
     return;
   }
@@ -478,12 +479,21 @@ static void handleSoundPlayPayload(const uint8_t *data, size_t len,
     return;
   }
 
-  if (!waveshare_board::speaker::requestPlay(sound)) {
+  uint8_t volumePercent = len == 2
+                              ? data[1]
+                              : waveshare_board::speaker::DEFAULT_VOLUME_PERCENT;
+  if (volumePercent > 100) {
+    Serial.printf("BLE Sound: invalid volume %u%%\n", volumePercent);
+    return;
+  }
+
+  if (!waveshare_board::speaker::requestPlay(sound, volumePercent)) {
     Serial.printf("BLE Sound: failed to queue sound ID %u\n", data[0]);
     return;
   }
 
-  Serial.printf("BLE Sound: queued sound ID %u from %s\n", data[0],
+  Serial.printf("BLE Sound: queued sound ID %u at %u%% from %s\n", data[0],
+                volumePercent,
                 source == nullptr ? "unknown" : source);
 }
 

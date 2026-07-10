@@ -76,6 +76,8 @@ enum DeviceSound: UInt8, CaseIterable, Identifiable {
 
     var id: UInt8 { rawValue }
 
+    static let defaultSelection: DeviceSound = .plasticBicycleHorn
+
     var title: String {
         switch self {
         case .bellDing:
@@ -321,6 +323,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
     @Published var deviceBrightnessPercent: Double = 100
     @Published var disconnectedSleepTimeout: DisconnectedSleepTimeout = .twoMinutes
+    @Published var selectedDeviceSound: DeviceSound = .defaultSelection
+    @Published var deviceSoundVolumePercent: Double = 70
     
     // Feature Visibility
     @Published var showBuildings: Bool = true
@@ -408,6 +412,8 @@ class BLEManager: NSObject, ObservableObject {
         static let defaultDeviceScreenMigrated = "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1"
         static let deviceBrightnessPercent = "deviceSettings.brightnessPercent"
         static let disconnectedSleepTimeoutSeconds = "deviceSettings.disconnectedSleepTimeoutSeconds"
+        static let selectedDeviceSound = "deviceSettings.selectedSound"
+        static let deviceSoundVolumePercent = "deviceSettings.soundVolumePercent"
         static let showBuildings = "mapSettings.showBuildings"
         static let showGreenSpace = "mapSettings.showGreenSpace"
         static let showPaths = "mapSettings.showPaths"
@@ -470,6 +476,13 @@ class BLEManager: NSObject, ObservableObject {
         disconnectedSleepTimeout = DisconnectedSleepTimeout.normalized(
             rawValue: defaults.object(forKey: SettingsKeys.disconnectedSleepTimeoutSeconds) as? Int ?? DisconnectedSleepTimeout.twoMinutes.rawValue
         )
+        let storedSoundID = defaults.object(forKey: SettingsKeys.selectedDeviceSound) as? Int
+            ?? Int(DeviceSound.defaultSelection.rawValue)
+        selectedDeviceSound = UInt8(exactly: storedSoundID)
+            .flatMap(DeviceSound.init(rawValue:))
+            ?? .defaultSelection
+        let storedSoundVolume = defaults.object(forKey: SettingsKeys.deviceSoundVolumePercent) as? Double ?? 70
+        deviceSoundVolumePercent = min(max(storedSoundVolume, 0), 100)
         showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
         let legacyNature = defaults.object(forKey: SettingsKeys.legacyShowNature) as? Bool ?? true
         let legacyMinorRoads = defaults.object(forKey: SettingsKeys.legacyShowMinorRoads) as? Bool ?? true
@@ -510,6 +523,8 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(defaultDeviceScreen.rawValue, forKey: SettingsKeys.defaultDeviceScreen)
         defaults.set(deviceBrightnessPercent, forKey: SettingsKeys.deviceBrightnessPercent)
         defaults.set(disconnectedSleepTimeout.rawValue, forKey: SettingsKeys.disconnectedSleepTimeoutSeconds)
+        defaults.set(Int(selectedDeviceSound.rawValue), forKey: SettingsKeys.selectedDeviceSound)
+        defaults.set(deviceSoundVolumePercent, forKey: SettingsKeys.deviceSoundVolumePercent)
         defaults.set(showBuildings, forKey: SettingsKeys.showBuildings)
         defaults.set(showGreenSpace, forKey: SettingsKeys.showGreenSpace)
         defaults.set(showPaths, forKey: SettingsKeys.showPaths)
@@ -790,14 +805,22 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
-    func playDeviceSound(_ sound: DeviceSound) -> Bool {
+    func playDeviceSound(_ sound: DeviceSound, volumePercent: Double) -> Bool {
+        let volume = UInt8(min(max(volumePercent.rounded(), 0), 100))
         var packet = Data(DeviceBLEProtocol.soundPlayPrefix.utf8)
         packet.append(sound.rawValue)
+        packet.append(volume)
 
-        if sendNativeMapTransferPacket(packet, label: "sound \(sound.rawValue)") {
+        let label = "sound \(sound.rawValue) at \(volume)%"
+        if sendNativeMapTransferPacket(packet, label: label) {
             return true
         }
-        return sendFallbackMapPacket(packet, label: "sound \(sound.rawValue)")
+        return sendFallbackMapPacket(packet, label: label)
+    }
+
+    @discardableResult
+    func playSelectedDeviceSound() -> Bool {
+        playDeviceSound(selectedDeviceSound, volumePercent: deviceSoundVolumePercent)
     }
 
     @discardableResult

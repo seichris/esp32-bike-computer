@@ -52,6 +52,13 @@ struct ContentView: View {
                 }
                 .ignoresSafeArea(.container, edges: .bottom)
 
+                if !offlineMapManager.isMapAreaSelectionActive && !shouldShowOfflineMapOnboarding {
+                    DeviceSoundMapButton(bleManager: coordinator.bleManager)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                        .padding(.trailing, 16)
+                        .zIndex(9)
+                }
+
                 if shouldShowOfflineMapOnboarding {
                     Color.black.opacity(0.18)
                         .ignoresSafeArea()
@@ -398,6 +405,28 @@ struct ContentView: View {
             offlineMapSelectionHeight = height
             offlineMapSelectionCenterY = fixedEdge + height / 2
         }
+    }
+}
+
+private struct DeviceSoundMapButton: View {
+    @ObservedObject var bleManager: BLEManager
+
+    var body: some View {
+        Button {
+            bleManager.playSelectedDeviceSound()
+        } label: {
+            Image(systemName: bleManager.selectedDeviceSound.systemImage)
+                .font(.title3.weight(.semibold))
+                .foregroundColor(.accentColor)
+                .frame(width: 52, height: 52)
+                .background(.regularMaterial, in: Circle())
+                .overlay(Circle().stroke(Color.primary.opacity(0.1), lineWidth: 1))
+                .shadow(color: .black.opacity(0.18), radius: 5, x: 0, y: 2)
+        }
+        .buttonStyle(.plain)
+        .disabled(!bleManager.isNavigationReady)
+        .opacity(bleManager.isNavigationReady ? 1 : 0.5)
+        .accessibilityLabel("Play \(bleManager.selectedDeviceSound.title)")
     }
 }
 

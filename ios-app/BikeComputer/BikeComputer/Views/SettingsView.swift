@@ -44,7 +44,6 @@ struct SettingsView: View {
 
                 MainFirmwareUpdateSection(manager: firmwareUpdateManager)
                 DeviceScreensSettingsSection()
-                DeviceSoundsSettingsSection()
                 SavedMapsSettingsSection(manager: offlineMapManager)
                 if offlineMapManager.isBusy || offlineMapManager.errorMessage != nil {
                     DownloadingMapsSettingsSection(manager: offlineMapManager)
@@ -84,15 +83,30 @@ private struct DeviceSoundsSettingsSection: View {
 
     var body: some View {
         Section(header: Text("Device Sounds")) {
-            ForEach(DeviceSound.allCases) { sound in
-                Button {
-                    bleManager.playDeviceSound(sound)
-                } label: {
+            Picker("Sound", selection: $bleManager.selectedDeviceSound) {
+                ForEach(DeviceSound.allCases) { sound in
                     Label(sound.title, systemImage: sound.systemImage)
+                        .tag(sound)
                 }
             }
+            .pickerStyle(.inline)
+            .onChange(of: bleManager.selectedDeviceSound) { _ in
+                bleManager.saveSettings()
+            }
+
+            VStack(alignment: .leading) {
+                HStack {
+                    Text("Volume")
+                    Spacer()
+                    Text("\(Int(bleManager.deviceSoundVolumePercent))%")
+                        .foregroundColor(.secondary)
+                }
+                Slider(value: $bleManager.deviceSoundVolumePercent, in: 0...100, step: 5)
+                    .onChange(of: bleManager.deviceSoundVolumePercent) { _ in
+                        bleManager.saveSettings()
+                    }
+            }
         }
-        .disabled(!bleManager.isNavigationReady)
     }
 }
 
@@ -568,6 +582,8 @@ private struct HardwareCustomizationSettingsView: View {
                 }
             }
             .disabled(!bleManager.supportsDeviceSettings)
+
+            DeviceSoundsSettingsSection()
 
             Section(header: Text("Power")) {
                 Picker("Disconnected Sleep After", selection: $bleManager.disconnectedSleepTimeout) {

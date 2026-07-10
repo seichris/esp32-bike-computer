@@ -208,8 +208,8 @@ The working codec configuration is:
 - 16-bit samples, two channels, 16 kHz sample rate, and 256x MCLK multiple.
 - Speaker volume set through `esp_codec_dev_set_out_vol()`, not by writing the
   ES8311 DAC volume register directly.
-- Nominal codec API volume range is `0` to `100`; production playback currently
-  uses `60`. Values above `100` are unsupported and require a deliberate
+- Nominal codec API volume range is `0` to `100`; production playback defaults
+  to `70`. Values above `100` are unsupported and require a deliberate
   hardware gain-stage review.
 - Write PCM with `esp_codec_dev_write()` and append a short block of silence so
   the end of the sample drains cleanly through I2S.
@@ -221,8 +221,8 @@ interface uses the board's shared, mutex-protected I2C helpers rather than
 installing a competing I2C driver on GPIO14/GPIO15.
 
 Playback runs in a dedicated FreeRTOS task behind a four-entry queue. BLE write
-callbacks only enqueue a sound ID, keeping codec initialization and blocking
-PCM writes out of the NimBLE callback.
+callbacks only enqueue a sound ID and volume, keeping codec initialization,
+volume changes, and blocking PCM writes out of the NimBLE callback.
 
 #### PCM Assets And Commands
 
@@ -237,16 +237,22 @@ They are embedded into the firmware image with PlatformIO
 | `3` | Rotating Bicycle Bell | Embedded PCM recording |
 | `5` | Squeeze Horn | Embedded PCM recording |
 
-The authenticated BLE playback command is ASCII `SNDP` followed by exactly one
-binary `UInt8` sound ID. It is accepted on the native settings characteristic,
-with the navigation characteristic retained as a compatibility fallback. The
-iOS Settings screen exposes one button for each supported sound.
+The authenticated BLE playback command is ASCII `SNDP`, one binary `UInt8`
+sound ID, and one binary `UInt8` volume percentage in the range `0...100`. A
+legacy request with no volume byte uses the default `70%`. The command is
+accepted on the native settings characteristic, with the navigation
+characteristic retained as a compatibility fallback.
+
+The iOS app stores the selected sound and volume locally. The selector and
+volume slider are under **Hardware Customization > Device Sounds**. Pressing
+the sound button at the center-right of the main map sends the selected sound
+and volume to the bike computer.
 
 #### Audio Bring-Up Diagnostics
 
 Healthy production boot prints `Speaker: playback task ready`. The first sound
-request should then print `Speaker: ES8311 ready at 60% volume` followed by
-`Speaker: playing sound N`.
+request should then print `Speaker: ES8311 ready at 70% default volume`
+followed by `Speaker: playing sound N at V% volume`.
 
 - Clean PCM, not `pf pfff`, is the success criterion. Short or long `pffff`
   noises are PA/clock/data artifacts and do not indicate partial codec success.
@@ -309,7 +315,7 @@ card, and factory firmware.
 | SD Card | Verified | SD map renders from `CS=17, MOSI=1, MISO=3, SCK=2` |
 | RTC | Partially verified | PCF85063 found at `0x51`; retention behavior still needs battery-backed power-removal validation |
 | IMU | Partially verified | QMI8658 found at `0x6B` and reports motion; axis/sign tests still need validation on 2.06 |
-| Audio | Verified / implemented | ES8311 speaker plays generated and embedded 16 kHz PCM at 60%; app can request sounds over authenticated BLE |
+| Audio | Verified / implemented | ES8311 speaker plays generated and embedded 16 kHz PCM; app selects the sound and `0...100%` playback volume, defaulting to 70% |
 | Power / Battery | Partially verified | AXP2101 status readable; current app preserves rails during boot; deeper sleep/rail shutdown still needs testing |
 
 ## 2.06 Bring-up Rules
