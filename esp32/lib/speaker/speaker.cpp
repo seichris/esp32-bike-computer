@@ -2,8 +2,10 @@
 
 #if defined(WAVESHARE_AMOLED_206)
 
+#include "../waveshare_board/axp2101.hpp"
 #include "../waveshare_board/i2c_bus.hpp"
 
+#include <Preferences.h>
 #include <audio_codec_ctrl_if.h>
 #include <audio_codec_data_if.h>
 #include <audio_codec_gpio_if.h>
@@ -60,11 +62,75 @@ const audio_codec_gpio_if_t *gpioInterface = nullptr;
 esp_codec_dev_handle_t speakerDevice = nullptr;
 QueueHandle_t soundQueue = nullptr;
 bool initialized = false;
+bool powerButtonHonkAvailable = false;
+bool powerButtonMonitoringConfigured = false;
+PowerButtonHonkConfig powerButtonHonkConfig{
+    false, Sound::PlasticBicycleHorn, DEFAULT_VOLUME_PERCENT};
+uint32_t lastPowerButtonPollMs = 0;
+uint32_t lastPowerButtonConfigureAttemptMs = 0;
+
+constexpr uint32_t POWER_BUTTON_POLL_INTERVAL_MS = 100;
+constexpr uint32_t POWER_BUTTON_CONFIGURE_RETRY_MS = 5000;
+constexpr char POWER_BUTTON_PREFERENCES_NAMESPACE[] = "deviceSounds";
+constexpr char POWER_BUTTON_ENABLED_KEY[] = "pwrHonk";
+constexpr char POWER_BUTTON_SOUND_KEY[] = "pwrSound";
+constexpr char POWER_BUTTON_VOLUME_KEY[] = "pwrVolume";
 
 struct QueuedPlaybackRequest {
   uint8_t sound;
   uint8_t volumePercent;
 };
+
+void loadPowerButtonHonkConfig() {
+  Preferences preferences;
+  if (!preferences.begin(POWER_BUTTON_PREFERENCES_NAMESPACE, false)) {
+    Serial.println("Speaker: unable to read PWR honk preferences");
+    return;
+  }
+
+  const Sound storedSound = static_cast<Sound>(
+      preferences.getUChar(POWER_BUTTON_SOUND_KEY,
+                           static_cast<uint8_t>(powerButtonHonkConfig.sound)));
+  const uint8_t storedVolume = preferences.getUChar(
+      POWER_BUTTON_VOLUME_KEY, powerButtonHonkConfig.volumePercent);
+  powerButtonHonkConfig.enabled =
+      preferences.getBool(POWER_BUTTON_ENABLED_KEY, false);
+  if (isKnownSound(storedSound)) {
+    powerButtonHonkConfig.sound = storedSound;
+  }
+  if (storedVolume <= 100) {
+    powerButtonHonkConfig.volumePercent = storedVolume;
+  }
+  preferences.end();
+}
+
+bool persistPowerButtonHonkConfig() {
+  Preferences preferences;
+  if (!preferences.begin(POWER_BUTTON_PREFERENCES_NAMESPACE, false)) {
+    return false;
+  }
+  const bool stored =
+      preferences.putBool(POWER_BUTTON_ENABLED_KEY,
+                          powerButtonHonkConfig.enabled) > 0 &&
+      preferences.putUChar(
+          POWER_BUTTON_SOUND_KEY,
+          static_cast<uint8_t>(powerButtonHonkConfig.sound)) > 0 &&
+      preferences.putUChar(POWER_BUTTON_VOLUME_KEY,
+                           powerButtonHonkConfig.volumePercent) > 0;
+  preferences.end();
+  return stored;
+}
+
+bool configurePowerButtonMonitoring() {
+  if (!powerButtonHonkAvailable) {
+    return false;
+  }
+  powerButtonMonitoringConfigured =
+      axp2101::setPowerButtonShortPressMonitoring(
+          powerButtonHonkConfig.enabled);
+  lastPowerButtonConfigureAttemptMs = millis();
+  return powerButtonMonitoringConfigured;
+}
 
 int wireControlOpen(const audio_codec_ctrl_if_t *, void *, int) {
   return ESP_CODEC_DEV_OK;
@@ -398,6 +464,20 @@ bool begin() {
   }
 
   Serial.println("Speaker: playback task ready");
+
+  loadPowerButtonHonkConfig();
+  powerButtonHonkAvailable = axp2101::isAvailable();
+  if (powerButtonHonkAvailable) {
+    if (!configurePowerButtonMonitoring()) {
+      Serial.println("Speaker: PWR honk monitoring setup will retry");
+    }
+    Serial.printf("Speaker: PWR honk %s sound %u at %u%%\n",
+                  powerButtonHonkConfig.enabled ? "enabled" : "disabled",
+                  static_cast<unsigned>(powerButtonHonkConfig.sound),
+                  powerButtonHonkConfig.volumePercent);
+  } else {
+    Serial.println("Speaker: PWR honk unavailable because AXP2101 is missing");
+  }
   return true;
 }
 
@@ -412,6 +492,71 @@ bool requestPlay(Sound sound, uint8_t volumePercent) {
   return xQueueSend(soundQueue, &request, 0) == pdTRUE;
 }
 
+bool isPowerButtonHonkAvailable() {
+  return isAvailable() && powerButtonHonkAvailable;
+}
+
+bool configurePowerButtonHonk(const PowerButtonHonkConfig &config) {
+  if (!isPowerButtonHonkAvailable() || !isKnownSound(config.sound) ||
+      config.volumePercent > 100) {
+    return false;
+  }
+
+  const PowerButtonHonkConfig previousConfig = powerButtonHonkConfig;
+  powerButtonHonkConfig = config;
+  if (!configurePowerButtonMonitoring()) {
+    powerButtonHonkConfig = previousConfig;
+    if (!configurePowerButtonMonitoring()) {
+      Serial.println("Speaker: failed to restore previous PWR honk state");
+    }
+    return false;
+  }
+  if (!persistPowerButtonHonkConfig()) {
+    Serial.println("Speaker: failed to persist PWR honk configuration");
+    powerButtonHonkConfig = previousConfig;
+    if (!configurePowerButtonMonitoring()) {
+      Serial.println("Speaker: failed to restore previous PWR honk state");
+    }
+    return false;
+  }
+
+  Serial.printf("Speaker: PWR honk %s sound %u at %u%%\n",
+                config.enabled ? "enabled" : "disabled",
+                static_cast<unsigned>(config.sound), config.volumePercent);
+  return true;
+}
+
+void processPowerButtonHonk() {
+  if (!isPowerButtonHonkAvailable()) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (!powerButtonMonitoringConfigured) {
+    if (now - lastPowerButtonConfigureAttemptMs >=
+        POWER_BUTTON_CONFIGURE_RETRY_MS) {
+      configurePowerButtonMonitoring();
+    }
+    return;
+  }
+  if (!powerButtonHonkConfig.enabled ||
+      now - lastPowerButtonPollMs < POWER_BUTTON_POLL_INTERVAL_MS) {
+    return;
+  }
+  lastPowerButtonPollMs = now;
+
+  bool pressed = false;
+  if (!axp2101::readAndClearPowerButtonShortPress(pressed) || !pressed) {
+    return;
+  }
+  if (!requestPlay(powerButtonHonkConfig.sound,
+                   powerButtonHonkConfig.volumePercent)) {
+    Serial.println("Speaker: PWR honk press could not queue playback");
+    return;
+  }
+  Serial.println("Speaker: PWR short press queued honk");
+}
+
 } // namespace waveshare_board::speaker
 
 #else
@@ -422,6 +567,9 @@ bool begin() { return false; }
 bool isAvailable() { return false; }
 bool requestPlay(Sound, uint8_t) { return false; }
 bool isSupported(Sound) { return false; }
+bool isPowerButtonHonkAvailable() { return false; }
+bool configurePowerButtonHonk(const PowerButtonHonkConfig &) { return false; }
+void processPowerButtonHonk() {}
 
 } // namespace waveshare_board::speaker
 

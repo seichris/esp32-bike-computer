@@ -5,17 +5,24 @@
 
 using waveshare_board::speaker::PlaybackRequest;
 using waveshare_board::speaker::PlayCommandResult;
+using waveshare_board::speaker::PowerButtonHonkConfig;
 using waveshare_board::speaker::Sound;
 using waveshare_board::speaker::CAPABILITY_DEVICE_SOUNDS;
+using waveshare_board::speaker::CAPABILITY_POWER_BUTTON_HONK;
 using waveshare_board::speaker::capabilityFlags;
 using waveshare_board::speaker::classifyPlayCommand;
+using waveshare_board::speaker::classifyPowerButtonHonkCommand;
 using waveshare_board::speaker::decodePlayPayload;
+using waveshare_board::speaker::decodePowerButtonHonkPayload;
 
 int main() {
   PlaybackRequest request{};
 
   assert(capabilityFlags(false) == 0);
   assert(capabilityFlags(true) == CAPABILITY_DEVICE_SOUNDS);
+  assert(capabilityFlags(false, true) == 0);
+  assert(capabilityFlags(true, true) ==
+         (CAPABILITY_DEVICE_SOUNDS | CAPABILITY_POWER_BUTTON_HONK));
 
   const uint8_t legacy[] = {2};
   assert(decodePlayPayload(legacy, sizeof(legacy), request));
@@ -53,4 +60,47 @@ int main() {
          PlayCommandResult::Accepted);
   assert(request.sound == Sound::RotatingBicycleBell);
   assert(request.volumePercent == 64);
+
+  PowerButtonHonkConfig config{};
+  const uint8_t enabledHonk[] = {1, 2, 85};
+  const uint8_t disabledHonk[] = {0, 5, 0};
+  const uint8_t invalidEnabled[] = {2, 2, 70};
+  const uint8_t invalidHonkSound[] = {1, 4, 70};
+  const uint8_t invalidHonkVolume[] = {1, 3, 101};
+  assert(decodePowerButtonHonkPayload(enabledHonk, sizeof(enabledHonk),
+                                      config));
+  assert(config.enabled);
+  assert(config.sound == Sound::PlasticBicycleHorn);
+  assert(config.volumePercent == 85);
+  assert(decodePowerButtonHonkPayload(disabledHonk, sizeof(disabledHonk),
+                                      config));
+  assert(!config.enabled);
+  assert(config.sound == Sound::SqueezeHorn);
+  assert(config.volumePercent == 0);
+  assert(!decodePowerButtonHonkPayload(invalidEnabled, sizeof(invalidEnabled),
+                                       config));
+  assert(!decodePowerButtonHonkPayload(invalidHonkSound,
+                                       sizeof(invalidHonkSound), config));
+  assert(!decodePowerButtonHonkPayload(invalidHonkVolume,
+                                       sizeof(invalidHonkVolume), config));
+
+  const uint8_t validHonkCommand[] = {'S', 'N', 'D', 'H', 1, 3, 55};
+  const uint8_t malformedHonkCommand[] = {'S', 'N', 'D', 'H', 1, 4, 55};
+  assert(classifyPowerButtonHonkCommand(otherCommand, sizeof(otherCommand),
+                                        true, config) ==
+         PlayCommandResult::NotMatched);
+  assert(classifyPowerButtonHonkCommand(validHonkCommand,
+                                        sizeof(validHonkCommand), false,
+                                        config) ==
+         PlayCommandResult::RejectedUnauthenticated);
+  assert(classifyPowerButtonHonkCommand(malformedHonkCommand,
+                                        sizeof(malformedHonkCommand), true,
+                                        config) ==
+         PlayCommandResult::RejectedMalformed);
+  assert(classifyPowerButtonHonkCommand(validHonkCommand,
+                                        sizeof(validHonkCommand), true,
+                                        config) == PlayCommandResult::Accepted);
+  assert(config.enabled);
+  assert(config.sound == Sound::RotatingBicycleBell);
+  assert(config.volumePercent == 55);
 }

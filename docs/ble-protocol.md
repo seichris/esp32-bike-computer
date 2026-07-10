@@ -140,6 +140,18 @@ Playback requests are queued by the firmware and run outside the BLE callback.
 Unsupported IDs, invalid volumes, and sound commands received before
 authentication are rejected.
 
+The app configures the 2.06 PWR button as a local honk control with another
+authenticated frame on the same command routes:
+
+```text
+"SNDH" | Enabled: UInt8 | SoundID: UInt8 | VolumePercent: UInt8
+```
+
+`Enabled` is `0` or `1`. The sound and volume use the same ranges as `SNDP`.
+Firmware persists the complete configuration and queues the configured sound
+after an AXP2101 short-press event, so the button works without an active app
+connection. The AXP2101's six-second hardware power-off behavior is unchanged.
+
 Capability discovery uses a bounded authenticated frame on either command
 route so it fits every supported BLE MTU:
 
@@ -149,8 +161,9 @@ ESP32 -> iOS: "CAPS" | Flags: UInt8
 ```
 
 Flag bit `0` reports runtime device-sound availability after the speaker queue
-and task start successfully. The app retries discovery after each connection
-and only enables sound controls when this bit is set.
+and task start successfully. Flag bit `1` reports PWR-button honk support. The
+app retries discovery after each connection, enables controls only when their
+bits are set, and synchronizes the persisted PWR configuration after discovery.
 
 ## OSM Map Blocks
 

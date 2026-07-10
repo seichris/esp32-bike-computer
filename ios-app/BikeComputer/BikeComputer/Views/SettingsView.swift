@@ -92,6 +92,9 @@ private struct DeviceSoundsSettingsSection: View {
             .pickerStyle(.inline)
             .onChange(of: bleManager.selectedDeviceSound) { _ in
                 bleManager.saveSettings()
+                if bleManager.isPowerButtonHonkEnabled {
+                    bleManager.sendPowerButtonHonkConfiguration()
+                }
             }
 
             VStack(alignment: .leading) {
@@ -104,8 +107,17 @@ private struct DeviceSoundsSettingsSection: View {
                 Slider(value: $bleManager.deviceSoundVolumePercent, in: 0...100, step: 5)
                     .onChange(of: bleManager.deviceSoundVolumePercent) { _ in
                         bleManager.saveSettings()
+                        if bleManager.isPowerButtonHonkEnabled {
+                            bleManager.sendPowerButtonHonkConfiguration()
+                        }
                     }
             }
+
+            Toggle("Use PWR Button as Honk", isOn: $bleManager.isPowerButtonHonkEnabled)
+                .disabled(!bleManager.supportsPowerButtonHonk)
+                .onChange(of: bleManager.isPowerButtonHonkEnabled) { _ in
+                    bleManager.sendPowerButtonHonkConfiguration()
+                }
         }
     }
 }

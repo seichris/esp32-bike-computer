@@ -7,6 +7,7 @@ namespace waveshare_board::speaker {
 
 constexpr uint8_t DEFAULT_VOLUME_PERCENT = 70;
 constexpr uint8_t CAPABILITY_DEVICE_SOUNDS = 1U << 0;
+constexpr uint8_t CAPABILITY_POWER_BUTTON_HONK = 1U << 1;
 
 enum class Sound : uint8_t {
   BellDing = 1,
@@ -16,6 +17,12 @@ enum class Sound : uint8_t {
 };
 
 struct PlaybackRequest {
+  Sound sound;
+  uint8_t volumePercent;
+};
+
+struct PowerButtonHonkConfig {
+  bool enabled;
   Sound sound;
   uint8_t volumePercent;
 };
@@ -38,8 +45,13 @@ inline bool isKnownSound(Sound sound) {
   return false;
 }
 
-inline uint8_t capabilityFlags(bool deviceSoundsAvailable) {
-  return deviceSoundsAvailable ? CAPABILITY_DEVICE_SOUNDS : 0;
+inline uint8_t capabilityFlags(bool deviceSoundsAvailable,
+                               bool powerButtonHonkAvailable = false) {
+  if (!deviceSoundsAvailable) {
+    return 0;
+  }
+  return CAPABILITY_DEVICE_SOUNDS |
+         (powerButtonHonkAvailable ? CAPABILITY_POWER_BUTTON_HONK : 0);
 }
 
 inline bool decodePlayPayload(const uint8_t *data, size_t length,
@@ -76,6 +88,43 @@ inline PlayCommandResult classifyPlayCommand(const uint8_t *data, size_t length,
   }
   if (!decodePlayPayload(data + sizeof(prefix), length - sizeof(prefix),
                          request)) {
+    return PlayCommandResult::RejectedMalformed;
+  }
+  return PlayCommandResult::Accepted;
+}
+
+inline bool decodePowerButtonHonkPayload(const uint8_t *data, size_t length,
+                                         PowerButtonHonkConfig &config) {
+  if (data == nullptr || length != 3 || data[0] > 1) {
+    return false;
+  }
+
+  const Sound sound = static_cast<Sound>(data[1]);
+  if (!isKnownSound(sound) || data[2] > 100) {
+    return false;
+  }
+
+  config = {data[0] == 1, sound, data[2]};
+  return true;
+}
+
+inline PlayCommandResult classifyPowerButtonHonkCommand(
+    const uint8_t *data, size_t length, bool authenticated,
+    PowerButtonHonkConfig &config) {
+  constexpr uint8_t prefix[] = {'S', 'N', 'D', 'H'};
+  if (data == nullptr || length < sizeof(prefix)) {
+    return PlayCommandResult::NotMatched;
+  }
+  for (size_t i = 0; i < sizeof(prefix); i++) {
+    if (data[i] != prefix[i]) {
+      return PlayCommandResult::NotMatched;
+    }
+  }
+  if (!authenticated) {
+    return PlayCommandResult::RejectedUnauthenticated;
+  }
+  if (!decodePowerButtonHonkPayload(data + sizeof(prefix),
+                                    length - sizeof(prefix), config)) {
     return PlayCommandResult::RejectedMalformed;
   }
   return PlayCommandResult::Accepted;

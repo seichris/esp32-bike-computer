@@ -27,6 +27,8 @@ bool isAvailable();
 bool readRegister(uint8_t reg, uint8_t &value);
 bool writeRegister(uint8_t reg, uint8_t value);
 bool readPowerStatus(PowerStatus &status);
+bool setPowerButtonShortPressMonitoring(bool enabled);
+bool readAndClearPowerButtonShortPress(bool &pressed);
 
 bool enableDisplayRails();
 bool enablePeripheralRails();

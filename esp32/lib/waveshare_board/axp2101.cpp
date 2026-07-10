@@ -25,6 +25,9 @@ constexpr uint8_t AXP2101_BATTERY_CURRENT_DIRECTION_MASK = 0x03;
 constexpr uint8_t AXP2101_SYSTEM_ON_MASK = 0x10;
 constexpr uint8_t AXP2101_VINDPM_ACTIVE_MASK = 0x08;
 constexpr uint8_t AXP2101_CHARGING_STATUS_MASK = 0x07;
+constexpr uint8_t AXP2101_INTERRUPT_ENABLE_2_REG = 0x41;
+constexpr uint8_t AXP2101_INTERRUPT_STATUS_2_REG = 0x49;
+constexpr uint8_t AXP2101_POWER_BUTTON_SHORT_PRESS_MASK = 0x08;
 
 constexpr uint8_t peripheralRailRegs[] = {
     AXP2101_ALDO1_VOLTAGE_REG, AXP2101_ALDO2_VOLTAGE_REG,
@@ -98,6 +101,53 @@ bool readPowerStatus(PowerStatus &status) {
   status.systemOn = (status.status2 & AXP2101_SYSTEM_ON_MASK) != 0;
   status.vindpmActive = (status.status2 & AXP2101_VINDPM_ACTIVE_MASK) != 0;
   status.chargingStatus = status.status2 & AXP2101_CHARGING_STATUS_MASK;
+  return true;
+}
+
+bool setPowerButtonShortPressMonitoring(bool enabled) {
+  if (!pmuAvailable) {
+    return false;
+  }
+
+  uint8_t interruptEnable = 0;
+  if (!readRegister(AXP2101_INTERRUPT_ENABLE_2_REG, interruptEnable)) {
+    return false;
+  }
+
+  const uint8_t updatedInterruptEnable =
+      enabled ? interruptEnable | AXP2101_POWER_BUTTON_SHORT_PRESS_MASK
+              : interruptEnable & ~AXP2101_POWER_BUTTON_SHORT_PRESS_MASK;
+  if (updatedInterruptEnable != interruptEnable &&
+      !writeRegister(AXP2101_INTERRUPT_ENABLE_2_REG,
+                     updatedInterruptEnable)) {
+    return false;
+  }
+
+  // AXP2101 interrupt status is write-one-to-clear. Remove any stale press so
+  // enabling the feature cannot immediately trigger playback.
+  return writeRegister(AXP2101_INTERRUPT_STATUS_2_REG,
+                       AXP2101_POWER_BUTTON_SHORT_PRESS_MASK);
+}
+
+bool readAndClearPowerButtonShortPress(bool &pressed) {
+  pressed = false;
+  if (!pmuAvailable) {
+    return false;
+  }
+
+  uint8_t interruptStatus = 0;
+  if (!readRegister(AXP2101_INTERRUPT_STATUS_2_REG, interruptStatus)) {
+    return false;
+  }
+  if ((interruptStatus & AXP2101_POWER_BUTTON_SHORT_PRESS_MASK) == 0) {
+    return true;
+  }
+  if (!writeRegister(AXP2101_INTERRUPT_STATUS_2_REG,
+                     AXP2101_POWER_BUTTON_SHORT_PRESS_MASK)) {
+    return false;
+  }
+
+  pressed = true;
   return true;
 }
 

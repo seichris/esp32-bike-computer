@@ -251,6 +251,7 @@ struct NavigationProtocolTests {
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsDeviceSoundFallback()
+        testBLEManagerSendsPowerButtonHonkFallback()
         testBLEManagerSendsDeviceCapabilityFallback()
         testBLEManagerSendsMapTransferControlFrames()
         testBLEManagerSendsDeviceTransferControlFrames()
@@ -900,6 +901,8 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.mapTransferStatusPrefix, "MSTS", "map transfer status remains framed over navigation notifications")
         assertEqual(DeviceBLEProtocol.deviceTransferControlPrefix, "DTRN", "generic transfer control remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.deviceTransferStatusPrefix, "DSTS", "generic transfer status remains firmware-compatible")
+        assertEqual(DeviceBLEProtocol.soundPlayPrefix, "SNDP", "sound playback remains firmware-compatible")
+        assertEqual(DeviceBLEProtocol.powerButtonHonkPrefix, "SNDH", "PWR honk configuration remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.brightnessSettingID, 12, "brightness uses firmware setting ID 12")
         assertEqual(DeviceBLEProtocol.enabledScreensSettingID, 13, "enabled screens use firmware setting ID 13")
         assertEqual(DeviceBLEProtocol.defaultScreenSettingID, 14, "default screen uses firmware setting ID 14")
@@ -946,23 +949,40 @@ struct NavigationProtocolTests {
         assertEqual(defaultPacket[5], 70, "non-finite volume falls back to the default")
         assertEqual(DeviceSound.bellDing.playPacket(volumePercent: -1)[5], 0, "sound volume clamps below zero")
         assertEqual(DeviceSound.squeezeHorn.playPacket(volumePercent: 101)[5], 100, "sound volume clamps above 100")
+
+        let honkPacket = DeviceSound.rotatingBicycleBell.powerButtonHonkPacket(
+            enabled: true,
+            volumePercent: 45
+        )
+        assertEqual(String(data: honkPacket.prefix(4), encoding: .utf8), "SNDH", "PWR honk packet uses SNDH prefix")
+        assertEqual(honkPacket[4], 1, "PWR honk packet contains enabled state")
+        assertEqual(honkPacket[5], DeviceSound.rotatingBicycleBell.rawValue, "PWR honk packet contains sound ID")
+        assertEqual(honkPacket[6], 45, "PWR honk packet contains volume")
+        assertEqual(DeviceSound.bellDing.powerButtonHonkPacket(enabled: false, volumePercent: 200)[4], 0, "PWR honk packet contains disabled state")
+        assertEqual(DeviceSound.bellDing.powerButtonHonkPacket(enabled: false, volumePercent: 200)[6], 100, "PWR honk volume clamps above 100")
     }
 
     static func testDeviceCapabilitiesProtocol() {
         let manager = BLEManager()
+        let supportedFlags = DeviceBLEProtocol.deviceSoundsCapabilityMask |
+            DeviceBLEProtocol.powerButtonHonkCapabilityMask
         let supported = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
-            Data([DeviceBLEProtocol.deviceSoundsCapabilityMask])
+            Data([supportedFlags])
         assert(manager.handleDeviceCapabilitiesNotification(supported), "CAPS notification should be consumed")
         assert(manager.supportsDeviceSounds, "CAPS bit enables device sounds")
+        assert(manager.supportsPowerButtonHonk, "CAPS bit enables PWR honk configuration")
         assert(manager.hasReceivedDeviceCapabilities, "valid CAPS completes capability negotiation")
 
-        let unsupported = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) + Data([0])
-        assert(manager.handleDeviceCapabilitiesNotification(unsupported), "unsupported CAPS should be consumed")
-        assert(!manager.supportsDeviceSounds, "clear CAPS bit disables device sounds")
-        assert(manager.hasReceivedDeviceCapabilities, "unsupported CAPS still completes negotiation")
+        let soundOnly = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.deviceSoundsCapabilityMask])
+        assert(manager.handleDeviceCapabilitiesNotification(soundOnly), "sound-only CAPS should be consumed")
+        assert(manager.supportsDeviceSounds, "sound-only CAPS keeps device sounds enabled")
+        assert(!manager.supportsPowerButtonHonk, "clear PWR honk bit disables PWR configuration")
+        assert(manager.hasReceivedDeviceCapabilities, "sound-only CAPS still completes negotiation")
 
         let malformed = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8)
         assert(manager.handleDeviceCapabilitiesNotification(malformed), "malformed CAPS should be consumed")
+        assert(!manager.supportsPowerButtonHonk, "malformed CAPS clears PWR honk support")
         assert(!manager.hasReceivedDeviceCapabilities, "malformed CAPS does not complete negotiation")
     }
 
@@ -1104,6 +1124,35 @@ struct NavigationProtocolTests {
         assertEqual(String(data: sentPackets[0].prefix(4), encoding: .utf8), "SNDP", "fallback packet uses SNDP prefix")
         assertEqual(sentPackets[0][4], DeviceSound.squeezeHorn.rawValue, "fallback packet includes selected sound")
         assertEqual(sentPackets[0][5], 62, "fallback packet includes selected volume")
+    }
+
+    static func testBLEManagerSendsPowerButtonHonkFallback() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        assert(!manager.sendPowerButtonHonkConfiguration(),
+               "PWR honk configuration rejects devices without the negotiated capability")
+        assertEqual(sentPackets.count, 0, "unsupported devices receive no PWR honk packet")
+
+        manager.supportsPowerButtonHonk = true
+        manager.isPowerButtonHonkEnabled = true
+        manager.selectedDeviceSound = .plasticBicycleHorn
+        manager.deviceSoundVolumePercent = 75
+        assert(manager.sendPowerButtonHonkConfiguration(),
+               "PWR honk configuration queues when BLE is ready and capability is present")
+        assertEqual(sentPackets.count, 1, "PWR honk configuration sends one fallback packet")
+        assertEqual(String(data: sentPackets[0].prefix(4), encoding: .utf8), "SNDH", "PWR honk fallback uses SNDH prefix")
+        assertEqual(sentPackets[0][4], 1, "PWR honk fallback includes enabled state")
+        assertEqual(sentPackets[0][5], DeviceSound.plasticBicycleHorn.rawValue, "PWR honk fallback includes selected sound")
+        assertEqual(sentPackets[0][6], 75, "PWR honk fallback includes selected volume")
     }
 
     static func testBLEManagerSendsDeviceCapabilityFallback() {
@@ -1342,20 +1391,25 @@ struct NavigationProtocolTests {
         let defaults = UserDefaults.standard
         let soundKey = "deviceSettings.selectedSound"
         let volumeKey = "deviceSettings.soundVolumePercent"
+        let powerButtonHonkKey = "deviceSettings.powerButtonHonkEnabled"
         defaults.removeObject(forKey: soundKey)
         defaults.removeObject(forKey: volumeKey)
+        defaults.removeObject(forKey: powerButtonHonkKey)
 
         let freshManager = BLEManager()
         assertEqual(freshManager.selectedDeviceSound, .plasticBicycleHorn, "fresh installs use the bicycle horn")
         assertEqual(freshManager.deviceSoundVolumePercent, 70, "fresh installs use 70 percent sound volume")
+        assert(!freshManager.isPowerButtonHonkEnabled, "fresh installs leave PWR honk disabled")
 
         freshManager.selectedDeviceSound = .rotatingBicycleBell
         freshManager.deviceSoundVolumePercent = 65
+        freshManager.isPowerButtonHonkEnabled = true
         freshManager.saveSettings()
 
         let reloaded = BLEManager()
         assertEqual(reloaded.selectedDeviceSound, .rotatingBicycleBell, "selected sound persists")
         assertEqual(reloaded.deviceSoundVolumePercent, 65, "sound volume persists")
+        assert(reloaded.isPowerButtonHonkEnabled, "PWR honk enabled state persists")
 
         defaults.set(4, forKey: soundKey)
         defaults.set(Double.nan, forKey: volumeKey)
@@ -1365,6 +1419,7 @@ struct NavigationProtocolTests {
 
         defaults.removeObject(forKey: soundKey)
         defaults.removeObject(forKey: volumeKey)
+        defaults.removeObject(forKey: powerButtonHonkKey)
     }
 
     static func testNavigationSendTrackerReadinessRetry() {

@@ -508,6 +508,41 @@ static bool handleSoundPlayCommand(const std::string &value,
   return true;
 }
 
+static bool handlePowerButtonHonkCommand(const std::string &value,
+                                         const char *authLabel,
+                                         const char *source) {
+  waveshare_board::speaker::PowerButtonHonkConfig config{};
+  const auto result =
+      waveshare_board::speaker::classifyPowerButtonHonkCommand(
+          reinterpret_cast<const uint8_t *>(value.data()), value.length(),
+          bleSessionAuthenticated, config);
+  if (result == waveshare_board::speaker::PlayCommandResult::NotMatched) {
+    return false;
+  }
+  if (result ==
+      waveshare_board::speaker::PlayCommandResult::RejectedUnauthenticated) {
+    requireAuthenticated(authLabel);
+    return true;
+  }
+  if (result ==
+      waveshare_board::speaker::PlayCommandResult::RejectedMalformed) {
+    Serial.printf("BLE Sound: rejected PWR honk payload from %s\n",
+                  source == nullptr ? "unknown" : source);
+    return true;
+  }
+  if (!waveshare_board::speaker::configurePowerButtonHonk(config)) {
+    Serial.printf("BLE Sound: failed to configure PWR honk from %s\n",
+                  source == nullptr ? "unknown" : source);
+    return true;
+  }
+  Serial.printf("BLE Sound: configured PWR honk enabled=%d sound=%u volume=%u "
+                "from %s\n",
+                config.enabled ? 1 : 0,
+                static_cast<unsigned>(config.sound), config.volumePercent,
+                source == nullptr ? "unknown" : source);
+  return true;
+}
+
 static std::string jsonEscape(const std::string &value) {
   std::string out;
   out.reserve(value.size() + 8);
@@ -662,7 +697,8 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar) {
   uint8_t response[] = {
       'C', 'A', 'P', 'S',
       waveshare_board::speaker::capabilityFlags(
-          waveshare_board::speaker::isAvailable()),
+          waveshare_board::speaker::isAvailable(),
+          waveshare_board::speaker::isPowerButtonHonkAvailable()),
   };
   pChar->setValue(response, sizeof(response));
   pChar->notify();
@@ -1235,6 +1271,11 @@ public:
       return;
     }
 
+    if (handlePowerButtonHonkCommand(value, "PWR honk configuration",
+                                     "fallback")) {
+      return;
+    }
+
     if (!requireAuthenticated("navigation instruction")) {
       return;
     }
@@ -1325,6 +1366,11 @@ public:
     }
 
     if (handleSoundPlayCommand(value, "native sound playback", "native")) {
+      return;
+    }
+
+    if (handlePowerButtonHonkCommand(value, "native PWR honk configuration",
+                                     "native")) {
       return;
     }
 

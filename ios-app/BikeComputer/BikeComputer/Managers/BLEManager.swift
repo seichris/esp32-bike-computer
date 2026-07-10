@@ -40,7 +40,9 @@ enum DeviceBLEProtocol {
     static let deviceTransferStatusPrefix = "DSTS"
     static let deviceCapabilitiesPrefix = "CAPS"
     static let soundPlayPrefix = "SNDP"
+    static let powerButtonHonkPrefix = "SNDH"
     static let deviceSoundsCapabilityMask: UInt8 = 1 << 0
+    static let powerButtonHonkCapabilityMask: UInt8 = 1 << 1
 
     static let brightnessSettingID: UInt8 = 12
     static let enabledScreensSettingID: UInt8 = 13
@@ -89,6 +91,15 @@ enum DeviceSound: UInt8, CaseIterable, Identifiable {
     func playPacket(volumePercent: Double) -> Data {
         let volume = UInt8(Self.normalizedVolumePercent(volumePercent).rounded())
         var packet = Data(DeviceBLEProtocol.soundPlayPrefix.utf8)
+        packet.append(rawValue)
+        packet.append(volume)
+        return packet
+    }
+
+    func powerButtonHonkPacket(enabled: Bool, volumePercent: Double) -> Data {
+        let volume = UInt8(Self.normalizedVolumePercent(volumePercent).rounded())
+        var packet = Data(DeviceBLEProtocol.powerButtonHonkPrefix.utf8)
+        packet.append(enabled ? 1 : 0)
         packet.append(rawValue)
         packet.append(volume)
         return packet
@@ -298,6 +309,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var isNavigationReady: Bool = false
     @Published var supportsDeviceSettings: Bool = false
     @Published var supportsDeviceSounds: Bool = false
+    @Published var supportsPowerButtonHonk: Bool = false
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
     @Published var hardwareLabel: String = ""
@@ -343,6 +355,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var disconnectedSleepTimeout: DisconnectedSleepTimeout = .twoMinutes
     @Published var selectedDeviceSound: DeviceSound = .defaultSelection
     @Published var deviceSoundVolumePercent: Double = DeviceSound.defaultVolumePercent
+    @Published var isPowerButtonHonkEnabled: Bool = false
     
     // Feature Visibility
     @Published var showBuildings: Bool = true
@@ -432,6 +445,7 @@ class BLEManager: NSObject, ObservableObject {
         static let disconnectedSleepTimeoutSeconds = "deviceSettings.disconnectedSleepTimeoutSeconds"
         static let selectedDeviceSound = "deviceSettings.selectedSound"
         static let deviceSoundVolumePercent = "deviceSettings.soundVolumePercent"
+        static let powerButtonHonkEnabled = "deviceSettings.powerButtonHonkEnabled"
         static let showBuildings = "mapSettings.showBuildings"
         static let showGreenSpace = "mapSettings.showGreenSpace"
         static let showPaths = "mapSettings.showPaths"
@@ -502,6 +516,9 @@ class BLEManager: NSObject, ObservableObject {
         let storedSoundVolume = defaults.object(forKey: SettingsKeys.deviceSoundVolumePercent) as? Double
             ?? DeviceSound.defaultVolumePercent
         deviceSoundVolumePercent = DeviceSound.normalizedVolumePercent(storedSoundVolume)
+        isPowerButtonHonkEnabled = defaults.object(
+            forKey: SettingsKeys.powerButtonHonkEnabled
+        ) as? Bool ?? false
         showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
         let legacyNature = defaults.object(forKey: SettingsKeys.legacyShowNature) as? Bool ?? true
         let legacyMinorRoads = defaults.object(forKey: SettingsKeys.legacyShowMinorRoads) as? Bool ?? true
@@ -545,6 +562,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(Int(selectedDeviceSound.rawValue), forKey: SettingsKeys.selectedDeviceSound)
         deviceSoundVolumePercent = DeviceSound.normalizedVolumePercent(deviceSoundVolumePercent)
         defaults.set(deviceSoundVolumePercent, forKey: SettingsKeys.deviceSoundVolumePercent)
+        defaults.set(isPowerButtonHonkEnabled, forKey: SettingsKeys.powerButtonHonkEnabled)
         defaults.set(showBuildings, forKey: SettingsKeys.showBuildings)
         defaults.set(showGreenSpace, forKey: SettingsKeys.showGreenSpace)
         defaults.set(showPaths, forKey: SettingsKeys.showPaths)
@@ -847,6 +865,25 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
+    func sendPowerButtonHonkConfiguration() -> Bool {
+        saveSettings()
+        guard supportsPowerButtonHonk else {
+            log("Cannot configure PWR honk: connected device does not advertise support")
+            return false
+        }
+
+        let packet = selectedDeviceSound.powerButtonHonkPacket(
+            enabled: isPowerButtonHonkEnabled,
+            volumePercent: deviceSoundVolumePercent
+        )
+        let label = "PWR honk \(isPowerButtonHonkEnabled ? "enabled" : "disabled")"
+        if sendNativeMapTransferPacket(packet, label: label) {
+            return true
+        }
+        return sendFallbackMapPacket(packet, label: label)
+    }
+
+    @discardableResult
     func requestMapTransferMode(enabled: Bool) -> Bool {
         var packet = Data(DeviceBLEProtocol.mapTransferControlPrefix.utf8)
         packet.append(Data((enabled ? "enter" : "exit").utf8))
@@ -1073,6 +1110,7 @@ class BLEManager: NSObject, ObservableObject {
         firmwareUpdateTotalBytes = 0
         firmwareUpdateLastError = nil
         supportsDeviceSounds = false
+        supportsPowerButtonHonk = false
         hasReceivedDeviceCapabilities = false
     }
 
@@ -1806,14 +1844,27 @@ extension BLEManager: CBPeripheralDelegate {
 
         guard data.count == 5 else {
             supportsDeviceSounds = false
+            supportsPowerButtonHonk = false
             hasReceivedDeviceCapabilities = false
             log("Received invalid device capabilities payload")
             return true
         }
 
-        supportsDeviceSounds = data[4] & DeviceBLEProtocol.deviceSoundsCapabilityMask != 0
+        let flags = data[4]
+        let hasDeviceSounds = flags & DeviceBLEProtocol.deviceSoundsCapabilityMask != 0
+        let hasPowerButtonHonk = hasDeviceSounds &&
+            flags & DeviceBLEProtocol.powerButtonHonkCapabilityMask != 0
+        supportsDeviceSounds = hasDeviceSounds
+        supportsPowerButtonHonk = hasPowerButtonHonk
         hasReceivedDeviceCapabilities = true
-        log("Device capabilities: flags=0x\(String(format: "%02X", data[4]))")
+        log("Device capabilities: flags=0x\(String(format: "%02X", flags))")
+        if hasPowerButtonHonk {
+            // @Published updates in willSet. Defer until the support flag is
+            // observable so the guarded send uses the negotiated capability.
+            DispatchQueue.main.async { [weak self] in
+                _ = self?.sendPowerButtonHonkConfiguration()
+            }
+        }
         return true
     }
 

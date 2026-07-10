@@ -602,6 +602,9 @@ void loop() {
   waveshare_board::imu::process();
   processWaveshareBootButton();
 #endif
+#ifdef WAVESHARE_AMOLED_206
+  waveshare_board::speaker::processPowerButtonHonk();
+#endif
 
   logSystemDebugHeartbeat();
 

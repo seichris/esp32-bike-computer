@@ -11,5 +11,8 @@ bool isAvailable();
 bool requestPlay(Sound sound,
                  uint8_t volumePercent = DEFAULT_VOLUME_PERCENT);
 bool isSupported(Sound sound);
+bool isPowerButtonHonkAvailable();
+bool configurePowerButtonHonk(const PowerButtonHonkConfig &config);
+void processPowerButtonHonk();
 
 } // namespace waveshare_board::speaker
