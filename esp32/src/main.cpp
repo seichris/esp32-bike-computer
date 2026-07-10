@@ -361,7 +361,9 @@ void setup() {
 
   // Initialize Serial for debug
   Serial.begin(115200);
-  Serial.setTxTimeoutMs(0); // Prevent blocking if no host connected
+  // HWCDC uses this value as both a timeout and a retry counter. Zero
+  // underflows that counter when the USB host stops reading and stalls the UI.
+  Serial.setTxTimeoutMs(1);
   delay(2000);              // Give time for USB CDC to attach
   log_i("Starting Setup...");
   Serial.printf("Reset reason: CPU0=%d CPU1=%d\n", esp_reset_reason(),

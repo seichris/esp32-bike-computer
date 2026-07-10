@@ -175,22 +175,17 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   uint32_t h = (area->y2 - area->y1 + 1);
 
   gfx->startWrite();
-#ifdef WAVESHARE_AMOLED_206
-  // Arduino_CO5300 caches the last address window. A full-screen clear before
-  // LVGL leaves that cache populated, but the panel still needs CASET/PASET
-  // resent before each full-frame transfer on the 2.06-inch variant.
-  const uint16_t x = area->x1 +
-                     waveshare_board::display::ARDUINO_CO5300_COL_OFFSET1;
-  const uint16_t y = area->y1 +
-                     waveshare_board::display::ARDUINO_CO5300_ROW_OFFSET1;
-  bus->writeC8D16D16(waveshare_board::display::CO5300_CASET, x, x + w - 1);
-  bus->writeC8D16D16(waveshare_board::display::CO5300_PASET, y, y + h - 1);
-  bus->writeCommand(waveshare_board::display::CO5300_RAMWR);
-#else
   gfx->writeAddrWindow(area->x1, area->y1, w, h);
-#endif
   gfx->writePixels((uint16_t *)px_map, w * h);
   gfx->endWrite();
+
+#ifdef WAVESHARE_AMOLED_206
+  // The 2.06-inch CO5300 presents the completed frame after a following window
+  // write. Rewriting the first framebuffer pixel commits it without changing
+  // the rendered image and leaves Arduino_GFX ready to resend the full window.
+  gfx->fillRect(area->x1, area->y1, 1, 1,
+                reinterpret_cast<uint16_t *>(px_map)[0]);
+#endif
 
   // Inform LVGL 9 that flushing is complete
   lv_display_flush_ready(disp);
