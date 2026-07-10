@@ -340,7 +340,7 @@ static int es8311_start(audio_codec_es8311_t *codec)
     }
     ret |= es8311_write_reg(codec, ES8311_CLK_MANAGER_REG01, regv);
 
-    ret = es8311_read_reg(codec, ES8311_SDPIN_REG09, &dac_iface);
+    ret |= es8311_read_reg(codec, ES8311_SDPIN_REG09, &dac_iface);
     ret |= es8311_read_reg(codec, ES8311_SDPOUT_REG0A, &adc_iface);
     if (ret != ESP_CODEC_DEV_OK) {
         return es8311_abort_start(codec, ret);

@@ -70,6 +70,11 @@ int main(void)
     assert(codec->set_fs(codec, &format) == ESP_CODEC_DEV_OK);
     assert(paired_8311.dac == NULL);
 
+    failed_write_register = ES8311_RESET_REG00;
+    assert(codec->enable(codec, true) != ESP_CODEC_DEV_OK);
+    assert(paired_8311.dac == NULL);
+    assert(!((audio_codec_es8311_t *) codec)->enabled);
+
     failed_write_register = ES8311_SYSTEM_REG0E;
     assert(codec->enable(codec, true) != ESP_CODEC_DEV_OK);
     assert(paired_8311.dac == NULL);
