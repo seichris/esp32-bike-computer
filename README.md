@@ -23,6 +23,10 @@ on a GPS-equipped board like the
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the repo layout, build and test flow, supported-hardware notes, and the current BLE protocol overview.
 
+## Garmin mounts
+
+Mount your Bike Computer on a Garmin mount, using our 3d print files in [`hardware/cad`](hardware/cad/README.md).
+
 ## Offline maps
 
 See [OFFLINE_MAPS.md](OFFLINE_MAPS.md) to generate OpenStreetMap vector blocks
