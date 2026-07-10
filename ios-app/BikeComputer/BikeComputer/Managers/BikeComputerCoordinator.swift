@@ -186,6 +186,7 @@ class BikeComputerCoordinator: ObservableObject {
                     self.navEngine.processExternalLocation(location)
                 }
                 self.requestMapTransferStatusAfterDeviceRefresh()
+                self.refreshDeviceCapabilities(attempt: 0)
                 self.bleManager.requestDeviceTransferStatus()
                 self.scheduleFirmwareUpdateCheckAfterDeviceRefresh()
             }
@@ -304,6 +305,17 @@ class BikeComputerCoordinator: ObservableObject {
     private func scheduleFirmwareUpdateCheckAfterDeviceRefresh() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
             self?.runAutomaticFirmwareUpdateCheck(attempt: 0)
+        }
+    }
+
+    private func refreshDeviceCapabilities(attempt: Int) {
+        guard bleManager.isNavigationReady,
+              !bleManager.hasReceivedDeviceCapabilities,
+              attempt < 5 else { return }
+
+        bleManager.requestDeviceCapabilities()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.refreshDeviceCapabilities(attempt: attempt + 1)
         }
     }
 

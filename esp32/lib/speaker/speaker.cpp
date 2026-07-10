@@ -136,11 +136,15 @@ void releaseCodecResources() {
 
   if (txChannel != nullptr) {
     i2s_channel_disable(txChannel);
+  }
+  if (rxChannel != nullptr) {
+    i2s_channel_disable(rxChannel);
+  }
+  if (txChannel != nullptr) {
     i2s_del_channel(txChannel);
     txChannel = nullptr;
   }
   if (rxChannel != nullptr) {
-    i2s_channel_disable(rxChannel);
     i2s_del_channel(rxChannel);
     rxChannel = nullptr;
   }
@@ -371,7 +375,7 @@ void speakerTask(void *) {
 } // namespace
 
 bool isSupported(Sound sound) {
-  return isKnownSound(sound);
+  return isAvailable() && isKnownSound(sound);
 }
 
 bool begin() {
@@ -397,6 +401,8 @@ bool begin() {
   return true;
 }
 
+bool isAvailable() { return soundQueue != nullptr; }
+
 bool requestPlay(Sound sound, uint8_t volumePercent) {
   if (!isSupported(sound) || volumePercent > 100 || soundQueue == nullptr) {
     return false;
@@ -413,6 +419,7 @@ bool requestPlay(Sound sound, uint8_t volumePercent) {
 namespace waveshare_board::speaker {
 
 bool begin() { return false; }
+bool isAvailable() { return false; }
 bool requestPlay(Sound, uint8_t) { return false; }
 bool isSupported(Sound) { return false; }
 

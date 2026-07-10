@@ -6,6 +6,7 @@
 namespace waveshare_board::speaker {
 
 constexpr uint8_t DEFAULT_VOLUME_PERCENT = 70;
+constexpr uint8_t CAPABILITY_DEVICE_SOUNDS = 1U << 0;
 
 enum class Sound : uint8_t {
   BellDing = 1,
@@ -28,6 +29,10 @@ inline bool isKnownSound(Sound sound) {
     return true;
   }
   return false;
+}
+
+inline uint8_t capabilityFlags(bool deviceSoundsAvailable) {
+  return deviceSoundsAvailable ? CAPABILITY_DEVICE_SOUNDS : 0;
 }
 
 inline bool decodePlayPayload(const uint8_t *data, size_t length,

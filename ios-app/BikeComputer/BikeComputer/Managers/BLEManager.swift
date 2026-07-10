@@ -38,7 +38,9 @@ enum DeviceBLEProtocol {
     static let mapTransferStatusPrefix = "MSTS"
     static let deviceTransferControlPrefix = "DTRN"
     static let deviceTransferStatusPrefix = "DSTS"
+    static let deviceCapabilitiesPrefix = "CAPS"
     static let soundPlayPrefix = "SNDP"
+    static let deviceSoundsCapabilityMask: UInt8 = 1 << 0
 
     static let brightnessSettingID: UInt8 = 12
     static let enabledScreensSettingID: UInt8 = 13
@@ -296,6 +298,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var isNavigationReady: Bool = false
     @Published var supportsDeviceSettings: Bool = false
     @Published var supportsDeviceSounds: Bool = false
+    @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
     @Published var hardwareLabel: String = ""
     @Published var signalStrength: Int = 0
@@ -887,6 +890,14 @@ class BLEManager: NSObject, ObservableObject {
         return sentNative || sentFallback
     }
 
+    @discardableResult
+    func requestDeviceCapabilities() -> Bool {
+        let packet = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8)
+        let sentNative = sendNativeMapTransferPacket(packet, label: "device capabilities")
+        let sentFallback = sendFallbackMapPacket(packet, label: "device capabilities")
+        return sentNative || sentFallback
+    }
+
     func sendDebugNavigationPacket() {
         let packet = "\(NavigationIconID.left)|123|Debug turn left"
         guard sendNavigationData(packet) else {
@@ -1054,10 +1065,15 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferAccessPointSSID = nil
         deviceTransferSessionToken = nil
         firmwareUpdateStatus = "unknown"
+        firmwareTarget = ""
+        firmwareVersion = ""
+        firmwareBuild = 0
+        firmwareGitSha = ""
         firmwareUpdateReceivedBytes = 0
         firmwareUpdateTotalBytes = 0
         firmwareUpdateLastError = nil
         supportsDeviceSounds = false
+        hasReceivedDeviceCapabilities = false
     }
 
     private func updateTrustedPeripheralDescription() {
@@ -1257,6 +1273,7 @@ class BLEManager: NSObject, ObservableObject {
         sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(deviceBrightnessPercent))
         sendSetting(id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
                     value: disconnectedSleepTimeout.settingValue)
+        requestDeviceCapabilities()
         requestDeviceTransferStatus()
     }
 
@@ -1742,6 +1759,11 @@ extension BLEManager: CBPeripheralDelegate {
         }
 
         if characteristic.uuid == characteristicUUID,
+           handleDeviceCapabilitiesNotification(data) {
+            return
+        }
+
+        if characteristic.uuid == characteristicUUID,
            handleDeviceTransferStatusNotification(data) {
             return
         }
@@ -1776,6 +1798,26 @@ extension BLEManager: CBPeripheralDelegate {
     }
 
     @discardableResult
+    func handleDeviceCapabilitiesNotification(_ data: Data) -> Bool {
+        guard data.count >= 4,
+              String(data: data.prefix(4), encoding: .utf8) == DeviceBLEProtocol.deviceCapabilitiesPrefix else {
+            return false
+        }
+
+        guard data.count == 5 else {
+            supportsDeviceSounds = false
+            hasReceivedDeviceCapabilities = false
+            log("Received invalid device capabilities payload")
+            return true
+        }
+
+        supportsDeviceSounds = data[4] & DeviceBLEProtocol.deviceSoundsCapabilityMask != 0
+        hasReceivedDeviceCapabilities = true
+        log("Device capabilities: flags=0x\(String(format: "%02X", data[4]))")
+        return true
+    }
+
+    @discardableResult
     func handleDeviceTransferStatusNotification(_ data: Data) -> Bool {
         guard data.count >= 4,
               String(data: data.prefix(4), encoding: .utf8) == DeviceBLEProtocol.deviceTransferStatusPrefix else {
@@ -1798,8 +1840,6 @@ extension BLEManager: CBPeripheralDelegate {
         }
         deviceTransferAccessPointSSID = object["apSsid"] as? String
         deviceTransferSessionToken = object["sessionToken"] as? String
-        let capabilities = object["capabilities"] as? [String: Any]
-        supportsDeviceSounds = capabilities?["deviceSounds"] as? Bool ?? false
 
         if let firmware = object["firmware"] as? [String: Any] {
             firmwareUpdateStatus = firmware["status"] as? String ?? (enabled ? "unknown" : "idle")

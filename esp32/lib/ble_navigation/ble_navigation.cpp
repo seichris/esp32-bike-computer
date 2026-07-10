@@ -491,6 +491,19 @@ static void handleSoundPlayPayload(const uint8_t *data, size_t len,
                 source == nullptr ? "unknown" : source);
 }
 
+static bool handleSoundPlayCommand(const std::string &value,
+                                   const char *authLabel,
+                                   const char *source) {
+  if (!hasPrefix(value, "SNDP")) {
+    return false;
+  }
+  if (requireAuthenticated(authLabel)) {
+    handleSoundPlayPayload((const uint8_t *)value.data() + 4,
+                           value.length() - 4, source);
+  }
+  return true;
+}
+
 static std::string jsonEscape(const std::string &value) {
   std::string out;
   out.reserve(value.size() + 8);
@@ -577,11 +590,6 @@ static std::string genericTransferStatusJson() {
     body += ",\"sessionToken\":\"" + jsonEscape(transferStatus.sessionToken) +
             "\"";
   }
-#ifdef WAVESHARE_AMOLED_206
-  body += ",\"capabilities\":{\"deviceSounds\":true}";
-#else
-  body += ",\"capabilities\":{\"deviceSounds\":false}";
-#endif
   if (!transferStatus.lastErrorCode.empty()) {
     body += ",\"lastError\":{\"code\":\"" +
             jsonEscape(transferStatus.lastErrorCode) + "\",\"message\":\"" +
@@ -637,6 +645,36 @@ static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
   pChar->notify();
   Serial.printf("BLE Device Transfer: status notified (%u bytes)\n",
                 (unsigned)response.size());
+}
+
+static void notifyDeviceCapabilities(NimBLECharacteristic *pChar) {
+  if (pChar == nullptr) {
+    pChar = mapTransferStatusCharacteristic;
+  }
+  if (pChar == nullptr) {
+    return;
+  }
+
+  uint8_t response[] = {
+      'C', 'A', 'P', 'S',
+      waveshare_board::speaker::capabilityFlags(
+          waveshare_board::speaker::isAvailable()),
+  };
+  pChar->setValue(response, sizeof(response));
+  pChar->notify();
+  Serial.printf("BLE Capabilities: notified flags=0x%02X\n", response[4]);
+}
+
+static bool handleDeviceCapabilitiesCommand(const std::string &value,
+                                            NimBLECharacteristic *pChar,
+                                            const char *authLabel) {
+  if (!hasPrefix(value, "CAPS")) {
+    return false;
+  }
+  if (requireAuthenticated(authLabel)) {
+    notifyDeviceCapabilities(pChar);
+  }
+  return true;
 }
 
 static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
@@ -1176,6 +1214,11 @@ public:
       return;
     }
 
+    if (handleDeviceCapabilitiesCommand(value, pChar,
+                                        "device capabilities")) {
+      return;
+    }
+
     if (hasPrefix(value, "DSTS")) {
       if (!requireAuthenticated("device transfer status")) {
         return;
@@ -1184,12 +1227,7 @@ public:
       return;
     }
 
-    if (hasPrefix(value, "SNDP")) {
-      if (!requireAuthenticated("sound playback")) {
-        return;
-      }
-      handleSoundPlayPayload((const uint8_t *)value.data() + 4,
-                             value.length() - 4, "fallback");
+    if (handleSoundPlayCommand(value, "sound playback", "fallback")) {
       return;
     }
 
@@ -1268,6 +1306,12 @@ public:
       return;
     }
 
+    if (handleDeviceCapabilitiesCommand(value,
+                                        mapTransferStatusCharacteristic,
+                                        "native device capabilities")) {
+      return;
+    }
+
     if (hasPrefix(value, "DSTS")) {
       if (!requireAuthenticated("native device transfer status")) {
         return;
@@ -1276,12 +1320,7 @@ public:
       return;
     }
 
-    if (hasPrefix(value, "SNDP")) {
-      if (!requireAuthenticated("native sound playback")) {
-        return;
-      }
-      handleSoundPlayPayload((const uint8_t *)value.data() + 4,
-                             value.length() - 4, "native");
+    if (handleSoundPlayCommand(value, "native sound playback", "native")) {
       return;
     }
 

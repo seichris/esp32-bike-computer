@@ -140,8 +140,17 @@ Playback requests are queued by the firmware and run outside the BLE callback.
 Unsupported IDs, invalid volumes, and sound commands received before
 authentication are rejected.
 
-The authenticated `DSTS` JSON reports `capabilities.deviceSounds`. The app only
-enables these controls when the connected firmware advertises this capability.
+Capability discovery uses a bounded authenticated frame on either command
+route so it fits every supported BLE MTU:
+
+```text
+iOS -> ESP32: "CAPS"
+ESP32 -> iOS: "CAPS" | Flags: UInt8
+```
+
+Flag bit `0` reports runtime device-sound availability after the speaker queue
+and task start successfully. The app retries discovery after each connection
+and only enables sound controls when this bit is set.
 
 ## OSM Map Blocks
 

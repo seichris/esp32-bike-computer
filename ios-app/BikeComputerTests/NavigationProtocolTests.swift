@@ -243,12 +243,14 @@ struct NavigationProtocolTests {
         testNavigationWriteQueue()
         testDeviceBLEProtocolConstants()
         testDeviceSoundProtocol()
+        testDeviceCapabilitiesProtocol()
         testDeviceScreenValidation()
         testHardwareLabelPreference()
         testBLEPairingAuthenticator()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsDeviceSoundFallback()
+        testBLEManagerSendsDeviceCapabilityFallback()
         testBLEManagerSendsMapTransferControlFrames()
         testBLEManagerSendsDeviceTransferControlFrames()
         testBLEManagerParsesMapTransferStatus()
@@ -945,6 +947,24 @@ struct NavigationProtocolTests {
         assertEqual(DeviceSound.squeezeHorn.playPacket(volumePercent: 101)[5], 100, "sound volume clamps above 100")
     }
 
+    static func testDeviceCapabilitiesProtocol() {
+        let manager = BLEManager()
+        let supported = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.deviceSoundsCapabilityMask])
+        assert(manager.handleDeviceCapabilitiesNotification(supported), "CAPS notification should be consumed")
+        assert(manager.supportsDeviceSounds, "CAPS bit enables device sounds")
+        assert(manager.hasReceivedDeviceCapabilities, "valid CAPS completes capability negotiation")
+
+        let unsupported = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) + Data([0])
+        assert(manager.handleDeviceCapabilitiesNotification(unsupported), "unsupported CAPS should be consumed")
+        assert(!manager.supportsDeviceSounds, "clear CAPS bit disables device sounds")
+        assert(manager.hasReceivedDeviceCapabilities, "unsupported CAPS still completes negotiation")
+
+        let malformed = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8)
+        assert(manager.handleDeviceCapabilitiesNotification(malformed), "malformed CAPS should be consumed")
+        assert(!manager.hasReceivedDeviceCapabilities, "malformed CAPS does not complete negotiation")
+    }
+
     static func testHardwareLabelPreference() {
         assertEqual(DeviceBLEProtocol.hardwareLabel(model: "BikeComputer-XIAO", hardware: "nRF52840"),
                     "BikeComputer-XIAO",
@@ -1052,6 +1072,22 @@ struct NavigationProtocolTests {
         assertEqual(sentPackets[0][5], 62, "fallback packet includes selected volume")
     }
 
+    static func testBLEManagerSendsDeviceCapabilityFallback() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        assert(manager.requestDeviceCapabilities(), "capability request should queue when BLE is ready")
+        assertEqual(sentPackets, [Data("CAPS".utf8)], "capability request uses a bounded fallback frame")
+    }
+
     static func testBLEManagerSendsMapTransferControlFrames() {
         let manager = BLEManager()
         manager.isConnected = true
@@ -1144,7 +1180,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"firmware","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"abc123","capabilities":{"deviceSounds":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"firmware","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"abc123","firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -1153,7 +1189,6 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceTransferBaseURL?.absoluteString, "http://192.168.4.1:8080", "status parser exposes base URL")
         assertEqual(manager.deviceTransferAccessPointSSID, "BikeComputer-Transfer", "status parser exposes SSID")
         assertEqual(manager.deviceTransferSessionToken, "abc123", "status parser exposes session token")
-        assert(manager.supportsDeviceSounds, "status parser exposes negotiated sound capability")
         assertEqual(manager.firmwareTarget, "WAVESHARE_AMOLED_206", "status parser exposes firmware target")
         assertEqual(manager.firmwareVersion, "0.2.2", "status parser exposes firmware version")
         assertEqual(manager.firmwareBuild, 86, "status parser exposes firmware build")
@@ -1162,12 +1197,8 @@ struct NavigationProtocolTests {
         assertEqual(manager.firmwareUpdateTotalBytes, 2048, "status parser exposes total bytes")
         assertEqual(manager.firmwareUpdateLastError, "previous: previous update failed", "status parser exposes firmware error")
 
-        let unsupportedJSON = """
-        {"configured":true,"enabled":false,"capabilities":{"deviceSounds":false}}
-        """
-        let unsupportedPacket = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(unsupportedJSON.utf8)
-        assert(manager.handleDeviceTransferStatusNotification(unsupportedPacket), "second DSTS notification should be consumed")
-        assert(!manager.supportsDeviceSounds, "a later unsupported status clears the sound capability")
+        let invalidPacket = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data("{".utf8)
+        assert(manager.handleDeviceTransferStatusNotification(invalidPacket), "invalid DSTS notification should be consumed")
     }
 
     static func testBLEManagerSendsBrightnessFallbackSetting() {
