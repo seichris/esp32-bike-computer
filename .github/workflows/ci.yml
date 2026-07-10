@@ -34,22 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run Swift helper tests
-        run: |
-          swiftc \
-            BikeComputer/BikeComputer/Models/AppModels.swift \
-            BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift \
-            BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
-            BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
-            BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
-            BikeComputer/BikeComputer/Managers/BLEManager.swift \
-            BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
-            BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
-            BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
-            BikeComputer/BikeComputer/Managers/OfflineMapManager.swift \
-            BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift \
-            BikeComputerTests/NavigationProtocolTests.swift \
-            -o /tmp/NavigationProtocolTests
-          /tmp/NavigationProtocolTests
+        run: ./scripts/run-navigation-tests.sh
         working-directory: ios-app
       - name: Build app
         run: |
