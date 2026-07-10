@@ -58,6 +58,11 @@ static const audio_codec_if_t *new_codec(void)
 int main(void)
 {
     memset(registers, 0, sizeof(registers));
+
+    failed_write_register = ES8311_SYSTEM_REG10;
+    assert(new_codec() == NULL);
+
+    failed_write_register = -1;
     const audio_codec_if_t *codec = new_codec();
     assert(codec != NULL);
 
@@ -67,6 +72,11 @@ int main(void)
         .sample_rate = 16000,
         .mclk_multiple = 256,
     };
+
+    failed_write_register = ES8311_CLK_MANAGER_REG05;
+    assert(codec->set_fs(codec, &format) != ESP_CODEC_DEV_OK);
+
+    failed_write_register = -1;
     assert(codec->set_fs(codec, &format) == ESP_CODEC_DEV_OK);
     assert(paired_8311.dac == NULL);
 

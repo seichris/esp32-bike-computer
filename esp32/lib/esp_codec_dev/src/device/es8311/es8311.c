@@ -535,7 +535,7 @@ static int es8311_config_sample(audio_codec_es8311_t *codec, int sample_rate)
     regv |= coeff_div[coeff].lrck_l << 0;
     ret |= es8311_write_reg(codec, ES8311_CLK_MANAGER_REG08, regv);
 
-    ret = es8311_read_reg(codec, ES8311_CLK_MANAGER_REG06, &regv);
+    ret |= es8311_read_reg(codec, ES8311_CLK_MANAGER_REG06, &regv);
     regv &= 0xE0;
     if (coeff_div[coeff].bclk_div < 19) {
         regv |= (coeff_div[coeff].bclk_div - 1) << 0;
@@ -584,7 +584,7 @@ static int es8311_open(const audio_codec_if_t *h, void *cfg, int cfg_size)
     ret |= es8311_write_reg(codec, ES8311_SYSTEM_REG11, 0x7F);
     ret |= es8311_write_reg(codec, ES8311_RESET_REG00, 0x80);
 
-    ret = es8311_read_reg(codec, ES8311_RESET_REG00, &regv);
+    ret |= es8311_read_reg(codec, ES8311_RESET_REG00, &regv);
     if (codec_cfg->master_mode) {
         ESP_LOGI(TAG, "Work in Master mode");
         regv |= 0x40;
