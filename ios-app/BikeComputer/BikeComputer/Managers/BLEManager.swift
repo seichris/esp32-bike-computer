@@ -38,6 +38,7 @@ enum DeviceBLEProtocol {
     static let mapTransferStatusPrefix = "MSTS"
     static let deviceTransferControlPrefix = "DTRN"
     static let deviceTransferStatusPrefix = "DSTS"
+    static let soundPlayPrefix = "SNDP"
 
     static let brightnessSettingID: UInt8 = 12
     static let enabledScreensSettingID: UInt8 = 13
@@ -64,6 +65,41 @@ enum DeviceBLEProtocol {
             return hardware
         }
         return ""
+    }
+}
+
+enum DeviceSound: UInt8, CaseIterable, Identifiable {
+    case bellDing = 1
+    case plasticBicycleHorn = 2
+    case rotatingBicycleBell = 3
+    case squeezeHorn = 5
+
+    var id: UInt8 { rawValue }
+
+    var title: String {
+        switch self {
+        case .bellDing:
+            return "Bell Ding"
+        case .plasticBicycleHorn:
+            return "Bicycle Horn"
+        case .rotatingBicycleBell:
+            return "Rotating Bicycle Bell"
+        case .squeezeHorn:
+            return "Squeeze Horn"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .bellDing:
+            return "bell.fill"
+        case .plasticBicycleHorn:
+            return "speaker.wave.2.fill"
+        case .rotatingBicycleBell:
+            return "bell.circle.fill"
+        case .squeezeHorn:
+            return "speaker.wave.3.fill"
+        }
     }
 }
 
@@ -751,6 +787,17 @@ class BLEManager: NSObject, ObservableObject {
         )
         sendSetting(id: DeviceBLEProtocol.defaultScreenSettingID,
                     value: Int32(defaultDeviceScreen.rawValue))
+    }
+
+    @discardableResult
+    func playDeviceSound(_ sound: DeviceSound) -> Bool {
+        var packet = Data(DeviceBLEProtocol.soundPlayPrefix.utf8)
+        packet.append(sound.rawValue)
+
+        if sendNativeMapTransferPacket(packet, label: "sound \(sound.rawValue)") {
+            return true
+        }
+        return sendFallbackMapPacket(packet, label: "sound \(sound.rawValue)")
     }
 
     @discardableResult

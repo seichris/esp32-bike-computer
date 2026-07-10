@@ -15,6 +15,7 @@
 #include "../firmware_update/firmware_update_http.hpp"
 #include "../map_transfer_http/map_transfer_http.hpp"
 #include "../route_overlay/route_overlay.hpp"
+#include "../speaker/speaker.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "../waveshare_board/display.hpp"
 #include "../waveshare_board/pcf85063.hpp"
@@ -461,6 +462,29 @@ static std::string trimAscii(const std::string &value) {
     end--;
   }
   return value.substr(begin, end - begin);
+}
+
+static void handleSoundPlayPayload(const uint8_t *data, size_t len,
+                                   const char *source) {
+  if (data == nullptr || len != 1) {
+    Serial.printf("BLE Sound: rejected %s payload, expected one sound ID byte\n",
+                  source == nullptr ? "unknown" : source);
+    return;
+  }
+
+  auto sound = static_cast<waveshare_board::speaker::Sound>(data[0]);
+  if (!waveshare_board::speaker::isSupported(sound)) {
+    Serial.printf("BLE Sound: unsupported sound ID %u\n", data[0]);
+    return;
+  }
+
+  if (!waveshare_board::speaker::requestPlay(sound)) {
+    Serial.printf("BLE Sound: failed to queue sound ID %u\n", data[0]);
+    return;
+  }
+
+  Serial.printf("BLE Sound: queued sound ID %u from %s\n", data[0],
+                source == nullptr ? "unknown" : source);
 }
 
 static std::string jsonEscape(const std::string &value) {
@@ -1151,6 +1175,15 @@ public:
       return;
     }
 
+    if (hasPrefix(value, "SNDP")) {
+      if (!requireAuthenticated("sound playback")) {
+        return;
+      }
+      handleSoundPlayPayload((const uint8_t *)value.data() + 4,
+                             value.length() - 4, "fallback");
+      return;
+    }
+
     if (!requireAuthenticated("navigation instruction")) {
       return;
     }
@@ -1231,6 +1264,15 @@ public:
         return;
       }
       notifyGenericTransferStatus(mapTransferStatusCharacteristic);
+      return;
+    }
+
+    if (hasPrefix(value, "SNDP")) {
+      if (!requireAuthenticated("native sound playback")) {
+        return;
+      }
+      handleSoundPlayPayload((const uint8_t *)value.data() + 4,
+                             value.length() - 4, "native");
       return;
     }
 

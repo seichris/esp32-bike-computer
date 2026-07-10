@@ -44,6 +44,7 @@ struct SettingsView: View {
 
                 MainFirmwareUpdateSection(manager: firmwareUpdateManager)
                 DeviceScreensSettingsSection()
+                DeviceSoundsSettingsSection()
                 SavedMapsSettingsSection(manager: offlineMapManager)
                 if offlineMapManager.isBusy || offlineMapManager.errorMessage != nil {
                     DownloadingMapsSettingsSection(manager: offlineMapManager)
@@ -75,6 +76,23 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
         }
+    }
+}
+
+private struct DeviceSoundsSettingsSection: View {
+    @EnvironmentObject private var bleManager: BLEManager
+
+    var body: some View {
+        Section(header: Text("Device Sounds")) {
+            ForEach(DeviceSound.allCases) { sound in
+                Button {
+                    bleManager.playDeviceSound(sound)
+                } label: {
+                    Label(sound.title, systemImage: sound.systemImage)
+                }
+            }
+        }
+        .disabled(!bleManager.isNavigationReady)
     }
 }
 

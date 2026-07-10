@@ -75,6 +75,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "i2c_bus.hpp"
 #include "pcf85063.hpp"
 #include "qmi8658.hpp"
+#include "speaker.hpp"
 #include "waveshare_board.hpp"
 #endif
 
@@ -534,6 +535,10 @@ void setup() {
 
   log_i("Loading Splash Screen...");
   splashScreen();
+
+#ifdef WAVESHARE_AMOLED_206
+  waveshare_board::speaker::begin();
+#endif
 
   // Initialize BLE early so device is discoverable while showing waiting screen
   bleNavServer.init("BikeComputer");
