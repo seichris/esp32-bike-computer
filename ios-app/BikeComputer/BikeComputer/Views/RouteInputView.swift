@@ -57,7 +57,7 @@ struct RouteSearchPanel: View {
     let currentAddress: String
     let currentLocation: CLLocation?
     let maxExpandedHeight: CGFloat
-    var onStartNavigation: (RouteEndpoint, RouteEndpoint, MKDirectionsTransportType, Bool) -> Void
+    var onStartNavigation: (RouteEndpoint, RouteEndpoint, MKDirectionsTransportType) -> Void
 
     @StateObject private var destinationCompleter = AddressSearchCompleter()
     @StateObject private var sourceCompleter = AddressSearchCompleter()
@@ -68,7 +68,6 @@ struct RouteSearchPanel: View {
     @State private var isSelectingFromSuggestion = false
     @State private var isEditingSource = false
     @State private var hasSelectedSource = false
-    @State private var isTestMode = false
     @State private var selectedTransportType: MKDirectionsTransportType = RouteTransportTypes.cycling
     @State private var recentDestinationSearches: [String] = []
 
@@ -130,7 +129,6 @@ struct RouteSearchPanel: View {
             if hasSelectedDestination {
                 sourcePicker
                 transportControls
-                testModeToggle
             }
 
             searchResults
@@ -272,14 +270,6 @@ struct RouteSearchPanel: View {
         }
     }
 
-    private var testModeToggle: some View {
-        Toggle(isOn: $isTestMode) {
-            Label("Test Mode", systemImage: "testtube.2")
-                .foregroundColor(.primary)
-        }
-        .tint(.orange)
-    }
-
     @ViewBuilder
     private var searchResults: some View {
         if isEditingSource {
@@ -359,14 +349,14 @@ struct RouteSearchPanel: View {
                 sourceAddress: sourceAddress
             )
             saveRecentDestinationSearch(destinationAddress)
-            onStartNavigation(sourceEndpoint, .query(destinationAddress), selectedTransportType, isTestMode)
+            onStartNavigation(sourceEndpoint, .query(destinationAddress), selectedTransportType)
         }) {
-            Text(isTestMode ? "Go (Test)" : "Go")
+            Text("Go")
                 .font(.headline)
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
                 .padding()
-                .background(isTestMode ? Color.orange : Color.blue, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .background(Color.blue, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -481,7 +471,7 @@ struct RouteInputView: View {
     let currentAddress: String
     let currentLocation: CLLocation?  // User's exact GPS location for region-biased search
     
-    var onStartNavigation: (RouteEndpoint, RouteEndpoint, MKDirectionsTransportType, Bool) -> Void
+    var onStartNavigation: (RouteEndpoint, RouteEndpoint, MKDirectionsTransportType) -> Void
     
     @StateObject private var destinationCompleter = AddressSearchCompleter()
     @StateObject private var sourceCompleter = AddressSearchCompleter()
@@ -494,7 +484,6 @@ struct RouteInputView: View {
     @State private var isEditingSource = false
     @State private var hasSelectedSource = false
     
-    @State private var isTestMode = false
     @State private var selectedTransportType: MKDirectionsTransportType = RouteTransportTypes.cycling
     @State private var recentDestinationSearches: [String] = []
 
@@ -631,18 +620,6 @@ struct RouteInputView: View {
                     .padding(.horizontal)
                     .transition(.move(edge: .top).combined(with: .opacity))
                     
-                    // Test Mode Toggle
-                    Toggle(isOn: $isTestMode) {
-                        HStack {
-                            Image(systemName: "testtube.2")
-                            .foregroundColor(.orange)
-                            Text("Test Mode")
-                            .foregroundColor(.primary)
-                        }
-                    }
-                    .padding(.horizontal)
-                    .padding(.top, 8)
-                    .tint(.orange)
                 }
                 
                 // Suggestions List
@@ -687,15 +664,15 @@ struct RouteInputView: View {
                             sourceAddress: sourceAddress
                         )
                         saveRecentDestinationSearch(destinationAddress)
-                        onStartNavigation(sourceEndpoint, .query(destinationAddress), selectedTransportType, isTestMode)
+                        onStartNavigation(sourceEndpoint, .query(destinationAddress), selectedTransportType)
                         dismiss()
                     }) {
-                        Text(isTestMode ? "Go (Test)" : "Go")
+                        Text("Go")
                             .font(.headline)
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
                             .padding()
-                            .background(isTestMode ? Color.orange : Color.blue)
+                            .background(Color.blue)
                             .cornerRadius(12)
                     }
                     .padding()
