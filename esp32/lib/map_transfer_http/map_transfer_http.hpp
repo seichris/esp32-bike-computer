@@ -32,6 +32,7 @@ private:
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
   MapActivationState activationState_;
   std::string pendingMapRoot_;
+  bool recoveryBlocked_ = false;
 
   bool handleRequest(const device_transfer::HttpRequest &request,
                      WiFiClient &client) override;

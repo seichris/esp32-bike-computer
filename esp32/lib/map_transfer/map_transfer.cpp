@@ -803,6 +803,12 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
   return {true, "recovered_rollback", "rolled back interrupted map activation"};
 }
 
+bool MapTransferInstaller::hasInterruptedActivation() const {
+  const std::string transactionPath =
+      joinPath(storageRoot_, kActivationTransactionFile);
+  return fileExists(transactionPath) || fileExists(transactionPath + ".bak");
+}
+
 InstallStatus
 MapTransferInstaller::readActiveMap(ActiveMapSelection &selection) const {
   selection = ActiveMapSelection();

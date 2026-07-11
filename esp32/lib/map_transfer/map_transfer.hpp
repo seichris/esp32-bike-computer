@@ -104,6 +104,7 @@ public:
   InstallStatus activateStagedMap(const std::string &sessionId,
                                   const MapManifest &manifest) const;
   InstallStatus recoverInterruptedActivation() const;
+  bool hasInterruptedActivation() const;
   InstallStatus readActiveMap(ActiveMapSelection &selection) const;
   InstallStatus readActiveMapId(std::string &mapId) const;
   bool pruneStagingSessions(const std::string &keepSessionId) const;

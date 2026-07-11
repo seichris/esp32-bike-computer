@@ -239,11 +239,34 @@ bool MapTransferHttpServer::handleHead(const std::string &path,
     sendHead(client, 409);
     return true;
   }
-  InstallStatus recovery = installer_.recoverInterruptedActivation();
-  if (!recovery.ok) {
+  if (installer_.hasInterruptedActivation()) {
+    lockState();
+    const bool recoveryBlocked = recoveryBlocked_;
+    unlockState();
+    if (recoveryBlocked) {
+      sendHead(client, 500);
+      return true;
+    }
+    // Complete the zero-length response before the exceptional recovery hash.
+    // The client uses this explicit 503 to distinguish SD recovery from an
+    // ordinary Wi-Fi timeout while this single-threaded server is occupied.
     sendHead(client, 503);
+    InstallStatus recovery = installer_.recoverInterruptedActivation();
+    lockState();
+    recoveryBlocked_ = !recovery.ok;
+    unlockState();
+    if (!recovery.ok)
+      setLastError(recovery.code, recovery.message);
     return true;
   }
+  InstallStatus recovery = installer_.recoverInterruptedActivation();
+  if (!recovery.ok) {
+    sendHead(client, 500);
+    return true;
+  }
+  lockState();
+  recoveryBlocked_ = false;
+  unlockState();
 
   const std::string stagedPath =
       joinPath(installer_.stagingRoot(sessionId), relativePath);

@@ -809,6 +809,26 @@ struct NavigationProtocolTests {
                "resume retries the file whose HEAD check returned missing")
         assertEqual(uploaded?.value, secondBlock,
                     "resume PUT sends the exact archive entry bytes")
+
+        var blindTimeoutAttempts = 0
+        FirmwareRequestCaptureProtocol.handler = { _, _ in
+            blindTimeoutAttempts += 1
+            throw URLError(.timedOut)
+        }
+        runMainActorAsyncTest {
+            do {
+                try await client.upload(
+                    archive: archive,
+                    sessionId: "session-1"
+                ) { _, _, _, _ in }
+                assert(false, "an ordinary Wi-Fi outage should not enter the long recovery wait")
+            } catch let error as URLError {
+                assertEqual(error.code, .timedOut,
+                            "blind manifest timeout surfaces the transport error")
+            }
+        }
+        assertEqual(blindTimeoutAttempts, 3,
+                    "blind recovery retries are bounded without an explicit device signal")
     }
 
     @MainActor

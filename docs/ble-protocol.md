@@ -309,6 +309,10 @@ bulk upload:
 An accepted activation returns HTTP 202 with the boot-local activation
 `sequence`. The app matches that acknowledgement to later HTTP/BLE terminal
 status so a cached same-session result cannot be mistaken for the new attempt.
+If a manifest HEAD encounters an interrupted activation journal, firmware first
+returns 503 and then performs exceptional recovery. The app permits a bounded
+long wait only after that explicit recovery/busy response; ordinary transport
+timeouts retain a short retry limit.
 
 The HTTP service is configured by firmware at boot but remains disabled until
 BLE transfer control enables it for an authenticated app session.

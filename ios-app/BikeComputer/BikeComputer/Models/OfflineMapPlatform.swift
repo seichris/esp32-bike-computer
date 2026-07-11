@@ -457,6 +457,8 @@ struct MapTransferDeviceClient {
     private nonisolated func stagedByteCount(sessionId: String, path: String) async throws -> Int? {
         let toleratesRecovery = path == "manifest.json"
         let recoveryDeadline = Date().addingTimeInterval(10 * 60)
+        var observedRecoveryResponse = false
+        var blindTransportRetries = 0
         while true {
             var request = URLRequest(url: Self.uploadURL(
                 baseURL: baseURL,
@@ -478,6 +480,7 @@ struct MapTransferDeviceClient {
                 if toleratesRecovery,
                    (http.statusCode == 409 || http.statusCode == 503),
                    Date() < recoveryDeadline {
+                    observedRecoveryResponse = true
                     try await Task.sleep(nanoseconds: recoveryRetryNanoseconds)
                     continue
                 }
@@ -493,8 +496,12 @@ struct MapTransferDeviceClient {
                 let urlError = error as? URLError
                 let isAmbiguousRecoveryWait = urlError?.code == .timedOut ||
                     urlError?.code == .networkConnectionLost
+                if isAmbiguousRecoveryWait && !observedRecoveryResponse {
+                    blindTransportRetries += 1
+                }
                 guard toleratesRecovery,
                       isAmbiguousRecoveryWait,
+                      (observedRecoveryResponse || blindTransportRetries <= 2),
                       Date() < recoveryDeadline else {
                     throw error
                 }
