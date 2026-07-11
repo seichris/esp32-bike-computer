@@ -12,7 +12,7 @@ namespace gui_layout {
 #if defined(WAVESHARE_AMOLED_206)
 constexpr uint16_t MAP_NONFULLSCREEN_RESERVED_HEIGHT = 72;
 constexpr uint8_t MAP_ANCHOR_X_PERCENT = 50;
-constexpr uint8_t MAP_ANCHOR_Y_PERCENT = 58;
+constexpr uint8_t MAP_ANCHOR_Y_PERCENT = 50;
 constexpr uint8_t MAP_TOOLBAR_OFFSET = 92;
 constexpr uint8_t MAP_TOOLBAR_SPACE = 54;
 constexpr uint8_t MAP_TOOLBAR_INSET = 12;
@@ -51,6 +51,23 @@ inline int16_t mapAnchorX(uint16_t width) {
 
 inline int16_t mapAnchorY(uint16_t height) {
   return (height * MAP_ANCHOR_Y_PERCENT) / 100;
+}
+
+inline int16_t centeredViewportOrigin(uint16_t containerExtent,
+                                      uint16_t viewportExtent) {
+  return (static_cast<int32_t>(containerExtent) - viewportExtent) / 2;
+}
+
+inline int16_t mapScreenAnchorX(uint16_t containerWidth,
+                                uint16_t mapWidth) {
+  return centeredViewportOrigin(containerWidth, mapWidth) +
+         mapAnchorX(mapWidth);
+}
+
+inline int16_t mapScreenAnchorY(uint16_t containerHeight,
+                                uint16_t mapHeight) {
+  return centeredViewportOrigin(containerHeight, mapHeight) +
+         mapAnchorY(mapHeight);
 }
 
 inline int16_t mapDragDelta(int16_t delta) {

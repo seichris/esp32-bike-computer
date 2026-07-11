@@ -363,10 +363,10 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,
     }
 
     // Draw thick line segment
-    int16_t routeLineWidth =
-        std::min<int16_t>(std::max<int16_t>(
-                              1, (int16_t)mapRenderSettings.routeLineWidth),
-                          48);
+    int16_t routeLineWidth = std::min<int16_t>(
+        std::max<int16_t>(
+            1, (int16_t)currentMapStyleSettings().routeLineWidth),
+        48);
     drawThickLine(buf, bufW, bufH, stride, x1, y1, x2, y2, ROUTE_COLOR,
                   routeLineWidth);
     drawnCount++;

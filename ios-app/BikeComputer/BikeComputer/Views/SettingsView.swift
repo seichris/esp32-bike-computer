@@ -465,105 +465,17 @@ private struct UICustomizationSettingsView: View {
 
     var body: some View {
         Form {
-            Section(header: Text("Navigation Overlays"), footer: Text("Show or hide live navigation layers drawn above the map.")) {
-                Toggle("Route Line", isOn: $bleManager.showRouteOverlay)
-                    .onChange(of: bleManager.showRouteOverlay) { _ in bleManager.sendVisibilityMask() }
-                Toggle("Current Position", isOn: $bleManager.showCurrentPosition)
-                    .onChange(of: bleManager.showCurrentPosition) { _ in bleManager.sendVisibilityMask() }
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
-            Section(header: Text("Roads & Paths"), footer: Text("Control which street and trail classes appear on the device map.")) {
-                Toggle("Major Roads", isOn: $bleManager.showMajorRoads)
-                    .onChange(of: bleManager.showMajorRoads) { _ in bleManager.sendVisibilityMask() }
-                Toggle("Local Streets", isOn: $bleManager.showLocalStreets)
-                    .onChange(of: bleManager.showLocalStreets) { _ in bleManager.sendVisibilityMask() }
-                Toggle("Paths & Tracks", isOn: $bleManager.showPaths)
-                    .onChange(of: bleManager.showPaths) { _ in bleManager.sendVisibilityMask() }
-                Toggle("Railways", isOn: $bleManager.showRailways)
-                    .onChange(of: bleManager.showRailways) { _ in bleManager.sendVisibilityMask() }
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
-            Section(header: Text("Places & Terrain"), footer: Text("Control background map areas and lower-priority context.")) {
-                Toggle("Buildings", isOn: $bleManager.showBuildings)
-                    .onChange(of: bleManager.showBuildings) { _ in bleManager.sendVisibilityMask() }
-                Toggle("Parks & Nature", isOn: $bleManager.showGreenSpace)
-                    .onChange(of: bleManager.showGreenSpace) { _ in bleManager.sendVisibilityMask() }
-                Toggle("Water", isOn: $bleManager.showWater)
-                    .onChange(of: bleManager.showWater) { _ in bleManager.sendVisibilityMask() }
-                Toggle("Other Areas", isOn: $bleManager.showOtherAreas)
-                    .onChange(of: bleManager.showOtherAreas) { _ in bleManager.sendVisibilityMask() }
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
-            Section(header: Text("Map Rendering"), footer: Text("Feature toggles control map categories; polygon size filters tiny filled areas.")) {
-                VStack(alignment: .leading) {
-                    HStack {
-                        Text("Min Polygon Size")
-                        Spacer()
-                        Text("\(Int(bleManager.minPolygonSize)) px²")
-                            .foregroundColor(.secondary)
-                    }
-                    Slider(value: $bleManager.minPolygonSize, in: 0...50, step: 5)
-                        .onChange(of: bleManager.minPolygonSize) { newValue in
-                            bleManager.sendSetting(id: 1, value: Int32(newValue))
-                        }
-                }
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
-            Section(header: Text("Detail Level"), footer: Text("Controls small-area density without overriding feature visibility.")) {
-                Picker("Detail", selection: $bleManager.detailLevel) {
-                    Text("Low").tag(0)
-                    Text("Medium").tag(1)
-                    Text("High").tag(2)
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: bleManager.detailLevel) { newValue in
-                    bleManager.sendSetting(id: 2, value: Int32(newValue))
-                }
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
-            Section(header: Text("Line Thickness")) {
-                VStack(alignment: .leading) {
-                    HStack {
-                        Text("Route Line Width")
-                        Spacer()
-                        Text("\(Int(bleManager.routeLineWidth)) px")
-                            .foregroundColor(.secondary)
-                    }
-                    Slider(value: $bleManager.routeLineWidth, in: 2...48, step: 1)
-                        .onChange(of: bleManager.routeLineWidth) { newValue in
-                            bleManager.sendSetting(id: 3, value: Int32(newValue))
-                        }
+            Section(header: Text("Screen Styles"), footer: Text("Configure map appearance independently for each device screen.")) {
+                NavigationLink {
+                    MapStyleSettingsView(screen: .map)
+                } label: {
+                    Label("Map", systemImage: "map")
                 }
 
-                VStack(alignment: .leading) {
-                    HStack {
-                        Text("Street Width Boost")
-                        Spacer()
-                        Text("+\(Int(bleManager.streetLineWidthBoost)) px")
-                            .foregroundColor(.secondary)
-                    }
-                    Slider(value: $bleManager.streetLineWidthBoost, in: 0...24, step: 1)
-                        .onChange(of: bleManager.streetLineWidthBoost) { newValue in
-                            bleManager.sendSetting(id: 9, value: Int32(newValue))
-                        }
-                }
-
-                VStack(alignment: .leading) {
-                    HStack {
-                        Text("Position Marker Size")
-                        Spacer()
-                        Text("\(Int(bleManager.positionMarkerScale))x")
-                            .foregroundColor(.secondary)
-                    }
-                    Slider(value: $bleManager.positionMarkerScale, in: 1...5, step: 1)
-                        .onChange(of: bleManager.positionMarkerScale) { newValue in
-                            bleManager.sendSetting(id: 10, value: Int32(newValue))
-                        }
+                NavigationLink {
+                    MapStyleSettingsView(screen: .mapPlusNavigation)
+                } label: {
+                    Label("Map + Navigation", systemImage: "location.north.line")
                 }
             }
             .disabled(!bleManager.supportsDeviceSettings)
@@ -579,7 +491,7 @@ private struct UICustomizationSettingsView: View {
             }
             .disabled(!bleManager.supportsDeviceSettings)
 
-            Section(header: Text("Map Mode")) {
+            Section(header: Text("Map Mode"), footer: Text("Applies only to the Map screen. Map + Navigation automatically uses course-up while navigating.")) {
                 Picker("Rotation", selection: $bleManager.mapRotationMode) {
                     Text("North Up").tag(0)
                     Text("Course Up").tag(1)
@@ -591,24 +503,234 @@ private struct UICustomizationSettingsView: View {
             }
             .disabled(!bleManager.supportsDeviceSettings)
 
-            Section(header: Text("Zoom Level"), footer: Text("0 = Super Zoom, 5 = Farthest")) {
-                Picker("Zoom", selection: $bleManager.zoomLevel) {
-                    Text("0").tag(0)
-                    Text("1").tag(1)
-                    Text("2").tag(2)
-                    Text("3").tag(3)
-                    Text("4").tag(4)
-                    Text("5").tag(5)
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: bleManager.zoomLevel) { newValue in
-                    bleManager.sendSetting(id: 7, value: Int32(newValue))
-                }
+            Section(header: Text("Navigation Overlays"), footer: Text("Show or hide live navigation layers drawn above both map screens.")) {
+                Toggle("Route Line", isOn: $bleManager.showRouteOverlay)
+                    .onChange(of: bleManager.showRouteOverlay) { _ in bleManager.sendVisibilityMask() }
+                Toggle("Current Position", isOn: $bleManager.showCurrentPosition)
+                    .onChange(of: bleManager.showCurrentPosition) { _ in bleManager.sendVisibilityMask() }
             }
             .disabled(!bleManager.supportsDeviceSettings)
         }
         .navigationTitle("UI Customization")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private enum MapStyleScreen {
+    case map
+    case mapPlusNavigation
+
+    var title: String {
+        switch self {
+        case .map: return "Map"
+        case .mapPlusNavigation: return "Map + Navigation"
+        }
+    }
+
+    var deviceScreen: DeviceScreen {
+        switch self {
+        case .map: return .map
+        case .mapPlusNavigation: return .mapPlusNavigation
+        }
+    }
+
+    func settingID(map: UInt8, mapPlusNavigation: UInt8) -> UInt8 {
+        self == .map ? map : mapPlusNavigation
+    }
+}
+
+private struct MapStyleSettingsView: View {
+    @EnvironmentObject private var bleManager: BLEManager
+    let screen: MapStyleScreen
+
+    private func binding<Value>(
+        map: ReferenceWritableKeyPath<BLEManager, Value>,
+        mapPlusNavigation: ReferenceWritableKeyPath<BLEManager, Value>
+    ) -> Binding<Value> {
+        let keyPath = screen == .map ? map : mapPlusNavigation
+        return Binding(
+            get: { bleManager[keyPath: keyPath] },
+            set: { bleManager[keyPath: keyPath] = $0 }
+        )
+    }
+
+    private var minPolygonSize: Binding<Double> {
+        binding(map: \.minPolygonSize, mapPlusNavigation: \.mapPlusNavigationMinPolygonSize)
+    }
+
+    private var detailLevel: Binding<Int> {
+        binding(map: \.detailLevel, mapPlusNavigation: \.mapPlusNavigationDetailLevel)
+    }
+
+    private var routeLineWidth: Binding<Double> {
+        binding(map: \.routeLineWidth, mapPlusNavigation: \.mapPlusNavigationRouteLineWidth)
+    }
+
+    private var streetLineWidthBoost: Binding<Double> {
+        binding(map: \.streetLineWidthBoost, mapPlusNavigation: \.mapPlusNavigationStreetLineWidthBoost)
+    }
+
+    private var positionMarkerScale: Binding<Double> {
+        binding(map: \.positionMarkerScale, mapPlusNavigation: \.mapPlusNavigationPositionMarkerScale)
+    }
+
+    private var zoomLevel: Binding<Int> {
+        binding(map: \.zoomLevel, mapPlusNavigation: \.mapPlusNavigationZoomLevel)
+    }
+
+    private var showMajorRoads: Binding<Bool> {
+        binding(map: \.showMajorRoads, mapPlusNavigation: \.mapPlusNavigationShowMajorRoads)
+    }
+
+    private var showLocalStreets: Binding<Bool> {
+        binding(map: \.showLocalStreets, mapPlusNavigation: \.mapPlusNavigationShowLocalStreets)
+    }
+
+    private var showPaths: Binding<Bool> {
+        binding(map: \.showPaths, mapPlusNavigation: \.mapPlusNavigationShowPaths)
+    }
+
+    private var showTracks: Binding<Bool> {
+        binding(map: \.showTracks, mapPlusNavigation: \.mapPlusNavigationShowTracks)
+    }
+
+    private var showServiceRoads: Binding<Bool> {
+        binding(map: \.showServiceRoads, mapPlusNavigation: \.mapPlusNavigationShowServiceRoads)
+    }
+
+    private var showRailways: Binding<Bool> {
+        binding(map: \.showRailways, mapPlusNavigation: \.mapPlusNavigationShowRailways)
+    }
+
+    private var showBuildings: Binding<Bool> {
+        binding(map: \.showBuildings, mapPlusNavigation: \.mapPlusNavigationShowBuildings)
+    }
+
+    private var showGreenSpace: Binding<Bool> {
+        binding(map: \.showGreenSpace, mapPlusNavigation: \.mapPlusNavigationShowGreenSpace)
+    }
+
+    private var showWater: Binding<Bool> {
+        binding(map: \.showWater, mapPlusNavigation: \.mapPlusNavigationShowWater)
+    }
+
+    private var showOtherAreas: Binding<Bool> {
+        binding(map: \.showOtherAreas, mapPlusNavigation: \.mapPlusNavigationShowOtherAreas)
+    }
+
+    var body: some View {
+        Form {
+            Section(header: Text("Roads & Paths"), footer: Text("Service roads commonly include driveways and internal compound roads; exact results depend on the OpenStreetMap tags in the downloaded map.")) {
+                Toggle("Major Roads", isOn: showMajorRoads)
+                    .onChange(of: showMajorRoads.wrappedValue) { _ in sendVisibilityMask() }
+                Toggle("Residential & Local Roads", isOn: showLocalStreets)
+                    .onChange(of: showLocalStreets.wrappedValue) { _ in sendVisibilityMask() }
+                Toggle("Service Roads", isOn: showServiceRoads)
+                    .onChange(of: showServiceRoads.wrappedValue) { _ in sendVisibilityMask() }
+                Toggle("Paths & Footways", isOn: showPaths)
+                    .onChange(of: showPaths.wrappedValue) { _ in sendVisibilityMask() }
+                Toggle("Tracks", isOn: showTracks)
+                    .onChange(of: showTracks.wrappedValue) { _ in sendVisibilityMask() }
+                Toggle("Railways", isOn: showRailways)
+                    .onChange(of: showRailways.wrappedValue) { _ in sendVisibilityMask() }
+            }
+
+            Section(header: Text("Places & Terrain"), footer: Text("Control background map areas and lower-priority context on this screen.")) {
+                Toggle("Buildings", isOn: showBuildings)
+                    .onChange(of: showBuildings.wrappedValue) { _ in sendVisibilityMask() }
+                Toggle("Parks & Nature", isOn: showGreenSpace)
+                    .onChange(of: showGreenSpace.wrappedValue) { _ in sendVisibilityMask() }
+                Toggle("Water", isOn: showWater)
+                    .onChange(of: showWater.wrappedValue) { _ in sendVisibilityMask() }
+                Toggle("Other Areas", isOn: showOtherAreas)
+                    .onChange(of: showOtherAreas.wrappedValue) { _ in sendVisibilityMask() }
+            }
+
+            Section(header: Text("Map Rendering"), footer: Text("Feature toggles control map categories; polygon size filters tiny filled areas.")) {
+                VStack(alignment: .leading) {
+                    HStack {
+                        Text("Min Polygon Size")
+                        Spacer()
+                        Text("\(Int(minPolygonSize.wrappedValue)) px²")
+                            .foregroundColor(.secondary)
+                    }
+                    Slider(value: minPolygonSize, in: 0...50, step: 5)
+                        .onChange(of: minPolygonSize.wrappedValue) { newValue in
+                            sendSetting(mapID: 1, mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationMinPolygonSizeSettingID, value: Int32(newValue))
+                        }
+                }
+            }
+
+            Section(header: Text("Detail Level"), footer: Text("Controls small-area density without overriding feature visibility.")) {
+                Picker("Detail", selection: detailLevel) {
+                    Text("Low").tag(0)
+                    Text("Medium").tag(1)
+                    Text("High").tag(2)
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: detailLevel.wrappedValue) { newValue in
+                    sendSetting(mapID: 2, mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationDetailLevelSettingID, value: Int32(newValue))
+                }
+            }
+
+            Section(header: Text("Line Thickness")) {
+                settingSlider(title: "Route Line Width", value: routeLineWidth, range: 2...48, prefix: "", suffix: " px") { newValue in
+                    sendSetting(mapID: 3, mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationRouteLineWidthSettingID, value: Int32(newValue))
+                }
+                settingSlider(title: "Street Width Boost", value: streetLineWidthBoost, range: 0...24, prefix: "+", suffix: " px") { newValue in
+                    sendSetting(mapID: 9, mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationStreetLineWidthBoostSettingID, value: Int32(newValue))
+                }
+                settingSlider(title: "Position Marker Size", value: positionMarkerScale, range: 1...5, prefix: "", suffix: "x") { newValue in
+                    sendSetting(mapID: 10, mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID, value: Int32(newValue))
+                }
+            }
+
+            Section(header: Text("Zoom Level"), footer: Text("0 = Super Zoom, 5 = Farthest")) {
+                Picker("Zoom", selection: zoomLevel) {
+                    ForEach(0...5, id: \.self) { level in
+                        Text("\(level)").tag(level)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: zoomLevel.wrappedValue) { newValue in
+                    sendSetting(mapID: 7, mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationZoomLevelSettingID, value: Int32(newValue))
+                }
+            }
+        }
+        .disabled(!bleManager.supportsDeviceSettings)
+        .navigationTitle(screen.title)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func sendVisibilityMask() {
+        bleManager.sendVisibilityMask(for: screen.deviceScreen)
+    }
+
+    private func sendSetting(mapID: UInt8, mapPlusNavigationID: UInt8, value: Int32) {
+        bleManager.sendSetting(
+            id: screen.settingID(map: mapID, mapPlusNavigation: mapPlusNavigationID),
+            value: value
+        )
+    }
+
+    private func settingSlider(
+        title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        prefix: String,
+        suffix: String,
+        onChange: @escaping (Double) -> Void
+    ) -> some View {
+        VStack(alignment: .leading) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text("\(prefix)\(Int(value.wrappedValue))\(suffix)")
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: value, in: range, step: 1)
+                .onChange(of: value.wrappedValue, perform: onChange)
+        }
     }
 }
 

@@ -262,6 +262,7 @@ struct NavigationProtocolTests {
         testDevicePacketRouting()
         testDeviceSoundProtocol()
         testDeviceCapabilitiesProtocol()
+        testMapProfilesRemainIndependentWithoutCapabilityBit()
         testDeviceCapabilitySynchronizesPowerButtonHonkOnce()
         testDeviceCapabilityRetryPolicy()
         testDeviceScreenValidation()
@@ -269,6 +270,8 @@ struct NavigationProtocolTests {
         testBLEPairingAuthenticator()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
+        testBLEManagerSendsSeparateMapProfileSettings()
+        testBLEManagerFoldsExtendedVisibilityForLegacyFirmware()
         testBLEManagerSendsDeviceSoundFallback()
         testBLEManagerSendsPowerButtonHonkFallback()
         testPowerButtonHonkTimeoutAndTransportFailures()
@@ -977,10 +980,22 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.powerButtonHonkPrefix, "SNDH", "PWR honk configuration remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.powerButtonHonkStatusPrefix, "SNHA", "PWR honk acknowledgement remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask, 4, "PWR honk acknowledgement uses capability bit 2")
+        assertEqual(DeviceBLEProtocol.extendedMapVisibilityCapabilityMask, 16, "extended map visibility uses capability bit 4")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 3, "capability version requests extended map visibility")
+        assertEqual(DeviceBLEProtocol.serviceRoadsVisibilityMask, 0x400, "service roads use visibility bit 10")
+        assertEqual(DeviceBLEProtocol.tracksVisibilityMask, 0x800, "tracks use visibility bit 11")
+        assertEqual(DeviceBLEProtocol.extendedVisibilityMarker, 0x1000, "extended visibility uses marker bit 12")
         assertEqual(DeviceBLEProtocol.brightnessSettingID, 12, "brightness uses firmware setting ID 12")
         assertEqual(DeviceBLEProtocol.enabledScreensSettingID, 13, "enabled screens use firmware setting ID 13")
         assertEqual(DeviceBLEProtocol.defaultScreenSettingID, 14, "default screen uses firmware setting ID 14")
         assertEqual(DeviceBLEProtocol.disconnectedSleepTimeoutSettingID, 15, "disconnected sleep timeout uses firmware setting ID 15")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationMinPolygonSizeSettingID, 16, "Map + Navigation polygon size uses setting ID 16")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationDetailLevelSettingID, 17, "Map + Navigation detail uses setting ID 17")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationRouteLineWidthSettingID, 18, "Map + Navigation route width uses setting ID 18")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationZoomLevelSettingID, 19, "Map + Navigation zoom uses setting ID 19")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID, 20, "Map + Navigation visibility uses setting ID 20")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationStreetLineWidthBoostSettingID, 21, "Map + Navigation street width uses setting ID 21")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID, 22, "Map + Navigation marker scale uses setting ID 22")
         assertEqual(DeviceScreen.map.rawValue, 0, "Map screen protocol value stays stable")
         assertEqual(DeviceScreen.navigation.rawValue, 1, "Navigation screen protocol value stays stable")
         assertEqual(DeviceScreen.rideStats.rawValue, 2, "Ride Stats screen protocol value stays stable")
@@ -1109,6 +1124,13 @@ struct NavigationProtocolTests {
                "older PWR-capable firmware remains a one-shot configuration target")
         assert(manager.hasReceivedDeviceCapabilities, "valid CAPS completes capability negotiation")
 
+        let extended = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.extendedMapVisibilityCapabilityMask])
+        assert(manager.handleDeviceCapabilitiesNotification(extended),
+               "extended map visibility CAPS should be consumed")
+        assert(manager.supportsExtendedMapVisibility,
+               "CAPS bit enables independent service-road and track visibility")
+
         let acknowledgedFlags = supportedFlags |
             DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask
         let acknowledged = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
@@ -1150,11 +1172,43 @@ struct NavigationProtocolTests {
         assert(!manager.supportsPowerButtonHonk, "malformed CAPS clears PWR honk support")
         assert(!manager.supportsPowerButtonHonkAcknowledgement,
                "malformed CAPS clears PWR honk acknowledgement support")
+        assert(!manager.supportsExtendedMapVisibility,
+               "malformed CAPS clears extended map visibility support")
         assert(!manager.hasReceivedDeviceCapabilities, "malformed CAPS does not complete negotiation")
 
         UserDefaults.standard.removeObject(forKey: "deviceSettings.selectedSound")
         UserDefaults.standard.removeObject(forKey: "deviceSettings.soundVolumePercent")
         UserDefaults.standard.removeObject(forKey: "deviceSettings.powerButtonHonkEnabled")
+    }
+
+    static func testMapProfilesRemainIndependentWithoutCapabilityBit() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.detailLevel = 2
+        manager.zoomLevel = 5
+        manager.showBuildings = true
+        manager.mapPlusNavigationDetailLevel = 0
+        manager.mapPlusNavigationZoomLevel = 1
+        manager.mapPlusNavigationShowBuildings = false
+        var packets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { packets.append($0) }
+        ))
+
+        let baselineCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) + Data([0])
+        assert(manager.handleDeviceCapabilitiesNotification(baselineCapabilities),
+               "baseline capability response should be consumed")
+        assertEqual(packets.map { $0[4] },
+                    [8, 1, 2, 3, 9, 10, 7, 20, 16, 17, 18, 21, 22, 19],
+                    "every firmware receives both complete map profiles")
+        let mapNavigationDetailPacket = packets.first { $0[4] == 17 }
+        assertEqual(readInt32LE(mapNavigationDetailPacket!, offset: 5), 0,
+                    "Map + Navigation keeps its independent detail value")
+        assertEqual(manager.mapPlusNavigationZoomLevel, 1,
+                    "capability negotiation does not overwrite Map + Navigation settings")
     }
 
     static func testDeviceCapabilitySynchronizesPowerButtonHonkOnce() {
@@ -1181,9 +1235,12 @@ struct NavigationProtocolTests {
         assert(manager.handleDeviceCapabilitiesNotification(capabilities),
                "first CAPS notification should be consumed")
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))
-        assertEqual(sentPackets.count, 1,
+        let honkPackets = sentPackets.filter {
+            String(data: $0.prefix(4), encoding: .utf8) == DeviceBLEProtocol.powerButtonHonkPrefix
+        }
+        assertEqual(honkPackets.count, 1,
                     "first PWR capability notification synchronizes configuration")
-        assertEqual(String(data: sentPackets[0].prefix(4), encoding: .utf8), "SNDH",
+        assertEqual(String(data: honkPackets[0].prefix(4), encoding: .utf8), "SNDH",
                     "capability synchronization sends a PWR honk frame")
 
         let staleDeviceConfig = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
@@ -1197,14 +1254,16 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceSoundVolumePercent, 55,
                     "an older device snapshot does not replace the pending volume")
 
-        let successStatus = powerButtonHonkStatus(for: sentPackets[0], applied: 1)
+        let successStatus = powerButtonHonkStatus(for: honkPackets[0], applied: 1)
         assert(manager.handleNavigationCharacteristicNotification(successStatus),
                "capability synchronization acknowledgement should be consumed")
 
         assert(manager.handleDeviceCapabilitiesNotification(capabilities),
                "duplicate CAPS notification should be consumed")
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))
-        assertEqual(sentPackets.count, 1,
+        assertEqual(sentPackets.filter {
+            String(data: $0.prefix(4), encoding: .utf8) == DeviceBLEProtocol.powerButtonHonkPrefix
+        }.count, 1,
                     "duplicate PWR capability notification does not resend configuration")
 
         let deviceConfig = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
@@ -1212,7 +1271,9 @@ struct NavigationProtocolTests {
         assert(manager.handleDeviceCapabilitiesNotification(deviceConfig),
                "versioned capability response should restore device state")
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))
-        assertEqual(sentPackets.count, 1,
+        assertEqual(sentPackets.filter {
+            String(data: $0.prefix(4), encoding: .utf8) == DeviceBLEProtocol.powerButtonHonkPrefix
+        }.count, 1,
                     "device-authoritative capability state is not written back")
         assert(manager.isPowerButtonHonkEnabled,
                "device-authoritative capability state remains enabled")
@@ -1352,6 +1413,88 @@ struct NavigationProtocolTests {
             | (Int32(valueBytes[2]) << 16)
             | (Int32(valueBytes[3]) << 24)
         assertEqual(value, 7, "fallback settings packet includes little-endian value")
+    }
+
+    static func testBLEManagerSendsSeparateMapProfileSettings() {
+        let manager = BLEManager()
+        let capabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.extendedMapVisibilityCapabilityMask])
+        assert(manager.handleDeviceCapabilitiesNotification(capabilities),
+               "extended visibility capability should be accepted")
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.showBuildings = true
+        manager.showGreenSpace = false
+        manager.showPaths = false
+        manager.showTracks = true
+        manager.showMajorRoads = false
+        manager.showLocalStreets = false
+        manager.showServiceRoads = true
+        manager.showWater = false
+        manager.showRailways = false
+        manager.showOtherAreas = false
+        manager.showRouteOverlay = true
+        manager.showCurrentPosition = false
+        manager.mapPlusNavigationShowBuildings = false
+        manager.mapPlusNavigationShowGreenSpace = false
+        manager.mapPlusNavigationShowPaths = false
+        manager.mapPlusNavigationShowTracks = true
+        manager.mapPlusNavigationShowMajorRoads = true
+        manager.mapPlusNavigationShowLocalStreets = false
+        manager.mapPlusNavigationShowServiceRoads = false
+        manager.mapPlusNavigationShowWater = false
+        manager.mapPlusNavigationShowRailways = false
+        manager.mapPlusNavigationShowOtherAreas = false
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        manager.sendVisibilityMask(for: .map)
+        manager.sendVisibilityMask(for: .mapPlusNavigation)
+
+        assertEqual(sentPackets.count, 2, "each map screen sends its own visibility profile")
+        assertEqual(sentPackets[0][4], 8, "Map visibility keeps legacy setting ID 8")
+        assertEqual(readInt32LE(sentPackets[0], offset: 5), 0x1D01,
+                    "Map visibility separates service roads and tracks while retaining overlays")
+        assertEqual(sentPackets[1][4], DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID,
+                    "Map + Navigation visibility uses its profile setting ID")
+        assertEqual(readInt32LE(sentPackets[1], offset: 5), 0x1808,
+                    "Map + Navigation visibility sends its independent track bit")
+    }
+
+    static func testBLEManagerFoldsExtendedVisibilityForLegacyFirmware() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.showBuildings = false
+        manager.showGreenSpace = false
+        manager.showPaths = false
+        manager.showTracks = true
+        manager.showMajorRoads = false
+        manager.showLocalStreets = false
+        manager.showServiceRoads = true
+        manager.showWater = false
+        manager.showRailways = false
+        manager.showOtherAreas = false
+        manager.showRouteOverlay = false
+        manager.showCurrentPosition = false
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        manager.sendVisibilityMask(for: .map)
+
+        assertEqual(sentPackets.count, 1, "legacy firmware receives one visibility packet")
+        assertEqual(readInt32LE(sentPackets[0], offset: 5), 0x14,
+                    "legacy firmware folds tracks into paths and service roads into local streets")
     }
 
     static func testBLEManagerSendsDeviceSoundFallback() {
@@ -1788,8 +1931,31 @@ struct NavigationProtocolTests {
     static func testBLEManagerPersistsNewMapSettings() {
         let defaults = UserDefaults.standard
         let keys = [
+            "mapSettings.detailLevel",
             "mapSettings.mapRotationMode",
             "mapSettings.zoomLevel",
+            "mapSettings.showBuildings",
+            "mapSettings.showPaths",
+            "mapSettings.showTracks",
+            "mapSettings.showLocalStreets",
+            "mapSettings.showServiceRoads",
+            "mapPlusNavigationSettings.minPolygonSize",
+            "mapPlusNavigationSettings.detailLevel",
+            "mapPlusNavigationSettings.routeLineWidth",
+            "mapPlusNavigationSettings.streetLineWidthBoost",
+            "mapPlusNavigationSettings.positionMarkerScale",
+            "mapPlusNavigationSettings.zoomLevel",
+            "mapPlusNavigationSettings.showBuildings",
+            "mapPlusNavigationSettings.showGreenSpace",
+            "mapPlusNavigationSettings.showPaths",
+            "mapPlusNavigationSettings.showTracks",
+            "mapPlusNavigationSettings.showMajorRoads",
+            "mapPlusNavigationSettings.showLocalStreets",
+            "mapPlusNavigationSettings.showServiceRoads",
+            "mapPlusNavigationSettings.showWater",
+            "mapPlusNavigationSettings.showRailways",
+            "mapPlusNavigationSettings.showOtherAreas",
+            "mapPlusNavigationSettings.migrated.v1",
             "deviceSettings.enabledScreensMask",
             "deviceSettings.defaultScreen",
             "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1",
@@ -1805,9 +1971,38 @@ struct NavigationProtocolTests {
         let migratedManager = BLEManager()
         assertEqual(migratedManager.defaultDeviceScreen, .mapPlusNavigation, "old Map defaults migrate to Map + Navigation")
 
+        defaults.set(1, forKey: "mapSettings.detailLevel")
+        defaults.set(4, forKey: "mapSettings.zoomLevel")
+        defaults.set(false, forKey: "mapSettings.showBuildings")
+        defaults.set(false, forKey: "mapSettings.showPaths")
+        defaults.set(false, forKey: "mapSettings.showLocalStreets")
+        defaults.removeObject(forKey: "mapSettings.showTracks")
+        defaults.removeObject(forKey: "mapSettings.showServiceRoads")
+        defaults.removeObject(forKey: "mapPlusNavigationSettings.showTracks")
+        defaults.removeObject(forKey: "mapPlusNavigationSettings.showServiceRoads")
+        defaults.removeObject(forKey: "mapPlusNavigationSettings.migrated.v1")
+        let migratedProfileManager = BLEManager()
+        assertEqual(migratedProfileManager.mapPlusNavigationDetailLevel, 1,
+                    "existing shared detail migrates into Map + Navigation")
+        assertEqual(migratedProfileManager.mapPlusNavigationZoomLevel, 4,
+                    "existing shared zoom migrates into Map + Navigation")
+        assert(!migratedProfileManager.mapPlusNavigationShowBuildings,
+               "existing shared visibility migrates into Map + Navigation")
+        assert(!migratedProfileManager.showTracks && !migratedProfileManager.mapPlusNavigationShowTracks,
+               "track visibility inherits the previous paths setting")
+        assert(!migratedProfileManager.showServiceRoads && !migratedProfileManager.mapPlusNavigationShowServiceRoads,
+               "service-road visibility inherits the previous local-streets setting")
+
         let manager = BLEManager()
         manager.mapRotationMode = 1
         manager.zoomLevel = 5
+        manager.mapPlusNavigationDetailLevel = 0
+        manager.mapPlusNavigationZoomLevel = 3
+        manager.mapPlusNavigationShowBuildings = true
+        manager.showTracks = false
+        manager.showServiceRoads = false
+        manager.mapPlusNavigationShowTracks = false
+        manager.mapPlusNavigationShowServiceRoads = false
         manager.enabledDeviceScreensMask = DeviceScreen.navigation.bit | DeviceScreen.mapPlusNavigation.bit
         manager.defaultDeviceScreen = .mapPlusNavigation
         manager.disconnectedSleepTimeout = .tenMinutes
@@ -1816,6 +2011,18 @@ struct NavigationProtocolTests {
         let reloaded = BLEManager()
         assertEqual(reloaded.mapRotationMode, 1, "map rotation mode should persist across BLEManager reloads")
         assertEqual(reloaded.zoomLevel, 5, "zoom level should persist across BLEManager reloads")
+        assertEqual(reloaded.mapPlusNavigationDetailLevel, 0,
+                    "Map + Navigation detail should persist independently")
+        assertEqual(reloaded.mapPlusNavigationZoomLevel, 3,
+                    "Map + Navigation zoom should persist independently")
+        assert(reloaded.mapPlusNavigationShowBuildings,
+               "Map + Navigation visibility should persist independently")
+        assert(!reloaded.showTracks, "Map track visibility should persist")
+        assert(!reloaded.showServiceRoads, "Map service-road visibility should persist")
+        assert(!reloaded.mapPlusNavigationShowTracks,
+               "Map + Navigation track visibility should persist independently")
+        assert(!reloaded.mapPlusNavigationShowServiceRoads,
+               "Map + Navigation service-road visibility should persist independently")
         assertEqual(reloaded.enabledDeviceScreensMask,
                     DeviceScreen.navigation.bit | DeviceScreen.mapPlusNavigation.bit,
                     "enabled device screens should persist across BLEManager reloads")
