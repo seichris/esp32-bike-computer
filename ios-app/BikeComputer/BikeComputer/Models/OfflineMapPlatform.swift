@@ -133,9 +133,24 @@ struct OfflineMapJob: Decodable, Equatable {
     let packPath: String?
     let geometry: OfflineMapJobGeometry?
     let sourceRegion: OfflineMapSourceRegion?
+    let progress: OfflineMapJobProgress?
 
     var isTerminal: Bool {
         ["ready", "failed", "expired", "cancelled"].contains(status)
+    }
+}
+
+struct OfflineMapJobProgress: Decodable, Equatable {
+    let completedBlocks: Int
+    let totalBlocks: Int
+
+    var fraction: Double {
+        guard totalBlocks > 0 else { return 0 }
+        return min(max(Double(completedBlocks) / Double(totalBlocks), 0), 1)
+    }
+
+    var percentage: Int {
+        Int((fraction * 100).rounded())
     }
 }
 

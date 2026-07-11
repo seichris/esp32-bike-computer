@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -27,6 +28,52 @@ class CommandRunner:
         result = subprocess.run(args, cwd=cwd, check=True, text=True, capture_output=True)
         return (result.stdout or result.stderr).strip()
 
+    def run_streaming(self, args: list[str], *, cwd: Path | None = None, on_output=None) -> str:
+        process = subprocess.Popen(
+            args,
+            cwd=cwd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+        )
+        output: list[str] = []
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                output.append(line)
+                if on_output:
+                    on_output(line)
+            return_code = process.wait()
+        except BaseException:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+        combined_output = "".join(output)
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, args, output=combined_output)
+        return combined_output.strip()
+
+
+_MAP_PROGRESS_PATTERN = re.compile(r"MAP_PROGRESS:(\d+):(\d+)")
+
+
+def parse_map_progress(line: str) -> tuple[int, int] | None:
+    match = _MAP_PROGRESS_PATTERN.search(line)
+    if match is None:
+        return None
+    completed, total = int(match.group(1)), int(match.group(2))
+    if total <= 0 or completed < 0 or completed > total:
+        return None
+    return completed, total
+
 
 class MapBuildPipeline:
     def __init__(self, paths: PipelinePaths, runner: CommandRunner | None = None, source_cache: SourceCache | None = None):
@@ -34,7 +81,7 @@ class MapBuildPipeline:
         self.runner = runner or CommandRunner()
         self.source_cache = source_cache or SourceCache(paths.repo_root)
 
-    def build(self, job: MapJob, on_status=None) -> tuple[str, Path]:
+    def build(self, job: MapJob, on_status=None, on_progress=None) -> tuple[str, Path]:
         map_id = stable_map_id(job)
         job.map_id = map_id
         job_dir = self.paths.work_root / job.job_id
@@ -59,7 +106,7 @@ class MapBuildPipeline:
         if on_status:
             on_status(JobStatus.CONVERTING_FEATURES)
         self._convert_to_geojson(job, clipped_pbf, geojson_prefix)
-        self._extract_features(job, geojson_prefix, raw_output_dir)
+        self._extract_features(job, geojson_prefix, raw_output_dir, on_progress=on_progress)
         if on_status:
             on_status(JobStatus.PACKAGING)
         self._stage_vectmap(raw_output_dir, vectmap_output)
@@ -117,22 +164,37 @@ class MapBuildPipeline:
             cwd=self.paths.osm_extract_root / "scripts",
         )
 
-    def _extract_features(self, job: MapJob, geojson_prefix: Path, raw_output_dir: Path) -> None:
+    def _extract_features(self, job: MapJob, geojson_prefix: Path, raw_output_dir: Path, on_progress=None) -> None:
         bounds = job.geometry.bounds
         script = self.paths.osm_extract_root / "scripts" / "extract_features.py"
-        self.runner.run(
-            [
-                "python",
-                str(script),
-                str(bounds.min_lon),
-                str(bounds.min_lat),
-                str(bounds.max_lon),
-                str(bounds.max_lat),
-                str(geojson_prefix),
-                str(raw_output_dir),
-            ],
-            cwd=self.paths.osm_extract_root / "scripts",
-        )
+        args = [
+            "python",
+            str(script),
+            str(bounds.min_lon),
+            str(bounds.min_lat),
+            str(bounds.max_lon),
+            str(bounds.max_lat),
+            str(geojson_prefix),
+            str(raw_output_dir),
+        ]
+
+        def handle_output(line: str) -> None:
+            progress = parse_map_progress(line)
+            if progress is not None and on_progress:
+                on_progress(*progress)
+
+        if on_progress and hasattr(self.runner, "run_streaming"):
+            self.runner.run_streaming(
+                args,
+                cwd=self.paths.osm_extract_root / "scripts",
+                on_output=handle_output,
+            )
+            return
+
+        output = self.runner.run(args, cwd=self.paths.osm_extract_root / "scripts")
+        if on_progress:
+            for line in output.splitlines():
+                handle_output(line)
 
     def _stage_vectmap(self, raw_output_dir: Path, vectmap_output: Path) -> None:
         if not raw_output_dir.exists():
@@ -160,8 +222,11 @@ def run_job(store, pipeline: MapBuildPipeline, job_id: str) -> MapJob:
     def update(status: JobStatus) -> None:
         store.update_status(job_id, status)
 
+    def update_progress(completed: int, total: int) -> None:
+        store.update_progress_unless_cancelled(job_id, completed, total)
+
     try:
-        map_id, archive_path = pipeline.build(job, on_status=update)
+        map_id, archive_path = pipeline.build(job, on_status=update, on_progress=update_progress)
         return store.update_status(
             job_id,
             JobStatus.READY,

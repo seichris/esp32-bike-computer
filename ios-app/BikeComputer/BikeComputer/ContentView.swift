@@ -219,7 +219,10 @@ struct ContentView: View {
         } label: {
             HStack(spacing: 10) {
                 if offlineMapManager.isBusy {
-                    ProgressView(value: offlineMapManager.downloadProgress > 0 ? offlineMapManager.downloadProgress : nil)
+                    ProgressView(
+                        value: offlineMapManager.mapPreparationProgress ??
+                            (offlineMapManager.downloadProgress > 0 ? offlineMapManager.downloadProgress : nil)
+                    )
                         .frame(width: 22, height: 22)
                 } else {
                     Image(systemName: offlineMapManager.downloadedPackURL == nil ? "map" : "checkmark.circle.fill")

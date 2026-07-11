@@ -229,6 +229,21 @@ private struct DownloadingMapsSettingsSection: View {
                 StatusValueRow(status: manager.statusMessage, isBusy: manager.isBusy)
             }
 
+            if let generationProgress {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Generation Progress")
+                        Spacer()
+                        Text("\(generationProgress.percentage)%")
+                            .foregroundColor(.secondary)
+                    }
+                    ProgressView(value: generationProgress.fraction)
+                    Text("\(generationProgress.completedBlocks) of \(generationProgress.totalBlocks) map blocks")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
             if let sourceSummary {
                 SettingsValueRow(title: "Source", value: sourceSummary)
             }
@@ -263,6 +278,11 @@ private struct DownloadingMapsSettingsSection: View {
             return nil
         }
         return OfflineMapPreparationTimeEstimate.description(for: areaKm2)
+    }
+
+    private var generationProgress: OfflineMapJobProgress? {
+        guard manager.currentJob?.status == "converting_features" else { return nil }
+        return manager.currentJob?.progress
     }
 }
 

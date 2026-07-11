@@ -33,8 +33,20 @@ class MapWorker:
         def update(status: JobStatus) -> None:
             self.store.update_status_unless_cancelled(job.job_id, status, worker_id=self.worker_id)
 
+        def update_progress(completed: int, total: int) -> None:
+            self.store.update_progress_unless_cancelled(
+                job.job_id,
+                completed,
+                total,
+                worker_id=self.worker_id,
+            )
+
         try:
-            map_id, archive_path = self.pipeline.build(job, on_status=update)
+            map_id, archive_path = self.pipeline.build(
+                job,
+                on_status=update,
+                on_progress=update_progress,
+            )
             finished = self.store.update_status_unless_cancelled(
                 job.job_id,
                 JobStatus.READY,

@@ -135,6 +135,28 @@ class JobStore:
         self.save(job)
         return job
 
+    def update_progress_unless_cancelled(
+        self,
+        job_id: str,
+        completed: int,
+        total: int,
+        *,
+        worker_id: str | None = None,
+    ) -> MapJob:
+        if total <= 0:
+            raise ValueError("progress total must be positive")
+        with self._queue_lock():
+            job = self.get(job_id)
+            if job.status == JobStatus.CANCELLED:
+                raise RuntimeError("job was cancelled")
+            job.progress_completed = max(0, min(int(completed), int(total)))
+            job.progress_total = int(total)
+            job.updated_at = utc_now_iso()
+            if worker_id is not None:
+                job.worker_id = worker_id
+            self.save(job)
+            return job
+
     def claim_next(self, worker_id: str) -> MapJob | None:
         with self._queue_lock():
             for job in self.list():
@@ -154,6 +176,8 @@ class JobStore:
                 job.worker_id = worker_id
                 job.attempts += 1
                 job.error = None
+                job.progress_completed = None
+                job.progress_total = None
                 job.events.append(
                     {
                         "at": job.updated_at,
@@ -173,6 +197,8 @@ class JobStore:
                     job.status = JobStatus.QUEUED
                     job.updated_at = utc_now_iso()
                     job.finished_at = None
+                    job.progress_completed = None
+                    job.progress_total = None
                     job.events.append({"at": job.updated_at, "status": job.status.value, "message": "requeued for retry"})
                     self.save(job)
                     count += 1

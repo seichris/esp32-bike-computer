@@ -23,7 +23,7 @@ private enum OfflineMapDefaults {
     nonisolated static let lastTransferPreviousSequenceKey = "offlineMap.lastTransfer.previousSequence"
     nonisolated static let lastTransferAcceptedSequenceKey = "offlineMap.lastTransfer.acceptedSequence"
     nonisolated static let lastTransferOutcomeKey = "offlineMap.lastTransfer.outcome"
-    nonisolated static let mapJobPollAttempts = 1800
+    nonisolated static let mapJobPollIntervalNanoseconds: UInt64 = 2_000_000_000
     nonisolated static let activationConfirmationTimeout: TimeInterval = 10 * 60
     nonisolated static let activationPollIntervalNanoseconds: UInt64 = 2_000_000_000
     nonisolated static let legacyServerURLs = [
@@ -196,6 +196,11 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var lastTransferMapId: String
     @Published private(set) var lastTransferOutcome: String
+
+    var mapPreparationProgress: Double? {
+        guard currentJob?.status == "converting_features" else { return nil }
+        return currentJob?.progress?.fraction
+    }
 
     private let defaults: UserDefaults
     private let deviceTransferManager = DeviceTransferManager()
@@ -526,7 +531,7 @@ final class OfflineMapManager: ObservableObject {
             throw OfflineMapPlatformError.invalidResponse
         }
 
-        for _ in 0..<OfflineMapDefaults.mapJobPollAttempts {
+        while !Task.isCancelled {
             let job = try await client.job(id: jobId)
             currentJob = job
             statusMessage = job.status
@@ -536,13 +541,10 @@ final class OfflineMapManager: ObservableObject {
             if job.isTerminal {
                 throw OfflineMapPlatformError.serverStatus(409, job.error ?? "Map job ended with status \(job.status)")
             }
-            try await Task.sleep(nanoseconds: 2_000_000_000)
+            try await Task.sleep(nanoseconds: OfflineMapDefaults.mapJobPollIntervalNanoseconds)
         }
 
-        throw OfflineMapPlatformError.serverStatus(
-            408,
-            "Map job is still running. Larger areas can take a long time to prepare."
-        )
+        throw CancellationError()
     }
 
     private func downloadReadyPack(client: OfflineMapPlatformClient) async throws {

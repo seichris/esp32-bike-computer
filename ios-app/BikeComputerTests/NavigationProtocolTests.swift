@@ -296,6 +296,7 @@ struct NavigationProtocolTests {
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         testOfflineMapCustomBBoxRequest()
         testOfflineMapPreparationTimeEstimate()
+        testOfflineMapJobProgressDecoding()
         testOfflineMapCreateJobURLRequest()
         testOfflineMapManagerMigratesProductionConfig()
         testOfflineMapManagerRestoresLastTransferIdentity()
@@ -481,6 +482,32 @@ struct NavigationProtocolTests {
             "May take several hours",
             "very large map preparation estimate"
         )
+    }
+
+    static func testOfflineMapJobProgressDecoding() {
+        let payload = Data(
+            """
+            {
+              "jobId": "job-progress",
+              "status": "converting_features",
+              "progress": {
+                "completedBlocks": 79,
+                "totalBlocks": 100,
+                "fraction": 0.79
+              }
+            }
+            """.utf8
+        )
+        guard let job = try? JSONDecoder().decode(OfflineMapJob.self, from: payload),
+              let progress = job.progress else {
+            assert(false, "map job progress should decode")
+            return
+        }
+
+        assertEqual(progress.completedBlocks, 79, "map progress decodes completed blocks")
+        assertEqual(progress.totalBlocks, 100, "map progress decodes total blocks")
+        assertEqual(progress.percentage, 79, "map progress calculates percentage")
+        assert(abs(progress.fraction - 0.79) < 0.000001, "map progress calculates fraction")
     }
 
     static func testOfflineMapCreateJobURLRequest() {

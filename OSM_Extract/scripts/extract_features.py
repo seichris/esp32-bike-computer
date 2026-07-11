@@ -46,10 +46,17 @@ lines = style_features( lines, styles) # styled_lines
 polygons = style_features( polygons, styles) # styled_polygons
 # polygons = make_all_convex( polygons)
 
-total = ((area_max_x - area_min_x)/4096) * ((area_max_y - area_min_y)/4096)
+x_positions = range(area_min_x, area_max_x, 4096)
+y_positions = range(area_min_y, area_max_y, 4096)
+total = len(x_positions) * len(y_positions)
 done = 0
-for init_x in range(area_min_x, area_max_x, 4096):
-    for init_y in range(area_min_y, area_max_y, 4096):
+
+def report_progress():
+    print("  Step 5/5 Building map. {:.0%}  ".format(done/total), end='\r', flush=True)
+    print(f"\nMAP_PROGRESS:{done}:{total}", flush=True)
+
+for init_x in x_positions:
+    for init_y in y_positions:
         # print("--------------------")
         # print("init_x, init_y", init_x, init_y)
         min_x = init_x & (~mapblock_mask)
@@ -61,6 +68,7 @@ for init_x in range(area_min_x, area_max_x, 4096):
         clipped_polygons = clip_polygons( polygons, mapblock_bbox)
         if len(clipped_lines) == 0 and len( clipped_polygons) == 0:
             done += 1
+            report_progress()
             continue
 
         # export map files
@@ -78,6 +86,7 @@ for init_x in range(area_min_x, area_max_x, 4096):
         if os.path.exists(f"{file_name}.fmb"):
             done += 1
             print(f"  Step 5/5 Skipping existing block {block_x}_{block_y}      ", end='\r')
+            report_progress()
             continue
 
         os.makedirs( folder_name, exist_ok=True)
@@ -128,5 +137,4 @@ for init_x in range(area_min_x, area_max_x, 4096):
         )
 
         done += 1
-        print("  Step 5/5 Building map. {:.0%}  ".format(done/total), end='\r')
-
+        report_progress()

@@ -13,10 +13,12 @@ class FakePipeline:
         self.failures = failures
         self.calls = 0
 
-    def build(self, job, on_status=None):
+    def build(self, job, on_status=None, on_progress=None):
         self.calls += 1
         if self.calls <= self.failures:
             raise RuntimeError("temporary worker failure")
+        if on_progress:
+            on_progress(8, 10)
         pack_path = Path(tempfile.gettempdir()) / f"map-123-{job.job_id}.zip"
         pack_path.write_bytes(b"zip-data")
         return "map-123", pack_path
@@ -26,7 +28,7 @@ class CancellingPipeline:
     def __init__(self, service):
         self.service = service
 
-    def build(self, job, on_status=None):
+    def build(self, job, on_status=None, on_progress=None):
         self.service.cancel_job(job.job_id)
         return "map-123", Path("/tmp/map-123.zip")
 
@@ -58,6 +60,9 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(loaded.pack_bytes, 8)
             response = loaded.to_dict()
             self.assertEqual(response["packBytes"], 8)
+            self.assertEqual(response["progress"]["completedBlocks"], 8)
+            self.assertEqual(response["progress"]["totalBlocks"], 10)
+            self.assertEqual(response["progress"]["fraction"], 0.8)
             timings = response["phaseTimings"]
             self.assertTrue(any(timing["status"] == "ready" for timing in timings))
             self.assertTrue(all("durationSeconds" in timing for timing in timings))
