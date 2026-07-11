@@ -60,7 +60,15 @@ jobs:
       - name: Install validation dependencies
         run: python -m pip install --upgrade pyyaml
       - name: Python syntax
-        run: python -m py_compile scripts/extract_features.py scripts/funcs.py tests/test_config.py
+        run: |
+          python -m py_compile \
+            scripts/extract_features.py \
+            scripts/feature_types.py \
+            scripts/funcs.py \
+            scripts/map_format.py \
+            tests/test_config.py \
+            tests/test_feature_types.py \
+            tests/test_map_format.py
       - name: YAML/config tests
         run: python -m unittest discover -s tests
       - name: Shell syntax
