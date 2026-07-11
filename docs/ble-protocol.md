@@ -240,6 +240,9 @@ Status responses should include:
 - `activeMapId`: map id from `/sdcard/VECTMAP/active-map.json`, if present.
 - `enabled`: whether Wi-Fi/HTTP upload mode is enabled.
 - `baseUrl`: temporary HTTP base URL when transfer mode is enabled.
+- `activation`: the latest activation `status`, `sessionId`, `mapId`, and
+  structured `error`, when present. Status is `idle`, `activating`, `failed`,
+  or `installed`.
 - `lastError`: last installer/upload error code and message, when present.
 - `activeError`: active-map metadata error, when no active map is installed.
 

@@ -349,6 +349,10 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferBaseURL: URL?
     @Published var mapTransferAccessPointSSID: String?
     @Published var mapTransferActiveMapId: String = ""
+    @Published var mapTransferActivationStatus: String = "idle"
+    @Published var mapTransferActivationSessionId: String = ""
+    @Published var mapTransferActivationMapId: String = ""
+    @Published var mapTransferActivationError: String?
     @Published var mapTransferLastError: String?
     @Published var mapTransferStatusDescription: String = "unknown"
     @Published var deviceTransferMode: String = ""
@@ -1084,6 +1088,13 @@ class BLEManager: NSObject, ObservableObject {
         return sentNative || sentFallback
     }
 
+    func resetMapTransferActivationObservation() {
+        mapTransferActivationStatus = "idle"
+        mapTransferActivationSessionId = ""
+        mapTransferActivationMapId = ""
+        mapTransferActivationError = nil
+    }
+
     @discardableResult
     func requestDeviceTransferMode(_ mode: DeviceTransferSession.Mode) -> Bool {
         var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
@@ -1286,6 +1297,11 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferModeEnabled = false
         mapTransferBaseURL = nil
         mapTransferAccessPointSSID = nil
+        mapTransferActiveMapId = ""
+        mapTransferActivationStatus = "idle"
+        mapTransferActivationSessionId = ""
+        mapTransferActivationMapId = ""
+        mapTransferActivationError = nil
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
         deviceTransferMode = ""
@@ -2310,6 +2326,23 @@ extension BLEManager: CBPeripheralDelegate {
         }
         mapTransferAccessPointSSID = object["apSsid"] as? String
         mapTransferActiveMapId = object["activeMapId"] as? String ?? ""
+        if let activation = object["activation"] as? [String: Any] {
+            mapTransferActivationStatus = activation["status"] as? String ?? "idle"
+            mapTransferActivationSessionId = activation["sessionId"] as? String ?? ""
+            mapTransferActivationMapId = activation["mapId"] as? String ?? ""
+            if let activationError = activation["error"] as? [String: Any] {
+                let code = activationError["code"] as? String ?? "activation_error"
+                let message = activationError["message"] as? String ?? ""
+                mapTransferActivationError = message.isEmpty ? code : "\(code): \(message)"
+            } else {
+                mapTransferActivationError = nil
+            }
+        } else {
+            mapTransferActivationStatus = "idle"
+            mapTransferActivationSessionId = ""
+            mapTransferActivationMapId = ""
+            mapTransferActivationError = nil
+        }
         deviceHasSDCard = object["sdPresent"] as? Bool
         deviceMapFoundForCurrentLocation = object["mapFound"] as? Bool
         deviceMapBlockCount = object["mapBlocks"] as? Int ?? 0

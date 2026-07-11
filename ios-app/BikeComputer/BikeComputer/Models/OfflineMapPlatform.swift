@@ -167,7 +167,7 @@ enum OfflineMapPlatformError: LocalizedError {
     case transferCommandNotSent
     case missingTransferBaseURL
     case deviceSDCardUnavailable
-    case mapActivationTimedOut
+    case mapActivationTimedOut(String)
     case mapActivationFailed(String)
     case transferWiFiJoinFailed(String, String)
     case invalidPack(String)
@@ -189,8 +189,8 @@ enum OfflineMapPlatformError: LocalizedError {
             return "Device map transfer mode is not ready"
         case .deviceSDCardUnavailable:
             return "Device SD card is not mounted"
-        case .mapActivationTimedOut:
-            return "Timed out while activating map on device"
+        case .mapActivationTimedOut(let message):
+            return "Map activation could not be confirmed: \(message)"
         case .mapActivationFailed(let message):
             return "Map activation failed: \(message)"
         case .transferWiFiJoinFailed(let ssid, let message):

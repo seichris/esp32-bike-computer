@@ -609,6 +609,8 @@ static std::string mapTransferStatusJson() {
             "\",\"message\":\"" + jsonEscape(activeStatus.message) + "\"}";
   }
 
+  body += ",\"activation\":" + mapTransferHttp.activationStatusJson();
+
   if (!transferStatus.lastErrorCode.empty()) {
     body += ",\"lastError\":{\"code\":\"" +
             jsonEscape(transferStatus.lastErrorCode) + "\",\"message\":\"" +

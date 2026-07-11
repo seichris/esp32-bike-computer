@@ -113,6 +113,8 @@ static void testValidatesStagedMapAndActivates() {
   assert(active.ok);
   assert(activeMapId == "map-1");
   assert(!exists(root + "/VECTMAP/.staging/" + session));
+  assert(!exists(root + "/VECTMAP/.activation/" + session));
+  assert(!exists(root + "/VECTMAP/.installed/map-1"));
 }
 
 static void testActivationReplacesOldPublishedBlocks() {

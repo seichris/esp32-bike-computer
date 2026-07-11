@@ -242,6 +242,16 @@ private struct SavedMapsSettingsSection: View {
 
     var body: some View {
         Section(header: Text("Saved Maps")) {
+            if !bleManager.mapTransferActiveMapId.isEmpty {
+                SettingsValueRow(
+                    title: "Installed on Device",
+                    value: manager.displayName(forMapId: bleManager.mapTransferActiveMapId)
+                )
+            }
+            if let lastTransferDescription = manager.lastTransferDescription {
+                SettingsValueRow(title: "Last Transfer", value: lastTransferDescription)
+            }
+
             if manager.cachedPackURLs.isEmpty {
                 Text("0 maps downloaded yet")
                     .foregroundColor(.secondary)
@@ -271,6 +281,12 @@ private struct DownloadedMapRow: View {
         HStack(spacing: 12) {
             Text(displayName)
                 .lineLimit(2)
+
+            if bleManager.mapTransferActiveMapId == packURL.deletingPathExtension().lastPathComponent {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+                    .accessibilityLabel("Installed on device")
+            }
 
             Spacer()
 

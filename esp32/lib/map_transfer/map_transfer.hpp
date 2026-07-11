@@ -39,7 +39,6 @@ public:
   InstallStatus readActiveMapId(std::string &mapId) const;
 
   std::string stagingRoot(const std::string &sessionId) const;
-  std::string installedRoot(const std::string &mapId) const;
 
 private:
   std::string storageRoot_;
@@ -55,6 +54,7 @@ private:
   bool backupPublishedMap(const std::string &backupRoot) const;
   bool restorePublishedMap(const std::string &backupRoot) const;
   bool clearPublishedMap() const;
+  bool publishActivation(const std::string &activationRoot) const;
   bool fileExists(const std::string &path) const;
   bool dirExists(const std::string &path) const;
   bool fileSize(const std::string &path, uint64_t &size) const;

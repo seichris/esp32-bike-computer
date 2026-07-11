@@ -19,6 +19,7 @@ public:
   void setLastError(const std::string &code, const std::string &message);
   void process();
   HttpTransferStatus status() const;
+  std::string activationStatusJson() const;
 
 private:
   std::string storageRoot_ = "/sdcard";
@@ -47,7 +48,6 @@ private:
                  const std::string &message);
   void lockState() const;
   void unlockState() const;
-  std::string activationStatusJson() const;
   void finishActivation(const std::string &status, const std::string &mapId,
                         const std::string &errorCode,
                         const std::string &errorMessage);

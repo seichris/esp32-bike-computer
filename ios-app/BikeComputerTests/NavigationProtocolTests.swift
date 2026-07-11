@@ -246,6 +246,7 @@ final class TestRoute: MKRoute {
 
 @main
 struct NavigationProtocolTests {
+    @MainActor
     static func main() {
         testIconMapping()
         testRouteEndpointExtraction()
@@ -292,6 +293,7 @@ struct NavigationProtocolTests {
         testOfflineMapCustomBBoxRequest()
         testOfflineMapCreateJobURLRequest()
         testOfflineMapManagerMigratesProductionConfig()
+        testOfflineMapManagerRestoresLastTransferIdentity()
         testOfflineMapPolygonClosesRing()
         testOfflineMapStoredZipReader()
         testOfflineMapManifestDecoding()
@@ -489,6 +491,28 @@ struct NavigationProtocolTests {
             OfflineMapServiceConfig.apiToken,
             "empty stored map API token falls back to bundled build token"
         )
+    }
+
+    @MainActor
+    static func testOfflineMapManagerRestoresLastTransferIdentity() {
+        let suite = "offline-map-transfer-test-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        defaults.set("custom-map-shanghai", forKey: "offlineMap.lastTransfer.mapId")
+        defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+        defaults.set(
+            ["custom-map-shanghai.zip": "Shanghai"],
+            forKey: "offlineMap.packDisplayNames"
+        )
+
+        let manager = OfflineMapManager(defaults: defaults)
+        assertEqual(manager.lastTransferMapId, "custom-map-shanghai", "last transfer map id survives app restart")
+        assertEqual(manager.lastTransferOutcome, "unconfirmed", "last transfer outcome survives app restart")
+        assertEqual(manager.lastTransferDescription, "Shanghai — unconfirmed", "last transfer identifies the selected saved map")
     }
 
     static func testOfflineMapPolygonClosesRing() {
@@ -1684,7 +1708,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","lastError":{"code":"previous","message":"previous upload failed"}}
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activation":{"status":"activating","sessionId":"tokyo-v2","mapId":"tokyo-v2"},"lastError":{"code":"previous","message":"previous upload failed"}}
         """
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -1692,6 +1716,9 @@ struct NavigationProtocolTests {
         assert(manager.mapTransferModeEnabled, "status parser exposes enabled transfer mode")
         assertEqual(manager.mapTransferBaseURL?.absoluteString, "http://192.168.4.20:8080", "status parser exposes base URL")
         assertEqual(manager.mapTransferActiveMapId, "kyoto-v1", "status parser exposes active map id")
+        assertEqual(manager.mapTransferActivationStatus, "activating", "status parser exposes activation state")
+        assertEqual(manager.mapTransferActivationSessionId, "tokyo-v2", "status parser exposes activation session")
+        assertEqual(manager.mapTransferActivationMapId, "tokyo-v2", "status parser exposes activating map id")
         assertEqual(manager.deviceHasSDCard, true, "status parser exposes physical SD state")
         assertEqual(manager.deviceMapFoundForCurrentLocation, false, "status parser exposes current map coverage")
         assertEqual(manager.deviceMapBlockCount, 0, "status parser exposes current map block count")

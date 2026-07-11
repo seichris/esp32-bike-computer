@@ -16,7 +16,13 @@ private enum OfflineMapDefaults {
     nonisolated static let centerLongitudeKey = "offlineMap.centerLongitude"
     nonisolated static let sideLengthKey = "offlineMap.sideLengthKm"
     nonisolated static let packDisplayNamesKey = "offlineMap.packDisplayNames"
+    nonisolated static let lastTransferMapIdKey = "offlineMap.lastTransfer.mapId"
+    nonisolated static let lastTransferSessionIdKey = "offlineMap.lastTransfer.sessionId"
+    nonisolated static let lastTransferPreviousMapIdKey = "offlineMap.lastTransfer.previousMapId"
+    nonisolated static let lastTransferOutcomeKey = "offlineMap.lastTransfer.outcome"
     nonisolated static let mapJobPollAttempts = 1800
+    nonisolated static let activationConfirmationTimeout: TimeInterval = 10 * 60
+    nonisolated static let activationPollIntervalNanoseconds: UInt64 = 2_000_000_000
     nonisolated static let legacyServerURLs = [
         "http://rhi0maej6bwo33hn0im6h4lf.178.18.245.246.sslip.io"
     ]
@@ -51,6 +57,8 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var selectedMapBounds: OfflineMapBounds?
     @Published private(set) var statusMessage = ""
     @Published private(set) var errorMessage: String?
+    @Published private(set) var lastTransferMapId: String
+    @Published private(set) var lastTransferOutcome: String
 
     private let defaults: UserDefaults
     private let deviceTransferManager = DeviceTransferManager()
@@ -64,6 +72,8 @@ final class OfflineMapManager: ObservableObject {
         self.centerLatitude = defaults.string(forKey: OfflineMapDefaults.centerLatitudeKey) ?? "35.16755"
         self.centerLongitude = defaults.string(forKey: OfflineMapDefaults.centerLongitudeKey) ?? "136.89451"
         self.sideLengthKm = defaults.string(forKey: OfflineMapDefaults.sideLengthKey) ?? "25"
+        self.lastTransferMapId = defaults.string(forKey: OfflineMapDefaults.lastTransferMapIdKey) ?? ""
+        self.lastTransferOutcome = defaults.string(forKey: OfflineMapDefaults.lastTransferOutcomeKey) ?? ""
         defaults.set(serverURLString, forKey: OfflineMapDefaults.serverURLKey)
         defaults.set(apiToken, forKey: OfflineMapDefaults.apiTokenKey)
         refreshCachedPacks()
@@ -213,6 +223,20 @@ final class OfflineMapManager: ObservableObject {
         return packURL.deletingPathExtension().lastPathComponent
     }
 
+    var lastTransferDescription: String? {
+        guard !lastTransferMapId.isEmpty else { return nil }
+        let outcome = lastTransferOutcome.isEmpty ? "unknown" : lastTransferOutcome
+        return "\(displayName(forMapId: lastTransferMapId)) — \(outcome)"
+    }
+
+    func displayName(forMapId mapId: String) -> String {
+        let filename = "\(mapId).zip"
+        if let displayName = packDisplayNames[filename], !displayName.isEmpty {
+            return displayName
+        }
+        return mapId
+    }
+
     func makeCustomBBoxRequest() throws -> OfflineMapJobRequest {
         guard let latitude = Double(centerLatitude),
               let longitude = Double(centerLongitude),
@@ -349,48 +373,78 @@ final class OfflineMapManager: ObservableObject {
         let archive = try await Task.detached(priority: .userInitiated) {
             try OfflineMapPackArchive(url: packURL)
         }.value
-        let expectedMapId = try? archive.manifest().mapId
-        let transferSession = try await deviceTransferManager.enterMapTransfer(
-            bleManager: bleManager
-        ) { message in
-            self.statusMessage = message
+        guard let expectedMapId = try archive.manifest().mapId,
+              !expectedMapId.isEmpty else {
+            throw OfflineMapPlatformError.invalidPack("manifest.json has no mapId")
         }
-        defer {
-            deviceTransferManager.exitMapTransfer(bleManager: bleManager)
-        }
-        downloadedPackURL = packURL
         let sessionId = transferSessionId(for: expectedMapId)
-        let client = MapTransferDeviceClient(baseURL: transferSession.baseURL)
-        transferProgress = 0
-        statusMessage = "uploading to device"
-        try await client.upload(archive: archive, sessionId: sessionId) { completed, total, path, didUpload in
-            self.transferProgress = total == 0 ? 0 : Double(completed) / Double(total)
-            let prefix = didUpload ? "uploaded" : "already on device"
-            self.statusMessage = "\(prefix) \(completed)/\(total): \(path)"
-        }
-        statusMessage = "activating map"
+        recordTransfer(
+            mapId: expectedMapId,
+            sessionId: sessionId,
+            previousMapId: bleManager.mapTransferActiveMapId,
+            outcome: "preparing"
+        )
+
         do {
-            try await client.activate(sessionId: sessionId)
+            let transferSession = try await deviceTransferManager.enterMapTransfer(
+                bleManager: bleManager
+            ) { message in
+                self.statusMessage = message
+            }
+            defer {
+                deviceTransferManager.exitMapTransfer(bleManager: bleManager)
+            }
+            downloadedPackURL = packURL
+            let client = MapTransferDeviceClient(baseURL: transferSession.baseURL)
+            transferProgress = 0
+            statusMessage = "uploading \(displayName(forMapId: expectedMapId)) to device"
+            updateLastTransferOutcome("uploading")
+            try await client.upload(archive: archive, sessionId: sessionId) { completed, total, path, didUpload in
+                self.transferProgress = total == 0 ? 0 : Double(completed) / Double(total)
+                let prefix = didUpload ? "uploaded" : "already on device"
+                self.statusMessage = "\(prefix) \(completed)/\(total): \(path)"
+            }
+
+            let statusBeforeActivation = try? await client.status()
+            let previousMapId = statusBeforeActivation?.activeMapId ?? bleManager.mapTransferActiveMapId
+            recordTransfer(
+                mapId: expectedMapId,
+                sessionId: sessionId,
+                previousMapId: previousMapId,
+                outcome: "activating"
+            )
+            statusMessage = "activating \(displayName(forMapId: expectedMapId))"
+            bleManager.resetMapTransferActivationObservation()
+            do {
+                try await client.activate(sessionId: sessionId)
+            } catch {
+                guard isActivationResponseLoss(error) else { throw error }
+            }
+
+            try await confirmActivatedMap(
+                expectedMapId: expectedMapId,
+                sessionId: sessionId,
+                previousMapId: previousMapId,
+                client: client,
+                bleManager: bleManager
+            )
+            transferProgress = 1
+            statusMessage = "map installed: \(displayName(forMapId: expectedMapId))"
+            updateLastTransferOutcome("installed")
+            bleManager.requestMapTransferStatus()
         } catch {
-            if isActivationResponseLoss(error),
-               try await confirmActivatedMap(expectedMapId: expectedMapId,
-                                             client: client,
-                                             bleManager: bleManager) {
-                transferProgress = 1
-                statusMessage = "map installed"
-                bleManager.requestMapTransferStatus()
-                return
+            if let platformError = error as? OfflineMapPlatformError {
+                switch platformError {
+                case .mapActivationTimedOut:
+                    updateLastTransferOutcome("unconfirmed")
+                default:
+                    updateLastTransferOutcome("failed")
+                }
+            } else {
+                updateLastTransferOutcome("failed")
             }
             throw error
         }
-        guard try await confirmActivatedMap(expectedMapId: expectedMapId,
-                                            client: client,
-                                            bleManager: bleManager) else {
-            throw OfflineMapPlatformError.mapActivationTimedOut
-        }
-        transferProgress = 1
-        statusMessage = "map installed"
-        bleManager.requestMapTransferStatus()
     }
 
     private func isActivationResponseLoss(_ error: Error) -> Bool {
@@ -414,36 +468,106 @@ final class OfflineMapManager: ObservableObject {
         return String(value.prefix(72))
     }
 
-    private func confirmActivatedMap(expectedMapId: String?,
+    private func confirmActivatedMap(expectedMapId: String,
+                                     sessionId: String,
+                                     previousMapId: String?,
                                      client: MapTransferDeviceClient,
-                                     bleManager: BLEManager) async throws -> Bool {
-        guard let expectedMapId, !expectedMapId.isEmpty else {
-            return false
+                                     bleManager: BLEManager) async throws {
+        let startedAt = Date()
+        let deadline = startedAt.addingTimeInterval(
+            OfflineMapDefaults.activationConfirmationTimeout
+        )
+        let previousMapId = previousMapId?.isEmpty == false ? previousMapId : nil
+        var lastObservedState = "activation request accepted"
+
+        while Date() < deadline {
+            var receivedHTTPStatus = false
+            do {
+                let status = try await client.status()
+                receivedHTTPStatus = true
+                if let activation = status.activation,
+                   activation.sessionId == sessionId {
+                    lastObservedState = activation.status ?? "unknown"
+                    if activation.status == "failed" {
+                        let message = activation.error?.message ??
+                            activation.error?.code ??
+                            "device reported activation failure"
+                        throw OfflineMapPlatformError.mapActivationFailed(message)
+                    }
+                    if activation.status == "installed" {
+                        guard activation.mapId == nil || activation.mapId == expectedMapId else {
+                            throw OfflineMapPlatformError.mapActivationFailed(
+                                "device activated \(activation.mapId ?? "an unknown map") instead of \(expectedMapId)"
+                            )
+                        }
+                        return
+                    }
+                }
+                if status.activeMapId == expectedMapId {
+                    lastObservedState = "active map is \(expectedMapId)"
+                    if previousMapId != expectedMapId {
+                        return
+                    }
+                }
+            } catch let error as OfflineMapPlatformError {
+                throw error
+            } catch {
+                lastObservedState = "device Wi-Fi status unavailable"
+            }
+
+            if !receivedHTTPStatus {
+                bleManager.requestMapTransferStatus()
+                if bleManager.mapTransferActivationSessionId == sessionId {
+                    lastObservedState = bleManager.mapTransferActivationStatus
+                    if bleManager.mapTransferActivationStatus == "failed" {
+                        throw OfflineMapPlatformError.mapActivationFailed(
+                            bleManager.mapTransferActivationError ??
+                            bleManager.mapTransferLastError ??
+                            "device reported activation failure"
+                        )
+                    }
+                    if bleManager.mapTransferActivationStatus == "installed" {
+                        guard bleManager.mapTransferActivationMapId.isEmpty ||
+                                bleManager.mapTransferActivationMapId == expectedMapId else {
+                            throw OfflineMapPlatformError.mapActivationFailed(
+                                "device activated \(bleManager.mapTransferActivationMapId) instead of \(expectedMapId)"
+                            )
+                        }
+                        return
+                    }
+                }
+                if bleManager.mapTransferActiveMapId == expectedMapId,
+                   previousMapId != expectedMapId {
+                    return
+                }
+            }
+
+            let elapsedSeconds = Int(Date().timeIntervalSince(startedAt))
+            statusMessage = "activating \(displayName(forMapId: expectedMapId)) (\(elapsedSeconds)s)"
+            try? await Task.sleep(
+                nanoseconds: OfflineMapDefaults.activationPollIntervalNanoseconds
+            )
         }
 
-        statusMessage = "checking installed map"
-        for attempt in 0..<240 {
-            if let status = try? await client.status() {
-                if status.activeMapId == expectedMapId {
-                    return true
-                }
-                if status.activation?.status == "failed" {
-                    let message = status.activation?.error?.message ??
-                        status.activation?.error?.code ??
-                        "device reported activation failure"
-                    throw OfflineMapPlatformError.mapActivationFailed(message)
-                }
-            }
-            bleManager.requestMapTransferStatus()
-            if bleManager.mapTransferActiveMapId == expectedMapId {
-                return true
-            }
-            if attempt % 10 == 9 {
-                statusMessage = "checking installed map"
-            }
-            try? await Task.sleep(nanoseconds: 500_000_000)
-        }
-        return bleManager.mapTransferActiveMapId == expectedMapId
+        throw OfflineMapPlatformError.mapActivationTimedOut(
+            "expected \(expectedMapId); last device state was \(lastObservedState)"
+        )
+    }
+
+    private func recordTransfer(mapId: String,
+                                sessionId: String,
+                                previousMapId: String?,
+                                outcome: String) {
+        lastTransferMapId = mapId
+        defaults.set(mapId, forKey: OfflineMapDefaults.lastTransferMapIdKey)
+        defaults.set(sessionId, forKey: OfflineMapDefaults.lastTransferSessionIdKey)
+        defaults.set(previousMapId ?? "", forKey: OfflineMapDefaults.lastTransferPreviousMapIdKey)
+        updateLastTransferOutcome(outcome)
+    }
+
+    private func updateLastTransferOutcome(_ outcome: String) {
+        lastTransferOutcome = outcome
+        defaults.set(outcome, forKey: OfflineMapDefaults.lastTransferOutcomeKey)
     }
 
     private func displayNameForCurrentJob() -> String? {

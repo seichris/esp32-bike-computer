@@ -396,7 +396,6 @@ InstallStatus MapTransferInstaller::activateStagedMap(
   if (!mkdirs(vectmapRoot))
     return fail("mkdir", "could not create VECTMAP root");
 
-  const std::string installed = installedRoot(manifest.mapId);
   const std::string activationRoot =
       joinPath(storageRoot_, std::string("VECTMAP/.activation/") + sessionId);
   const std::string rollbackRoot =
@@ -404,9 +403,6 @@ InstallStatus MapTransferInstaller::activateStagedMap(
 
   removeTree(activationRoot);
   removeTree(rollbackRoot);
-  removeTree(installed);
-  if (!mkdirs(installed))
-    return fail("mkdir", "could not create installed map root");
 
   for (const ManifestFile &file : manifest.files) {
     const std::string stagedPath = joinPath(stagingRoot(sessionId), file.path);
@@ -427,8 +423,7 @@ InstallStatus MapTransferInstaller::activateStagedMap(
     removeTree(activationRoot);
     return fail("publish_clear", "could not clear current published map");
   }
-  if (!copyTree(joinPath(activationRoot, "VECTMAP"),
-                joinPath(storageRoot_, "VECTMAP"))) {
+  if (!publishActivation(activationRoot)) {
     clearPublishedMap();
     restorePublishedMap(rollbackRoot);
     removeTree(activationRoot);
@@ -463,10 +458,6 @@ MapTransferInstaller::readActiveMapId(std::string &mapId) const {
 
 std::string MapTransferInstaller::stagingRoot(const std::string &sessionId) const {
   return joinPath(joinPath(storageRoot_, "VECTMAP/.staging"), sessionId);
-}
-
-std::string MapTransferInstaller::installedRoot(const std::string &mapId) const {
-  return joinPath(storageRoot_, std::string("VECTMAP/.installed/") + mapId);
 }
 
 InstallStatus MapTransferInstaller::fail(const std::string &code,
@@ -661,6 +652,27 @@ bool MapTransferInstaller::clearPublishedMap() const {
         name == "active-map.json")
       continue;
     if (!removeTree(joinPath(vectmapRoot, name))) {
+      ::closedir(dir);
+      return false;
+    }
+  }
+  ::closedir(dir);
+  return true;
+}
+
+bool MapTransferInstaller::publishActivation(
+    const std::string &activationRoot) const {
+  const std::string sourceRoot = joinPath(activationRoot, "VECTMAP");
+  const std::string vectmapRoot = joinPath(storageRoot_, "VECTMAP");
+  DIR *dir = ::opendir(sourceRoot.c_str());
+  if (!dir)
+    return false;
+  struct dirent *entry = nullptr;
+  while ((entry = ::readdir(dir)) != nullptr) {
+    std::string name = entry->d_name;
+    if (name == "." || name == "..")
+      continue;
+    if (!movePath(joinPath(sourceRoot, name), joinPath(vectmapRoot, name))) {
       ::closedir(dir);
       return false;
     }
