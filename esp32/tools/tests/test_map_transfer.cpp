@@ -65,6 +65,37 @@ static std::string sha(const std::string &text) {
   return sha256Hex(reinterpret_cast<const uint8_t *>(text.data()), text.size());
 }
 
+static void prepareInterruptedSelectedVersion(const std::string &root,
+                                              const std::string &blockData) {
+  MapTransferInstaller installer(root);
+  const std::string vectmap = root + "/VECTMAP";
+  const std::string oldRoot = vectmap + "/.maps/session-old";
+  const std::string stagedDir =
+      vectmap + "/.staging/session-commit/VECTMAP/map-new/+0032+0008";
+  assert(::system((std::string("mkdir -p ") + oldRoot).c_str()) == 0);
+  assert(::system((std::string("mkdir -p ") + stagedDir).c_str()) == 0);
+  writeFile(oldRoot + "/old.fmb", "old");
+  writeFile(vectmap + "/active-map.json",
+            "{\"mapId\":\"map-old\",\"sessionId\":\"session-old\","
+            "\"root\":\"/VECTMAP/.maps/session-old\"}\n");
+  writeFile(stagedDir + "/new.fmb", blockData);
+  writeFile(vectmap + "/.staging/session-commit/manifest.json",
+            "{\"schemaVersion\":1,\"mapId\":\"map-new\",\"files\":[{"
+            "\"path\":\"VECTMAP/map-new/+0032+0008/new.fmb\",\"bytes\":" +
+                std::to_string(blockData.size()) + ",\"sha256\":\"" +
+                sha(blockData) + "\"}]}\n");
+  MapManifest manifest;
+  assert(installer.validateStagedMap("session-commit", manifest).ok);
+  assert(installer.activateStagedMap("session-commit", manifest).ok);
+  writeFile(vectmap + "/.activation-transaction.json",
+            "{\"sessionId\":\"session-commit\",\"mapId\":\"map-new\","
+            "\"root\":\"/VECTMAP/.maps/session-commit\","
+            "\"previousMapId\":\"map-old\","
+            "\"previousSessionId\":\"session-old\","
+            "\"previousRoot\":\"/VECTMAP/.maps/session-old\","
+            "\"phase\":\"ready\"}\n");
+}
+
 static void testSha256KnownVector() {
   assert(sha("abc") ==
          "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
@@ -428,36 +459,49 @@ static void testCompletesPointerSwitchInterruptedBeforeJournalCommit() {
   const std::string vectmap = root + "/VECTMAP";
   const std::string newRoot = vectmap + "/.maps/session-commit";
   const std::string oldRoot = vectmap + "/.maps/session-old";
-  const std::string staging = vectmap + "/.staging/session-commit";
-  assert(::system((std::string("mkdir -p ") + newRoot).c_str()) == 0);
-  assert(::system((std::string("mkdir -p ") + oldRoot).c_str()) == 0);
-  assert(::system((std::string("mkdir -p ") + staging).c_str()) == 0);
-  writeFile(newRoot + "/new.fmb", "new");
-  writeFile(oldRoot + "/old.fmb", "old");
-  writeFile(staging + "/manifest.json", "stale");
-  writeFile(vectmap + "/active-map.json",
-            "{\"mapId\":\"map-new\",\"sessionId\":\"session-commit\","
-            "\"root\":\"/VECTMAP/.maps/session-commit\","
-            "\"previousMapId\":\"map-old\","
-            "\"previousSessionId\":\"session-old\","
-            "\"previousRoot\":\"/VECTMAP/.maps/session-old\"}\n");
-  writeFile(vectmap + "/.activation-transaction.json",
-            "{\"sessionId\":\"session-commit\",\"mapId\":\"map-new\","
-            "\"root\":\"/VECTMAP/.maps/session-commit\","
-            "\"previousMapId\":\"map-old\","
-            "\"previousSessionId\":\"session-old\","
-            "\"previousRoot\":\"/VECTMAP/.maps/session-old\","
-            "\"phase\":\"ready\"}\n");
+  prepareInterruptedSelectedVersion(root, "new");
 
   auto recovered = installer.recoverInterruptedActivation();
   assert(recovered.ok);
   assert(recovered.code == "recovered_commit");
-  assert(readFile(newRoot + "/new.fmb") == "new");
+  assert(readFile(newRoot + "/+0032+0008/new.fmb") == "new");
   assert(readFile(oldRoot + "/old.fmb") == "old");
-  assert(!exists(staging));
   std::string activeMapId;
   assert(installer.readActiveMapId(activeMapId).ok);
   assert(activeMapId == "map-new");
+}
+
+static void testJournalRecoveryRollsBackPartialSelectedVersion() {
+  std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  prepareInterruptedSelectedVersion(root, "new-map-data");
+  const std::string installed =
+      root + "/VECTMAP/.maps/session-commit/+0032+0008/new.fmb";
+  assert(::unlink(installed.c_str()) == 0);
+
+  auto recovered = installer.recoverInterruptedActivation();
+  assert(recovered.ok);
+  assert(recovered.code == "recovered_rollback");
+  ActiveMapSelection selected;
+  assert(installer.readActiveMap(selected).ok);
+  assert(selected.mapId == "map-old");
+  assert(!exists(root + "/VECTMAP/.maps/session-commit"));
+}
+
+static void testJournalRecoveryRollsBackSameSizeCorruptSelectedVersion() {
+  std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  prepareInterruptedSelectedVersion(root, "good");
+  writeFile(root + "/VECTMAP/.maps/session-commit/+0032+0008/new.fmb",
+            "evil");
+
+  auto recovered = installer.recoverInterruptedActivation();
+  assert(recovered.ok);
+  assert(recovered.code == "recovered_rollback");
+  ActiveMapSelection selected;
+  assert(installer.readActiveMap(selected).ok);
+  assert(selected.mapId == "map-old");
+  assert(!exists(root + "/VECTMAP/.maps/session-commit"));
 }
 
 static void testJournalRecoveryRollsBackMissingSelectedVersion() {
@@ -512,6 +556,71 @@ static void testMissingSelectedVersionRestoresPreviousPointer() {
   assert(installer.readActiveMap(selected).ok);
   assert(selected.mapId == "map-old");
   assert(selected.root == "/VECTMAP/.maps/session-old");
+}
+
+static void testJournalRecoveryRestoresPreviousFromCorruptActiveMetadata() {
+  std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string vectmap = root + "/VECTMAP";
+  const std::string previousRoot = vectmap + "/.maps/session-old";
+  assert(::system((std::string("mkdir -p ") + previousRoot).c_str()) == 0);
+  writeFile(previousRoot + "/old.fmb", "old");
+  writeFile(vectmap + "/active-map.json", "{not-json}\n");
+  writeFile(vectmap + "/.activation-transaction.json",
+            "{\"sessionId\":\"session-new\",\"mapId\":\"map-new\","
+            "\"root\":\"/VECTMAP/.maps/session-new\","
+            "\"previousMapId\":\"map-old\","
+            "\"previousSessionId\":\"session-old\","
+            "\"previousRoot\":\"/VECTMAP/.maps/session-old\","
+            "\"phase\":\"publishing\"}\n");
+
+  auto recovered = installer.recoverInterruptedActivation();
+  assert(recovered.ok);
+  assert(recovered.code == "recovered_rollback");
+  ActiveMapSelection selected;
+  assert(installer.readActiveMap(selected).ok);
+  assert(selected.mapId == "map-old");
+  assert(selected.root == "/VECTMAP/.maps/session-old");
+}
+
+static void testJournalRecoveryClearsCorruptFirstInstallMetadata() {
+  std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string vectmap = root + "/VECTMAP";
+  assert(::system((std::string("mkdir -p ") +
+                   vectmap + "/.maps/session-new").c_str()) == 0);
+  writeFile(vectmap + "/.maps/session-new/partial.fmb", "partial");
+  writeFile(vectmap + "/active-map.json", "{not-json}\n");
+  writeFile(vectmap + "/.activation-transaction.json",
+            "{\"sessionId\":\"session-new\",\"mapId\":\"map-new\","
+            "\"root\":\"/VECTMAP/.maps/session-new\",\"phase\":"
+            "\"publishing\"}\n");
+
+  auto recovered = installer.recoverInterruptedActivation();
+  assert(recovered.ok);
+  assert(recovered.code == "recovered_rollback");
+  ActiveMapSelection selected;
+  auto active = installer.readActiveMap(selected);
+  assert(!active.ok);
+  assert(active.code == "active_missing");
+  assert(!exists(vectmap + "/.maps/session-new"));
+  assert(!exists(vectmap + "/.activation-transaction.json"));
+  assert(installer.recoverInterruptedActivation().ok);
+}
+
+static void testRecoveryClearsCorruptMetadataWithoutJournal() {
+  std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  assert(::system((std::string("mkdir -p ") + root + "/VECTMAP").c_str()) == 0);
+  writeFile(root + "/VECTMAP/active-map.json", "{not-json}\n");
+
+  auto recovered = installer.recoverInterruptedActivation();
+  assert(recovered.ok);
+  assert(recovered.code == "recovered_rollback");
+  ActiveMapSelection selected;
+  auto active = installer.readActiveMap(selected);
+  assert(!active.ok);
+  assert(active.code == "active_missing");
 }
 
 static void testRejectsChecksumMismatch() {
@@ -578,8 +687,13 @@ int main() {
   testPrunesLegacyRollbackAfterVersionedMapIsActive();
   testRollsBackInterruptedVersionPublish();
   testCompletesPointerSwitchInterruptedBeforeJournalCommit();
+  testJournalRecoveryRollsBackPartialSelectedVersion();
+  testJournalRecoveryRollsBackSameSizeCorruptSelectedVersion();
   testJournalRecoveryRollsBackMissingSelectedVersion();
   testMissingSelectedVersionRestoresPreviousPointer();
+  testJournalRecoveryRestoresPreviousFromCorruptActiveMetadata();
+  testJournalRecoveryClearsCorruptFirstInstallMetadata();
+  testRecoveryClearsCorruptMetadataWithoutJournal();
   testRejectsChecksumMismatch();
   testVerificationReceiptControlsResumeEligibility();
   std::cout << "map_transfer tests passed\n";

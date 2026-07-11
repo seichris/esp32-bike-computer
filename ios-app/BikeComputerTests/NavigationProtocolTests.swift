@@ -792,7 +792,6 @@ struct NavigationProtocolTests {
     static func testMapActivationReconciliationMatrix() {
         func evaluate(previousMapId: String? = "map-1",
                       previousSequence: UInt32? = 7,
-                      requestAcknowledged: Bool = false,
                       observedCurrentAttempt: Bool = false,
                       activeMapId: String? = "map-1",
                       activeSessionId: String? = nil,
@@ -806,7 +805,6 @@ struct NavigationProtocolTests {
                 sessionId: "session-1",
                 previousMapId: previousMapId,
                 previousSequence: previousSequence,
-                requestAcknowledged: requestAcknowledged,
                 observedCurrentAttempt: observedCurrentAttempt,
                 activeMapId: activeMapId,
                 activeSessionId: activeSessionId,
@@ -839,9 +837,25 @@ struct NavigationProtocolTests {
             "the durable active session proves an exact same-ID pack after restart"
         )
         assertEqual(
-            evaluate(requestAcknowledged: true).decision,
-            .installed,
-            "an acknowledged activation request can complete before the first poll"
+            evaluate(
+                activeSessionId: "session-1",
+                activationStatus: "activating"
+            ).decision,
+            .pending("activating"),
+            "an old exact-session root does not complete an in-progress same-session repair"
+        )
+        assertEqual(
+            evaluate(
+                activeSessionId: "session-1",
+                activationStatus: "failed"
+            ).decision,
+            .pending("failed"),
+            "an unobserved matching failure is not hidden by an old exact-session root"
+        )
+        assertEqual(
+            evaluate(activeSessionId: "session-1").decision,
+            .pending("installed"),
+            "a cached terminal state cannot complete a same-session retry"
         )
         assertEqual(
             evaluate(
@@ -942,7 +956,6 @@ struct NavigationProtocolTests {
                 sessionId: "session-1",
                 previousMapId: "map-1",
                 previousSequence: 7,
-                activationRequestAcknowledged: false,
                 client: client,
                 bleManager: bleManager,
                 timeout: 0.2,
@@ -970,7 +983,6 @@ struct NavigationProtocolTests {
                 sessionId: "session-1",
                 previousMapId: "map-1",
                 previousSequence: 7,
-                activationRequestAcknowledged: false,
                 client: client,
                 bleManager: bleManager,
                 timeout: 0.2,
@@ -999,7 +1011,6 @@ struct NavigationProtocolTests {
                     sessionId: "session-1",
                     previousMapId: "map-1",
                     previousSequence: 7,
-                    activationRequestAcknowledged: false,
                     client: client,
                     bleManager: bleManager,
                     timeout: 0.02,

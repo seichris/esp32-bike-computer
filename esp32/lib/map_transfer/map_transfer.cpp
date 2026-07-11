@@ -21,6 +21,8 @@ constexpr const char *kVectMapPrefix = "VECTMAP/";
 constexpr const char *kActiveMapFile = "/VECTMAP/active-map.json";
 constexpr const char *kActivationTransactionFile =
     "/VECTMAP/.activation-transaction.json";
+constexpr const char *kInstalledManifestFile = ".manifest.json";
+constexpr const char *kInstalledReceiptFile = ".verified.sha256";
 constexpr size_t kMaxManifestBytes = 64 * 1024;
 
 static std::string joinPath(const std::string &a, const std::string &b) {
@@ -533,7 +535,7 @@ InstallStatus MapTransferInstaller::activateStagedMap(
   if (!previousStatus.ok && previousStatus.code != "active_missing")
     return previousStatus;
   if (previousStatus.ok && previous.sessionId == sessionId) {
-    if (installedMapMatches(previous.root, manifest)) {
+    if (installedMapReceiptMatches(previous.root, manifest)) {
       removeTree(stagingRoot(sessionId));
       return {true, "ok", ""};
     }
@@ -571,6 +573,10 @@ InstallStatus MapTransferInstaller::activateStagedMap(
   if (!publishStagedFiles(sessionId, manifest, destinationRoot)) {
     abandonNewRoot();
     return fail("publish_move", "could not publish verified map files");
+  }
+  if (!publishInstalledMetadata(sessionId, manifest, destinationRoot)) {
+    abandonNewRoot();
+    return fail("publish_metadata", "could not publish map verification metadata");
   }
   if (!writeTextFileAtomic(transactionPath, transactionJson("ready"))) {
     abandonNewRoot();
@@ -620,6 +626,25 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
       if (!active.ok || activeRootExists(selected.root)) {
         if (active.ok || active.code == "active_missing")
           return {true, "ok", ""};
+        if (active.code == "active_invalid") {
+          const std::string activeBackup = activePath + ".bak";
+          removeTree(activePath);
+          if (fileExists(activeBackup) &&
+              ::rename(activeBackup.c_str(), activePath.c_str()) == 0) {
+            ActiveMapSelection backup;
+            InstallStatus backupStatus = readActiveMap(backup);
+            if (backupStatus.ok && activeRootExists(backup.root)) {
+              removeTree(activePath + ".tmp");
+              return {true, "recovered_rollback",
+                      "restored valid active map metadata backup"};
+            }
+            removeTree(activePath);
+          }
+          removeTree(activeBackup);
+          removeTree(activePath + ".tmp");
+          return {true, "recovered_rollback",
+                  "cleared invalid active map metadata"};
+        }
         return active;
       }
       if (!selected.previousRoot.empty() &&
@@ -662,8 +687,16 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
 
   ActiveMapSelection active;
   InstallStatus activeStatus = readActiveMap(active);
-  const bool selectedNewRoot = activeStatus.ok && active.root == root;
-  if (selectedNewRoot && activeRootExists(root)) {
+  const bool activePointsToNewRoot = activeStatus.ok && active.root == root;
+  const bool selectedNewRoot = activePointsToNewRoot &&
+                               active.mapId == mapId &&
+                               active.sessionId == sessionId;
+  MapManifest installedManifest;
+  const bool selectedRootVerified =
+      selectedNewRoot && readInstalledManifest(root, installedManifest).ok &&
+      installedManifest.mapId == mapId &&
+      installedMapContentsMatch(root, installedManifest);
+  if (selectedRootVerified) {
     const bool cleanupComplete = removeTree(stagingRoot(sessionId)) &&
                                  removeTree(activePath + ".bak") &&
                                  removeTree(activePath + ".tmp") &&
@@ -675,7 +708,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
   }
 
   bool restoredPrevious = false;
-  if ((!activeStatus.ok || selectedNewRoot) && !previousRoot.empty() &&
+  if ((!activeStatus.ok || activePointsToNewRoot) && !previousRoot.empty() &&
       activeRootExists(previousRoot)) {
     ActiveMapSelection rollback;
     rollback.mapId = previousMapId;
@@ -686,16 +719,20 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
     restoredPrevious = true;
   }
 
-  if (selectedNewRoot && !restoredPrevious)
-    return fail("active_root_missing",
-                "selected map directory is missing and no rollback is available");
-
-  const bool cleanupComplete = removeTree(joinPath(storageRoot_, root)) &&
-                               removeTree(stagingRoot(sessionId)) &&
-                               removeTree(activePath + ".bak") &&
-                               removeTree(activePath + ".tmp") &&
-                               removeTree(transactionPath + ".bak") &&
-                               removeTree(transactionPath + ".tmp");
+  const bool discardInvalidActive = !activeStatus.ok &&
+                                    activeStatus.code == "active_invalid" &&
+                                    !restoredPrevious;
+  const bool discardIncompleteSelection = activePointsToNewRoot &&
+                                           !restoredPrevious;
+  const bool cleanupComplete =
+      (!(discardInvalidActive || discardIncompleteSelection) ||
+       removeTree(activePath)) &&
+      removeTree(joinPath(storageRoot_, root)) &&
+      removeTree(stagingRoot(sessionId)) &&
+      removeTree(activePath + ".bak") &&
+      removeTree(activePath + ".tmp") &&
+      removeTree(transactionPath + ".bak") &&
+      removeTree(transactionPath + ".tmp");
   if (!cleanupComplete || !removeTree(transactionPath))
     return fail("transaction_cleanup",
                 "could not clear interrupted map version");
@@ -982,10 +1019,61 @@ bool MapTransferInstaller::publishStagedFiles(
   return true;
 }
 
-bool MapTransferInstaller::installedMapMatches(
+bool MapTransferInstaller::publishInstalledMetadata(
+    const std::string &sessionId, const MapManifest &manifest,
+    const std::string &destinationRoot) const {
+  std::string manifestText;
+  if (!readTextFile(joinPath(stagingRoot(sessionId), "manifest.json"),
+                    manifestText, kMaxManifestBytes)) {
+    return false;
+  }
+  return writeTextFileAtomic(joinPath(destinationRoot, kInstalledManifestFile),
+                             manifestText) &&
+         writeTextFileAtomic(joinPath(destinationRoot, kInstalledReceiptFile),
+                             manifestReceipt(manifest));
+}
+
+std::string
+MapTransferInstaller::manifestReceipt(const MapManifest &manifest) const {
+  std::string value = std::to_string(manifest.schemaVersion) + "\n" +
+                      manifest.mapId + "\n";
+  for (const ManifestFile &file : manifest.files) {
+    value += file.path + "\n" + file.publishPath + "\n" +
+             std::to_string(file.bytes) + "\n" + file.sha256 + "\n";
+  }
+  return sha256Hex(reinterpret_cast<const uint8_t *>(value.data()),
+                   value.size());
+}
+
+InstallStatus MapTransferInstaller::readInstalledManifest(
+    const std::string &root, MapManifest &manifest) const {
+  if (!safeActiveRoot(root) || !activeRootExists(root))
+    return fail("installed_root", "installed map root is missing");
+  std::string text;
+  if (!readTextFile(
+          joinPath(joinPath(storageRoot_, root), kInstalledManifestFile), text,
+          kMaxManifestBytes)) {
+    return fail("installed_manifest", "installed map manifest is missing");
+  }
+  return validateManifestText(text, manifest);
+}
+
+bool MapTransferInstaller::installedMapReceiptMatches(
     const std::string &root, const MapManifest &manifest) const {
   if (!activeRootExists(root))
     return false;
+  MapManifest installedManifest;
+  if (!readInstalledManifest(root, installedManifest).ok ||
+      manifestReceipt(installedManifest) != manifestReceipt(manifest)) {
+    return false;
+  }
+  std::string receipt;
+  if (!readTextFile(
+          joinPath(joinPath(storageRoot_, root), kInstalledReceiptFile), receipt,
+          64) ||
+      receipt != manifestReceipt(manifest)) {
+    return false;
+  }
   const std::string publishPrefix = kVectMapPrefix;
   for (const ManifestFile &file : manifest.files) {
     if (!startsWith(file.publishPath, publishPrefix))
@@ -995,6 +1083,18 @@ bool MapTransferInstaller::installedMapMatches(
     uint64_t size = 0;
     if (!fileSize(path, size) || size != file.bytes)
       return false;
+  }
+  return true;
+}
+
+bool MapTransferInstaller::installedMapContentsMatch(
+    const std::string &root, const MapManifest &manifest) const {
+  if (!installedMapReceiptMatches(root, manifest))
+    return false;
+  const std::string publishPrefix = kVectMapPrefix;
+  for (const ManifestFile &file : manifest.files) {
+    const std::string relative = file.publishPath.substr(publishPrefix.size());
+    const std::string path = joinPath(joinPath(storageRoot_, root), relative);
     std::string actual;
     if (!fileSha256Hex(path, actual))
       return false;

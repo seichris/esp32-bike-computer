@@ -45,7 +45,6 @@ nonisolated enum MapActivationReconciler {
                          sessionId: String,
                          previousMapId: String?,
                          previousSequence: UInt32?,
-                         requestAcknowledged: Bool,
                          observedCurrentAttempt: Bool,
                          activeMapId: String?,
                          activeSessionId: String?,
@@ -65,8 +64,7 @@ nonisolated enum MapActivationReconciler {
             sequenceAdvanced = false
         }
 
-        var observedCurrentAttempt = observedCurrentAttempt ||
-            requestAcknowledged || sequenceAdvanced
+        var observedCurrentAttempt = observedCurrentAttempt || sequenceAdvanced
         if sessionMatches, activationStatus == "activating" {
             observedCurrentAttempt = true
         }
@@ -96,7 +94,9 @@ nonisolated enum MapActivationReconciler {
             }
         }
 
-        if activeMapId == expectedMapId, activeSessionId == sessionId {
+        if activeMapId == expectedMapId,
+           activeSessionId == sessionId,
+           !sessionMatches {
             return MapActivationEvaluation(
                 decision: .installed,
                 observedCurrentAttempt: observedCurrentAttempt
@@ -419,7 +419,6 @@ final class OfflineMapManager: ObservableObject {
             sessionId: sessionId,
             previousMapId: previousMapId,
             previousSequence: previousSequence,
-            requestAcknowledged: false,
             observedCurrentAttempt: false,
             activeMapId: bleManager.mapTransferActiveMapId,
             activeSessionId: bleManager.mapTransferActiveSessionId,
@@ -629,10 +628,8 @@ final class OfflineMapManager: ObservableObject {
             )
             statusMessage = "activating \(displayName(forMapId: expectedMapId))"
             bleManager.resetMapTransferActivationObservation()
-            var activationRequestAcknowledged = false
             do {
                 try await client.activate(sessionId: sessionId)
-                activationRequestAcknowledged = true
             } catch {
                 guard MapActivationTransport.isAmbiguousResponseError(error) else {
                     throw error
@@ -644,7 +641,6 @@ final class OfflineMapManager: ObservableObject {
                 sessionId: sessionId,
                 previousMapId: previousMapId,
                 previousSequence: previousSequence,
-                activationRequestAcknowledged: activationRequestAcknowledged,
                 client: client,
                 bleManager: bleManager
             )
@@ -671,7 +667,6 @@ final class OfflineMapManager: ObservableObject {
                              sessionId: String,
                              previousMapId: String?,
                              previousSequence: UInt32?,
-                             activationRequestAcknowledged: Bool,
                              client: MapTransferDeviceClient,
                              bleManager: BLEManager,
                              timeout: TimeInterval = OfflineMapDefaults.activationConfirmationTimeout,
@@ -679,7 +674,7 @@ final class OfflineMapManager: ObservableObject {
         let startedAt = Date()
         let deadline = startedAt.addingTimeInterval(timeout)
         var lastObservedState = "activation request accepted"
-        var observedCurrentAttempt = activationRequestAcknowledged
+        var observedCurrentAttempt = false
 
         while Date() < deadline {
             var receivedHTTPStatus = false
@@ -692,7 +687,6 @@ final class OfflineMapManager: ObservableObject {
                     sessionId: sessionId,
                     previousMapId: previousMapId,
                     previousSequence: previousSequence,
-                    requestAcknowledged: activationRequestAcknowledged,
                     observedCurrentAttempt: observedCurrentAttempt,
                     activeMapId: status.activeMapId,
                     activeSessionId: status.activeSessionId,
@@ -729,7 +723,6 @@ final class OfflineMapManager: ObservableObject {
                     sessionId: sessionId,
                     previousMapId: previousMapId,
                     previousSequence: previousSequence,
-                    requestAcknowledged: activationRequestAcknowledged,
                     observedCurrentAttempt: observedCurrentAttempt,
                     activeMapId: bleManager.mapTransferActiveMapId,
                     activeSessionId: bleManager.mapTransferActiveSessionId,

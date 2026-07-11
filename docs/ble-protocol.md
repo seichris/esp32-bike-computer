@@ -281,13 +281,18 @@ The ESP32 map installer validates staged packs before activation:
   second full read during activation.
 - activation moves verified files into `.maps/<sessionId>` using same-volume
   renames, then switches `/sdcard/VECTMAP/active-map.json` to that immutable
-root. It does not copy the full map again.
+  root. Each installed root retains a hidden manifest and verification receipt,
+  so an idempotent same-session activation checks metadata without rereading all
+  map bytes. It does not copy the full map again.
 
 Active-map metadata is written through a temporary file and atomic rename. A
 backup is retained during the embedded FAT fallback. A hidden activation
 journal tracks publishing and the pointer switch. Boot recovery removes an
-incomplete new version when the pointer was not switched, or completes cleanup
-when the new root is already selected. The previous selected root remains
+incomplete new version when the pointer was not switched. If the new root is
+already selected, the exceptional recovery path verifies its retained manifest,
+receipt, sizes, and hashes before completing cleanup; otherwise it restores the
+previous root or clears an unrecoverable first-install selection so a fresh
+transfer can proceed. The previous selected root remains
 available for rollback until the next transfer begins; at that point only the
 current version is retained before the replacement uploads.
 

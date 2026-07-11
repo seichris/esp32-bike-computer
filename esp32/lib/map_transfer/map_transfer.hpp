@@ -132,8 +132,16 @@ private:
   bool publishStagedFiles(const std::string &sessionId,
                           const MapManifest &manifest,
                           const std::string &destinationRoot) const;
-  bool installedMapMatches(const std::string &root,
-                           const MapManifest &manifest) const;
+  bool publishInstalledMetadata(const std::string &sessionId,
+                                const MapManifest &manifest,
+                                const std::string &destinationRoot) const;
+  std::string manifestReceipt(const MapManifest &manifest) const;
+  InstallStatus readInstalledManifest(const std::string &root,
+                                      MapManifest &manifest) const;
+  bool installedMapReceiptMatches(const std::string &root,
+                                  const MapManifest &manifest) const;
+  bool installedMapContentsMatch(const std::string &root,
+                                 const MapManifest &manifest) const;
   bool writeActiveMap(const ActiveMapSelection &selection) const;
   bool activeRootExists(const std::string &root) const;
   bool fileExists(const std::string &path) const;
