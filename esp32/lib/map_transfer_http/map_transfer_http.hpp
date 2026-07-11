@@ -21,6 +21,7 @@ public:
   HttpTransferStatus status() const;
   std::string activationStatusJson(bool compact = false) const;
   bool activationHasError() const;
+  bool takeActivatedMapRoot(std::string &root);
 
 private:
   std::string storageRoot_ = "/sdcard";
@@ -30,6 +31,7 @@ private:
   MapTransferInstaller installer_{"/sdcard"};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
   MapActivationState activationState_;
+  std::string pendingMapRoot_;
 
   bool handleRequest(const device_transfer::HttpRequest &request,
                      WiFiClient &client) override;

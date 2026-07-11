@@ -223,102 +223,92 @@ static const uint32_t kSha256RoundConstants[64] = {
     0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
     0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
 
-class Sha256 {
-public:
-  void update(const uint8_t *data, size_t len) {
-    totalLen_ += len;
-    while (len > 0) {
-      size_t n = std::min(len, block_.size() - blockLen_);
-      memcpy(block_.data() + blockLen_, data, n);
-      blockLen_ += n;
-      data += n;
-      len -= n;
-      if (blockLen_ == block_.size()) {
-        transform(block_.data());
-        blockLen_ = 0;
-      }
-    }
-  }
-
-  std::string finalHex() {
-    uint64_t bitLen = totalLen_ * 8;
-    uint8_t one = 0x80;
-    update(&one, 1);
-    uint8_t zero = 0;
-    while (blockLen_ != 56)
-      update(&zero, 1);
-    uint8_t lengthBytes[8];
-    for (int i = 0; i < 8; i++)
-      lengthBytes[i] = static_cast<uint8_t>(bitLen >> (56 - (i * 8)));
-    update(lengthBytes, sizeof(lengthBytes));
-
-    static const char hex[] = "0123456789abcdef";
-    std::string out;
-    out.reserve(64);
-    for (uint32_t word : h_) {
-      for (int shift = 28; shift >= 0; shift -= 4)
-        out.push_back(hex[(word >> shift) & 0x0F]);
-    }
-    return out;
-  }
-
-private:
-  std::array<uint8_t, 64> block_ = {};
-  size_t blockLen_ = 0;
-  uint64_t totalLen_ = 0;
-  uint32_t h_[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-                    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
-
-  void transform(const uint8_t *chunk) {
-    uint32_t w[64] = {};
-    for (int i = 0; i < 16; i++) {
-      size_t j = static_cast<size_t>(i) * 4;
-      w[i] = (static_cast<uint32_t>(chunk[j]) << 24) |
-             (static_cast<uint32_t>(chunk[j + 1]) << 16) |
-             (static_cast<uint32_t>(chunk[j + 2]) << 8) |
-             static_cast<uint32_t>(chunk[j + 3]);
-    }
-    for (int i = 16; i < 64; i++) {
-      uint32_t s0 =
-          rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
-      uint32_t s1 =
-          rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
-      w[i] = w[i - 16] + s0 + w[i - 7] + s1;
-    }
-
-    uint32_t a = h_[0], b = h_[1], c = h_[2], d = h_[3];
-    uint32_t e = h_[4], f = h_[5], g = h_[6], hh = h_[7];
-    for (int i = 0; i < 64; i++) {
-      uint32_t s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-      uint32_t ch = (e & f) ^ ((~e) & g);
-      uint32_t temp1 = hh + s1 + ch + kSha256RoundConstants[i] + w[i];
-      uint32_t s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-      uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
-      uint32_t temp2 = s0 + maj;
-      hh = g;
-      g = f;
-      f = e;
-      e = d + temp1;
-      d = c;
-      c = b;
-      b = a;
-      a = temp1 + temp2;
-    }
-    h_[0] += a;
-    h_[1] += b;
-    h_[2] += c;
-    h_[3] += d;
-    h_[4] += e;
-    h_[5] += f;
-    h_[6] += g;
-    h_[7] += hh;
-  }
-};
-
 } // namespace
 
+void Sha256Hasher::update(const uint8_t *data, size_t len) {
+  totalLen_ += len;
+  while (len > 0) {
+    size_t n = std::min(len, block_.size() - blockLen_);
+    memcpy(block_.data() + blockLen_, data, n);
+    blockLen_ += n;
+    data += n;
+    len -= n;
+    if (blockLen_ == block_.size()) {
+      transform(block_.data());
+      blockLen_ = 0;
+    }
+  }
+}
+
+std::string Sha256Hasher::finalHex() {
+  uint64_t bitLen = totalLen_ * 8;
+  uint8_t one = 0x80;
+  update(&one, 1);
+  uint8_t zero = 0;
+  while (blockLen_ != 56)
+    update(&zero, 1);
+  uint8_t lengthBytes[8];
+  for (int i = 0; i < 8; i++)
+    lengthBytes[i] = static_cast<uint8_t>(bitLen >> (56 - (i * 8)));
+  update(lengthBytes, sizeof(lengthBytes));
+
+  static const char hex[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(64);
+  for (uint32_t word : h_) {
+    for (int shift = 28; shift >= 0; shift -= 4)
+      out.push_back(hex[(word >> shift) & 0x0F]);
+  }
+  return out;
+}
+
+void Sha256Hasher::transform(const uint8_t *chunk) {
+  uint32_t w[64] = {};
+  for (int i = 0; i < 16; i++) {
+    size_t j = static_cast<size_t>(i) * 4;
+    w[i] = (static_cast<uint32_t>(chunk[j]) << 24) |
+           (static_cast<uint32_t>(chunk[j + 1]) << 16) |
+           (static_cast<uint32_t>(chunk[j + 2]) << 8) |
+           static_cast<uint32_t>(chunk[j + 3]);
+  }
+  for (int i = 16; i < 64; i++) {
+    uint32_t s0 =
+        rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+    uint32_t s1 =
+        rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+    w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+  }
+
+  uint32_t a = h_[0], b = h_[1], c = h_[2], d = h_[3];
+  uint32_t e = h_[4], f = h_[5], g = h_[6], hh = h_[7];
+  for (int i = 0; i < 64; i++) {
+    uint32_t s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+    uint32_t ch = (e & f) ^ ((~e) & g);
+    uint32_t temp1 = hh + s1 + ch + kSha256RoundConstants[i] + w[i];
+    uint32_t s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+    uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+    uint32_t temp2 = s0 + maj;
+    hh = g;
+    g = f;
+    f = e;
+    e = d + temp1;
+    d = c;
+    c = b;
+    b = a;
+    a = temp1 + temp2;
+  }
+  h_[0] += a;
+  h_[1] += b;
+  h_[2] += c;
+  h_[3] += d;
+  h_[4] += e;
+  h_[5] += f;
+  h_[6] += g;
+  h_[7] += hh;
+}
+
 std::string sha256Hex(const uint8_t *data, size_t len) {
-  Sha256 sha;
+  Sha256Hasher sha;
   sha.update(data, len);
   return sha.finalHex();
 }
@@ -424,16 +414,22 @@ InstallStatus MapTransferInstaller::validateManifestText(
   return {true, "ok", ""};
 }
 
-InstallStatus
-MapTransferInstaller::validateStagedMap(const std::string &sessionId,
-                                        MapManifest &manifest) const {
+InstallStatus MapTransferInstaller::readStagedManifest(
+    const std::string &sessionId, MapManifest &manifest) const {
   if (!safeId(sessionId))
     return fail("session_id", "session id contains unsafe characters");
   std::string manifestText;
   if (!readTextFile(joinPath(stagingRoot(sessionId), "manifest.json"),
-                    manifestText, kMaxManifestBytes))
+                    manifestText, kMaxManifestBytes)) {
     return fail("manifest_missing", "staged manifest is missing");
-  InstallStatus parsed = validateManifestText(manifestText, manifest);
+  }
+  return validateManifestText(manifestText, manifest);
+}
+
+InstallStatus
+MapTransferInstaller::validateStagedMap(const std::string &sessionId,
+                                        MapManifest &manifest) const {
+  InstallStatus parsed = readStagedManifest(sessionId, manifest);
   if (!parsed.ok)
     return parsed;
 
@@ -444,16 +440,80 @@ MapTransferInstaller::validateStagedMap(const std::string &sessionId,
       return fail("file_missing", "staged map file is missing: " + file.path);
     if (size != file.bytes)
       return fail("file_size", "staged map file size mismatch: " + file.path);
-    std::string sha;
-    if (!fileSha256Hex(stagedPath, sha))
-      return fail("file_sha256", "could not hash staged map file: " + file.path);
-    std::transform(sha.begin(), sha.end(), sha.begin(), ::tolower);
-    std::string expected = file.sha256;
-    std::transform(expected.begin(), expected.end(), expected.begin(), ::tolower);
-    if (sha != expected)
-      return fail("file_sha256", "staged map file sha256 mismatch: " + file.path);
+    if (!stagedFileVerified(sessionId, file)) {
+      // Compatibility path for a transfer staged by older firmware. New
+      // uploads are hashed while streaming and only reach activation with a
+      // verification receipt, so the normal activation path performs no
+      // full-file reads.
+      std::string sha;
+      if (!fileSha256Hex(stagedPath, sha))
+        return fail("file_sha256",
+                    "could not hash staged map file: " + file.path);
+      std::transform(sha.begin(), sha.end(), sha.begin(), ::tolower);
+      std::string expected = file.sha256;
+      std::transform(expected.begin(), expected.end(), expected.begin(),
+                     ::tolower);
+      if (sha != expected)
+        return fail("file_sha256",
+                    "staged map file sha256 mismatch: " + file.path);
+      if (!markStagedFileVerified(sessionId, file))
+        return fail("file_receipt",
+                    "could not record staged map verification: " + file.path);
+    }
   }
   return {true, "ok", ""};
+}
+
+InstallStatus MapTransferInstaller::expectedStagedFile(
+    const std::string &sessionId, const std::string &path,
+    ManifestFile &file) const {
+  if (!safeId(sessionId) || !safeRelativePath(path))
+    return fail("path", "staged map path is invalid");
+  MapManifest manifest;
+  InstallStatus parsed = readStagedManifest(sessionId, manifest);
+  if (!parsed.ok)
+    return parsed;
+  for (const ManifestFile &candidate : manifest.files) {
+    if (candidate.path == path) {
+      file = candidate;
+      return {true, "ok", ""};
+    }
+  }
+  return fail("manifest_path", "file is not declared by the staged manifest");
+}
+
+bool MapTransferInstaller::stagedFileVerified(
+    const std::string &sessionId, const ManifestFile &file) const {
+  uint64_t size = 0;
+  if (!fileSize(joinPath(stagingRoot(sessionId), file.path), size) ||
+      size != file.bytes) {
+    return false;
+  }
+  std::string receipt;
+  if (!readTextFile(verificationPath(sessionId, file), receipt, 64))
+    return false;
+  std::transform(receipt.begin(), receipt.end(), receipt.begin(), ::tolower);
+  std::string expected = file.sha256;
+  std::transform(expected.begin(), expected.end(), expected.begin(), ::tolower);
+  return receipt == expected;
+}
+
+bool MapTransferInstaller::markStagedFileVerified(
+    const std::string &sessionId, const ManifestFile &file) const {
+  if (!safeId(sessionId) || !safeRelativePath(file.path) ||
+      !isHexSha256(file.sha256)) {
+    return false;
+  }
+  std::string sha = file.sha256;
+  std::transform(sha.begin(), sha.end(), sha.begin(), ::tolower);
+  return writeTextFileAtomic(verificationPath(sessionId, file), sha);
+}
+
+void MapTransferInstaller::clearStagedFileVerification(
+    const std::string &sessionId, const ManifestFile &file) const {
+  removeTree(verificationPath(sessionId, file));
+  removeTree(verificationPath(sessionId, file) + ".bak");
+  removeTree(verificationPath(sessionId, file) + ".tmp");
 }
 
 InstallStatus MapTransferInstaller::activateStagedMap(
@@ -463,101 +523,73 @@ InstallStatus MapTransferInstaller::activateStagedMap(
   if (!safeId(manifest.mapId))
     return fail("manifest_map_id", "mapId contains unsafe characters");
 
-  const std::string vectmapRoot = joinPath(storageRoot_, "VECTMAP");
-  if (!mkdirs(vectmapRoot))
-    return fail("mkdir", "could not create VECTMAP root");
-
-  const std::string activationRoot =
-      joinPath(storageRoot_, std::string("VECTMAP/.activation/") + sessionId);
-  const std::string rollbackRoot =
-      joinPath(storageRoot_, std::string("VECTMAP/.rollback/") + sessionId);
-
-  removeTree(activationRoot);
-  removeTree(rollbackRoot);
-
-  for (const ManifestFile &file : manifest.files) {
-    const std::string stagedPath = joinPath(stagingRoot(sessionId), file.path);
-    const std::string destination = joinPath(activationRoot, file.publishPath);
-    if (!mkdirs(dirnameOf(destination)))
-      return fail("mkdir", "could not create destination folder");
-    if (!copyFile(stagedPath, destination))
-      return fail("copy", "could not stage published map file: " + file.publishPath);
-  }
-
   const std::string transactionPath =
       joinPath(storageRoot_, kActivationTransactionFile);
-  const std::string activePath = joinPath(storageRoot_, kActiveMapFile);
+  const std::string root = std::string("/VECTMAP/.maps/") + sessionId;
+  const std::string destinationRoot = joinPath(storageRoot_, root);
+
+  ActiveMapSelection previous;
+  InstallStatus previousStatus = readActiveMap(previous);
+  if (!previousStatus.ok && previousStatus.code != "active_missing")
+    return previousStatus;
+  if (previousStatus.ok && previous.sessionId == sessionId &&
+      previous.root == root && activeRootExists(root)) {
+    removeTree(stagingRoot(sessionId));
+    return {true, "ok", ""};
+  }
+
   const auto transactionJson = [&](const char *phase) {
     return std::string("{\"sessionId\":\"") + sessionId +
-           "\",\"mapId\":\"" + manifest.mapId + "\",\"phase\":\"" +
-           phase + "\"}\n";
+           "\",\"mapId\":\"" + manifest.mapId + "\",\"root\":\"" + root +
+           "\",\"previousMapId\":\"" + jsonEscape(previous.mapId) +
+           "\",\"previousSessionId\":\"" +
+           jsonEscape(previous.sessionId) + "\",\"previousRoot\":\"" +
+           jsonEscape(previous.root) + "\",\"phase\":\"" + phase +
+           "\"}\n";
   };
-  const auto cleanupRolledBack = [&]() {
-    const bool cleanupComplete = removeTree(rollbackRoot) &&
-                                 removeTree(activationRoot) &&
-                                 removeTree(activePath + ".bak") &&
-                                 removeTree(activePath + ".tmp") &&
-                                 removeTree(transactionPath + ".bak") &&
-                                 removeTree(transactionPath + ".tmp");
-    return cleanupComplete && removeTree(transactionPath);
-  };
-  const auto finalizeRollback = [&](bool preserveExisting) {
-    if (!restorePublishedMap(rollbackRoot, preserveExisting))
-      return false;
-    if (!writeTextFileAtomic(transactionPath, transactionJson("rolled_back")))
-      return false;
-    return cleanupRolledBack();
-  };
-  const auto rollbackPublished = [&]() {
-    const bool cleared = clearPublishedMap();
-    const bool metadataRemoved =
-        ::unlink(activePath.c_str()) == 0 || errno == ENOENT;
-    if (!cleared || !metadataRemoved)
-      return false;
-    return finalizeRollback(false);
+  const auto abandonNewRoot = [&]() {
+    const bool cleaned = removeTree(destinationRoot) &&
+                         removeTree(stagingRoot(sessionId)) &&
+                         removeTree(transactionPath + ".bak") &&
+                         removeTree(transactionPath + ".tmp");
+    return cleaned && removeTree(transactionPath);
   };
 
-  if (!writeTextFileAtomic(transactionPath, transactionJson("backing_up"))) {
-    removeTree(activationRoot);
+  if (!removeTree(destinationRoot))
+    return fail("install_cleanup", "could not clear incomplete map version");
+  if (!writeTextFileAtomic(transactionPath, transactionJson("publishing"))) {
     return fail("transaction", "could not start map activation transaction");
   }
-  if (!backupPublishedMap(rollbackRoot)) {
-    finalizeRollback(true);
-    return fail("rollback", "could not backup current map before activation");
+  if (!publishStagedFiles(sessionId, manifest, destinationRoot)) {
+    abandonNewRoot();
+    return fail("publish_move", "could not publish verified map files");
   }
-  if (!writeTextFileAtomic(transactionPath, transactionJson("publishing"))) {
-    finalizeRollback(true);
-    return fail("transaction", "could not advance map activation transaction");
-  }
-  if (!clearPublishedMap()) {
-    rollbackPublished();
-    removeTree(activationRoot);
-    return fail("publish_clear", "could not clear current published map");
-  }
-  if (!publishActivation(activationRoot)) {
-    rollbackPublished();
-    removeTree(activationRoot);
-    return fail("publish_copy", "could not publish activated map");
+  if (!writeTextFileAtomic(transactionPath, transactionJson("ready"))) {
+    abandonNewRoot();
+    return fail("transaction", "could not prepare map activation switch");
   }
 
-  const std::string activeJson = std::string("{\"mapId\":\"") + manifest.mapId +
-                                 "\",\"root\":\"/VECTMAP\"}\n";
-  if (!writeTextFileAtomic(activePath, activeJson)) {
-    rollbackPublished();
-    removeTree(activationRoot);
-    return fail("active_write", "could not write active map metadata");
+  ActiveMapSelection selected;
+  selected.mapId = manifest.mapId;
+  selected.sessionId = sessionId;
+  selected.root = root;
+  if (previousStatus.ok) {
+    selected.previousMapId = previous.mapId;
+    selected.previousSessionId = previous.sessionId;
+    selected.previousRoot = previous.root;
+  }
+  if (!writeActiveMap(selected)) {
+    InstallStatus recovered = recoverInterruptedActivation();
+    if (!recovered.ok)
+      return fail("active_recovery", recovered.message);
+    return fail("active_write", "could not select installed map version");
   }
   if (!writeTextFileAtomic(transactionPath, transactionJson("committed"))) {
-    rollbackPublished();
-    removeTree(activationRoot);
-    return fail("transaction", "could not commit map activation transaction");
+    return {true, "cleanup_pending",
+            "map selected; activation journal cleanup will retry"};
   }
 
-  const bool cleanupComplete = removeTree(rollbackRoot) &&
-                               removeTree(activationRoot) &&
-                               removeTree(stagingRoot(sessionId)) &&
-                               removeTree(activePath + ".bak") &&
-                               removeTree(activePath + ".tmp") &&
+  const bool cleanupComplete = removeTree(stagingRoot(sessionId)) &&
                                removeTree(transactionPath + ".bak") &&
                                removeTree(transactionPath + ".tmp");
   if (cleanupComplete && removeTree(transactionPath))
@@ -569,13 +601,31 @@ InstallStatus MapTransferInstaller::activateStagedMap(
 InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
   const std::string transactionPath =
       joinPath(storageRoot_, kActivationTransactionFile);
+  const std::string activePath = joinPath(storageRoot_, kActiveMapFile);
   std::string transaction;
   if (!readTextFile(transactionPath, transaction, 1024)) {
     const std::string backupPath = transactionPath + ".bak";
     if (!fileExists(backupPath)) {
       removeTree(transactionPath + ".tmp");
-      removeTree(joinPath(storageRoot_, "VECTMAP/.activation"));
-      return {true, "ok", ""};
+      ActiveMapSelection selected;
+      InstallStatus active = readActiveMap(selected);
+      if (!active.ok || activeRootExists(selected.root)) {
+        if (active.ok || active.code == "active_missing")
+          return {true, "ok", ""};
+        return active;
+      }
+      if (!selected.previousRoot.empty() &&
+          activeRootExists(selected.previousRoot)) {
+        ActiveMapSelection rollback;
+        rollback.mapId = selected.previousMapId;
+        rollback.sessionId = selected.previousSessionId;
+        rollback.root = selected.previousRoot;
+        if (!writeActiveMap(rollback))
+          return fail("active_recovery", "could not restore previous map selection");
+        return {true, "recovered_rollback",
+                "restored previous map selection"};
+      }
+      return fail("active_root_missing", "selected map directory is missing");
     }
     if (::rename(backupPath.c_str(), transactionPath.c_str()) != 0 ||
         !readTextFile(transactionPath, transaction, 1024)) {
@@ -586,80 +636,95 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
 
   const std::string sessionId = jsonStringValue(transaction, "sessionId");
   const std::string mapId = jsonStringValue(transaction, "mapId");
+  const std::string root = jsonStringValue(transaction, "root");
+  const std::string previousMapId =
+      jsonStringValue(transaction, "previousMapId");
+  const std::string previousSessionId =
+      jsonStringValue(transaction, "previousSessionId");
+  const std::string previousRoot =
+      jsonStringValue(transaction, "previousRoot");
   const std::string phase = jsonStringValue(transaction, "phase");
-  if (!safeId(sessionId) || !safeId(mapId) ||
-      (phase != "backing_up" && phase != "publishing" &&
-       phase != "rolled_back" && phase != "committed")) {
+  if (!safeId(sessionId) || !safeId(mapId) || !safeActiveRoot(root) ||
+      (!previousRoot.empty() &&
+       (!safeActiveRoot(previousRoot) || !safeId(previousMapId) ||
+        (!previousSessionId.empty() && !safeId(previousSessionId)))) ||
+      (phase != "publishing" && phase != "ready" && phase != "committed")) {
     return fail("transaction_invalid", "map activation transaction is invalid");
   }
 
-  const std::string activationRoot =
-      joinPath(storageRoot_, std::string("VECTMAP/.activation/") + sessionId);
-  const std::string rollbackRoot =
-      joinPath(storageRoot_, std::string("VECTMAP/.rollback/") + sessionId);
-  const std::string activePath = joinPath(storageRoot_, kActiveMapFile);
-
-  if (phase == "committed") {
-    const bool cleanupComplete = removeTree(rollbackRoot) &&
-                                 removeTree(activationRoot) &&
-                                 removeTree(stagingRoot(sessionId)) &&
+  ActiveMapSelection active;
+  InstallStatus activeStatus = readActiveMap(active);
+  const bool selectedNewRoot = activeStatus.ok && active.root == root;
+  if (selectedNewRoot) {
+    const bool cleanupComplete = removeTree(stagingRoot(sessionId)) &&
                                  removeTree(activePath + ".bak") &&
                                  removeTree(activePath + ".tmp") &&
                                  removeTree(transactionPath + ".bak") &&
                                  removeTree(transactionPath + ".tmp");
     if (!cleanupComplete || !removeTree(transactionPath))
-      return fail("transaction_cleanup",
-                  "could not finish committed map cleanup");
+      return fail("transaction_cleanup", "could not finish map commit cleanup");
     return {true, "recovered_commit", "completed interrupted map commit"};
   }
 
-  const auto cleanupRolledBack = [&]() {
-    const bool cleanupComplete = removeTree(rollbackRoot) &&
-                                 removeTree(activationRoot) &&
-                                 removeTree(activePath + ".bak") &&
-                                 removeTree(activePath + ".tmp") &&
-                                 removeTree(transactionPath + ".bak") &&
-                                 removeTree(transactionPath + ".tmp");
-    return cleanupComplete && removeTree(transactionPath);
-  };
-  if (phase == "rolled_back") {
-    if (!cleanupRolledBack())
-      return fail("transaction_cleanup",
-                  "could not finish rolled-back map cleanup");
-    return {true, "recovered_rollback",
-            "completed interrupted map rollback"};
+  if (!activeStatus.ok && !previousRoot.empty() &&
+      activeRootExists(previousRoot)) {
+    ActiveMapSelection rollback;
+    rollback.mapId = previousMapId;
+    rollback.sessionId = previousSessionId;
+    rollback.root = previousRoot;
+    if (!writeActiveMap(rollback))
+      return fail("transaction_recovery", "could not restore previous map selection");
   }
 
-  if (phase == "publishing") {
-    if (!clearPublishedMap())
-      return fail("transaction_recovery", "could not clear interrupted map");
-    if (::unlink(activePath.c_str()) != 0 && errno != ENOENT)
-      return fail("transaction_recovery", "could not clear interrupted metadata");
-  }
-  if (!restorePublishedMap(rollbackRoot, phase == "backing_up"))
-    return fail("transaction_recovery", "could not restore interrupted map");
-  const std::string rolledBack = std::string("{\"sessionId\":\"") + sessionId +
-                                 "\",\"mapId\":\"" + mapId +
-                                 "\",\"phase\":\"rolled_back\"}\n";
-  if (!writeTextFileAtomic(transactionPath, rolledBack))
-    return fail("transaction_recovery",
-                "could not record completed map rollback");
-  if (!cleanupRolledBack())
+  const bool cleanupComplete = removeTree(joinPath(storageRoot_, root)) &&
+                               removeTree(stagingRoot(sessionId)) &&
+                               removeTree(activePath + ".bak") &&
+                               removeTree(activePath + ".tmp") &&
+                               removeTree(transactionPath + ".bak") &&
+                               removeTree(transactionPath + ".tmp");
+  if (!cleanupComplete || !removeTree(transactionPath))
     return fail("transaction_cleanup",
-                "could not finish rolled-back map cleanup");
+                "could not clear interrupted map version");
   return {true, "recovered_rollback", "rolled back interrupted map activation"};
 }
 
 InstallStatus
-MapTransferInstaller::readActiveMapId(std::string &mapId) const {
+MapTransferInstaller::readActiveMap(ActiveMapSelection &selection) const {
+  selection = ActiveMapSelection();
   const std::string activePath = joinPath(storageRoot_, kActiveMapFile);
   std::string text;
-  if (!readTextFile(activePath, text, 1024))
+  if (!readTextFile(activePath, text, 2048))
     return fail("active_missing", "active map metadata is missing");
-  mapId = jsonStringValue(text, "mapId");
-  if (!safeId(mapId))
+  selection.mapId = jsonStringValue(text, "mapId");
+  selection.sessionId = jsonStringValue(text, "sessionId");
+  selection.root = jsonStringValue(text, "root");
+  selection.previousMapId = jsonStringValue(text, "previousMapId");
+  selection.previousSessionId = jsonStringValue(text, "previousSessionId");
+  selection.previousRoot = jsonStringValue(text, "previousRoot");
+  if (selection.root.empty())
+    selection.root = "/VECTMAP";
+  if (!safeId(selection.mapId) || !safeActiveRoot(selection.root) ||
+      (!selection.sessionId.empty() && !safeId(selection.sessionId)) ||
+      (!selection.previousRoot.empty() &&
+       (!safeActiveRoot(selection.previousRoot) ||
+        !safeId(selection.previousMapId) ||
+        (!selection.previousSessionId.empty() &&
+         !safeId(selection.previousSessionId)))) ||
+      (selection.previousRoot.empty() &&
+       (!selection.previousMapId.empty() ||
+        !selection.previousSessionId.empty()))) {
     return fail("active_invalid", "active map metadata is invalid");
+  }
   return {true, "ok", ""};
+}
+
+InstallStatus
+MapTransferInstaller::readActiveMapId(std::string &mapId) const {
+  ActiveMapSelection selection;
+  InstallStatus status = readActiveMap(selection);
+  if (status.ok)
+    mapId = selection.mapId;
+  return status;
 }
 
 bool MapTransferInstaller::pruneStagingSessions(
@@ -683,6 +748,47 @@ bool MapTransferInstaller::pruneStagingSessions(
   return ok;
 }
 
+bool MapTransferInstaller::pruneObsoleteInstalledMaps() const {
+  ActiveMapSelection selected;
+  InstallStatus status = readActiveMap(selected);
+  if (!status.ok && status.code != "active_missing")
+    return false;
+  const std::string root = joinPath(storageRoot_, "VECTMAP/.maps");
+  DIR *dir = ::opendir(root.c_str());
+  if (!dir)
+    return errno == ENOENT;
+  bool ok = true;
+  struct dirent *entry = nullptr;
+  while ((entry = ::readdir(dir)) != nullptr) {
+    const std::string name = entry->d_name;
+    if (name == "." || name == "..")
+      continue;
+    const std::string candidate = std::string("/VECTMAP/.maps/") + name;
+    if (candidate == selected.root)
+      continue;
+    if (!safeId(name) || !removeTree(joinPath(root, name)))
+      ok = false;
+  }
+  ::closedir(dir);
+  if (selected.root != "/VECTMAP" && selected.previousRoot == "/VECTMAP") {
+    const std::string vectmapRoot = joinPath(storageRoot_, "VECTMAP");
+    DIR *legacy = ::opendir(vectmapRoot.c_str());
+    if (!legacy)
+      return false;
+    while ((entry = ::readdir(legacy)) != nullptr) {
+      const std::string name = entry->d_name;
+      if (name == "." || name == ".." || name[0] == '.' ||
+          startsWith(name, "active-map.json")) {
+        continue;
+      }
+      if (!removeTree(joinPath(vectmapRoot, name)))
+        ok = false;
+    }
+    ::closedir(legacy);
+  }
+  return ok;
+}
+
 std::string MapTransferInstaller::stagingRoot(const std::string &sessionId) const {
   return joinPath(joinPath(storageRoot_, "VECTMAP/.staging"), sessionId);
 }
@@ -702,6 +808,14 @@ bool MapTransferInstaller::safeId(const std::string &value) const {
     }
   }
   return value.find("..") == std::string::npos;
+}
+
+bool MapTransferInstaller::safeActiveRoot(const std::string &value) const {
+  if (value == "/VECTMAP")
+    return true;
+  const std::string prefix = "/VECTMAP/.maps/";
+  return startsWith(value, prefix) && safeId(value.substr(prefix.size())) &&
+         value.find('/', prefix.size()) == std::string::npos;
 }
 
 bool MapTransferInstaller::safeRelativePath(const std::string &path) const {
@@ -827,111 +941,64 @@ bool MapTransferInstaller::removeTree(const std::string &path) const {
   return ::rmdir(path.c_str()) == 0;
 }
 
-bool MapTransferInstaller::backupPublishedMap(
-    const std::string &backupRoot) const {
-  const std::string vectmapRoot = joinPath(storageRoot_, "VECTMAP");
-  if (!dirExists(vectmapRoot))
-    return true;
-  if (!mkdirs(backupRoot))
+std::string MapTransferInstaller::verificationPath(
+    const std::string &sessionId, const ManifestFile &file) const {
+  const std::string key = sha256Hex(
+      reinterpret_cast<const uint8_t *>(file.path.data()), file.path.size());
+  return joinPath(joinPath(stagingRoot(sessionId), ".verified"),
+                  key + ".sha256");
+}
+
+bool MapTransferInstaller::publishStagedFiles(
+    const std::string &sessionId, const MapManifest &manifest,
+    const std::string &destinationRoot) const {
+  const std::string sourcePrefix =
+      std::string(kVectMapPrefix) + manifest.mapId + "/";
+  if (!mkdirs(destinationRoot))
     return false;
-  DIR *dir = ::opendir(vectmapRoot.c_str());
-  if (!dir)
-    return false;
-  struct dirent *entry = nullptr;
-  while ((entry = ::readdir(dir)) != nullptr) {
-    std::string name = entry->d_name;
-    if (name == "." || name == ".." || name[0] == '.')
-      continue;
-    if (startsWith(name, "active-map.json"))
-      continue;
-    if (!movePath(joinPath(vectmapRoot, name), joinPath(backupRoot, name))) {
-      ::closedir(dir);
+  for (const ManifestFile &file : manifest.files) {
+    if (!startsWith(file.path, sourcePrefix))
       return false;
-    }
-  }
-  ::closedir(dir);
-  const std::string activePath = joinPath(vectmapRoot, "active-map.json");
-  if (fileExists(activePath)) {
-    std::string activeText;
-    if (!readTextFile(activePath, activeText, 1024) ||
-        !writeTextFileAtomic(joinPath(backupRoot, "active-map.json"),
-                             activeText)) {
+    const std::string relative = file.path.substr(sourcePrefix.size());
+    const std::string source = joinPath(stagingRoot(sessionId), file.path);
+    const std::string destination = joinPath(destinationRoot, relative);
+    if (!movePath(source, destination))
       return false;
-    }
   }
   return true;
 }
 
-bool MapTransferInstaller::restorePublishedMap(
-    const std::string &backupRoot, bool preserveExisting) const {
-  if (!dirExists(backupRoot))
-    return true;
-  const std::string vectmapRoot = joinPath(storageRoot_, "VECTMAP");
-  if (!mkdirs(vectmapRoot))
+bool MapTransferInstaller::writeActiveMap(
+    const ActiveMapSelection &selection) const {
+  if (!safeId(selection.mapId) || !safeActiveRoot(selection.root) ||
+      (!selection.sessionId.empty() && !safeId(selection.sessionId)) ||
+      (!selection.previousRoot.empty() &&
+       (!safeActiveRoot(selection.previousRoot) ||
+        !safeId(selection.previousMapId) ||
+        (!selection.previousSessionId.empty() &&
+         !safeId(selection.previousSessionId)))) ||
+      (selection.previousRoot.empty() &&
+       (!selection.previousMapId.empty() ||
+        !selection.previousSessionId.empty()))) {
     return false;
-  DIR *dir = ::opendir(backupRoot.c_str());
-  if (!dir)
-    return false;
-  struct dirent *entry = nullptr;
-  while ((entry = ::readdir(dir)) != nullptr) {
-    std::string name = entry->d_name;
-    if (name == "." || name == "..")
-      continue;
-    const std::string destination = joinPath(vectmapRoot, name);
-    if (preserveExisting &&
-        (fileExists(destination) || dirExists(destination))) {
-      continue;
-    }
-    if (!copyTree(joinPath(backupRoot, name), destination)) {
-      ::closedir(dir);
-      return false;
-    }
   }
-  ::closedir(dir);
-  return true;
+  std::string json = std::string("{\"mapId\":\"") +
+                     jsonEscape(selection.mapId) + "\",\"sessionId\":\"" +
+                     jsonEscape(selection.sessionId) + "\",\"root\":\"" +
+                     jsonEscape(selection.root) + "\"";
+  if (!selection.previousRoot.empty()) {
+    json += ",\"previousMapId\":\"" + jsonEscape(selection.previousMapId) +
+            "\",\"previousSessionId\":\"" +
+            jsonEscape(selection.previousSessionId) +
+            "\",\"previousRoot\":\"" +
+            jsonEscape(selection.previousRoot) + "\"";
+  }
+  json += "}\n";
+  return writeTextFileAtomic(joinPath(storageRoot_, kActiveMapFile), json);
 }
 
-bool MapTransferInstaller::clearPublishedMap() const {
-  const std::string vectmapRoot = joinPath(storageRoot_, "VECTMAP");
-  if (!dirExists(vectmapRoot))
-    return true;
-  DIR *dir = ::opendir(vectmapRoot.c_str());
-  if (!dir)
-    return false;
-  struct dirent *entry = nullptr;
-  while ((entry = ::readdir(dir)) != nullptr) {
-    std::string name = entry->d_name;
-    if (name == "." || name == ".." || name[0] == '.' ||
-        startsWith(name, "active-map.json"))
-      continue;
-    if (!removeTree(joinPath(vectmapRoot, name))) {
-      ::closedir(dir);
-      return false;
-    }
-  }
-  ::closedir(dir);
-  return true;
-}
-
-bool MapTransferInstaller::publishActivation(
-    const std::string &activationRoot) const {
-  const std::string sourceRoot = joinPath(activationRoot, "VECTMAP");
-  const std::string vectmapRoot = joinPath(storageRoot_, "VECTMAP");
-  DIR *dir = ::opendir(sourceRoot.c_str());
-  if (!dir)
-    return false;
-  struct dirent *entry = nullptr;
-  while ((entry = ::readdir(dir)) != nullptr) {
-    std::string name = entry->d_name;
-    if (name == "." || name == "..")
-      continue;
-    if (!movePath(joinPath(sourceRoot, name), joinPath(vectmapRoot, name))) {
-      ::closedir(dir);
-      return false;
-    }
-  }
-  ::closedir(dir);
-  return true;
+bool MapTransferInstaller::activeRootExists(const std::string &root) const {
+  return safeActiveRoot(root) && dirExists(joinPath(storageRoot_, root));
 }
 
 bool MapTransferInstaller::fileExists(const std::string &path) const {
@@ -958,7 +1025,7 @@ bool MapTransferInstaller::fileSha256Hex(const std::string &path,
   std::ifstream input(path, std::ios::binary);
   if (!input)
     return false;
-  Sha256 sha;
+  Sha256Hasher sha;
   std::array<uint8_t, 1024> buffer = {};
   while (input.good()) {
     input.read(reinterpret_cast<char *>(buffer.data()), buffer.size());

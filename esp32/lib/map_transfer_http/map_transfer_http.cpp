@@ -240,6 +240,21 @@ bool MapTransferHttpServer::handleHead(const std::string &path,
     sendHead(client, 404);
     return true;
   }
+  if (relativePath == "manifest.json") {
+    MapManifest manifest;
+    if (!installer_.readStagedManifest(sessionId, manifest).ok) {
+      sendHead(client, 404);
+      return true;
+    }
+  } else {
+    ManifestFile expected;
+    InstallStatus declared =
+        installer_.expectedStagedFile(sessionId, relativePath, expected);
+    if (!declared.ok || !installer_.stagedFileVerified(sessionId, expected)) {
+      sendHead(client, 404);
+      return true;
+    }
+  }
   sendHead(client, 200, size);
   return true;
 }
@@ -272,6 +287,23 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     sendError(client, 503, recovery.code, recovery.message);
     return true;
   }
+
+  ManifestFile expectedFile;
+  const bool isManifest = relativePath == "manifest.json";
+  if (!isManifest) {
+    InstallStatus declared =
+        installer_.expectedStagedFile(sessionId, relativePath, expectedFile);
+    if (!declared.ok) {
+      sendError(client, 400, declared.code, declared.message);
+      return true;
+    }
+    if (contentLength != expectedFile.bytes) {
+      sendError(client, 400, "file_size",
+                "upload size does not match the staged manifest");
+      return true;
+    }
+    installer_.clearStagedFileVerification(sessionId, expectedFile);
+  }
   const std::string destination =
       joinPath(installer_.stagingRoot(sessionId), relativePath);
   if (!mkdirs(dirnameOf(destination))) {
@@ -286,6 +318,7 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
   }
 
   uint8_t buffer[1024];
+  Sha256Hasher hasher;
   uint64_t remaining = contentLength;
   uint32_t lastRead = millis();
   while (remaining > 0) {
@@ -304,6 +337,8 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     int read = client.read(buffer, toRead);
     if (read <= 0)
       continue;
+    if (!isManifest)
+      hasher.update(buffer, static_cast<size_t>(read));
     output.write(reinterpret_cast<const char *>(buffer), read);
     if (!output) {
       sendError(client, 500, "write", "could not write staged file");
@@ -317,12 +352,38 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     sendError(client, 500, "write", "could not finish staged file");
     return true;
   }
-  if (relativePath == "manifest.json" &&
-      !installer_.pruneStagingSessions(sessionId)) {
-    ::unlink(destination.c_str());
-    sendError(client, 500, "staging_cleanup",
-              "could not remove abandoned map staging sessions");
-    return true;
+  if (isManifest) {
+    MapManifest manifest;
+    InstallStatus parsed = installer_.readStagedManifest(sessionId, manifest);
+    if (!parsed.ok) {
+      ::unlink(destination.c_str());
+      sendError(client, 400, parsed.code, parsed.message);
+      return true;
+    }
+    if (!installer_.pruneStagingSessions(sessionId) ||
+        !installer_.pruneObsoleteInstalledMaps()) {
+      ::unlink(destination.c_str());
+      sendError(client, 500, "staging_cleanup",
+                "could not prune obsolete map transfers");
+      return true;
+    }
+  } else {
+    std::string actualSha = hasher.finalHex();
+    std::string expectedSha = expectedFile.sha256;
+    std::transform(expectedSha.begin(), expectedSha.end(), expectedSha.begin(),
+                   ::tolower);
+    if (actualSha != expectedSha) {
+      ::unlink(destination.c_str());
+      sendError(client, 400, "file_sha256",
+                "uploaded map file sha256 mismatch");
+      return true;
+    }
+    if (!installer_.markStagedFileVerified(sessionId, expectedFile)) {
+      ::unlink(destination.c_str());
+      sendError(client, 500, "file_receipt",
+                "could not record uploaded map verification");
+      return true;
+    }
   }
 
   Serial.printf("MAP_TRANSFER_HTTP: staged session=%s path=%s bytes=%llu\n",
@@ -452,6 +513,18 @@ bool MapTransferHttpServer::activationHasError() const {
   return hasError;
 }
 
+bool MapTransferHttpServer::takeActivatedMapRoot(std::string &root) {
+  lockState();
+  if (pendingMapRoot_.empty()) {
+    unlockState();
+    return false;
+  }
+  root = pendingMapRoot_;
+  pendingMapRoot_.clear();
+  unlockState();
+  return true;
+}
+
 void MapTransferHttpServer::finishActivation(const std::string &status,
                                              const std::string &mapId,
                                              const std::string &errorCode,
@@ -494,6 +567,15 @@ void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
 
   Serial.printf("MAP_TRANSFER_HTTP: activated mapId=%s session=%s\n",
                 manifest.mapId.c_str(), sessionId.c_str());
+  ActiveMapSelection selected;
+  InstallStatus active = installer_.readActiveMap(selected);
+  if (!active.ok) {
+    finishActivation("failed", manifest.mapId, active.code, active.message);
+    return;
+  }
+  lockState();
+  pendingMapRoot_ = selected.root;
+  unlockState();
   finishActivation("installed", manifest.mapId, "", "");
 }
 

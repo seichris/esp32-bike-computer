@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,30 @@ struct InstallStatus {
   bool ok = false;
   std::string code;
   std::string message;
+};
+
+struct ActiveMapSelection {
+  std::string mapId;
+  std::string sessionId;
+  std::string root;
+  std::string previousMapId;
+  std::string previousSessionId;
+  std::string previousRoot;
+};
+
+class Sha256Hasher {
+public:
+  void update(const uint8_t *data, size_t len);
+  std::string finalHex();
+
+private:
+  std::array<uint8_t, 64> block_ = {};
+  size_t blockLen_ = 0;
+  uint64_t totalLen_ = 0;
+  uint32_t h_[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+
+  void transform(const uint8_t *chunk);
 };
 
 enum class ActivationBeginResult {
@@ -63,13 +88,26 @@ public:
 
   InstallStatus validateManifestText(const std::string &manifestText,
                                      MapManifest &manifest) const;
+  InstallStatus readStagedManifest(const std::string &sessionId,
+                                   MapManifest &manifest) const;
   InstallStatus validateStagedMap(const std::string &sessionId,
                                   MapManifest &manifest) const;
+  InstallStatus expectedStagedFile(const std::string &sessionId,
+                                   const std::string &path,
+                                   ManifestFile &file) const;
+  bool stagedFileVerified(const std::string &sessionId,
+                          const ManifestFile &file) const;
+  bool markStagedFileVerified(const std::string &sessionId,
+                              const ManifestFile &file) const;
+  void clearStagedFileVerification(const std::string &sessionId,
+                                   const ManifestFile &file) const;
   InstallStatus activateStagedMap(const std::string &sessionId,
                                   const MapManifest &manifest) const;
   InstallStatus recoverInterruptedActivation() const;
+  InstallStatus readActiveMap(ActiveMapSelection &selection) const;
   InstallStatus readActiveMapId(std::string &mapId) const;
   bool pruneStagingSessions(const std::string &keepSessionId) const;
+  bool pruneObsoleteInstalledMaps() const;
 
   std::string stagingRoot(const std::string &sessionId) const;
 
@@ -82,17 +120,20 @@ private:
 
   InstallStatus fail(const std::string &code, const std::string &message) const;
   bool safeId(const std::string &value) const;
+  bool safeActiveRoot(const std::string &value) const;
   bool safeRelativePath(const std::string &path) const;
   bool mkdirs(const std::string &path) const;
   bool copyFile(const std::string &from, const std::string &to) const;
   bool copyTree(const std::string &from, const std::string &to) const;
   bool movePath(const std::string &from, const std::string &to) const;
   bool removeTree(const std::string &path) const;
-  bool backupPublishedMap(const std::string &backupRoot) const;
-  bool restorePublishedMap(const std::string &backupRoot,
-                           bool preserveExisting = false) const;
-  bool clearPublishedMap() const;
-  bool publishActivation(const std::string &activationRoot) const;
+  std::string verificationPath(const std::string &sessionId,
+                               const ManifestFile &file) const;
+  bool publishStagedFiles(const std::string &sessionId,
+                          const MapManifest &manifest,
+                          const std::string &destinationRoot) const;
+  bool writeActiveMap(const ActiveMapSelection &selection) const;
+  bool activeRootExists(const std::string &root) const;
   bool fileExists(const std::string &path) const;
   bool dirExists(const std::string &path) const;
   bool fileSize(const std::string &path, uint64_t &size) const;
