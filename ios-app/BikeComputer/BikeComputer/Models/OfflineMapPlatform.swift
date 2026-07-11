@@ -390,6 +390,7 @@ struct OfflineMapPackArchive {
 struct MapTransferDeviceClient {
     let baseURL: URL
     var session: URLSession = .shared
+    var recoveryRetryNanoseconds: UInt64 = 2_000_000_000
 
     nonisolated func upload(
         archive: OfflineMapPackArchive,
@@ -454,30 +455,52 @@ struct MapTransferDeviceClient {
     }
 
     private nonisolated func stagedByteCount(sessionId: String, path: String) async throws -> Int? {
-        var request = URLRequest(url: Self.uploadURL(
-            baseURL: baseURL,
-            sessionId: sessionId,
-            relativePath: path
-        ))
-        request.httpMethod = "HEAD"
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = 3
+        let toleratesRecovery = path == "manifest.json"
+        let recoveryDeadline = Date().addingTimeInterval(10 * 60)
+        while true {
+            var request = URLRequest(url: Self.uploadURL(
+                baseURL: baseURL,
+                sessionId: sessionId,
+                relativePath: path
+            ))
+            request.httpMethod = "HEAD"
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            request.timeoutInterval = 3
 
-        let response = try await session.data(for: request)
-        guard let http = response.1 as? HTTPURLResponse else {
-            throw OfflineMapPlatformError.invalidResponse
+            do {
+                let response = try await session.data(for: request)
+                guard let http = response.1 as? HTTPURLResponse else {
+                    throw OfflineMapPlatformError.invalidResponse
+                }
+                if http.statusCode == 404 {
+                    return nil
+                }
+                if toleratesRecovery,
+                   (http.statusCode == 409 || http.statusCode == 503),
+                   Date() < recoveryDeadline {
+                    try await Task.sleep(nanoseconds: recoveryRetryNanoseconds)
+                    continue
+                }
+                guard 200..<300 ~= http.statusCode else {
+                    return nil
+                }
+                guard let value = http.value(forHTTPHeaderField: "Content-Length"),
+                      let count = Int(value) else {
+                    return nil
+                }
+                return count
+            } catch {
+                let urlError = error as? URLError
+                let isAmbiguousRecoveryWait = urlError?.code == .timedOut ||
+                    urlError?.code == .networkConnectionLost
+                guard toleratesRecovery,
+                      isAmbiguousRecoveryWait,
+                      Date() < recoveryDeadline else {
+                    throw error
+                }
+                try await Task.sleep(nanoseconds: recoveryRetryNanoseconds)
+            }
         }
-        if http.statusCode == 404 {
-            return nil
-        }
-        guard 200..<300 ~= http.statusCode else {
-            return nil
-        }
-        guard let value = http.value(forHTTPHeaderField: "Content-Length"),
-              let count = Int(value) else {
-            return nil
-        }
-        return count
     }
 
     private nonisolated func send(request: URLRequest, data: Data?) async throws -> Data {

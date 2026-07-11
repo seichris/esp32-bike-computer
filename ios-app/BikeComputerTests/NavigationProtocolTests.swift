@@ -296,6 +296,7 @@ struct NavigationProtocolTests {
         testOfflineMapManagerMigratesProductionConfig()
         testOfflineMapManagerRestoresLastTransferIdentity()
         testOfflineMapManagerReconcilesInterruptedActivation()
+        testOfflineMapManagerReconcilesAcknowledgedFirstInstall()
         testOfflineMapPolygonClosesRing()
         testOfflineMapStoredZipReader()
         testCachedMapInstalledIdentityUsesManifestSession()
@@ -550,6 +551,34 @@ struct NavigationProtocolTests {
         assertEqual(manager.lastTransferOutcome, "installed", "durable exact-session status reconciles after device restart")
     }
 
+    @MainActor
+    static func testOfflineMapManagerReconcilesAcknowledgedFirstInstall() {
+        let suite = "offline-map-first-install-reconcile-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        defaults.set("map-1", forKey: "offlineMap.lastTransfer.mapId")
+        defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+        defaults.set("map-1-manifest", forKey: "offlineMap.lastTransfer.sessionId")
+        defaults.set(9, forKey: "offlineMap.lastTransfer.acceptedSequence")
+
+        let manager = OfflineMapManager(defaults: defaults)
+        let bleManager = BLEManager()
+        bleManager.mapTransferActiveMapId = "map-1"
+        bleManager.mapTransferActiveSessionId = "map-1-manifest"
+        bleManager.mapTransferActivationStatus = "installed"
+        bleManager.mapTransferActivationSequence = 9
+        bleManager.mapTransferActivationSessionId = "map-1-manifest"
+        bleManager.mapTransferActivationMapId = "map-1"
+        manager.reconcileLastTransfer(bleManager: bleManager)
+
+        assertEqual(manager.lastTransferOutcome, "installed",
+                    "persisted activation acknowledgement reconciles after app restart")
+    }
+
     static func testOfflineMapPolygonClosesRing() {
         let request = OfflineMapJobRequest.customPolygon(ring: [
             CLLocationCoordinate2D(latitude: 1, longitude: 2),
@@ -712,6 +741,7 @@ struct NavigationProtocolTests {
             FirmwareRequestCaptureProtocol.handler = nil
         }
         var headPaths: [String] = []
+        var manifestHeadAttempts = 0
         var putBodies: [String: Data] = [:]
         FirmwareRequestCaptureProtocol.handler = { request, body in
             let path = request.url!.path
@@ -721,8 +751,15 @@ struct NavigationProtocolTests {
             if method == "HEAD" {
                 headPaths.append(path)
                 if path.hasSuffix("manifest.json") {
-                    status = 200
-                    headers["Content-Length"] = String(manifest.count)
+                    manifestHeadAttempts += 1
+                    if manifestHeadAttempts == 1 {
+                        throw URLError(.timedOut)
+                    } else if manifestHeadAttempts == 2 {
+                        status = 503
+                    } else {
+                        status = 200
+                        headers["Content-Length"] = String(manifest.count)
+                    }
                 } else if path.hasSuffix("001_001.fmb") {
                     status = 200
                     headers["Content-Length"] = String(firstBlock.count)
@@ -749,7 +786,8 @@ struct NavigationProtocolTests {
         var progress: [(String, Bool)] = []
         let client = MapTransferDeviceClient(
             baseURL: URL(string: "http://192.168.4.20:8080")!,
-            session: session
+            session: session,
+            recoveryRetryNanoseconds: 1_000_000
         )
         runMainActorAsyncTest {
             try await client.upload(
@@ -760,7 +798,9 @@ struct NavigationProtocolTests {
             }
         }
 
-        assertEqual(headPaths.count, 3, "resume checks every declared upload entry")
+        assertEqual(manifestHeadAttempts, 3,
+                    "resume waits through timeout and busy recovery responses")
+        assertEqual(headPaths.count, 5, "resume checks every declared upload entry")
         assertEqual(progress.map { $0.1 }, [false, false, true],
                     "verified entries are skipped while a missing receipt is reuploaded")
         assertEqual(putBodies.count, 1, "resume uploads only the unverified file")
