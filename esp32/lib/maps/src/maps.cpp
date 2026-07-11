@@ -43,7 +43,7 @@ enum class VisibilityClass : uint8_t {
 };
 
 static inline bool isClassVisible(VisibilityClass visibilityClass,
-                                  const MapRenderSettings &settings) {
+                                  const ScreenMapRenderSettings &settings) {
   if (visibilityClass == VisibilityClass::Always)
     return true;
 
@@ -140,7 +140,7 @@ static inline VisibilityClass legacyLineVisibilityClass(uint16_t color,
 // Bits: 0 buildings, 1 green space, 2 paths, 3 major roads, 4 local streets,
 // 5 water, 6 rail, 7 other areas.
 static inline bool isTypeVisible(uint8_t typeId,
-                                 const MapRenderSettings &settings) {
+                                 const ScreenMapRenderSettings &settings) {
   if (typeId == 0)
     return true; // Unknown types always visible
   return isClassVisible(visibilityClassForTypeId(typeId), settings);
@@ -158,31 +158,31 @@ static inline uint8_t detailPolygonSizeFloor(uint8_t detailLevel) {
 }
 
 static inline uint8_t effectiveMinPolygonSize(
-    const MapRenderSettings &settings) {
+    const ScreenMapRenderSettings &settings) {
   return std::max(settings.minPolygonSize,
                   detailPolygonSizeFloor(settings.detailLevel));
 }
 
 static inline bool isPolygonVisible(uint8_t typeId, uint16_t color,
-                                    const MapRenderSettings &settings) {
+                                    const ScreenMapRenderSettings &settings) {
   if (typeId != 0)
     return isTypeVisible(typeId, settings);
   return isClassVisible(legacyPolygonVisibilityClass(color), settings);
 }
 
 static inline bool isLineVisible(uint8_t typeId, uint16_t color, uint8_t width,
-                                 const MapRenderSettings &settings) {
+                                 const ScreenMapRenderSettings &settings) {
   if (typeId != 0)
     return isTypeVisible(typeId, settings);
   return isClassVisible(legacyLineVisibilityClass(color, width), settings);
 }
 
 static inline bool isRouteOverlayVisible(const MapRenderSettings &settings) {
-  return (settings.visibilityMask & (1 << 8)) != 0;
+  return (settings.navigationOverlayVisibilityMask & (1 << 8)) != 0;
 }
 
 static inline bool isCurrentPositionVisible(const MapRenderSettings &settings) {
-  return (settings.visibilityMask & (1 << 9)) != 0;
+  return (settings.navigationOverlayVisibilityMask & (1 << 9)) != 0;
 }
 
 static inline bool shouldBoostLineWidth(uint8_t typeId, uint8_t styleWidth) {
@@ -398,9 +398,8 @@ static void drawPositionDotMarker(lv_obj_t *canvas) {
 }
 
 static uint8_t currentMarkerScale() {
-  return (uint8_t)std::min(std::max((int)mapRenderSettings.positionMarkerScale,
-                                    1),
-                           5);
+  return (uint8_t)std::min(
+      std::max((int)currentMapStyleSettings().positionMarkerScale, 1), 5);
 }
 
 static void applyNavigationMarkerScale(lv_obj_t *canvas) {
@@ -1485,6 +1484,7 @@ void Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
 void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                          lv_obj_t *canvas, uint8_t zoom, double rotation) {
   Polygon newPolygon;
+  const ScreenMapRenderSettings &style = currentMapStyleSettings();
   const uint32_t drawStartMs = MAPIO_TIME_MS();
   const uint32_t fillStartMs = MAPIO_TIME_MS();
   lv_canvas_fill_bg(canvas, lv_color_hex(BACKGROUND_COLOR), LV_OPA_COVER);
@@ -1495,8 +1495,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
   double sinA = sin(rotation);
 
   // Use the actual canvas dimensions, not mapScrHeight which may differ from
-  // canvas height in fullscreen mode. The anchor may be board-specific: 1.75
-  // stays centered; 2.06 shifts down to show more route ahead on the tall panel.
+  // canvas height in fullscreen mode.
   lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
   int16_t screenAnchorX =
       mapAnchorXForWidth(draw_buf ? draw_buf->header.w : Maps::mapScrWidth);
@@ -1609,8 +1608,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             }
 
             // Skip if type is hidden by visibility mask
-            if (!isPolygonVisible(polygon.typeId, polygon.color,
-                                  mapRenderSettings)) {
+            if (!isPolygonVisible(polygon.typeId, polygon.color, style)) {
               continue;
             }
 
@@ -1641,7 +1639,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
 
             // Skip tiny polygons based on explicit min size plus detail density.
             const uint8_t minPolygonSize =
-                effectiveMinPolygonSize(mapRenderSettings);
+                effectiveMinPolygonSize(style);
             int16_t polyWidth = maxX - minX;
             int16_t polyHeight = maxY - minY;
             if (minPolygonSize > 0 &&
@@ -1672,8 +1670,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           continue;
 
         // Skip if type is hidden by visibility mask
-        if (!isLineVisible(line.typeId, line.color, line.width,
-                           mapRenderSettings))
+        if (!isLineVisible(line.typeId, line.color, line.width, style))
           continue;
 
         uint16_t color_swapped = line.color; // Use color directly (RGB565)
@@ -1703,7 +1700,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
 
         Point16 p1 = transformPoint(line.points[0]);
         int32_t streetBoost = shouldBoostLineWidth(line.typeId, line.width)
-                                  ? mapRenderSettings.streetLineWidthBoost
+                                  ? style.streetLineWidthBoost
                                   : 0;
         uint8_t lineWidth = (uint8_t)std::min<int32_t>(
             std::max<int32_t>(line.width, 1) + streetBoost, 24);
@@ -2356,6 +2353,12 @@ void Maps::displayMap() {
     }
 
     uint16_t h = mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+    const uint16_t containerWidth = lv_obj_get_width(mapTile);
+    const uint16_t containerHeight = lv_obj_get_height(mapTile);
+    const int16_t mapOriginX =
+        gui_layout::centeredViewportOrigin(containerWidth, Maps::mapScrWidth);
+    const int16_t mapOriginY =
+        gui_layout::centeredViewportOrigin(containerHeight, h);
     const int16_t anchorX = mapAnchorXForWidth(Maps::mapScrWidth);
     const int16_t anchorY = mapAnchorYForHeight(h);
     updateCurrentPositionMarker(Maps::canvasArrow);
@@ -2363,10 +2366,11 @@ void Maps::displayMap() {
     int16_t x, y;
 
     if (Maps::followGps) {
-      // Board-specific map anchor when following GPS (48x48 icon, so offset
-      // by -24). The 1.75 stays centered; the 2.06 anchor is lower.
-      x = anchorX - 24;
-      y = anchorY - 24;
+      // The marker is a sibling of the centered map canvas, so translate the
+      // canvas-local anchor into map-tile coordinates before applying the
+      // 48x48 icon's center offset.
+      x = mapOriginX + anchorX - 24;
+      y = mapOriginY + anchorY - 24;
       lv_obj_clear_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
       lv_obj_set_pos(Maps::canvasArrow, x, y);
       ESP_LOGI(TAG, "GPS indicator: followGps mode, anchor screen pos(%d,%d)",
@@ -2402,8 +2406,8 @@ void Maps::displayMap() {
 
       // 3. Translate to screen center (centered on arrow)
       // 48x48 icon, so offset by -24
-      x = (round(rx) + anchorX) - 24;
-      y = (round(ry) + anchorY) - 24;
+      x = mapOriginX + round(rx) + anchorX - 24;
+      y = mapOriginY + round(ry) + anchorY - 24;
 
       ESP_LOGI(TAG,
                "GPS indicator: gps(%.6f,%.6f) -> mercator(%d,%d) -> "
@@ -2417,10 +2421,11 @@ void Maps::displayMap() {
       // Simple bounds check to hide if too far off screen
       const int16_t centerX = x + 24;
       const int16_t centerY = y + 24;
-      if (centerX < -markerVisualHalf ||
-          centerX > (int16_t)Maps::mapScrWidth + markerVisualHalf ||
-          centerY < -markerVisualHalf ||
-          centerY > (int16_t)h + markerVisualHalf) {
+      if (centerX < mapOriginX - markerVisualHalf ||
+          centerX > mapOriginX + (int16_t)Maps::mapScrWidth +
+                        markerVisualHalf ||
+          centerY < mapOriginY - markerVisualHalf ||
+          centerY > mapOriginY + (int16_t)h + markerVisualHalf) {
         lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
         ESP_LOGI(TAG, "GPS indicator hidden: off-screen at (%d,%d)", x, y);
       } else {

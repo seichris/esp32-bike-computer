@@ -52,6 +52,13 @@ enum DeviceBLEProtocol {
     static let enabledScreensSettingID: UInt8 = 13
     static let defaultScreenSettingID: UInt8 = 14
     static let disconnectedSleepTimeoutSettingID: UInt8 = 15
+    static let mapPlusNavigationMinPolygonSizeSettingID: UInt8 = 16
+    static let mapPlusNavigationDetailLevelSettingID: UInt8 = 17
+    static let mapPlusNavigationRouteLineWidthSettingID: UInt8 = 18
+    static let mapPlusNavigationZoomLevelSettingID: UInt8 = 19
+    static let mapPlusNavigationVisibilityMaskSettingID: UInt8 = 20
+    static let mapPlusNavigationStreetLineWidthBoostSettingID: UInt8 = 21
+    static let mapPlusNavigationPositionMarkerScaleSettingID: UInt8 = 22
 
     static var serviceUUID: CBUUID { CBUUID(string: serviceUUIDString) }
     static var navigationCharacteristicUUID: CBUUID { CBUUID(string: navigationCharacteristicUUIDString) }
@@ -376,6 +383,12 @@ class BLEManager: NSObject, ObservableObject {
     @Published var displayRotation: Int = 0 
     @Published var mapRotationMode: Int = 0 // 0=North Up, 1=Course Up  // 0-3: 0°, 90°, 180°, 270°
     @Published var zoomLevel: Int = 2 // 0-4: 0=super-zoom, 1=closest, 4=farthest
+    @Published var mapPlusNavigationMinPolygonSize: Double = 0
+    @Published var mapPlusNavigationDetailLevel: Int = 2
+    @Published var mapPlusNavigationRouteLineWidth: Double = 4
+    @Published var mapPlusNavigationStreetLineWidthBoost: Double = 0
+    @Published var mapPlusNavigationPositionMarkerScale: Double = 2
+    @Published var mapPlusNavigationZoomLevel: Int = 2
     @Published var tapToSwitchScreens: Bool = false
     @Published var enabledDeviceScreensMask: Int = DeviceScreen.allScreensMask
     @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
@@ -394,6 +407,14 @@ class BLEManager: NSObject, ObservableObject {
     @Published var showWater: Bool = true
     @Published var showRailways: Bool = true
     @Published var showOtherAreas: Bool = true
+    @Published var mapPlusNavigationShowBuildings: Bool = true
+    @Published var mapPlusNavigationShowGreenSpace: Bool = true
+    @Published var mapPlusNavigationShowPaths: Bool = true
+    @Published var mapPlusNavigationShowMajorRoads: Bool = true
+    @Published var mapPlusNavigationShowLocalStreets: Bool = true
+    @Published var mapPlusNavigationShowWater: Bool = true
+    @Published var mapPlusNavigationShowRailways: Bool = true
+    @Published var mapPlusNavigationShowOtherAreas: Bool = true
     @Published var showRouteOverlay: Bool = true
     @Published var showCurrentPosition: Bool = true
     
@@ -475,6 +496,21 @@ class BLEManager: NSObject, ObservableObject {
         static let mapRotationMode = "mapSettings.mapRotationMode"
         static let resetMapRotationModeToNorthUp = "mapSettings.resetMapRotationModeToNorthUp.v1"
         static let zoomLevel = "mapSettings.zoomLevel"
+        static let mapPlusNavigationMinPolygonSize = "mapPlusNavigationSettings.minPolygonSize"
+        static let mapPlusNavigationDetailLevel = "mapPlusNavigationSettings.detailLevel"
+        static let mapPlusNavigationRouteLineWidth = "mapPlusNavigationSettings.routeLineWidth"
+        static let mapPlusNavigationStreetLineWidthBoost = "mapPlusNavigationSettings.streetLineWidthBoost"
+        static let mapPlusNavigationPositionMarkerScale = "mapPlusNavigationSettings.positionMarkerScale"
+        static let mapPlusNavigationZoomLevel = "mapPlusNavigationSettings.zoomLevel"
+        static let mapPlusNavigationShowBuildings = "mapPlusNavigationSettings.showBuildings"
+        static let mapPlusNavigationShowGreenSpace = "mapPlusNavigationSettings.showGreenSpace"
+        static let mapPlusNavigationShowPaths = "mapPlusNavigationSettings.showPaths"
+        static let mapPlusNavigationShowMajorRoads = "mapPlusNavigationSettings.showMajorRoads"
+        static let mapPlusNavigationShowLocalStreets = "mapPlusNavigationSettings.showLocalStreets"
+        static let mapPlusNavigationShowWater = "mapPlusNavigationSettings.showWater"
+        static let mapPlusNavigationShowRailways = "mapPlusNavigationSettings.showRailways"
+        static let mapPlusNavigationShowOtherAreas = "mapPlusNavigationSettings.showOtherAreas"
+        static let mapPlusNavigationProfileMigrated = "mapPlusNavigationSettings.migrated.v1"
         static let tapToSwitchScreens = "deviceSettings.tapToSwitchScreens"
         static let enabledDeviceScreensMask = "deviceSettings.enabledScreensMask"
         static let defaultDeviceScreen = "deviceSettings.defaultScreen"
@@ -569,8 +605,74 @@ class BLEManager: NSObject, ObservableObject {
         showWater = defaults.object(forKey: SettingsKeys.showWater) as? Bool ?? legacyNature
         showRailways = defaults.object(forKey: SettingsKeys.showRailways) as? Bool ?? true
         showOtherAreas = defaults.object(forKey: SettingsKeys.showOtherAreas) as? Bool ?? true
+        let shouldMigrateMapPlusNavigationProfile = !defaults.bool(
+            forKey: SettingsKeys.mapPlusNavigationProfileMigrated
+        )
+        if shouldMigrateMapPlusNavigationProfile {
+            mapPlusNavigationMinPolygonSize = minPolygonSize
+            mapPlusNavigationDetailLevel = detailLevel
+            mapPlusNavigationRouteLineWidth = routeLineWidth
+            mapPlusNavigationStreetLineWidthBoost = streetLineWidthBoost
+            mapPlusNavigationPositionMarkerScale = positionMarkerScale
+            mapPlusNavigationZoomLevel = zoomLevel
+            mapPlusNavigationShowBuildings = showBuildings
+            mapPlusNavigationShowGreenSpace = showGreenSpace
+            mapPlusNavigationShowPaths = showPaths
+            mapPlusNavigationShowMajorRoads = showMajorRoads
+            mapPlusNavigationShowLocalStreets = showLocalStreets
+            mapPlusNavigationShowWater = showWater
+            mapPlusNavigationShowRailways = showRailways
+            mapPlusNavigationShowOtherAreas = showOtherAreas
+        } else {
+            mapPlusNavigationMinPolygonSize = defaults.double(
+                forKey: SettingsKeys.mapPlusNavigationMinPolygonSize
+            )
+            mapPlusNavigationDetailLevel = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationDetailLevel
+            ) as? Int ?? 2
+            mapPlusNavigationRouteLineWidth = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationRouteLineWidth
+            ) as? Double ?? 4
+            mapPlusNavigationStreetLineWidthBoost = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationStreetLineWidthBoost
+            ) as? Double ?? 0
+            mapPlusNavigationPositionMarkerScale = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationPositionMarkerScale
+            ) as? Double ?? 2
+            mapPlusNavigationZoomLevel = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationZoomLevel
+            ) as? Int ?? 2
+            mapPlusNavigationShowBuildings = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationShowBuildings
+            ) as? Bool ?? true
+            mapPlusNavigationShowGreenSpace = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationShowGreenSpace
+            ) as? Bool ?? true
+            mapPlusNavigationShowPaths = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationShowPaths
+            ) as? Bool ?? true
+            mapPlusNavigationShowMajorRoads = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationShowMajorRoads
+            ) as? Bool ?? true
+            mapPlusNavigationShowLocalStreets = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationShowLocalStreets
+            ) as? Bool ?? true
+            mapPlusNavigationShowWater = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationShowWater
+            ) as? Bool ?? true
+            mapPlusNavigationShowRailways = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationShowRailways
+            ) as? Bool ?? true
+            mapPlusNavigationShowOtherAreas = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationShowOtherAreas
+            ) as? Bool ?? true
+        }
         showRouteOverlay = defaults.object(forKey: SettingsKeys.showRouteOverlay) as? Bool ?? true
         showCurrentPosition = defaults.object(forKey: SettingsKeys.showCurrentPosition) as? Bool ?? true
+        if shouldMigrateMapPlusNavigationProfile {
+            defaults.set(true, forKey: SettingsKeys.mapPlusNavigationProfileMigrated)
+            saveSettings()
+        }
     }
 
     private func loadLastPeripheralIdentifier() {
@@ -589,6 +691,12 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(displayRotation, forKey: SettingsKeys.displayRotation)
         defaults.set(mapRotationMode, forKey: SettingsKeys.mapRotationMode)
         defaults.set(zoomLevel, forKey: SettingsKeys.zoomLevel)
+        defaults.set(mapPlusNavigationMinPolygonSize, forKey: SettingsKeys.mapPlusNavigationMinPolygonSize)
+        defaults.set(mapPlusNavigationDetailLevel, forKey: SettingsKeys.mapPlusNavigationDetailLevel)
+        defaults.set(mapPlusNavigationRouteLineWidth, forKey: SettingsKeys.mapPlusNavigationRouteLineWidth)
+        defaults.set(mapPlusNavigationStreetLineWidthBoost, forKey: SettingsKeys.mapPlusNavigationStreetLineWidthBoost)
+        defaults.set(mapPlusNavigationPositionMarkerScale, forKey: SettingsKeys.mapPlusNavigationPositionMarkerScale)
+        defaults.set(mapPlusNavigationZoomLevel, forKey: SettingsKeys.mapPlusNavigationZoomLevel)
         defaults.set(tapToSwitchScreens, forKey: SettingsKeys.tapToSwitchScreens)
         enabledDeviceScreensMask = DeviceScreen.normalizedMask(enabledDeviceScreensMask)
         defaultDeviceScreen = DeviceScreen.fallbackDefault(
@@ -611,6 +719,15 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(showWater, forKey: SettingsKeys.showWater)
         defaults.set(showRailways, forKey: SettingsKeys.showRailways)
         defaults.set(showOtherAreas, forKey: SettingsKeys.showOtherAreas)
+        defaults.set(mapPlusNavigationShowBuildings, forKey: SettingsKeys.mapPlusNavigationShowBuildings)
+        defaults.set(mapPlusNavigationShowGreenSpace, forKey: SettingsKeys.mapPlusNavigationShowGreenSpace)
+        defaults.set(mapPlusNavigationShowPaths, forKey: SettingsKeys.mapPlusNavigationShowPaths)
+        defaults.set(mapPlusNavigationShowMajorRoads, forKey: SettingsKeys.mapPlusNavigationShowMajorRoads)
+        defaults.set(mapPlusNavigationShowLocalStreets, forKey: SettingsKeys.mapPlusNavigationShowLocalStreets)
+        defaults.set(mapPlusNavigationShowWater, forKey: SettingsKeys.mapPlusNavigationShowWater)
+        defaults.set(mapPlusNavigationShowRailways, forKey: SettingsKeys.mapPlusNavigationShowRailways)
+        defaults.set(mapPlusNavigationShowOtherAreas, forKey: SettingsKeys.mapPlusNavigationShowOtherAreas)
+        defaults.set(true, forKey: SettingsKeys.mapPlusNavigationProfileMigrated)
         defaults.set(showRouteOverlay, forKey: SettingsKeys.showRouteOverlay)
         defaults.set(showCurrentPosition, forKey: SettingsKeys.showCurrentPosition)
     }
@@ -841,19 +958,41 @@ class BLEManager: NSObject, ObservableObject {
     
     /// Send feature visibility bitmask
     func sendVisibilityMask() {
+        sendVisibilityMask(for: .map)
+    }
+
+    func sendVisibilityMask(for screen: DeviceScreen) {
         var mask: Int32 = 0
-        if showBuildings { mask |= (1 << 0) }
-        if showGreenSpace { mask |= (1 << 1) }
-        if showPaths { mask |= (1 << 2) }
-        if showMajorRoads { mask |= (1 << 3) }
-        if showLocalStreets { mask |= (1 << 4) }
-        if showWater { mask |= (1 << 5) }
-        if showRailways { mask |= (1 << 6) }
-        if showOtherAreas { mask |= (1 << 7) }
-        if showRouteOverlay { mask |= (1 << 8) }
-        if showCurrentPosition { mask |= (1 << 9) }
-        
-        sendSetting(id: 8, value: mask)
+        let settingID: UInt8
+
+        switch screen {
+        case .map:
+            if showBuildings { mask |= (1 << 0) }
+            if showGreenSpace { mask |= (1 << 1) }
+            if showPaths { mask |= (1 << 2) }
+            if showMajorRoads { mask |= (1 << 3) }
+            if showLocalStreets { mask |= (1 << 4) }
+            if showWater { mask |= (1 << 5) }
+            if showRailways { mask |= (1 << 6) }
+            if showOtherAreas { mask |= (1 << 7) }
+            if showRouteOverlay { mask |= (1 << 8) }
+            if showCurrentPosition { mask |= (1 << 9) }
+            settingID = 8
+        case .mapPlusNavigation:
+            if mapPlusNavigationShowBuildings { mask |= (1 << 0) }
+            if mapPlusNavigationShowGreenSpace { mask |= (1 << 1) }
+            if mapPlusNavigationShowPaths { mask |= (1 << 2) }
+            if mapPlusNavigationShowMajorRoads { mask |= (1 << 3) }
+            if mapPlusNavigationShowLocalStreets { mask |= (1 << 4) }
+            if mapPlusNavigationShowWater { mask |= (1 << 5) }
+            if mapPlusNavigationShowRailways { mask |= (1 << 6) }
+            if mapPlusNavigationShowOtherAreas { mask |= (1 << 7) }
+            settingID = DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID
+        case .navigation, .rideStats:
+            return
+        }
+
+        sendSetting(id: settingID, value: mask)
     }
 
     func isDeviceScreenEnabled(_ screen: DeviceScreen) -> Bool {
@@ -1523,6 +1662,19 @@ class BLEManager: NSObject, ObservableObject {
         sendSetting(id: 4, value: Int32(displayRotation))
         sendSetting(id: 6, value: Int32(mapRotationMode))
         sendSetting(id: 7, value: Int32(zoomLevel))
+        sendVisibilityMask(for: .mapPlusNavigation)
+        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationMinPolygonSizeSettingID,
+                    value: Int32(mapPlusNavigationMinPolygonSize))
+        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationDetailLevelSettingID,
+                    value: Int32(mapPlusNavigationDetailLevel))
+        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationRouteLineWidthSettingID,
+                    value: Int32(mapPlusNavigationRouteLineWidth))
+        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationStreetLineWidthBoostSettingID,
+                    value: Int32(mapPlusNavigationStreetLineWidthBoost))
+        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID,
+                    value: Int32(mapPlusNavigationPositionMarkerScale))
+        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationZoomLevelSettingID,
+                    value: Int32(mapPlusNavigationZoomLevel))
         sendSetting(id: 11, value: tapToSwitchScreens ? 1 : 0)
         sendEnabledDeviceScreensMask()
         sendDefaultDeviceScreen()

@@ -269,6 +269,7 @@ struct NavigationProtocolTests {
         testBLEPairingAuthenticator()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
+        testBLEManagerSendsSeparateMapProfileSettings()
         testBLEManagerSendsDeviceSoundFallback()
         testBLEManagerSendsPowerButtonHonkFallback()
         testPowerButtonHonkTimeoutAndTransportFailures()
@@ -981,6 +982,13 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.enabledScreensSettingID, 13, "enabled screens use firmware setting ID 13")
         assertEqual(DeviceBLEProtocol.defaultScreenSettingID, 14, "default screen uses firmware setting ID 14")
         assertEqual(DeviceBLEProtocol.disconnectedSleepTimeoutSettingID, 15, "disconnected sleep timeout uses firmware setting ID 15")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationMinPolygonSizeSettingID, 16, "Map + Navigation polygon size uses setting ID 16")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationDetailLevelSettingID, 17, "Map + Navigation detail uses setting ID 17")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationRouteLineWidthSettingID, 18, "Map + Navigation route width uses setting ID 18")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationZoomLevelSettingID, 19, "Map + Navigation zoom uses setting ID 19")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID, 20, "Map + Navigation visibility uses setting ID 20")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationStreetLineWidthBoostSettingID, 21, "Map + Navigation street width uses setting ID 21")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID, 22, "Map + Navigation marker scale uses setting ID 22")
         assertEqual(DeviceScreen.map.rawValue, 0, "Map screen protocol value stays stable")
         assertEqual(DeviceScreen.navigation.rawValue, 1, "Navigation screen protocol value stays stable")
         assertEqual(DeviceScreen.rideStats.rawValue, 2, "Ride Stats screen protocol value stays stable")
@@ -1352,6 +1360,49 @@ struct NavigationProtocolTests {
             | (Int32(valueBytes[2]) << 16)
             | (Int32(valueBytes[3]) << 24)
         assertEqual(value, 7, "fallback settings packet includes little-endian value")
+    }
+
+    static func testBLEManagerSendsSeparateMapProfileSettings() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.showBuildings = true
+        manager.showGreenSpace = false
+        manager.showPaths = false
+        manager.showMajorRoads = false
+        manager.showLocalStreets = false
+        manager.showWater = false
+        manager.showRailways = false
+        manager.showOtherAreas = false
+        manager.showRouteOverlay = true
+        manager.showCurrentPosition = false
+        manager.mapPlusNavigationShowBuildings = false
+        manager.mapPlusNavigationShowGreenSpace = false
+        manager.mapPlusNavigationShowPaths = false
+        manager.mapPlusNavigationShowMajorRoads = true
+        manager.mapPlusNavigationShowLocalStreets = false
+        manager.mapPlusNavigationShowWater = false
+        manager.mapPlusNavigationShowRailways = false
+        manager.mapPlusNavigationShowOtherAreas = false
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        manager.sendVisibilityMask(for: .map)
+        manager.sendVisibilityMask(for: .mapPlusNavigation)
+
+        assertEqual(sentPackets.count, 2, "each map screen sends its own visibility profile")
+        assertEqual(sentPackets[0][4], 8, "Map visibility keeps legacy setting ID 8")
+        assertEqual(readInt32LE(sentPackets[0], offset: 5), 0x101,
+                    "Map visibility includes its feature bits and global overlays")
+        assertEqual(sentPackets[1][4], DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID,
+                    "Map + Navigation visibility uses its profile setting ID")
+        assertEqual(readInt32LE(sentPackets[1], offset: 5), 0x08,
+                    "Map + Navigation visibility contains only its feature bits")
     }
 
     static func testBLEManagerSendsDeviceSoundFallback() {
@@ -1788,8 +1839,25 @@ struct NavigationProtocolTests {
     static func testBLEManagerPersistsNewMapSettings() {
         let defaults = UserDefaults.standard
         let keys = [
+            "mapSettings.detailLevel",
             "mapSettings.mapRotationMode",
             "mapSettings.zoomLevel",
+            "mapSettings.showBuildings",
+            "mapPlusNavigationSettings.minPolygonSize",
+            "mapPlusNavigationSettings.detailLevel",
+            "mapPlusNavigationSettings.routeLineWidth",
+            "mapPlusNavigationSettings.streetLineWidthBoost",
+            "mapPlusNavigationSettings.positionMarkerScale",
+            "mapPlusNavigationSettings.zoomLevel",
+            "mapPlusNavigationSettings.showBuildings",
+            "mapPlusNavigationSettings.showGreenSpace",
+            "mapPlusNavigationSettings.showPaths",
+            "mapPlusNavigationSettings.showMajorRoads",
+            "mapPlusNavigationSettings.showLocalStreets",
+            "mapPlusNavigationSettings.showWater",
+            "mapPlusNavigationSettings.showRailways",
+            "mapPlusNavigationSettings.showOtherAreas",
+            "mapPlusNavigationSettings.migrated.v1",
             "deviceSettings.enabledScreensMask",
             "deviceSettings.defaultScreen",
             "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1",
@@ -1805,9 +1873,24 @@ struct NavigationProtocolTests {
         let migratedManager = BLEManager()
         assertEqual(migratedManager.defaultDeviceScreen, .mapPlusNavigation, "old Map defaults migrate to Map + Navigation")
 
+        defaults.set(1, forKey: "mapSettings.detailLevel")
+        defaults.set(4, forKey: "mapSettings.zoomLevel")
+        defaults.set(false, forKey: "mapSettings.showBuildings")
+        defaults.removeObject(forKey: "mapPlusNavigationSettings.migrated.v1")
+        let migratedProfileManager = BLEManager()
+        assertEqual(migratedProfileManager.mapPlusNavigationDetailLevel, 1,
+                    "existing shared detail migrates into Map + Navigation")
+        assertEqual(migratedProfileManager.mapPlusNavigationZoomLevel, 4,
+                    "existing shared zoom migrates into Map + Navigation")
+        assert(!migratedProfileManager.mapPlusNavigationShowBuildings,
+               "existing shared visibility migrates into Map + Navigation")
+
         let manager = BLEManager()
         manager.mapRotationMode = 1
         manager.zoomLevel = 5
+        manager.mapPlusNavigationDetailLevel = 0
+        manager.mapPlusNavigationZoomLevel = 3
+        manager.mapPlusNavigationShowBuildings = true
         manager.enabledDeviceScreensMask = DeviceScreen.navigation.bit | DeviceScreen.mapPlusNavigation.bit
         manager.defaultDeviceScreen = .mapPlusNavigation
         manager.disconnectedSleepTimeout = .tenMinutes
@@ -1816,6 +1899,12 @@ struct NavigationProtocolTests {
         let reloaded = BLEManager()
         assertEqual(reloaded.mapRotationMode, 1, "map rotation mode should persist across BLEManager reloads")
         assertEqual(reloaded.zoomLevel, 5, "zoom level should persist across BLEManager reloads")
+        assertEqual(reloaded.mapPlusNavigationDetailLevel, 0,
+                    "Map + Navigation detail should persist independently")
+        assertEqual(reloaded.mapPlusNavigationZoomLevel, 3,
+                    "Map + Navigation zoom should persist independently")
+        assert(reloaded.mapPlusNavigationShowBuildings,
+               "Map + Navigation visibility should persist independently")
         assertEqual(reloaded.enabledDeviceScreensMask,
                     DeviceScreen.navigation.bit | DeviceScreen.mapPlusNavigation.bit,
                     "enabled device screens should persist across BLEManager reloads")

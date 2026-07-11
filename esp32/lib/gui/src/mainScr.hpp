@@ -80,6 +80,8 @@ void zoomOutEvent(lv_event_t *event);
 void zoomInEvent(lv_event_t *event);
 void updateNavEvent(lv_event_t *event);
 void showNextMainScreen();
+bool isMapScreenActive();
+bool isMapGuidanceScreenActive();
 
 void createMainScr();
 void toggleNavigationScreen();

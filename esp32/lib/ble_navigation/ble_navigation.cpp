@@ -43,6 +43,8 @@ BLENavigationServer bleNavServer;
 // Forward declaration of map redraw trigger
 extern void triggerMapRedraw();
 extern void applyDeviceScreenSettings();
+extern bool isMapScreenActive();
+extern bool isMapGuidanceScreenActive();
 
 // NavigationData struct is now in ble_navigation.hpp
 
@@ -1037,51 +1039,54 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
 
   switch (settingId) {
   case 1:
-    mapRenderSettings.minPolygonSize =
+    mapRenderSettings.mapStyle.minPolygonSize =
         (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)50);
     settingsPrefs.begin("mapSettings", false);
-    settingsPrefs.putUChar("minPolySize", mapRenderSettings.minPolygonSize);
+    settingsPrefs.putUChar("minPolySize",
+                           mapRenderSettings.mapStyle.minPolygonSize);
     settingsPrefs.end();
     Serial.printf("BLE Settings: minPolygonSize = %d (saved)\n",
-                  mapRenderSettings.minPolygonSize);
+                  mapRenderSettings.mapStyle.minPolygonSize);
     break;
   case 2:
-    mapRenderSettings.detailLevel =
+    mapRenderSettings.mapStyle.detailLevel =
         (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)2);
     settingsPrefs.begin("mapSettings", false);
-    settingsPrefs.putUChar("detailLevel", mapRenderSettings.detailLevel);
+    settingsPrefs.putUChar("detailLevel",
+                           mapRenderSettings.mapStyle.detailLevel);
     settingsPrefs.end();
     Serial.printf("BLE Settings: detailLevel = %d (saved)\n",
-                  mapRenderSettings.detailLevel);
+                  mapRenderSettings.mapStyle.detailLevel);
     break;
   case 3:
-    mapRenderSettings.routeLineWidth =
+    mapRenderSettings.mapStyle.routeLineWidth =
         (uint8_t)std::min(std::max(settingValue, (int32_t)2), (int32_t)48);
     settingsPrefs.begin("mapSettings", false);
-    settingsPrefs.putUChar("routeWidth", mapRenderSettings.routeLineWidth);
+    settingsPrefs.putUChar("routeWidth",
+                           mapRenderSettings.mapStyle.routeLineWidth);
     settingsPrefs.end();
     Serial.printf("BLE Settings: routeLineWidth = %d (saved)\n",
-                  mapRenderSettings.routeLineWidth);
+                  mapRenderSettings.mapStyle.routeLineWidth);
     break;
   case 9:
-    mapRenderSettings.streetLineWidthBoost =
+    mapRenderSettings.mapStyle.streetLineWidthBoost =
         (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)24);
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar("streetBoost",
-                           mapRenderSettings.streetLineWidthBoost);
+                           mapRenderSettings.mapStyle.streetLineWidthBoost);
     settingsPrefs.end();
     Serial.printf("BLE Settings: streetLineWidthBoost = %d (saved)\n",
-                  mapRenderSettings.streetLineWidthBoost);
+                  mapRenderSettings.mapStyle.streetLineWidthBoost);
     break;
   case 10:
-    mapRenderSettings.positionMarkerScale =
+    mapRenderSettings.mapStyle.positionMarkerScale =
         (uint8_t)std::min(std::max(settingValue, (int32_t)1), (int32_t)5);
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar("markerScale",
-                           mapRenderSettings.positionMarkerScale);
+                           mapRenderSettings.mapStyle.positionMarkerScale);
     settingsPrefs.end();
     Serial.printf("BLE Settings: positionMarkerScale = %d (saved)\n",
-                  mapRenderSettings.positionMarkerScale);
+                  mapRenderSettings.mapStyle.positionMarkerScale);
     break;
   case 11:
     mapRenderSettings.tapToSwitchScreens = settingValue != 0 ? 1 : 0;
@@ -1153,23 +1158,92 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     break;
   case 7: {
     extern uint8_t zoom;
-    mapRenderSettings.zoomLevel =
+    mapRenderSettings.mapStyle.zoomLevel =
         (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)5);
-    zoom = mapRenderSettings.zoomLevel;
+    if (isMapScreenActive()) {
+      zoom = mapRenderSettings.mapStyle.zoomLevel;
+    }
     settingsPrefs.begin("mapSettings", false);
-    settingsPrefs.putUChar("zoomLevel", mapRenderSettings.zoomLevel);
+    settingsPrefs.putUChar("zoomLevel", mapRenderSettings.mapStyle.zoomLevel);
     settingsPrefs.end();
     Serial.printf("BLE Settings: zoomLevel = %d (saved)\n",
-                  mapRenderSettings.zoomLevel);
+                  mapRenderSettings.mapStyle.zoomLevel);
     break;
   }
-  case 8:
-    mapRenderSettings.visibilityMask = (uint32_t)settingValue;
+  case 8: {
+    const uint32_t mask = (uint32_t)settingValue;
+    mapRenderSettings.mapStyle.visibilityMask = mask & 0xFF;
+    mapRenderSettings.navigationOverlayVisibilityMask = mask & 0x300;
     settingsPrefs.begin("mapSettings", false);
-    settingsPrefs.putUInt("visMask", mapRenderSettings.visibilityMask);
+    settingsPrefs.putUInt(
+        "visMask", mapRenderSettings.mapStyle.visibilityMask |
+                       mapRenderSettings.navigationOverlayVisibilityMask);
     settingsPrefs.end();
     Serial.printf("BLE Settings: visibilityMask = 0x%08X (saved)\n",
-                  mapRenderSettings.visibilityMask);
+                  mask);
+    break;
+  }
+  case 16:
+    mapRenderSettings.mapNavigationStyle.minPolygonSize =
+        (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)50);
+    settingsPrefs.begin("mapSettings", false);
+    settingsPrefs.putUChar(
+        "navMinPoly", mapRenderSettings.mapNavigationStyle.minPolygonSize);
+    settingsPrefs.end();
+    break;
+  case 17:
+    mapRenderSettings.mapNavigationStyle.detailLevel =
+        (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)2);
+    settingsPrefs.begin("mapSettings", false);
+    settingsPrefs.putUChar("navDetail",
+                           mapRenderSettings.mapNavigationStyle.detailLevel);
+    settingsPrefs.end();
+    break;
+  case 18:
+    mapRenderSettings.mapNavigationStyle.routeLineWidth =
+        (uint8_t)std::min(std::max(settingValue, (int32_t)2), (int32_t)48);
+    settingsPrefs.begin("mapSettings", false);
+    settingsPrefs.putUChar(
+        "navRouteW", mapRenderSettings.mapNavigationStyle.routeLineWidth);
+    settingsPrefs.end();
+    break;
+  case 19:
+    mapRenderSettings.mapNavigationStyle.zoomLevel =
+        (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)5);
+    if (isMapGuidanceScreenActive()) {
+      extern uint8_t zoom;
+      zoom = mapRenderSettings.mapNavigationStyle.zoomLevel;
+    }
+    settingsPrefs.begin("mapSettings", false);
+    settingsPrefs.putUChar("navZoom",
+                           mapRenderSettings.mapNavigationStyle.zoomLevel);
+    settingsPrefs.end();
+    break;
+  case 20:
+    mapRenderSettings.mapNavigationStyle.visibilityMask =
+        (uint32_t)settingValue & 0xFF;
+    settingsPrefs.begin("mapSettings", false);
+    settingsPrefs.putUInt(
+        "navVis", mapRenderSettings.mapNavigationStyle.visibilityMask);
+    settingsPrefs.end();
+    break;
+  case 21:
+    mapRenderSettings.mapNavigationStyle.streetLineWidthBoost =
+        (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)24);
+    settingsPrefs.begin("mapSettings", false);
+    settingsPrefs.putUChar(
+        "navStreetB",
+        mapRenderSettings.mapNavigationStyle.streetLineWidthBoost);
+    settingsPrefs.end();
+    break;
+  case 22:
+    mapRenderSettings.mapNavigationStyle.positionMarkerScale =
+        (uint8_t)std::min(std::max(settingValue, (int32_t)1), (int32_t)5);
+    settingsPrefs.begin("mapSettings", false);
+    settingsPrefs.putUChar(
+        "navMarkerS",
+        mapRenderSettings.mapNavigationStyle.positionMarkerScale);
+    settingsPrefs.end();
     break;
   default:
     Serial.printf("BLE Settings: Unknown setting ID %d from %s\n", settingId,
@@ -1458,15 +1532,30 @@ static void loadSettingsFromNVS() {
   Preferences prefs;
   prefs.begin("mapSettings", true); // read-only
 
-  mapRenderSettings.minPolygonSize = prefs.getUChar("minPolySize", 0);
-  mapRenderSettings.detailLevel = prefs.getUChar("detailLevel", 2);
-  mapRenderSettings.routeLineWidth = prefs.getUChar("routeWidth", 4);
-  mapRenderSettings.streetLineWidthBoost = prefs.getUChar("streetBoost", 0);
-  mapRenderSettings.positionMarkerScale = prefs.getUChar("markerScale", 2);
+  mapRenderSettings.mapStyle.minPolygonSize = prefs.getUChar("minPolySize", 0);
+  mapRenderSettings.mapStyle.detailLevel = prefs.getUChar("detailLevel", 2);
+  mapRenderSettings.mapStyle.routeLineWidth = prefs.getUChar("routeWidth", 4);
+  mapRenderSettings.mapStyle.streetLineWidthBoost =
+      prefs.getUChar("streetBoost", 0);
+  mapRenderSettings.mapStyle.positionMarkerScale =
+      prefs.getUChar("markerScale", 2);
+  mapRenderSettings.mapStyle.zoomLevel = prefs.getUChar("zoomLevel", 4);
+
+  mapRenderSettings.mapNavigationStyle.minPolygonSize = prefs.getUChar(
+      "navMinPoly", mapRenderSettings.mapStyle.minPolygonSize);
+  mapRenderSettings.mapNavigationStyle.detailLevel =
+      prefs.getUChar("navDetail", mapRenderSettings.mapStyle.detailLevel);
+  mapRenderSettings.mapNavigationStyle.routeLineWidth =
+      prefs.getUChar("navRouteW", mapRenderSettings.mapStyle.routeLineWidth);
+  mapRenderSettings.mapNavigationStyle.streetLineWidthBoost = prefs.getUChar(
+      "navStreetB", mapRenderSettings.mapStyle.streetLineWidthBoost);
+  mapRenderSettings.mapNavigationStyle.positionMarkerScale = prefs.getUChar(
+      "navMarkerS", mapRenderSettings.mapStyle.positionMarkerScale);
+  mapRenderSettings.mapNavigationStyle.zoomLevel =
+      prefs.getUChar("navZoom", mapRenderSettings.mapStyle.zoomLevel);
   mapRenderSettings.displayRotation =
       sanitizeMapDisplayRotation(prefs.getUChar("rotation", 0), "NVS");
   mapRenderSettings.mapRotationMode = prefs.getUChar("mapRotMode", 0);
-  mapRenderSettings.zoomLevel = prefs.getUChar("zoomLevel", 4);
   mapRenderSettings.tapToSwitchScreens = prefs.getUChar("tapSwitch", 0);
   mapRenderSettings.enabledScreensMask =
       normalizedEnabledScreensMask(prefs.getUChar("screenMask",
@@ -1477,7 +1566,13 @@ static void loadSettingsFromNVS() {
   mapRenderSettings.disconnectedSleepTimeoutSeconds =
       normalizedDisconnectedSleepTimeoutSeconds(
           prefs.getUInt("discSleepSec", 120));
-  mapRenderSettings.visibilityMask = prefs.getUInt("visMask", 0xFFFFFFFF);
+  const uint32_t legacyVisibilityMask = prefs.getUInt("visMask", 0x3FF);
+  mapRenderSettings.mapStyle.visibilityMask = legacyVisibilityMask & 0xFF;
+  mapRenderSettings.navigationOverlayVisibilityMask =
+      legacyVisibilityMask & 0x300;
+  mapRenderSettings.mapNavigationStyle.visibilityMask =
+      prefs.getUInt("navVis", mapRenderSettings.mapStyle.visibilityMask) &
+      0xFF;
 
   prefs.end();
 
@@ -1485,10 +1580,11 @@ static void loadSettingsFromNVS() {
                 "detailLevel=%d, routeWidth=%d, streetBoost=%d, "
                 "markerScale=%d, rotation=%d, tapSwitch=%d, "
                 "screenMask=0x%02X, defaultScreen=%d, discSleepSec=%lu\n",
-                mapRenderSettings.minPolygonSize, mapRenderSettings.detailLevel,
-                mapRenderSettings.routeLineWidth,
-                mapRenderSettings.streetLineWidthBoost,
-                mapRenderSettings.positionMarkerScale,
+                mapRenderSettings.mapStyle.minPolygonSize,
+                mapRenderSettings.mapStyle.detailLevel,
+                mapRenderSettings.mapStyle.routeLineWidth,
+                mapRenderSettings.mapStyle.streetLineWidthBoost,
+                mapRenderSettings.mapStyle.positionMarkerScale,
                 mapRenderSettings.displayRotation,
                 mapRenderSettings.tapToSwitchScreens,
                 mapRenderSettings.enabledScreensMask,

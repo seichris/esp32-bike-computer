@@ -56,20 +56,28 @@ lv_obj_t *btnZoomOut;
 static lv_obj_t *mapGuidanceOverlay;
 static lv_obj_t *mapGuidanceArrow;
 static lv_obj_t *mapGuidanceDistance;
-static lv_obj_t *mapGuidanceUnit;
 
 Maps mapView;
+
+bool isMapScreenActive() { return activeTile == MAP; }
+
+bool isMapGuidanceScreenActive() { return activeTile == MAP_GUIDANCE; }
+
+const ScreenMapRenderSettings &currentMapStyleSettings() {
+  return isMapGuidanceScreenActive() ? mapRenderSettings.mapNavigationStyle
+                                     : mapRenderSettings.mapStyle;
+}
 
 static void tapCycleScreenEvent(lv_event_t *event);
 
 static int16_t mapInteractionAnchorX() {
-  return gui_layout::mapAnchorX(mapView.mapScrWidth);
+  return gui_layout::mapScreenAnchorX(TFT_WIDTH, mapView.mapScrWidth);
 }
 
 static int16_t mapInteractionAnchorY() {
   const uint16_t mapHeight =
       mapSet.mapFullScreen ? mapView.mapScrFull : mapView.mapScrHeight;
-  return gui_layout::mapAnchorY(mapHeight);
+  return gui_layout::mapScreenAnchorY(TFT_HEIGHT, mapHeight);
 }
 
 static uint16_t currentCourseUpHeading() {
@@ -222,7 +230,7 @@ static void applyMapRotationForActiveTile() {
 }
 
 static void updateMapGuidanceOverlay() {
-  if (!mapGuidanceArrow || !mapGuidanceDistance || !mapGuidanceUnit) {
+  if (!mapGuidanceArrow || !mapGuidanceDistance) {
     return;
   }
 
@@ -232,19 +240,16 @@ static void updateMapGuidanceOverlay() {
   if (!hasCurrentNavigationData()) {
     lv_img_set_angle(mapGuidanceArrow, 0);
     lv_label_set_text_static(mapGuidanceDistance, "--");
-    lv_label_set_text_static(mapGuidanceUnit, "");
     return;
   }
 
   NavigationData navData = getCurrentNavigationData();
   lv_img_set_angle(mapGuidanceArrow, navigationArrowAngle(navData.iconID));
   if (navData.distance >= 1000) {
-    lv_label_set_text_fmt(mapGuidanceDistance, "%.1f",
+    lv_label_set_text_fmt(mapGuidanceDistance, "%.1f km",
                           navData.distance / 1000.0f);
-    lv_label_set_text_static(mapGuidanceUnit, "km");
   } else {
-    lv_label_set_text_fmt(mapGuidanceDistance, "%u", navData.distance);
-    lv_label_set_text_static(mapGuidanceUnit, "m");
+    lv_label_set_text_fmt(mapGuidanceDistance, "%u m", navData.distance);
   }
 }
 
@@ -763,9 +768,9 @@ void scrollMapEvent(lv_event_t *event) {
             log_i("MAP SHORT TAP: cycling main screen");
             showNextMainScreen();
           } else {
-            // GPS indicator is at the board-specific map anchor when followGps
-            // is true. When followGps is false, use the center area since users
-            // expect to tap the center indicator.
+            // GPS indicator is centered in the rendered map viewport when
+            // followGps is true. When followGps is false, use that center area
+            // since users expect to tap the center indicator.
             int centerX = mapInteractionAnchorX();
             int centerY = mapInteractionAnchorY();
             int distX = abs(p.x - centerX);
@@ -937,18 +942,11 @@ static void createMapGuidanceOverlay() {
   lv_obj_align(mapGuidanceArrow, LV_ALIGN_LEFT_MID, 20, 0);
 
   mapGuidanceDistance = lv_label_create(mapGuidanceOverlay);
-  lv_obj_set_style_text_font(mapGuidanceDistance, fontVeryLarge, 0);
+  lv_obj_set_style_text_font(mapGuidanceDistance, &lv_font_montserrat_48, 0);
   lv_obj_set_style_text_color(mapGuidanceDistance, lv_color_white(), 0);
   lv_obj_set_style_text_align(mapGuidanceDistance, LV_TEXT_ALIGN_LEFT, 0);
   lv_label_set_text_static(mapGuidanceDistance, "--");
-  lv_obj_align(mapGuidanceDistance, LV_ALIGN_CENTER, 46, -10);
-
-  mapGuidanceUnit = lv_label_create(mapGuidanceOverlay);
-  lv_obj_set_style_text_font(mapGuidanceUnit, fontOptions, 0);
-  lv_obj_set_style_text_color(mapGuidanceUnit, lv_color_white(), 0);
-  lv_label_set_text_static(mapGuidanceUnit, "");
-  lv_obj_align_to(mapGuidanceUnit, mapGuidanceDistance, LV_ALIGN_OUT_BOTTOM_LEFT,
-                  4, -8);
+  lv_obj_align(mapGuidanceDistance, LV_ALIGN_CENTER, 46, 0);
 
   lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
 }
@@ -965,6 +963,10 @@ static void showMainTile(tileName tile) {
 
   activeTile = tile;
   canScrollMap = tile == MAP;
+  if (isMapBackedTile(activeTile)) {
+    zoom = currentMapStyleSettings().zoomLevel;
+    mapView.isPosMoved = true;
+  }
 
   switch (tile) {
   case MAP_GUIDANCE:
@@ -1099,7 +1101,7 @@ void createMainScr() {
 
   // Sync zoom level from settings
   extern uint8_t zoom;
-  if (mapRenderSettings.zoomLevel >= 0 && mapRenderSettings.zoomLevel <= 5) {
-    zoom = mapRenderSettings.zoomLevel;
+  if (mapRenderSettings.mapStyle.zoomLevel <= 5) {
+    zoom = mapRenderSettings.mapStyle.zoomLevel;
   }
 }
