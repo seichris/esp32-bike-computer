@@ -640,9 +640,15 @@ static int es8311_close(const audio_codec_if_t *h)
         return ESP_CODEC_DEV_INVALID_ARG;
     }
     if (codec->is_open) {
-        es8311_set_mute(h, true);
-        es8311_pa_power(codec, ES_PA_DISABLE);
-        es8311_suspend(codec);
+        if (codec->enabled) {
+            int ret = es8311_set_mute(h, true);
+            es8311_pa_power(codec, ES_PA_DISABLE);
+            ret |= es8311_suspend(codec);
+            if (ret != ESP_CODEC_DEV_OK) {
+                return ret;
+            }
+            codec->enabled = false;
+        }
         codec->is_open = false;
     }
     return ESP_CODEC_DEV_OK;

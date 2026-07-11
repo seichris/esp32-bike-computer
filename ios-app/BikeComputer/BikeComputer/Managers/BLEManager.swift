@@ -45,6 +45,8 @@ enum DeviceBLEProtocol {
     static let deviceSoundsCapabilityMask: UInt8 = 1 << 0
     static let powerButtonHonkCapabilityMask: UInt8 = 1 << 1
     static let powerButtonHonkAcknowledgementCapabilityMask: UInt8 = 1 << 2
+    static let deviceCapabilitiesVersion: UInt8 = 1
+    static let fallbackWriteQueueCapacity = 32
 
     static let brightnessSettingID: UInt8 = 12
     static let enabledScreensSettingID: UInt8 = 13
@@ -418,7 +420,9 @@ class BLEManager: NSObject, ObservableObject {
     private var settingsCharacteristic: CBCharacteristic?
     private var deviceInformation: [CBUUID: String] = [:]
     private var navigationWriteEndpoint: NavigationWriteEndpoint?
-    private var navigationWriteQueue = NavigationWriteQueue(maxCount: 16)
+    private var navigationWriteQueue = NavigationWriteQueue(
+        maxCount: DeviceBLEProtocol.fallbackWriteQueueCapacity
+    )
     private var isConnecting: Bool = false
     private var isPairingMode: Bool = false
     private var pendingAuthNonce: String?
@@ -496,7 +500,9 @@ class BLEManager: NSObject, ObservableObject {
     // MARK: - Initialization
     override init() {
         super.init()
+#if !HOST_TESTING
         centralManager = CBCentralManager(delegate: self, queue: nil)
+#endif
         loadSettings()
         loadLastPeripheralIdentifier()
         updateTrustedPeripheralDescription()
@@ -947,23 +953,45 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func transmitPowerButtonHonkConfiguration(_ packet: Data) -> Bool {
-        let sent = routePowerButtonHonkConfiguration(packet)
-        if sent {
+        let label = powerButtonHonkConfigurationLabel(packet)
+        if sendNativeMapTransferPacket(packet, label: label) {
             schedulePowerButtonHonkRetry(
                 for: packet,
                 after: powerButtonHonkAckTimeout
             )
+            return true
         }
-        return sent
+
+        return sendFallbackMapPacket(
+            packet,
+            label: label,
+            onWrite: { [weak self] in
+                guard let self, self.pendingPowerButtonHonkPacket == packet else { return }
+                self.schedulePowerButtonHonkRetry(
+                    for: packet,
+                    after: self.powerButtonHonkAckTimeout
+                )
+            },
+            onDrop: { [weak self] in
+                guard let self, self.pendingPowerButtonHonkPacket == packet else { return }
+                self.reportPowerButtonHonkConfigurationFailure(
+                    "PWR honk configuration was dropped before it could be sent"
+                )
+            }
+        )
     }
 
     private func routePowerButtonHonkConfiguration(_ packet: Data) -> Bool {
-        let enabled = packet.count >= 3 && packet[packet.count - 3] == 1
-        let label = "PWR honk \(enabled ? "enabled" : "disabled")"
+        let label = powerButtonHonkConfigurationLabel(packet)
         return DevicePacketRouting.sendPreferredThenFallback(
             preferred: { sendNativeMapTransferPacket(packet, label: label) },
             fallback: { sendFallbackMapPacket(packet, label: label) }
         )
+    }
+
+    private func powerButtonHonkConfigurationLabel(_ packet: Data) -> String {
+        let enabled = packet.count >= 3 && packet[packet.count - 3] == 1
+        return "PWR honk \(enabled ? "enabled" : "disabled")"
     }
 
     private func schedulePowerButtonHonkRetry(
@@ -1054,7 +1082,8 @@ class BLEManager: NSObject, ObservableObject {
 
     @discardableResult
     func requestDeviceCapabilities() -> Bool {
-        let packet = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8)
+        var packet = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8)
+        packet.append(DeviceBLEProtocol.deviceCapabilitiesVersion)
         return DevicePacketRouting.sendPreferredThenFallback(
             preferred: {
                 sendNativeMapTransferPacket(packet, label: "device capabilities")
@@ -1495,8 +1524,19 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
-    private func enqueueNavigationWrite(_ data: Data, endpoint: NavigationWriteEndpoint, label: String) {
-        if navigationWriteQueue.enqueue(NavigationWrite(data: data, label: label)) {
+    private func enqueueNavigationWrite(
+        _ data: Data,
+        endpoint: NavigationWriteEndpoint,
+        label: String,
+        onWrite: (() -> Void)? = nil,
+        onDrop: (() -> Void)? = nil
+    ) {
+        if navigationWriteQueue.enqueue(NavigationWrite(
+            data: data,
+            label: label,
+            onWrite: onWrite,
+            onDrop: onDrop
+        )) {
             log("Navigation write queue full; dropped oldest packet")
         }
 
@@ -1505,7 +1545,12 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
-    private func sendFallbackMapPacket(_ data: Data, label: String) -> Bool {
+    private func sendFallbackMapPacket(
+        _ data: Data,
+        label: String,
+        onWrite: (() -> Void)? = nil,
+        onDrop: (() -> Void)? = nil
+    ) -> Bool {
         guard let endpoint = navigationWriteEndpoint,
               isConnected,
               isNavigationReady else {
@@ -1513,7 +1558,13 @@ class BLEManager: NSObject, ObservableObject {
             return false
         }
 
-        enqueueNavigationWrite(data, endpoint: endpoint, label: "fallback \(label)")
+        enqueueNavigationWrite(
+            data,
+            endpoint: endpoint,
+            label: "fallback \(label)",
+            onWrite: onWrite,
+            onDrop: onDrop
+        )
         log("Queued fallback \(label): \(data.count) bytes")
         return true
     }
@@ -1555,6 +1606,7 @@ class BLEManager: NSObject, ObservableObject {
     private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
         navigationWriteQueue.flush(canSend: endpoint.canSend) { write in
             endpoint.write(write.data)
+            write.onWrite?()
             log("Sent \(write.label): \(write.data.count) bytes")
         }
         if navigationWriteQueue.count == 0 {
@@ -1973,7 +2025,7 @@ extension BLEManager: CBPeripheralDelegate {
             return false
         }
 
-        guard data.count == 5 else {
+        guard data.count == 5 || data.count == 8 else {
             supportsDeviceSounds = false
             supportsPowerButtonHonk = false
             supportsPowerButtonHonkAcknowledgement = false
@@ -1989,7 +2041,34 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.powerButtonHonkCapabilityMask != 0
         let hasPowerButtonHonkAcknowledgement = hasPowerButtonHonk &&
             flags & DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask != 0
+        let hasDevicePowerButtonConfig = data.count == 8
+        if hasDevicePowerButtonConfig {
+            guard hasPowerButtonHonk,
+                  data[5] <= 1,
+                  let deviceSound = DeviceSound(rawValue: data[6]),
+                  data[7] <= 100 else {
+                supportsDeviceSounds = false
+                supportsPowerButtonHonk = false
+                supportsPowerButtonHonkAcknowledgement = false
+                hasReceivedDeviceCapabilities = false
+                clearPendingPowerButtonHonkConfiguration()
+                log("Received invalid device capabilities configuration")
+                return true
+            }
+            if pendingPowerButtonHonkPacket == nil {
+                let deviceHonkEnabled = data[5] == 1
+                isPowerButtonHonkEnabled = deviceHonkEnabled
+                if deviceHonkEnabled {
+                    selectedDeviceSound = deviceSound
+                    deviceSoundVolumePercent = Double(data[7])
+                }
+                saveSettings()
+            } else {
+                log("Ignored device capabilities configuration while a local update is pending")
+            }
+        }
         let shouldSynchronizePowerButtonHonk = hasPowerButtonHonk &&
+            !hasDevicePowerButtonConfig &&
             (!hasReceivedDeviceCapabilities || !supportsPowerButtonHonk)
         supportsDeviceSounds = hasDeviceSounds
         supportsPowerButtonHonk = hasPowerButtonHonk

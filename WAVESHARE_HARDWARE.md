@@ -230,7 +230,9 @@ and firmware persists it in NVS. On the 2.06 board, a short PWR press is read
 from AXP2101 interrupt-enable/status register pair `0x41`/`0x49`, bit `3`.
 Firmware polls the latched status only while honk mode is enabled and queues
 playback on the existing speaker task; the PMU's six-second hard power-off is
-unchanged.
+unchanged. Versioned capability discovery also returns this persisted
+configuration, so reconnecting from a fresh app does not overwrite device
+state with app defaults.
 
 ### Buttons, External Pads, And Power
 

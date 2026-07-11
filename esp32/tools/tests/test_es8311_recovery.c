@@ -127,6 +127,11 @@ int main(void)
     assert(codec->set_vol(codec, target_route_db) == ESP_CODEC_DEV_OK);
     assert(registers[ES8311_DAC_REG32] == 0xE7);
 
+    failed_write_register = ES8311_SYSTEM_REG0E;
+    assert(codec->enable(codec, false) != ESP_CODEC_DEV_OK);
+    assert(((audio_codec_es8311_t *) codec)->enabled);
+
+    failed_write_register = -1;
     assert(codec->enable(codec, false) == ESP_CODEC_DEV_OK);
     assert(paired_8311.dac == NULL);
 

@@ -81,21 +81,49 @@ struct SettingsView: View {
 private struct DeviceSoundsSettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
 
+    private var soundSelection: Binding<DeviceSound> {
+        Binding(
+            get: { bleManager.selectedDeviceSound },
+            set: { sound in
+                bleManager.selectedDeviceSound = sound
+                bleManager.saveSettings()
+                if bleManager.isPowerButtonHonkEnabled {
+                    bleManager.sendPowerButtonHonkConfiguration()
+                }
+            }
+        )
+    }
+
+    private var volumeSelection: Binding<Double> {
+        Binding(
+            get: { bleManager.deviceSoundVolumePercent },
+            set: { volume in
+                bleManager.deviceSoundVolumePercent = volume
+                bleManager.saveSettings()
+            }
+        )
+    }
+
+    private var powerButtonHonkSelection: Binding<Bool> {
+        Binding(
+            get: { bleManager.isPowerButtonHonkEnabled },
+            set: { enabled in
+                bleManager.isPowerButtonHonkEnabled = enabled
+                bleManager.saveSettings()
+                bleManager.sendPowerButtonHonkConfiguration()
+            }
+        )
+    }
+
     var body: some View {
         Section(header: Text("Device Sounds")) {
-            Picker("Sound", selection: $bleManager.selectedDeviceSound) {
+            Picker("Sound", selection: soundSelection) {
                 ForEach(DeviceSound.allCases) { sound in
                     Label(sound.title, systemImage: sound.systemImage)
                         .tag(sound)
                 }
             }
             .pickerStyle(.inline)
-            .onChange(of: bleManager.selectedDeviceSound) { _ in
-                bleManager.saveSettings()
-                if bleManager.isPowerButtonHonkEnabled {
-                    bleManager.sendPowerButtonHonkConfiguration()
-                }
-            }
 
             VStack(alignment: .leading) {
                 HStack {
@@ -105,24 +133,17 @@ private struct DeviceSoundsSettingsSection: View {
                         .foregroundColor(.secondary)
                 }
                 Slider(
-                    value: $bleManager.deviceSoundVolumePercent,
+                    value: volumeSelection,
                     in: 0...100,
                     step: 5,
                     onEditingChanged: { isEditing in
                         bleManager.deviceSoundVolumeEditingChanged(isEditing)
                     }
                 )
-                    .onChange(of: bleManager.deviceSoundVolumePercent) { _ in
-                        bleManager.saveSettings()
-                    }
             }
 
-            Toggle("Use PWR Button as Honk", isOn: $bleManager.isPowerButtonHonkEnabled)
+            Toggle("Use PWR Button as Honk", isOn: powerButtonHonkSelection)
                 .disabled(!bleManager.supportsPowerButtonHonk)
-                .onChange(of: bleManager.isPowerButtonHonkEnabled) { _ in
-                    bleManager.saveSettings()
-                    bleManager.sendPowerButtonHonkConfiguration()
-                }
 
             if let error = bleManager.powerButtonHonkConfigurationError {
                 Label(error, systemImage: "exclamationmark.triangle.fill")

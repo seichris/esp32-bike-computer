@@ -906,6 +906,33 @@ struct NavigationProtocolTests {
         assertEqual(sent, [Data([2]), Data([3])], "queue flushes remaining packet")
         assertEqual(labels, ["second", "third"], "queue flushes write metadata in order")
         assertEqual(queue.count, 0, "queue is empty after flush")
+
+        var reconnectQueue = NavigationWriteQueue(
+            maxCount: DeviceBLEProtocol.fallbackWriteQueueCapacity
+        )
+        for index in 0..<30 {
+            assert(!reconnectQueue.enqueue(NavigationWrite(
+                data: Data([UInt8(index)]),
+                label: "reconnect-\(index)"
+            )), "bounded automatic reconnect traffic must not evict persisted settings")
+        }
+        var reconnectWrites: [NavigationWrite] = []
+        reconnectQueue.flush(canSend: { true }) { reconnectWrites.append($0) }
+        assertEqual(reconnectWrites.count, 30,
+                    "fallback queue retains the complete automatic reconnect burst")
+        assertEqual(reconnectWrites.first?.label, "reconnect-0",
+                    "fallback queue preserves the oldest reconnect setting")
+
+        var didNotifyDrop = false
+        var trackedQueue = NavigationWriteQueue(maxCount: 1)
+        trackedQueue.enqueue(NavigationWrite(
+            data: Data([1]),
+            label: "tracked",
+            onDrop: { didNotifyDrop = true }
+        ))
+        assert(trackedQueue.enqueue(NavigationWrite(data: Data([2]), label: "replacement")),
+               "overflow reports that the oldest write was dropped")
+        assert(didNotifyDrop, "tracked writes are notified when queue overflow evicts them")
     }
 
     static func testDeviceBLEProtocolConstants() {
@@ -1066,6 +1093,24 @@ struct NavigationProtocolTests {
         assert(manager.supportsPowerButtonHonkAcknowledgement,
                "CAPS bit enables PWR honk acknowledgement handling")
 
+        let deviceConfig = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([acknowledgedFlags, 1, DeviceSound.rotatingBicycleBell.rawValue, 65])
+        assert(manager.handleDeviceCapabilitiesNotification(deviceConfig),
+               "versioned CAPS configuration should be consumed")
+        assert(manager.isPowerButtonHonkEnabled,
+               "versioned CAPS restores the device-persisted PWR state")
+        assertEqual(manager.selectedDeviceSound, .rotatingBicycleBell,
+                    "versioned CAPS restores the device-persisted sound")
+        assertEqual(manager.deviceSoundVolumePercent, 65,
+                    "versioned CAPS restores the device-persisted volume")
+
+        let invalidDeviceConfig = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([acknowledgedFlags, 2, DeviceSound.bellDing.rawValue, 70])
+        assert(manager.handleDeviceCapabilitiesNotification(invalidDeviceConfig),
+               "invalid versioned CAPS configuration should be consumed")
+        assert(!manager.hasReceivedDeviceCapabilities,
+               "invalid versioned CAPS configuration remains retryable")
+
         let soundOnly = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
             Data([DeviceBLEProtocol.deviceSoundsCapabilityMask])
         assert(manager.handleDeviceCapabilitiesNotification(soundOnly), "sound-only CAPS should be consumed")
@@ -1081,6 +1126,10 @@ struct NavigationProtocolTests {
         assert(!manager.supportsPowerButtonHonkAcknowledgement,
                "malformed CAPS clears PWR honk acknowledgement support")
         assert(!manager.hasReceivedDeviceCapabilities, "malformed CAPS does not complete negotiation")
+
+        UserDefaults.standard.removeObject(forKey: "deviceSettings.selectedSound")
+        UserDefaults.standard.removeObject(forKey: "deviceSettings.soundVolumePercent")
+        UserDefaults.standard.removeObject(forKey: "deviceSettings.powerButtonHonkEnabled")
     }
 
     static func testDeviceCapabilitySynchronizesPowerButtonHonkOnce() {
@@ -1112,6 +1161,17 @@ struct NavigationProtocolTests {
         assertEqual(String(data: sentPackets[0].prefix(4), encoding: .utf8), "SNDH",
                     "capability synchronization sends a PWR honk frame")
 
+        let staleDeviceConfig = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([flags, 0, DeviceSound.bellDing.rawValue, 20])
+        assert(manager.handleDeviceCapabilitiesNotification(staleDeviceConfig),
+               "versioned capability response should be consumed during an in-flight update")
+        assert(manager.isPowerButtonHonkEnabled,
+               "an in-flight local update wins over an older device snapshot")
+        assertEqual(manager.selectedDeviceSound, .squeezeHorn,
+                    "an older device snapshot does not replace the pending sound")
+        assertEqual(manager.deviceSoundVolumePercent, 55,
+                    "an older device snapshot does not replace the pending volume")
+
         let successStatus = powerButtonHonkStatus(for: sentPackets[0], applied: 1)
         assert(manager.handleNavigationCharacteristicNotification(successStatus),
                "capability synchronization acknowledgement should be consumed")
@@ -1121,6 +1181,29 @@ struct NavigationProtocolTests {
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))
         assertEqual(sentPackets.count, 1,
                     "duplicate PWR capability notification does not resend configuration")
+
+        let deviceConfig = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([flags, 1, DeviceSound.rotatingBicycleBell.rawValue, 60])
+        assert(manager.handleDeviceCapabilitiesNotification(deviceConfig),
+               "versioned capability response should restore device state")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        assertEqual(sentPackets.count, 1,
+                    "device-authoritative capability state is not written back")
+        assert(manager.isPowerButtonHonkEnabled,
+               "device-authoritative capability state remains enabled")
+        assertEqual(manager.selectedDeviceSound, .rotatingBicycleBell,
+                    "device-authoritative capability state selects the device sound")
+
+        let disabledDeviceConfig = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([flags, 0, DeviceSound.bellDing.rawValue, 20])
+        assert(manager.handleDeviceCapabilitiesNotification(disabledDeviceConfig),
+               "disabled device configuration should still restore the toggle")
+        assert(!manager.isPowerButtonHonkEnabled,
+               "disabled device configuration restores the disabled PWR state")
+        assertEqual(manager.selectedDeviceSound, .rotatingBicycleBell,
+                    "dormant PWR configuration does not replace the map-button sound")
+        assertEqual(manager.deviceSoundVolumePercent, 60,
+                    "dormant PWR configuration does not replace the map-button volume")
     }
 
     static func testDeviceCapabilityRetryPolicy() {
@@ -1453,6 +1536,34 @@ struct NavigationProtocolTests {
         }, "retry transport failure reaches terminal failure")
         assertEqual(sentPackets.count, 1,
                     "failed retry transport does not report an unsent packet")
+
+        var transportReady = false
+        sentPackets.removeAll()
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { transportReady },
+            write: { sentPackets.append($0) }
+        ))
+        assert(manager.sendPowerButtonHonkConfiguration(),
+               "backpressured PWR configuration is accepted into the fallback queue")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.12))
+        assertEqual(sentPackets.count, 0,
+                    "backpressured PWR configuration is not reported as written")
+        assert(manager.powerButtonHonkConfigurationError == nil,
+               "ACK timeout does not start while the PWR configuration is queued")
+
+        transportReady = true
+        assert(waitForMainLoop(timeout: 1) { sentPackets.count == 1 },
+               "queued PWR configuration is eventually handed to the transport")
+        let recoveredAfterBackpressure = powerButtonHonkStatus(
+            for: sentPackets[0],
+            applied: 1
+        )
+        assert(manager.handlePowerButtonHonkStatusNotification(recoveredAfterBackpressure),
+               "queued PWR configuration can be acknowledged after transport recovery")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        assertEqual(sentPackets.count, 1,
+                    "successful ACK cancels retries after transport recovery")
     }
 
     static func testBLEManagerSendsDeviceCapabilityFallback() {
@@ -1468,7 +1579,9 @@ struct NavigationProtocolTests {
         ))
 
         assert(manager.requestDeviceCapabilities(), "capability request should queue when BLE is ready")
-        assertEqual(sentPackets, [Data("CAPS".utf8)], "capability request uses a bounded fallback frame")
+        assertEqual(sentPackets,
+                    [Data("CAPS".utf8) + Data([DeviceBLEProtocol.deviceCapabilitiesVersion])],
+                    "capability request negotiates device-persisted configuration")
     }
 
     static func testBLEManagerSendsMapTransferControlFrames() {

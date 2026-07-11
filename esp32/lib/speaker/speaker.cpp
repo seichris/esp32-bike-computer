@@ -58,7 +58,6 @@ struct WireControlInterface {
 
 WireControlInterface wireControl;
 i2s_chan_handle_t txChannel = nullptr;
-i2s_chan_handle_t rxChannel = nullptr;
 const audio_codec_if_t *codecInterface = nullptr;
 const audio_codec_data_if_t *dataInterface = nullptr;
 const audio_codec_gpio_if_t *gpioInterface = nullptr;
@@ -228,13 +227,18 @@ void configureWireControl() {
   wireControl.base.close = wireControlClose;
 }
 
-void releaseCodecResources() {
+bool releaseCodecResources() {
   initialized = false;
   codecHardwareGainDb = 0.0f;
   currentDacGainDb = 0.0f;
   playbackLimiter = {};
+  gpio_set_level(PA_ENABLE, 0);
 
   if (speakerDevice != nullptr) {
+    if (esp_codec_dev_close(speakerDevice) != ESP_CODEC_DEV_OK) {
+      Serial.println("Speaker: codec shutdown failed; cleanup will retry");
+      return false;
+    }
     esp_codec_dev_delete(speakerDevice);
     speakerDevice = nullptr;
   }
@@ -253,20 +257,14 @@ void releaseCodecResources() {
 
   if (txChannel != nullptr) {
     i2s_channel_disable(txChannel);
-  }
-  if (rxChannel != nullptr) {
-    i2s_channel_disable(rxChannel);
-  }
-  if (txChannel != nullptr) {
-    i2s_del_channel(txChannel);
+    if (i2s_del_channel(txChannel) != ESP_OK) {
+      Serial.println("Speaker: I2S channel cleanup failed; cleanup will retry");
+      return false;
+    }
     txChannel = nullptr;
   }
-  if (rxChannel != nullptr) {
-    i2s_del_channel(rxChannel);
-    rxChannel = nullptr;
-  }
 
-  gpio_set_level(PA_ENABLE, 0);
+  return true;
 }
 
 bool failInitialization(const char *message) {
@@ -278,6 +276,13 @@ bool failInitialization(const char *message) {
 bool initializeCodec() {
   if (initialized) {
     return true;
+  }
+  if (speakerDevice != nullptr || codecInterface != nullptr ||
+      dataInterface != nullptr || gpioInterface != nullptr ||
+      txChannel != nullptr) {
+    if (!releaseCodecResources()) {
+      return false;
+    }
   }
 
   if (!i2c::probe(ES8311_I2C_ADDRESS, "ES8311 speaker", 3)) {
@@ -291,7 +296,7 @@ bool initializeCodec() {
   i2s_chan_config_t channelConfig =
       I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
   channelConfig.auto_clear = true;
-  if (i2s_new_channel(&channelConfig, &txChannel, &rxChannel) != ESP_OK) {
+  if (i2s_new_channel(&channelConfig, &txChannel, nullptr) != ESP_OK) {
     return failInitialization("Speaker: failed to allocate I2S channels");
   }
 
@@ -306,15 +311,13 @@ bool initializeCodec() {
   standardConfig.gpio_cfg.din = I2S_DIN;
 
   if (i2s_channel_init_std_mode(txChannel, &standardConfig) != ESP_OK ||
-      i2s_channel_enable(txChannel) != ESP_OK ||
-      i2s_channel_init_std_mode(rxChannel, &standardConfig) != ESP_OK ||
-      i2s_channel_enable(rxChannel) != ESP_OK) {
+      i2s_channel_enable(txChannel) != ESP_OK) {
     return failInitialization("Speaker: failed to configure I2S");
   }
 
   audio_codec_i2s_cfg_t i2sConfig{};
   i2sConfig.port = I2S_NUM_0;
-  i2sConfig.rx_handle = rxChannel;
+  i2sConfig.rx_handle = nullptr;
   i2sConfig.tx_handle = txChannel;
   dataInterface = audio_codec_new_i2s_data(&i2sConfig);
   gpioInterface = audio_codec_new_gpio();
@@ -605,6 +608,20 @@ bool isPowerButtonHonkAvailable() {
   return isAvailable() && powerButtonHonkAvailable;
 }
 
+bool getPowerButtonHonkConfig(PowerButtonHonkConfig &config) {
+  if (!isPowerButtonHonkAvailable()) {
+    return false;
+  }
+
+  PowerButtonConfigLock lock(
+      pdMS_TO_TICKS(POWER_BUTTON_CONFIG_LOCK_TIMEOUT_MS));
+  if (!lock.ok()) {
+    return false;
+  }
+  config = powerButtonHonkConfig;
+  return true;
+}
+
 bool configurePowerButtonHonk(const PowerButtonHonkConfig &config) {
   if (!isPowerButtonHonkAvailable() || !isKnownSound(config.sound) ||
       config.volumePercent > 100) {
@@ -693,6 +710,7 @@ bool isAvailable() { return false; }
 bool requestPlay(Sound, uint8_t) { return false; }
 bool isSupported(Sound) { return false; }
 bool isPowerButtonHonkAvailable() { return false; }
+bool getPowerButtonHonkConfig(PowerButtonHonkConfig &) { return false; }
 bool configurePowerButtonHonk(const PowerButtonHonkConfig &) { return false; }
 void processPowerButtonHonk() {}
 

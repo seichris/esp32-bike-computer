@@ -14,11 +14,15 @@ typedef enum {
     FAIL_DATA_ENABLE,
     FAIL_CODEC_FORMAT,
     FAIL_CODEC_ENABLE,
+    FAIL_DATA_DISABLE,
+    FAIL_CODEC_DISABLE,
 } failure_point_t;
 
 static failure_point_t failure_point;
 static int codec_disable_count;
 static int data_disable_count;
+static bool codec_enabled;
+static bool data_enabled;
 static float last_volume_db;
 
 static bool codec_is_open(const audio_codec_if_t *codec)
@@ -32,9 +36,17 @@ static int codec_enable(const audio_codec_if_t *codec, bool enable)
     (void) codec;
     if (!enable) {
         codec_disable_count++;
+        if (!codec_enabled || failure_point == FAIL_CODEC_DISABLE) {
+            return ESP_CODEC_DEV_DRV_ERR;
+        }
+        codec_enabled = false;
         return ESP_CODEC_DEV_OK;
     }
-    return failure_point == FAIL_CODEC_ENABLE ? ESP_CODEC_DEV_DRV_ERR : ESP_CODEC_DEV_OK;
+    if (failure_point == FAIL_CODEC_ENABLE) {
+        return ESP_CODEC_DEV_DRV_ERR;
+    }
+    codec_enabled = true;
+    return ESP_CODEC_DEV_OK;
 }
 
 static int codec_set_format(const audio_codec_if_t *codec, esp_codec_dev_sample_info_t *format)
@@ -81,9 +93,17 @@ static int data_enable(const audio_codec_data_if_t *data_if,
     (void) type;
     if (!enable) {
         data_disable_count++;
+        if (!data_enabled || failure_point == FAIL_DATA_DISABLE) {
+            return ESP_CODEC_DEV_DRV_ERR;
+        }
+        data_enabled = false;
         return ESP_CODEC_DEV_OK;
     }
-    return failure_point == FAIL_DATA_ENABLE ? ESP_CODEC_DEV_DRV_ERR : ESP_CODEC_DEV_OK;
+    if (failure_point == FAIL_DATA_ENABLE) {
+        return ESP_CODEC_DEV_DRV_ERR;
+    }
+    data_enabled = true;
+    return ESP_CODEC_DEV_OK;
 }
 
 static int data_write(const audio_codec_data_if_t *data_if, uint8_t *data, int size)
@@ -124,6 +144,8 @@ static void verify_failed_open_can_retry(failure_point_t point)
     failure_point = point;
     codec_disable_count = 0;
     data_disable_count = 0;
+    codec_enabled = false;
+    data_enabled = false;
 
     esp_codec_dev_cfg_t config = {
         .dev_type = ESP_CODEC_DEV_TYPE_OUT,
@@ -146,6 +168,10 @@ static void verify_failed_open_can_retry(failure_point_t point)
     assert(esp_codec_dev_write(device, &sample, 1) == ESP_CODEC_DEV_WRONG_STATE);
 
     failure_point = FAIL_NONE;
+    codec_disable_count = 0;
+    data_disable_count = 0;
+    codec_enabled = false;
+    data_enabled = false;
     assert(esp_codec_dev_open(device, &format) == ESP_CODEC_DEV_OK);
     assert(esp_codec_dev_write(device, &sample, 1) == 1);
     assert(esp_codec_dev_close(device) == ESP_CODEC_DEV_OK);
@@ -185,6 +211,45 @@ static void verify_custom_volume_curve(void)
     esp_codec_dev_delete(device);
 }
 
+static void verify_failed_close_can_retry(failure_point_t point)
+{
+    failure_point = FAIL_NONE;
+    codec_disable_count = 0;
+    data_disable_count = 0;
+    codec_enabled = false;
+    data_enabled = false;
+    esp_codec_dev_cfg_t config = {
+        .dev_type = ESP_CODEC_DEV_TYPE_OUT,
+        .codec_if = &codec_if,
+        .data_if = &data_if,
+    };
+    esp_codec_dev_sample_info_t format = {
+        .bits_per_sample = 16,
+        .channel = 1,
+        .sample_rate = 16000,
+    };
+    esp_codec_dev_handle_t device = esp_codec_dev_new(&config);
+    assert(device != NULL);
+    assert(esp_codec_dev_open(device, &format) == ESP_CODEC_DEV_OK);
+
+    failure_point = point;
+    assert(esp_codec_dev_close(device) != ESP_CODEC_DEV_OK);
+    uint8_t sample = 0;
+    assert(esp_codec_dev_write(device, &sample, 1) == 1);
+
+    failure_point = FAIL_NONE;
+    assert(esp_codec_dev_close(device) == ESP_CODEC_DEV_OK);
+    if (point == FAIL_CODEC_DISABLE) {
+        assert(codec_disable_count == 2);
+        assert(data_disable_count == 1);
+    } else {
+        assert(codec_disable_count == 1);
+        assert(data_disable_count == 2);
+    }
+    assert(esp_codec_dev_write(device, &sample, 1) == ESP_CODEC_DEV_WRONG_STATE);
+    esp_codec_dev_delete(device);
+}
+
 static void verify_high_gain_limiter(void)
 {
     speaker_limiter_t limiter = {0};
@@ -217,6 +282,8 @@ int main(void)
     for (size_t i = 0; i < sizeof(points) / sizeof(points[0]); i++) {
         verify_failed_open_can_retry(points[i]);
     }
+    verify_failed_close_can_retry(FAIL_CODEC_DISABLE);
+    verify_failed_close_can_retry(FAIL_DATA_DISABLE);
     verify_custom_volume_curve();
     verify_high_gain_limiter();
     return 0;

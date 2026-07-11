@@ -696,7 +696,8 @@ static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
                 (unsigned)response.size());
 }
 
-static void notifyDeviceCapabilities(NimBLECharacteristic *pChar) {
+static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
+                                     bool includePowerButtonConfig) {
   if (pChar == nullptr) {
     pChar = mapTransferStatusCharacteristic;
   }
@@ -704,16 +705,31 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar) {
     return;
   }
 
-  uint8_t response[] = {
+  const bool speakerAvailable = waveshare_board::speaker::isAvailable();
+  const bool powerButtonHonkAvailable =
+      waveshare_board::speaker::isPowerButtonHonkAvailable();
+  uint8_t response[8] = {
       'C', 'A', 'P', 'S',
       waveshare_board::speaker::capabilityFlags(
-          waveshare_board::speaker::isAvailable(),
-          waveshare_board::speaker::isPowerButtonHonkAvailable(),
-          waveshare_board::speaker::isPowerButtonHonkAvailable()),
+          speakerAvailable, powerButtonHonkAvailable,
+          powerButtonHonkAvailable),
   };
-  pChar->setValue(response, sizeof(response));
+  size_t responseSize = 5;
+  waveshare_board::speaker::PowerButtonHonkConfig config{};
+  if (includePowerButtonConfig && powerButtonHonkAvailable) {
+    if (!waveshare_board::speaker::getPowerButtonHonkConfig(config) ||
+        !waveshare_board::speaker::encodePowerButtonHonkPayload(
+            config, response + responseSize,
+            waveshare_board::speaker::POWER_BUTTON_HONK_PAYLOAD_SIZE)) {
+      Serial.println("BLE Capabilities: PWR config unavailable; retry required");
+      return;
+    }
+    responseSize += waveshare_board::speaker::POWER_BUTTON_HONK_PAYLOAD_SIZE;
+  }
+  pChar->setValue(response, responseSize);
   pChar->notify();
-  Serial.printf("BLE Capabilities: notified flags=0x%02X\n", response[4]);
+  Serial.printf("BLE Capabilities: notified flags=0x%02X config=%d\n",
+                response[4], responseSize > 5 ? 1 : 0);
 }
 
 static void notifyPowerButtonHonkStatus(
@@ -747,7 +763,9 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
     return false;
   }
   if (requireAuthenticated(authLabel)) {
-    notifyDeviceCapabilities(pChar);
+    const bool includePowerButtonConfig =
+        value.length() == 5 && static_cast<uint8_t>(value[4]) >= 1;
+    notifyDeviceCapabilities(pChar, includePowerButtonConfig);
   }
   return true;
 }

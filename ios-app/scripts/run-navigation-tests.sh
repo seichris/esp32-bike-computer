@@ -9,6 +9,7 @@ OUT="${TMPDIR:-/tmp}/open-bike-navigation-tests"
 cd "${REPO_DIR}"
 
 xcrun swiftc \
+  -D HOST_TESTING \
   -o "${OUT}" \
   ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \

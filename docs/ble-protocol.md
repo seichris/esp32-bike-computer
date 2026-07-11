@@ -175,17 +175,31 @@ Capability discovery uses a bounded authenticated frame on either command
 route so it fits every supported BLE MTU:
 
 ```text
-iOS -> ESP32: "CAPS"
+iOS -> ESP32: "CAPS" | Version: UInt8
 ESP32 -> iOS: "CAPS" | Flags: UInt8
 ```
+
+Version `1` asks ACK-capable firmware to append its persisted PWR-button
+configuration:
+
+```text
+"CAPS" | Flags: UInt8 | Enabled: UInt8 | SoundID: UInt8 | VolumePercent: UInt8
+```
+
+Legacy four-byte requests and five-byte responses remain supported. This lets
+new apps treat the device as the source of truth after reconnecting, while new
+apps still interoperate with older firmware and older apps still receive the
+original response. When the device reports PWR honk disabled, the app restores
+the toggle without replacing its app-local map-button sound and volume.
 
 Flag bit `0` reports runtime device-sound availability after the speaker queue
 and task start successfully. Flag bit `1` reports PWR-button honk support. Flag
 bit `2` reports `SNHA` acknowledgement support; iOS only retries PWR
 configuration when this bit is set, preserving one-shot writes for older
 firmware. The app retries discovery after each connection, enables controls
-only when their bits are set, and synchronizes the persisted PWR configuration
-after discovery.
+only when their bits are set, and restores the device-persisted PWR
+configuration from versioned responses. With legacy responses, it synchronizes
+the app-persisted configuration after discovery.
 
 ## OSM Map Blocks
 

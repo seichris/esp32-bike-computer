@@ -28,6 +28,9 @@ typedef struct {
     bool                         muted;
     bool                         mic_muted;
     bool                         sw_vol_alloced;
+    bool                         codec_disabled;
+    bool                         data_disabled;
+    bool                         sw_vol_closed;
     esp_codec_dev_vol_curve_t    vol_curve;
     bool                         disable_when_closed;
 } codec_dev_t;
@@ -170,6 +173,9 @@ int esp_codec_dev_open(esp_codec_dev_handle_t handle, esp_codec_dev_sample_info_
         ESP_LOGI(TAG, "Input already open");
         return ESP_CODEC_DEV_OK;
     }
+    dev->codec_disabled = false;
+    dev->data_disabled = false;
+    dev->sw_vol_closed = false;
     bool input_opened = false;
     bool output_opened = false;
     if ((dev->dev_caps & ESP_CODEC_DEV_TYPE_IN)) {
@@ -536,18 +542,45 @@ int esp_codec_dev_close(esp_codec_dev_handle_t handle)
     if (dev->output_opened == false && dev->input_opened == false) {
         return ESP_CODEC_DEV_OK;
     }
+    int ret = ESP_CODEC_DEV_OK;
     const audio_codec_if_t *codec = dev->codec_if;
-    if (dev->disable_when_closed && codec) {
-        if (codec->enable) {
-            codec->enable(codec, false);
+    if (!dev->codec_disabled) {
+        if (dev->disable_when_closed && codec && codec->enable) {
+            int codec_ret = codec->enable(codec, false);
+            if (codec_ret != ESP_CODEC_DEV_OK) {
+                ret = codec_ret;
+            } else {
+                dev->codec_disabled = true;
+            }
+        } else {
+            dev->codec_disabled = true;
         }
     }
     const audio_codec_data_if_t *data_if = dev->data_if;
-    if (data_if->enable) {
-        data_if->enable(data_if, dev->dev_caps, false);
+    if (!dev->data_disabled && data_if->enable) {
+        int data_ret = data_if->enable(data_if, dev->dev_caps, false);
+        if (ret == ESP_CODEC_DEV_OK && data_ret != ESP_CODEC_DEV_OK) {
+            ret = data_ret;
+        }
+        if (data_ret == ESP_CODEC_DEV_OK) {
+            dev->data_disabled = true;
+        }
+    } else if (!data_if->enable) {
+        dev->data_disabled = true;
     }
-    if (dev->sw_vol) {
-        dev->sw_vol->close(dev->sw_vol);
+    if (!dev->sw_vol_closed && dev->sw_vol) {
+        int volume_ret = dev->sw_vol->close(dev->sw_vol);
+        if (ret == ESP_CODEC_DEV_OK && volume_ret != ESP_CODEC_DEV_OK) {
+            ret = volume_ret;
+        }
+        if (volume_ret == ESP_CODEC_DEV_OK) {
+            dev->sw_vol_closed = true;
+        }
+    } else if (!dev->sw_vol) {
+        dev->sw_vol_closed = true;
+    }
+    if (ret != ESP_CODEC_DEV_OK) {
+        return ret;
     }
     dev->output_opened = dev->input_opened = false;
     return ESP_CODEC_DEV_OK;
