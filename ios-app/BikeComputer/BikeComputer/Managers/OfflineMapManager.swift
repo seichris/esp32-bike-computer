@@ -19,6 +19,7 @@ private enum OfflineMapDefaults {
     nonisolated static let lastTransferMapIdKey = "offlineMap.lastTransfer.mapId"
     nonisolated static let lastTransferSessionIdKey = "offlineMap.lastTransfer.sessionId"
     nonisolated static let lastTransferPreviousMapIdKey = "offlineMap.lastTransfer.previousMapId"
+    nonisolated static let lastTransferPreviousSessionIdKey = "offlineMap.lastTransfer.previousSessionId"
     nonisolated static let lastTransferPreviousSequenceKey = "offlineMap.lastTransfer.previousSequence"
     nonisolated static let lastTransferOutcomeKey = "offlineMap.lastTransfer.outcome"
     nonisolated static let mapJobPollAttempts = 1800
@@ -44,7 +45,9 @@ nonisolated enum MapActivationReconciler {
     static func evaluate(expectedMapId: String,
                          sessionId: String,
                          previousMapId: String?,
+                         previousSessionId: String?,
                          previousSequence: UInt32?,
+                         acceptedSequence: UInt32?,
                          observedCurrentAttempt: Bool,
                          activeMapId: String?,
                          activeSessionId: String?,
@@ -54,6 +57,7 @@ nonisolated enum MapActivationReconciler {
                          activationMapId: String?,
                          activationError: String?) -> MapActivationEvaluation {
         let previousMapId = previousMapId?.isEmpty == false ? previousMapId : nil
+        let previousSessionId = previousSessionId?.isEmpty == false ? previousSessionId : nil
         let activeMapId = activeMapId?.isEmpty == false ? activeMapId : nil
         let activeSessionId = activeSessionId?.isEmpty == false ? activeSessionId : nil
         let sessionMatches = activationSessionId == sessionId
@@ -64,7 +68,10 @@ nonisolated enum MapActivationReconciler {
             sequenceAdvanced = false
         }
 
-        var observedCurrentAttempt = observedCurrentAttempt || sequenceAdvanced
+        let acknowledgedSequenceMatches = acceptedSequence != nil &&
+            activationSequence == acceptedSequence
+        var observedCurrentAttempt = observedCurrentAttempt ||
+            sequenceAdvanced || acknowledgedSequenceMatches
         if sessionMatches, activationStatus == "activating" {
             observedCurrentAttempt = true
         }
@@ -96,7 +103,8 @@ nonisolated enum MapActivationReconciler {
 
         if activeMapId == expectedMapId,
            activeSessionId == sessionId,
-           !sessionMatches {
+           (!sessionMatches ||
+            (previousSessionId != nil && previousSessionId != sessionId)) {
             return MapActivationEvaluation(
                 decision: .installed,
                 observedCurrentAttempt: observedCurrentAttempt
@@ -410,6 +418,9 @@ final class OfflineMapManager: ObservableObject {
         let previousMapId = defaults.string(
             forKey: OfflineMapDefaults.lastTransferPreviousMapIdKey
         )
+        let previousSessionId = defaults.string(
+            forKey: OfflineMapDefaults.lastTransferPreviousSessionIdKey
+        )
         let previousSequence = (
             defaults.object(forKey: OfflineMapDefaults.lastTransferPreviousSequenceKey)
                 as? NSNumber
@@ -418,7 +429,9 @@ final class OfflineMapManager: ObservableObject {
             expectedMapId: lastTransferMapId,
             sessionId: sessionId,
             previousMapId: previousMapId,
+            previousSessionId: previousSessionId,
             previousSequence: previousSequence,
+            acceptedSequence: nil,
             observedCurrentAttempt: false,
             activeMapId: bleManager.mapTransferActiveMapId,
             activeSessionId: bleManager.mapTransferActiveSessionId,
@@ -591,6 +604,7 @@ final class OfflineMapManager: ObservableObject {
             mapId: expectedMapId,
             sessionId: sessionId,
             previousMapId: bleManager.mapTransferActiveMapId,
+            previousSessionId: bleManager.mapTransferActiveSessionId,
             previousSequence: bleManager.mapTransferActivationSequence,
             outcome: "preparing"
         )
@@ -617,19 +631,23 @@ final class OfflineMapManager: ObservableObject {
 
             let statusBeforeActivation = try? await client.status()
             let previousMapId = statusBeforeActivation?.activeMapId ?? bleManager.mapTransferActiveMapId
+            let previousSessionId = statusBeforeActivation?.activeSessionId ??
+                bleManager.mapTransferActiveSessionId
             let previousSequence = statusBeforeActivation?.activation?.sequence ??
                 bleManager.mapTransferActivationSequence
             recordTransfer(
                 mapId: expectedMapId,
                 sessionId: sessionId,
                 previousMapId: previousMapId,
+                previousSessionId: previousSessionId,
                 previousSequence: previousSequence,
                 outcome: "activating"
             )
             statusMessage = "activating \(displayName(forMapId: expectedMapId))"
             bleManager.resetMapTransferActivationObservation()
+            var acceptedSequence: UInt32? = nil
             do {
-                try await client.activate(sessionId: sessionId)
+                acceptedSequence = try await client.activate(sessionId: sessionId)
             } catch {
                 guard MapActivationTransport.isAmbiguousResponseError(error) else {
                     throw error
@@ -640,7 +658,9 @@ final class OfflineMapManager: ObservableObject {
                 expectedMapId: expectedMapId,
                 sessionId: sessionId,
                 previousMapId: previousMapId,
+                previousSessionId: previousSessionId,
                 previousSequence: previousSequence,
+                acceptedSequence: acceptedSequence,
                 client: client,
                 bleManager: bleManager
             )
@@ -666,7 +686,9 @@ final class OfflineMapManager: ObservableObject {
     func confirmActivatedMap(expectedMapId: String,
                              sessionId: String,
                              previousMapId: String?,
+                             previousSessionId: String?,
                              previousSequence: UInt32?,
+                             acceptedSequence: UInt32?,
                              client: MapTransferDeviceClient,
                              bleManager: BLEManager,
                              timeout: TimeInterval = OfflineMapDefaults.activationConfirmationTimeout,
@@ -686,7 +708,9 @@ final class OfflineMapManager: ObservableObject {
                     expectedMapId: expectedMapId,
                     sessionId: sessionId,
                     previousMapId: previousMapId,
+                    previousSessionId: previousSessionId,
                     previousSequence: previousSequence,
+                    acceptedSequence: acceptedSequence,
                     observedCurrentAttempt: observedCurrentAttempt,
                     activeMapId: status.activeMapId,
                     activeSessionId: status.activeSessionId,
@@ -722,7 +746,9 @@ final class OfflineMapManager: ObservableObject {
                     expectedMapId: expectedMapId,
                     sessionId: sessionId,
                     previousMapId: previousMapId,
+                    previousSessionId: previousSessionId,
                     previousSequence: previousSequence,
+                    acceptedSequence: acceptedSequence,
                     observedCurrentAttempt: observedCurrentAttempt,
                     activeMapId: bleManager.mapTransferActiveMapId,
                     activeSessionId: bleManager.mapTransferActiveSessionId,
@@ -759,12 +785,14 @@ final class OfflineMapManager: ObservableObject {
     private func recordTransfer(mapId: String,
                                 sessionId: String,
                                 previousMapId: String?,
+                                previousSessionId: String?,
                                 previousSequence: UInt32?,
                                 outcome: String) {
         lastTransferMapId = mapId
         defaults.set(mapId, forKey: OfflineMapDefaults.lastTransferMapIdKey)
         defaults.set(sessionId, forKey: OfflineMapDefaults.lastTransferSessionIdKey)
         defaults.set(previousMapId ?? "", forKey: OfflineMapDefaults.lastTransferPreviousMapIdKey)
+        defaults.set(previousSessionId ?? "", forKey: OfflineMapDefaults.lastTransferPreviousSessionIdKey)
         if let previousSequence {
             defaults.set(Int(previousSequence), forKey: OfflineMapDefaults.lastTransferPreviousSequenceKey)
         } else {

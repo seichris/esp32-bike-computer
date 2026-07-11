@@ -535,7 +535,10 @@ InstallStatus MapTransferInstaller::activateStagedMap(
   if (!previousStatus.ok && previousStatus.code != "active_missing")
     return previousStatus;
   if (previousStatus.ok && previous.sessionId == sessionId) {
-    if (installedMapReceiptMatches(previous.root, manifest)) {
+    const bool stagedReplacement =
+        fileExists(joinPath(stagingRoot(sessionId), "manifest.json"));
+    if (!stagedReplacement &&
+        installedMapReceiptMatches(previous.root, manifest)) {
       removeTree(stagingRoot(sessionId));
       return {true, "ok", ""};
     }
@@ -658,7 +661,13 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
         return {true, "recovered_rollback",
                 "restored previous map selection"};
       }
-      return fail("active_root_missing", "selected map directory is missing");
+      if (!removeTree(activePath) || !removeTree(activePath + ".bak") ||
+          !removeTree(activePath + ".tmp")) {
+        return fail("active_recovery",
+                    "could not clear missing active map selection");
+      }
+      return {true, "recovered_rollback",
+              "cleared missing active map selection"};
     }
     if (::rename(backupPath.c_str(), transactionPath.c_str()) != 0 ||
         !readTextFile(transactionPath, transaction, 1024)) {
@@ -682,7 +691,62 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
        (!safeActiveRoot(previousRoot) || !safeId(previousMapId) ||
         (!previousSessionId.empty() && !safeId(previousSessionId)))) ||
       (phase != "publishing" && phase != "ready" && phase != "committed")) {
-    return fail("transaction_invalid", "map activation transaction is invalid");
+    const auto clearInvalidTransaction = [&]() {
+      return removeTree(transactionPath) &&
+             removeTree(transactionPath + ".bak") &&
+             removeTree(transactionPath + ".tmp");
+    };
+    ActiveMapSelection selected;
+    InstallStatus active = readActiveMap(selected);
+    if (active.ok && selected.root != "/VECTMAP") {
+      MapManifest installed;
+      if (readInstalledManifest(selected.root, installed).ok &&
+          installed.mapId == selected.mapId &&
+          installedMapContentsMatch(selected.root, installed)) {
+        if (!clearInvalidTransaction())
+          return fail("transaction_invalid",
+                      "could not clear invalid map activation transaction");
+        return {true, "recovered_commit",
+                "verified selected map after clearing invalid transaction"};
+      }
+      if (!selected.previousRoot.empty() &&
+          activeRootExists(selected.previousRoot)) {
+        ActiveMapSelection rollback;
+        rollback.mapId = selected.previousMapId;
+        rollback.sessionId = selected.previousSessionId;
+        rollback.root = selected.previousRoot;
+        if (!writeActiveMap(rollback))
+          return fail("transaction_recovery",
+                      "could not restore previous map after invalid transaction");
+        if (!clearInvalidTransaction())
+          return fail("transaction_invalid",
+                      "could not clear invalid map activation transaction");
+        if (!removeTree(joinPath(storageRoot_, selected.root)))
+          return fail("transaction_cleanup",
+                      "restored previous map but could not remove invalid version");
+        return {true, "recovered_rollback",
+                "restored previous map after invalid transaction"};
+      }
+      if (!removeTree(activePath)) {
+        return fail("transaction_recovery",
+                    "could not clear invalid selected map metadata");
+      }
+      if (!clearInvalidTransaction() ||
+          !removeTree(joinPath(storageRoot_, selected.root))) {
+        return fail("transaction_recovery",
+                    "could not clear unverifiable map transaction");
+      }
+      return {true, "recovered_rollback",
+              "discarded unverifiable map after invalid transaction"};
+    }
+    if (!clearInvalidTransaction())
+      return fail("transaction_invalid",
+                  "could not clear invalid map activation transaction");
+    InstallStatus recovered = recoverInterruptedActivation();
+    if (!recovered.ok)
+      return recovered;
+    return {true, "recovered_rollback",
+            "cleared invalid map activation transaction"};
   }
 
   ActiveMapSelection active;

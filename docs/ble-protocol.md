@@ -306,5 +306,9 @@ bulk upload:
 | `PUT` | `/map-transfer/sessions/{sessionId}/VECTMAP/{mapId}/{folder}/{file}` | Upload one `.fmb` or `.fmp` file. |
 | `POST` | `/map-transfer/sessions/{sessionId}/activate` | Validate and atomically activate the staged map. |
 
+An accepted activation returns HTTP 202 with the boot-local activation
+`sequence`. The app matches that acknowledgement to later HTTP/BLE terminal
+status so a cached same-session result cannot be mistaken for the new attempt.
+
 The HTTP service is configured by firmware at boot but remains disabled until
 BLE transfer control enables it for an authenticated app session.

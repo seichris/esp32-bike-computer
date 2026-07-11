@@ -232,6 +232,18 @@ bool MapTransferHttpServer::handleHead(const std::string &path,
     sendHead(client, 400);
     return true;
   }
+  lockState();
+  const bool acceptsUploads = activationState_.acceptsUploads();
+  unlockState();
+  if (!acceptsUploads) {
+    sendHead(client, 409);
+    return true;
+  }
+  InstallStatus recovery = installer_.recoverInterruptedActivation();
+  if (!recovery.ok) {
+    sendHead(client, 503);
+    return true;
+  }
 
   const std::string stagedPath =
       joinPath(installer_.stagingRoot(sessionId), relativePath);
@@ -407,11 +419,15 @@ bool MapTransferHttpServer::handleActivate(const std::string &path,
 
   lockState();
   ActivationBeginResult beginResult = activationState_.begin(sessionId);
+  const uint32_t activationSequence = activationState_.snapshot().sequence;
   unlockState();
+  const auto activatingResponse = [&]() {
+    return std::string("{\"ok\":true,\"status\":\"activating\",\"sessionId\":\"") +
+           jsonEscape(sessionId) + "\",\"sequence\":" +
+           std::to_string(activationSequence) + "}";
+  };
   if (beginResult == ActivationBeginResult::AlreadyRunning) {
-    sendJson(client, 202,
-             std::string("{\"ok\":true,\"status\":\"activating\",\"sessionId\":\"") +
-                 jsonEscape(sessionId) + "\"}");
+    sendJson(client, 202, activatingResponse());
     return true;
   }
   if (beginResult == ActivationBeginResult::Busy) {
@@ -434,9 +450,7 @@ bool MapTransferHttpServer::handleActivate(const std::string &path,
 
   Serial.printf("MAP_TRANSFER_HTTP: activation queued session=%s\n",
                 sessionId.c_str());
-  sendJson(client, 202,
-           std::string("{\"ok\":true,\"status\":\"activating\",\"sessionId\":\"") +
-               jsonEscape(sessionId) + "\"}");
+  sendJson(client, 202, activatingResponse());
   return true;
 }
 

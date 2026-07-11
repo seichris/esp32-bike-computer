@@ -302,6 +302,7 @@ struct NavigationProtocolTests {
         testOfflineMapManifestDecoding()
         testMapTransferUploadURLEncodesPlusPathComponents()
         testMapTransferUploadResumeContract()
+        testMapTransferActivationAcknowledgementSequence()
         testMapTransferSessionIdentityUsesManifestContent()
         testMapActivationReconciliationMatrix()
         testMapActivationConfirmationOrchestration()
@@ -770,6 +771,37 @@ struct NavigationProtocolTests {
                     "resume PUT sends the exact archive entry bytes")
     }
 
+    @MainActor
+    static func testMapTransferActivationAcknowledgementSequence() {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            FirmwareRequestCaptureProtocol.handler = nil
+        }
+        FirmwareRequestCaptureProtocol.handler = { request, _ in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 202, httpVersion: nil,
+                headerFields: nil
+            )!
+            return (
+                response,
+                Data("{\"ok\":true,\"sessionId\":\"session-1\",\"sequence\":9}".utf8)
+            )
+        }
+        let client = MapTransferDeviceClient(
+            baseURL: URL(string: "http://192.168.4.20:8080")!,
+            session: session
+        )
+        var acceptedSequence: UInt32?
+        runMainActorAsyncTest {
+            acceptedSequence = try await client.activate(sessionId: "session-1")
+        }
+        assertEqual(acceptedSequence, 9,
+                    "activation acknowledgement exposes the queued attempt sequence")
+    }
+
     static func testMapTransferSessionIdentityUsesManifestContent() {
         let first = MapTransferSessionIdentity.make(
             mapId: "custom-map-shanghai",
@@ -791,7 +823,9 @@ struct NavigationProtocolTests {
 
     static func testMapActivationReconciliationMatrix() {
         func evaluate(previousMapId: String? = "map-1",
+                      previousSessionId: String? = "session-1",
                       previousSequence: UInt32? = 7,
+                      acceptedSequence: UInt32? = nil,
                       observedCurrentAttempt: Bool = false,
                       activeMapId: String? = "map-1",
                       activeSessionId: String? = nil,
@@ -804,7 +838,9 @@ struct NavigationProtocolTests {
                 expectedMapId: "map-1",
                 sessionId: "session-1",
                 previousMapId: previousMapId,
+                previousSessionId: previousSessionId,
                 previousSequence: previousSequence,
+                acceptedSequence: acceptedSequence,
                 observedCurrentAttempt: observedCurrentAttempt,
                 activeMapId: activeMapId,
                 activeSessionId: activeSessionId,
@@ -825,6 +861,24 @@ struct NavigationProtocolTests {
             evaluate(activationSequence: 8).decision,
             .installed,
             "a newer activation sequence proves same-ID installation"
+        )
+        assertEqual(
+            evaluate(
+                previousSequence: nil,
+                acceptedSequence: 8,
+                activationSequence: 8
+            ).decision,
+            .installed,
+            "the acknowledged activation sequence proves a fast same-session completion"
+        )
+        assertEqual(
+            evaluate(
+                previousSessionId: "old-session",
+                previousSequence: nil,
+                activeSessionId: "session-1"
+            ).decision,
+            .installed,
+            "an exact active-session transition proves a fast same-ID installation"
         )
         assertEqual(
             evaluate(
@@ -955,7 +1009,9 @@ struct NavigationProtocolTests {
                 expectedMapId: "map-1",
                 sessionId: "session-1",
                 previousMapId: "map-1",
+                previousSessionId: "old-session",
                 previousSequence: 7,
+                acceptedSequence: nil,
                 client: client,
                 bleManager: bleManager,
                 timeout: 0.2,
@@ -982,7 +1038,9 @@ struct NavigationProtocolTests {
                 expectedMapId: "map-1",
                 sessionId: "session-1",
                 previousMapId: "map-1",
+                previousSessionId: "old-session",
                 previousSequence: 7,
+                acceptedSequence: nil,
                 client: client,
                 bleManager: bleManager,
                 timeout: 0.2,
@@ -1010,7 +1068,9 @@ struct NavigationProtocolTests {
                     expectedMapId: "map-1",
                     sessionId: "session-1",
                     previousMapId: "map-1",
+                    previousSessionId: "session-1",
                     previousSequence: 7,
+                    acceptedSequence: nil,
                     client: client,
                     bleManager: bleManager,
                     timeout: 0.02,

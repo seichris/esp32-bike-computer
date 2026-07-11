@@ -244,6 +244,11 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
     let activation: Activation?
 }
 
+nonisolated struct MapTransferActivationAcknowledgement: Decodable, Equatable {
+    let sessionId: String?
+    let sequence: UInt32?
+}
+
 struct OfflineMapPackArchive {
     let url: URL
     let entries: [OfflineMapPackEntry]
@@ -407,7 +412,7 @@ struct MapTransferDeviceClient {
         }
     }
 
-    nonisolated func activate(sessionId: String) async throws {
+    nonisolated func activate(sessionId: String) async throws -> UInt32? {
         var request = URLRequest(url: Self.uploadURL(
             baseURL: baseURL,
             sessionId: sessionId,
@@ -415,7 +420,16 @@ struct MapTransferDeviceClient {
         ))
         request.httpMethod = "POST"
         request.timeoutInterval = 15
-        _ = try await send(request: request, data: nil)
+        let data = try await send(request: request, data: nil)
+        let acknowledgement = try JSONDecoder().decode(
+            MapTransferActivationAcknowledgement.self,
+            from: data
+        )
+        guard acknowledgement.sessionId == nil ||
+                acknowledgement.sessionId == sessionId else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        return acknowledgement.sequence
     }
 
     nonisolated func status() async throws -> MapTransferDeviceStatus {
