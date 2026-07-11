@@ -7,22 +7,31 @@
 
 import SwiftUI
 import UIKit
+import CoreLocation
+import MapKit
 
 struct SettingsView: View {
     @EnvironmentObject var bleManager: BLEManager
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @ObservedObject private var offlineMapManager: OfflineMapManager
     @ObservedObject private var firmwareUpdateManager: FirmwareUpdateManager
     let locationAuthorized: Bool
+    let currentLocation: CLLocation?
+    let onStartTestNavigation: (String) -> Void
 
     init(
         locationAuthorized: Bool = true,
+        currentLocation: CLLocation?,
         offlineMapManager: OfflineMapManager,
-        firmwareUpdateManager: FirmwareUpdateManager
+        firmwareUpdateManager: FirmwareUpdateManager,
+        onStartTestNavigation: @escaping (String) -> Void
     ) {
         self.locationAuthorized = locationAuthorized
+        self.currentLocation = currentLocation
         self.offlineMapManager = offlineMapManager
         self.firmwareUpdateManager = firmwareUpdateManager
+        self.onStartTestNavigation = onStartTestNavigation
     }
     
     var body: some View {
@@ -65,7 +74,12 @@ struct SettingsView: View {
                     NavigationLink {
                         DeveloperSettingsView(
                             offlineMapManager: offlineMapManager,
-                            firmwareUpdateManager: firmwareUpdateManager
+                            firmwareUpdateManager: firmwareUpdateManager,
+                            currentLocation: currentLocation,
+                            onStartTestNavigation: { destination in
+                                onStartTestNavigation(destination)
+                                dismiss()
+                            }
                         )
                     } label: {
                         Label("Developer Settings", systemImage: "wrench.and.screwdriver")
@@ -650,10 +664,109 @@ private struct HardwareCustomizationSettingsView: View {
     }
 }
 
+private struct TestNavigationSettingsSection: View {
+    let currentLocation: CLLocation?
+    let onStartNavigation: (String) -> Void
+
+    @StateObject private var destinationCompleter = AddressSearchCompleter()
+    @State private var destination = ""
+    @State private var isApplyingSuggestion = false
+    @FocusState private var isDestinationFocused: Bool
+
+    var body: some View {
+        Section {
+            TextField("Destination", text: $destination)
+                .textContentType(.fullStreetAddress)
+                .submitLabel(.go)
+                .focused($isDestinationFocused)
+                .onChange(of: destination) { newValue in
+                    if isApplyingSuggestion {
+                        isApplyingSuggestion = false
+                        return
+                    }
+                    destinationCompleter.search(query: newValue)
+                }
+                .onSubmit(startNavigation)
+
+            if isDestinationFocused && !normalizedDestination.isEmpty {
+                ForEach(Array(destinationCompleter.suggestions.prefix(5)), id: \.self) { suggestion in
+                    Button {
+                        isApplyingSuggestion = true
+                        destination = formattedAddress(for: suggestion)
+                        isDestinationFocused = false
+                    } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(suggestion.title)
+                                .foregroundColor(.primary)
+                            if !suggestion.subtitle.isEmpty {
+                                Text(suggestion.subtitle)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Button(action: startNavigation) {
+                Label("Start Test Navigation", systemImage: "testtube.2")
+            }
+            .disabled(!canStartNavigation)
+        } header: {
+            Text("Test Navigation")
+        } footer: {
+            Text(footerText)
+        }
+        .onAppear(perform: updateSearchRegion)
+        .onChange(of: currentLocation) { _ in
+            updateSearchRegion()
+        }
+    }
+
+    private var normalizedDestination: String {
+        destination.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canStartNavigation: Bool {
+        currentLocation != nil && !normalizedDestination.isEmpty
+    }
+
+    private var footerText: String {
+        if currentLocation == nil {
+            return "Waiting for your current location. Test navigation starts from your live position."
+        }
+        return "Starts a simulated Bike route from your current location to this destination."
+    }
+
+    private func startNavigation() {
+        guard canStartNavigation else { return }
+        isDestinationFocused = false
+        onStartNavigation(normalizedDestination)
+    }
+
+    private func formattedAddress(for suggestion: MKLocalSearchCompletion) -> String {
+        suggestion.subtitle.isEmpty ? suggestion.title : "\(suggestion.title), \(suggestion.subtitle)"
+    }
+
+    private func updateSearchRegion() {
+        guard let currentLocation else { return }
+        destinationCompleter.updateRegion(
+            MKCoordinateRegion(
+                center: currentLocation.coordinate,
+                latitudinalMeters: 50000,
+                longitudinalMeters: 50000
+            )
+        )
+    }
+}
+
 private struct DeveloperSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var offlineMapManager: OfflineMapManager
     @ObservedObject var firmwareUpdateManager: FirmwareUpdateManager
+    let currentLocation: CLLocation?
+    let onStartTestNavigation: (String) -> Void
 
     var body: some View {
         Form {
@@ -673,6 +786,10 @@ private struct DeveloperSettingsView: View {
 
             OfflineMapDeviceTransferSettingsSection(manager: offlineMapManager)
             FirmwareUpdateSettingsSection(manager: firmwareUpdateManager)
+            TestNavigationSettingsSection(
+                currentLocation: currentLocation,
+                onStartNavigation: onStartTestNavigation
+            )
 
             Section {
                 HStack {
@@ -700,13 +817,6 @@ private struct DeveloperSettingsView: View {
                 }) {
                     Label("Reconnect", systemImage: "antenna.radiowaves.left.and.right")
                 }
-
-                Button(action: {
-                    bleManager.sendDebugNavigationPacket()
-                }) {
-                    Label("Send Test Navigation", systemImage: "arrow.turn.up.left")
-                }
-                .disabled(!bleManager.isNavigationReady)
 
                 Button(role: .destructive, action: {
                     bleManager.forgetTrustedPeripheral()
@@ -805,8 +915,10 @@ private struct StatusValueRow: View {
 
 #Preview {
     SettingsView(
+        currentLocation: nil,
         offlineMapManager: OfflineMapManager(),
-        firmwareUpdateManager: FirmwareUpdateManager()
+        firmwareUpdateManager: FirmwareUpdateManager(),
+        onStartTestNavigation: { _ in }
     )
         .environmentObject(BLEManager())
 }

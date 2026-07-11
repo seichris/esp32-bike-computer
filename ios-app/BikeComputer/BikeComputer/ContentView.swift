@@ -86,8 +86,17 @@ struct ContentView: View {
             .sheet(isPresented: $showingSettings) {
                 SettingsView(
                     locationAuthorized: coordinator.isLocationAuthorized,
+                    currentLocation: coordinator.currentLocation,
                     offlineMapManager: offlineMapManager,
-                    firmwareUpdateManager: coordinator.firmwareUpdateManager
+                    firmwareUpdateManager: coordinator.firmwareUpdateManager,
+                    onStartTestNavigation: { destination in
+                        coordinator.startNavigation(
+                            from: .currentLocation,
+                            to: .query(destination),
+                            transportType: RouteTransportTypes.cycling,
+                            isTestMode: true
+                        )
+                    }
                 )
                     .environmentObject(coordinator.bleManager)
             }
@@ -165,9 +174,9 @@ struct ContentView: View {
                     currentAddress: coordinator.currentAddress,
                     currentLocation: coordinator.currentLocation,
                     maxExpandedHeight: maxHeight,
-                    onStartNavigation: { source, destination, transport, isTestMode in
+                    onStartNavigation: { source, destination, transport in
                         isSearchPanelExpanded = false
-                        coordinator.startNavigation(from: source, to: destination, transportType: transport, isTestMode: isTestMode)
+                        coordinator.startNavigation(from: source, to: destination, transportType: transport)
                     }
                 )
                 .padding(.horizontal, 12)
