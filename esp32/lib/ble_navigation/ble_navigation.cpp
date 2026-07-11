@@ -677,6 +677,23 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
   constexpr size_t kChunkBytes = 13;
   static uint8_t transferId = 0;
   const std::string body = mapTransferStatusJson();
+  const std::string legacy = "MSTS" + body;
+  uint16_t peerMtu = 23;
+  NimBLEService *service = pChar->getService();
+  NimBLEServer *server = service == nullptr ? nullptr : service->getServer();
+  if (server != nullptr) {
+    const std::vector<uint16_t> peers = server->getPeerDevices();
+    if (!peers.empty())
+      peerMtu = server->getPeerMTU(peers.front());
+  }
+  if (peerMtu >= 3 && legacy.size() <= peerMtu - 3) {
+    pChar->setValue(reinterpret_cast<const uint8_t *>(legacy.data()),
+                    legacy.size());
+    pChar->notify();
+    Serial.printf("BLE Map Transfer: status notified (%u bytes, MTU %u)\n",
+                  (unsigned)legacy.size(), (unsigned)peerMtu);
+    return;
+  }
   const size_t chunkCount = (body.size() + kChunkBytes - 1) / kChunkBytes;
   if (chunkCount == 0 || chunkCount > 255) {
     Serial.printf("BLE Map Transfer: status too large (%u bytes)\n",

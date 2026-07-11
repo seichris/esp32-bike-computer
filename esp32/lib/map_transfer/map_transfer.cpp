@@ -19,6 +19,8 @@ namespace {
 
 constexpr const char *kVectMapPrefix = "VECTMAP/";
 constexpr const char *kActiveMapFile = "/VECTMAP/active-map.json";
+constexpr const char *kActivationTransactionFile =
+    "/VECTMAP/.activation-transaction.json";
 constexpr size_t kMaxManifestBytes = 64 * 1024;
 
 static std::string joinPath(const std::string &a, const std::string &b) {
@@ -480,36 +482,133 @@ InstallStatus MapTransferInstaller::activateStagedMap(
       return fail("copy", "could not stage published map file: " + file.publishPath);
   }
 
+  const std::string transactionPath =
+      joinPath(storageRoot_, kActivationTransactionFile);
+  const std::string activePath = joinPath(storageRoot_, kActiveMapFile);
+  const auto transactionJson = [&](const char *phase) {
+    return std::string("{\"sessionId\":\"") + sessionId +
+           "\",\"mapId\":\"" + manifest.mapId + "\",\"phase\":\"" +
+           phase + "\"}\n";
+  };
+  const auto rollbackPublished = [&]() {
+    const bool cleared = clearPublishedMap();
+    const bool metadataRemoved =
+        ::unlink(activePath.c_str()) == 0 || errno == ENOENT;
+    const bool restored = restorePublishedMap(rollbackRoot);
+    if (cleared && metadataRemoved && restored) {
+      removeTree(activePath + ".bak");
+      removeTree(activePath + ".tmp");
+      removeTree(transactionPath);
+      return true;
+    }
+    return false;
+  };
+
+  if (!writeTextFileAtomic(transactionPath, transactionJson("backing_up"))) {
+    removeTree(activationRoot);
+    return fail("transaction", "could not start map activation transaction");
+  }
   if (!backupPublishedMap(rollbackRoot)) {
-    restorePublishedMap(rollbackRoot);
+    if (restorePublishedMap(rollbackRoot))
+      removeTree(transactionPath);
     removeTree(activationRoot);
     return fail("rollback", "could not backup current map before activation");
   }
+  if (!writeTextFileAtomic(transactionPath, transactionJson("publishing"))) {
+    if (restorePublishedMap(rollbackRoot))
+      removeTree(transactionPath);
+    removeTree(activationRoot);
+    return fail("transaction", "could not advance map activation transaction");
+  }
   if (!clearPublishedMap()) {
-    restorePublishedMap(rollbackRoot);
+    rollbackPublished();
     removeTree(activationRoot);
     return fail("publish_clear", "could not clear current published map");
   }
   if (!publishActivation(activationRoot)) {
-    clearPublishedMap();
-    restorePublishedMap(rollbackRoot);
+    rollbackPublished();
     removeTree(activationRoot);
     return fail("publish_copy", "could not publish activated map");
   }
 
   const std::string activeJson = std::string("{\"mapId\":\"") + manifest.mapId +
                                  "\",\"root\":\"/VECTMAP\"}\n";
-  if (!writeTextFileAtomic(joinPath(storageRoot_, kActiveMapFile), activeJson)) {
-    clearPublishedMap();
-    restorePublishedMap(rollbackRoot);
+  if (!writeTextFileAtomic(activePath, activeJson)) {
+    rollbackPublished();
     removeTree(activationRoot);
     return fail("active_write", "could not write active map metadata");
+  }
+  if (!writeTextFileAtomic(transactionPath, transactionJson("committed"))) {
+    rollbackPublished();
+    removeTree(activationRoot);
+    return fail("transaction", "could not commit map activation transaction");
   }
 
   removeTree(rollbackRoot);
   removeTree(activationRoot);
   removeTree(stagingRoot(sessionId));
+  removeTree(activePath + ".bak");
+  removeTree(activePath + ".tmp");
+  removeTree(transactionPath);
   return {true, "ok", ""};
+}
+
+InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
+  const std::string transactionPath =
+      joinPath(storageRoot_, kActivationTransactionFile);
+  std::string transaction;
+  if (!readTextFile(transactionPath, transaction, 1024)) {
+    const std::string backupPath = transactionPath + ".bak";
+    if (!fileExists(backupPath)) {
+      removeTree(transactionPath + ".tmp");
+      return {true, "ok", ""};
+    }
+    if (::rename(backupPath.c_str(), transactionPath.c_str()) != 0 ||
+        !readTextFile(transactionPath, transaction, 1024)) {
+      return fail("transaction_recovery",
+                  "could not recover map activation journal");
+    }
+  }
+
+  const std::string sessionId = jsonStringValue(transaction, "sessionId");
+  const std::string mapId = jsonStringValue(transaction, "mapId");
+  const std::string phase = jsonStringValue(transaction, "phase");
+  if (!safeId(sessionId) || !safeId(mapId) ||
+      (phase != "backing_up" && phase != "publishing" &&
+       phase != "committed")) {
+    return fail("transaction_invalid", "map activation transaction is invalid");
+  }
+
+  const std::string activationRoot =
+      joinPath(storageRoot_, std::string("VECTMAP/.activation/") + sessionId);
+  const std::string rollbackRoot =
+      joinPath(storageRoot_, std::string("VECTMAP/.rollback/") + sessionId);
+  const std::string activePath = joinPath(storageRoot_, kActiveMapFile);
+
+  if (phase == "committed") {
+    removeTree(rollbackRoot);
+    removeTree(activationRoot);
+    removeTree(stagingRoot(sessionId));
+    removeTree(activePath + ".bak");
+    removeTree(activePath + ".tmp");
+    removeTree(transactionPath);
+    return {true, "recovered_commit", "completed interrupted map commit"};
+  }
+
+  if (phase == "publishing") {
+    if (!clearPublishedMap())
+      return fail("transaction_recovery", "could not clear interrupted map");
+    if (::unlink(activePath.c_str()) != 0 && errno != ENOENT)
+      return fail("transaction_recovery", "could not clear interrupted metadata");
+  }
+  if (!restorePublishedMap(rollbackRoot))
+    return fail("transaction_recovery", "could not restore interrupted map");
+
+  removeTree(activationRoot);
+  removeTree(activePath + ".tmp");
+  removeTree(activePath + ".bak");
+  removeTree(transactionPath);
+  return {true, "recovered_rollback", "rolled back interrupted map activation"};
 }
 
 InstallStatus
@@ -695,8 +794,9 @@ bool MapTransferInstaller::backupPublishedMap(
   struct dirent *entry = nullptr;
   while ((entry = ::readdir(dir)) != nullptr) {
     std::string name = entry->d_name;
-    if (name == "." || name == ".." || name[0] == '.' ||
-        name == "active-map.json")
+    if (name == "." || name == ".." || name[0] == '.')
+      continue;
+    if (startsWith(name, "active-map.json"))
       continue;
     if (!movePath(joinPath(vectmapRoot, name), joinPath(backupRoot, name))) {
       ::closedir(dir);
@@ -704,6 +804,15 @@ bool MapTransferInstaller::backupPublishedMap(
     }
   }
   ::closedir(dir);
+  const std::string activePath = joinPath(vectmapRoot, "active-map.json");
+  if (fileExists(activePath)) {
+    std::string activeText;
+    if (!readTextFile(activePath, activeText, 1024) ||
+        !writeTextFileAtomic(joinPath(backupRoot, "active-map.json"),
+                             activeText)) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -743,7 +852,7 @@ bool MapTransferInstaller::clearPublishedMap() const {
   while ((entry = ::readdir(dir)) != nullptr) {
     std::string name = entry->d_name;
     if (name == "." || name == ".." || name[0] == '.' ||
-        name == "active-map.json")
+        startsWith(name, "active-map.json"))
       continue;
     if (!removeTree(joinPath(vectmapRoot, name))) {
       ::closedir(dir);
@@ -821,7 +930,11 @@ bool MapTransferInstaller::writeTextFile(const std::string &path,
   if (!output)
     return false;
   output << text;
-  return output.good();
+  output.flush();
+  if (!output.good())
+    return false;
+  output.close();
+  return !output.fail();
 }
 
 bool MapTransferInstaller::writeTextFileAtomic(const std::string &path,
@@ -835,8 +948,10 @@ bool MapTransferInstaller::writeTextFileAtomic(const std::string &path,
   // POSIX filesystems replace the destination atomically. Some embedded FAT
   // implementations reject replacement, so retain a recoverable backup while
   // using their two-rename fallback.
-  if (::rename(temporaryPath.c_str(), path.c_str()) == 0)
+  if (::rename(temporaryPath.c_str(), path.c_str()) == 0) {
+    removeTree(backupPath);
     return true;
+  }
 
   removeTree(backupPath);
   const bool hadPrevious = fileExists(path);

@@ -259,6 +259,14 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     sendError(client, 413, "content_length", "upload size is invalid");
     return true;
   }
+  lockState();
+  const bool activationRunning = activationState_.snapshot().running;
+  unlockState();
+  if (activationRunning) {
+    sendError(client, 409, "activation_busy",
+              "map files cannot change while activation is running");
+    return true;
+  }
   if (relativePath == "manifest.json" &&
       !installer_.pruneStagingSessions(sessionId)) {
     sendError(client, 500, "staging_cleanup",

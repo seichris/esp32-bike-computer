@@ -477,6 +477,14 @@ void setup() {
 
   {
     map_transfer::MapTransferInstaller mapInstaller("/sdcard");
+    map_transfer::InstallStatus recoveryStatus =
+        mapInstaller.recoverInterruptedActivation();
+    if (!recoveryStatus.ok) {
+      Serial.printf("MAP_TRANSFER: recovery failed code=%s message=%s\n",
+                    recoveryStatus.code.c_str(), recoveryStatus.message.c_str());
+    } else if (recoveryStatus.code != "ok") {
+      Serial.printf("MAP_TRANSFER: %s\n", recoveryStatus.message.c_str());
+    }
     std::string activeMapId;
     map_transfer::InstallStatus activeStatus =
         mapInstaller.readActiveMapId(activeMapId);

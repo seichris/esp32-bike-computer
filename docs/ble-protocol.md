@@ -235,10 +235,11 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `MSTS` | iOS -> ESP32 | empty | Request current map-transfer status. |
 | `MSTC` | ESP32 -> iOS | Framed UTF-8 JSON chunk | Current map-transfer status notification. |
 
-`MSTC` responses fit the minimum BLE notification payload: ASCII `MSTC`, a
-one-byte transfer id, zero-based chunk index, chunk count, and up to 13 JSON
-bytes (20 bytes total). The app reassembles chunks by transfer id and still
-accepts legacy single-frame `MSTS{...}` responses.
+When the full legacy `MSTS{...}` response fits the negotiated ATT MTU, firmware
+continues to use it. Otherwise `MSTC` responses fit the minimum BLE notification
+payload: ASCII `MSTC`, a one-byte transfer id, zero-based chunk index, chunk
+count, and up to 13 JSON bytes (20 bytes total). The app reassembles chunks by
+transfer id and accepts both forms.
 
 Status responses should include:
 
@@ -269,7 +270,10 @@ The ESP32 map installer validates staged packs before activation:
 
 Active-map metadata is written through a temporary file and atomic rename. A
 backup is retained during the embedded FAT fallback and recovered on the next
-status read if power is lost between renames.
+status read if power is lost between renames. A hidden activation journal tracks
+the map-tree publish phase: boot recovery restores `.rollback/<session>` unless
+the journal reached `committed`, preventing metadata and visible blocks from
+describing different maps after power loss.
 
 When transfer mode is enabled, the ESP32 exposes a short-lived HTTP service for
 bulk upload:
