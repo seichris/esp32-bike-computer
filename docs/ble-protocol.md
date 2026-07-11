@@ -233,7 +233,12 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `MTRN` | iOS -> ESP32 | `enter` | Enable short-lived map-transfer mode. |
 | `MTRN` | iOS -> ESP32 | `exit` | Disable map-transfer mode. |
 | `MSTS` | iOS -> ESP32 | empty | Request current map-transfer status. |
-| `MSTS` | ESP32 -> iOS | UTF-8 JSON | Current map-transfer status notification. |
+| `MSTC` | ESP32 -> iOS | Framed UTF-8 JSON chunk | Current map-transfer status notification. |
+
+`MSTC` responses fit the minimum BLE notification payload: ASCII `MSTC`, a
+one-byte transfer id, zero-based chunk index, chunk count, and up to 13 JSON
+bytes (20 bytes total). The app reassembles chunks by transfer id and still
+accepts legacy single-frame `MSTS{...}` responses.
 
 Status responses should include:
 
@@ -252,6 +257,8 @@ Status responses should include:
 
 The ESP32 map installer validates staged packs before activation:
 
+- uploading a new session manifest removes abandoned staging sessions while
+  preserving the current content-derived session for resume.
 - manifest schema version must be `1`.
 - `mapId` and session ids may contain only letters, numbers, `.`, `_`, and `-`.
 - files must live under `VECTMAP/` and end in `.fmb` or `.fmp`.
@@ -259,6 +266,10 @@ The ESP32 map installer validates staged packs before activation:
 - declared byte size and SHA-256 must match the staged file.
 - activation writes `/sdcard/VECTMAP/active-map.json` only after all map files
   have been published.
+
+Active-map metadata is written through a temporary file and atomic rename. A
+backup is retained during the embedded FAT fallback and recovered on the next
+status read if power is lost between renames.
 
 When transfer mode is enabled, the ESP32 exposes a short-lived HTTP service for
 bulk upload:

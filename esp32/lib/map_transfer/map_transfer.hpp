@@ -58,6 +58,7 @@ private:
 class MapTransferInstaller {
 public:
   explicit MapTransferInstaller(std::string storageRoot = "/sdcard");
+  virtual ~MapTransferInstaller() = default;
 
   InstallStatus validateManifestText(const std::string &manifestText,
                                      MapManifest &manifest) const;
@@ -66,8 +67,13 @@ public:
   InstallStatus activateStagedMap(const std::string &sessionId,
                                   const MapManifest &manifest) const;
   InstallStatus readActiveMapId(std::string &mapId) const;
+  bool pruneStagingSessions(const std::string &keepSessionId) const;
 
   std::string stagingRoot(const std::string &sessionId) const;
+
+protected:
+  virtual bool writeTextFileAtomic(const std::string &path,
+                                   const std::string &text) const;
 
 private:
   std::string storageRoot_;

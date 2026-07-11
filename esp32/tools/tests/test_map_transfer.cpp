@@ -15,6 +15,17 @@ using map_transfer::MapTransferInstaller;
 using map_transfer::ActivationBeginResult;
 using map_transfer::sha256Hex;
 
+class MetadataWriteFailingInstaller : public MapTransferInstaller {
+public:
+  using MapTransferInstaller::MapTransferInstaller;
+
+protected:
+  bool writeTextFileAtomic(const std::string &,
+                           const std::string &) const override {
+    return false;
+  }
+};
+
 static bool exists(const std::string &path) {
   struct stat st;
   return ::stat(path.c_str(), &st) == 0;
@@ -199,7 +210,7 @@ static void testActivationReplacesOldPublishedBlocks() {
 
 static void testActivationRestoresOldMapWhenMetadataWriteFails() {
   std::string root = tempRoot();
-  MapTransferInstaller installer(root);
+  MetadataWriteFailingInstaller installer(root);
   const std::string session = "session-rollback";
   const std::string oldDir = root + "/VECTMAP/+9999+9999";
   const std::string stagedDir =
@@ -209,7 +220,6 @@ static void testActivationRestoresOldMapWhenMetadataWriteFails() {
   writeFile(oldDir + "/old.fmb", "old-map-block");
   const std::string activePath = root + "/VECTMAP/active-map.json";
   writeFile(activePath, "{\"mapId\":\"map-old\",\"root\":\"/VECTMAP\"}\n");
-  assert(::chmod(activePath.c_str(), 0444) == 0);
 
   const std::string blockData = "new-map-block";
   writeFile(stagedDir + "/123_456.fmb", blockData);
@@ -235,6 +245,36 @@ static void testActivationRestoresOldMapWhenMetadataWriteFails() {
   assert(active.ok);
   assert(activeMapId == "map-old");
   assert(exists(root + "/VECTMAP/.staging/" + session));
+}
+
+static void testPrunesAbandonedStagingSessions() {
+  std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string staging = root + "/VECTMAP/.staging";
+  assert(::system((std::string("mkdir -p ") + staging + "/keep").c_str()) == 0);
+  assert(::system((std::string("mkdir -p ") + staging + "/abandoned").c_str()) == 0);
+  writeFile(staging + "/keep/manifest.json", "keep");
+  writeFile(staging + "/abandoned/block.fmb", "old");
+
+  assert(installer.pruneStagingSessions("keep"));
+  assert(exists(staging + "/keep/manifest.json"));
+  assert(!exists(staging + "/abandoned"));
+}
+
+static void testRecoversInterruptedActiveMetadataRename() {
+  std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string vectmap = root + "/VECTMAP";
+  assert(::system((std::string("mkdir -p ") + vectmap).c_str()) == 0);
+  writeFile(vectmap + "/active-map.json.bak",
+            "{\"mapId\":\"map-old\",\"root\":\"/VECTMAP\"}\n");
+
+  std::string activeMapId;
+  auto active = installer.readActiveMapId(activeMapId);
+  assert(active.ok);
+  assert(activeMapId == "map-old");
+  assert(exists(vectmap + "/active-map.json"));
+  assert(!exists(vectmap + "/active-map.json.bak"));
 }
 
 static void testRejectsChecksumMismatch() {
@@ -266,6 +306,8 @@ int main() {
   testValidatesStagedMapAndActivates();
   testActivationReplacesOldPublishedBlocks();
   testActivationRestoresOldMapWhenMetadataWriteFails();
+  testPrunesAbandonedStagingSessions();
+  testRecoversInterruptedActiveMetadataRename();
   testRejectsChecksumMismatch();
   std::cout << "map_transfer tests passed\n";
   return 0;

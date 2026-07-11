@@ -259,6 +259,12 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     sendError(client, 413, "content_length", "upload size is invalid");
     return true;
   }
+  if (relativePath == "manifest.json" &&
+      !installer_.pruneStagingSessions(sessionId)) {
+    sendError(client, 500, "staging_cleanup",
+              "could not remove abandoned map staging sessions");
+    return true;
+  }
 
   const std::string destination =
       joinPath(installer_.stagingRoot(sessionId), relativePath);

@@ -36,6 +36,7 @@ enum DeviceBLEProtocol {
     static let settingsFallbackPrefix = "MSET"
     static let mapTransferControlPrefix = "MTRN"
     static let mapTransferStatusPrefix = "MSTS"
+    static let mapTransferStatusChunkPrefix = "MSTC"
     static let deviceTransferControlPrefix = "DTRN"
     static let deviceTransferStatusPrefix = "DSTS"
     static let deviceCapabilitiesPrefix = "CAPS"
@@ -453,6 +454,9 @@ class BLEManager: NSObject, ObservableObject {
     private var reconnectTimer: Timer?
     private var rssiTimer: Timer?
     private var navigationFlushRetryTimer: Timer?
+    private var mapTransferStatusChunkTransferID: UInt8?
+    private var mapTransferStatusChunkCount: UInt8 = 0
+    private var mapTransferStatusChunks: [UInt8: Data] = [:]
     private var writeWithResponseInFlight = false
     private var connectionTimeoutTimer: Timer?
     private var authRetryTimer: Timer?
@@ -1307,6 +1311,9 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferActivationError = nil
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
+        mapTransferStatusChunkTransferID = nil
+        mapTransferStatusChunkCount = 0
+        mapTransferStatusChunks.removeAll()
         deviceTransferMode = ""
         deviceTransferBaseURL = nil
         deviceTransferAccessPointSSID = nil
@@ -2310,12 +2317,50 @@ extension BLEManager: CBPeripheralDelegate {
     @discardableResult
     func handleMapTransferStatusNotification(_ data: Data) -> Bool {
         guard data.count >= 4,
-              String(data: data.prefix(4), encoding: .utf8) == DeviceBLEProtocol.mapTransferStatusPrefix else {
+              let prefix = String(data: data.prefix(4), encoding: .utf8) else {
             return false
         }
+        if prefix == DeviceBLEProtocol.mapTransferStatusChunkPrefix {
+            return handleMapTransferStatusChunk(data)
+        }
+        guard prefix == DeviceBLEProtocol.mapTransferStatusPrefix else { return false }
+        return applyMapTransferStatusBody(Data(data.dropFirst(4)))
+    }
 
-        let body = data.dropFirst(4)
-        guard let object = try? JSONSerialization.jsonObject(with: Data(body)) as? [String: Any] else {
+    private func handleMapTransferStatusChunk(_ data: Data) -> Bool {
+        guard data.count >= 7 else {
+            mapTransferStatusDescription = "invalid status"
+            return true
+        }
+        let transferID = data[4]
+        let index = data[5]
+        let count = data[6]
+        guard count > 0, index < count else {
+            mapTransferStatusDescription = "invalid status"
+            return true
+        }
+        if mapTransferStatusChunkTransferID != transferID ||
+            mapTransferStatusChunkCount != count {
+            mapTransferStatusChunkTransferID = transferID
+            mapTransferStatusChunkCount = count
+            mapTransferStatusChunks.removeAll(keepingCapacity: true)
+        }
+        mapTransferStatusChunks[index] = Data(data.dropFirst(7))
+        guard mapTransferStatusChunks.count == Int(count) else { return true }
+
+        var body = Data()
+        for chunkIndex in UInt8(0)..<count {
+            guard let chunk = mapTransferStatusChunks[chunkIndex] else { return true }
+            body.append(chunk)
+        }
+        mapTransferStatusChunkTransferID = nil
+        mapTransferStatusChunkCount = 0
+        mapTransferStatusChunks.removeAll(keepingCapacity: true)
+        return applyMapTransferStatusBody(body)
+    }
+
+    private func applyMapTransferStatusBody(_ body: Data) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             mapTransferStatusDescription = "invalid status"
             log("Received invalid map transfer status payload")
             return true

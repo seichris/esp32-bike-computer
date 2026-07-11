@@ -277,6 +277,7 @@ struct NavigationProtocolTests {
         testBLEManagerSendsMapTransferControlFrames()
         testBLEManagerSendsDeviceTransferControlFrames()
         testBLEManagerParsesMapTransferStatus()
+        testBLEManagerReassemblesChunkedMapTransferStatus()
         testBLEManagerParsesDeviceTransferStatus()
         testBLEManagerSendsBrightnessFallbackSetting()
         testBLEManagerSendsDisconnectedSleepTimeoutSetting()
@@ -301,6 +302,7 @@ struct NavigationProtocolTests {
         testMapTransferUploadURLEncodesPlusPathComponents()
         testMapTransferSessionIdentityUsesManifestContent()
         testMapActivationReconciliationMatrix()
+        testMapActivationConfirmationOrchestration()
         testMapTransferDeviceStatusDecodesActivationFailure()
         testFirmwareManifestDecodingAndHash()
         testFirmwareUpdateManagerRestoresPendingStatus()
@@ -733,6 +735,132 @@ struct NavigationProtocolTests {
             .installed,
             "legacy firmware installs after an observed activating transition"
         )
+        assertEqual(
+            evaluate(
+                previousMapId: nil,
+                activeMapId: "map-1",
+                activationStatus: "idle",
+                activationSessionId: nil,
+                activationMapId: nil
+            ).decision,
+            .pending("active map is map-1; waiting for current activation"),
+            "an unknown baseline is not proof that a same-ID activation ran"
+        )
+        assert(
+            MapActivationTransport.isAmbiguousResponseError(URLError(.timedOut)),
+            "activation request timeout enters reconciliation"
+        )
+        assert(
+            MapActivationTransport.isAmbiguousResponseError(URLError(.networkConnectionLost)),
+            "lost activation response enters reconciliation"
+        )
+        assert(
+            !MapActivationTransport.isAmbiguousResponseError(URLError(.cannotConnectToHost)),
+            "a connection failure before delivery remains a hard error"
+        )
+    }
+
+    @MainActor
+    static func testMapActivationConfirmationOrchestration() {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            FirmwareRequestCaptureProtocol.handler = nil
+        }
+        let defaults = UserDefaults(suiteName: "map-confirmation-\(UUID().uuidString)")!
+        let manager = OfflineMapManager(defaults: defaults)
+        let bleManager = BLEManager()
+        let client = MapTransferDeviceClient(
+            baseURL: URL(string: "http://192.168.4.20:8080")!,
+            session: session
+        )
+
+        var statusRequests = 0
+        FirmwareRequestCaptureProtocol.handler = { _, _ in
+            statusRequests += 1
+            throw URLError(.timedOut)
+        }
+        bleManager.mapTransferActiveMapId = "map-1"
+        bleManager.mapTransferActivationStatus = "installed"
+        bleManager.mapTransferActivationSequence = 8
+        bleManager.mapTransferActivationSessionId = "session-1"
+        runMainActorAsyncTest {
+            try await manager.confirmActivatedMap(
+                expectedMapId: "map-1",
+                sessionId: "session-1",
+                previousMapId: "map-1",
+                previousSequence: 7,
+                activationRequestAcknowledged: false,
+                client: client,
+                bleManager: bleManager,
+                timeout: 0.2,
+                pollIntervalNanoseconds: 1_000_000
+            )
+        }
+        assertEqual(statusRequests, 1, "HTTP status failure falls back to BLE")
+
+        statusRequests = 0
+        FirmwareRequestCaptureProtocol.handler = { request, _ in
+            statusRequests += 1
+            let state = statusRequests == 1 ? "activating" : "installed"
+            let body = Data("""
+            {"activeMapId":"map-1","activation":{"status":"\(state)","sequence":8,"sessionId":"session-1","mapId":"map-1"}}
+            """.utf8)
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, body)
+        }
+        runMainActorAsyncTest {
+            try await manager.confirmActivatedMap(
+                expectedMapId: "map-1",
+                sessionId: "session-1",
+                previousMapId: "map-1",
+                previousSequence: 7,
+                activationRequestAcknowledged: false,
+                client: client,
+                bleManager: bleManager,
+                timeout: 0.2,
+                pollIntervalNanoseconds: 1_000_000
+            )
+        }
+        assertEqual(statusRequests, 2,
+                    "confirmation polls from activating through installed")
+
+        statusRequests = 0
+        FirmwareRequestCaptureProtocol.handler = { request, _ in
+            statusRequests += 1
+            let body = Data("""
+            {"activeMapId":"map-1","activation":{"status":"installed","sequence":7,"sessionId":"session-1","mapId":"map-1"}}
+            """.utf8)
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, body)
+        }
+        runMainActorAsyncTest {
+            do {
+                try await manager.confirmActivatedMap(
+                    expectedMapId: "map-1",
+                    sessionId: "session-1",
+                    previousMapId: "map-1",
+                    previousSequence: 7,
+                    activationRequestAcknowledged: false,
+                    client: client,
+                    bleManager: bleManager,
+                    timeout: 0.02,
+                    pollIntervalNanoseconds: 1_000_000
+                )
+                assert(false, "retained activation should time out")
+            } catch OfflineMapPlatformError.mapActivationTimedOut {
+                // Expected.
+            }
+        }
+        assert(statusRequests > 1, "timeout covers repeated pending polls")
     }
 
     static func testMapTransferDeviceStatusDecodesActivationFailure() {
@@ -1012,6 +1140,27 @@ struct NavigationProtocolTests {
         }
     }
 
+    @MainActor
+    static func runMainActorAsyncTest(
+        _ operation: @MainActor @escaping () async throws -> Void
+    ) {
+        var finished = false
+        var failure: Error?
+        Task { @MainActor in
+            do {
+                try await operation()
+            } catch {
+                failure = error
+            }
+            finished = true
+        }
+        assert(waitForMainLoop(timeout: 3) { finished },
+               "main-actor async test should finish")
+        if let failure {
+            assert(false, "main-actor async test failed: \(failure)")
+        }
+    }
+
     static func testNavigationPacketBuilder() {
         let shortPacket = "2|150|Turn left"
         guard let shortData = NavigationPacketBuilder.data(from: shortPacket, maxLength: NavigationPacketBuilder.protocolMaxBytes) else {
@@ -1134,6 +1283,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.settingsFallbackPrefix, "MSET", "settings fallback remains framed over navigation writes")
         assertEqual(DeviceBLEProtocol.mapTransferControlPrefix, "MTRN", "map transfer control remains framed over navigation writes")
         assertEqual(DeviceBLEProtocol.mapTransferStatusPrefix, "MSTS", "map transfer status remains framed over navigation notifications")
+        assertEqual(DeviceBLEProtocol.mapTransferStatusChunkPrefix, "MSTC", "chunked map transfer status remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.deviceTransferControlPrefix, "DTRN", "generic transfer control remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.deviceTransferStatusPrefix, "DSTS", "generic transfer status remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.soundPlayPrefix, "SNDP", "sound playback remains firmware-compatible")
@@ -1741,7 +1891,7 @@ struct NavigationProtocolTests {
                "ACK timeout does not start while the PWR configuration is queued")
 
         transportReady = true
-        assert(waitForMainLoop(timeout: 1) { sentPackets.count == 1 },
+        assert(waitForMainLoop(timeout: 2) { sentPackets.count == 1 },
                "queued PWR configuration is eventually handed to the transport")
         let recoveredAfterBackpressure = powerButtonHonkStatus(
             for: sentPackets[0],
@@ -1863,6 +2013,32 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceMapFoundForCurrentLocation, false, "status parser exposes current map coverage")
         assertEqual(manager.deviceMapBlockCount, 0, "status parser exposes current map block count")
         assertEqual(manager.mapTransferLastError, "previous: previous upload failed", "status parser exposes last transfer error")
+    }
+
+    static func testBLEManagerReassemblesChunkedMapTransferStatus() {
+        let manager = BLEManager()
+        let body = Data("""
+        {"enabled":true,"baseUrl":"http://192.168.4.20:8080","activeMapId":"custom-map","activation":{"status":"installed","sequence":9,"sessionId":"custom-map-session"}}
+        """.utf8)
+        let chunkSize = 13
+        let chunkCount = UInt8((body.count + chunkSize - 1) / chunkSize)
+        for index in UInt8(0)..<chunkCount {
+            let start = Int(index) * chunkSize
+            let end = min(start + chunkSize, body.count)
+            var frame = Data(DeviceBLEProtocol.mapTransferStatusChunkPrefix.utf8)
+            frame.append(contentsOf: [7, index, chunkCount])
+            frame.append(body.subdata(in: start..<end))
+            assert(frame.count <= 20, "chunked map status fits the minimum ATT payload")
+            assert(manager.handleMapTransferStatusNotification(frame),
+                   "MSTC chunk should be consumed")
+        }
+
+        assertEqual(manager.mapTransferActiveMapId, "custom-map",
+                    "chunk reassembly exposes active map")
+        assertEqual(manager.mapTransferActivationStatus, "installed",
+                    "chunk reassembly exposes activation state")
+        assertEqual(manager.mapTransferActivationSequence, 9,
+                    "chunk reassembly exposes activation sequence")
     }
 
     static func testBLEManagerParsesDeviceTransferStatus() {

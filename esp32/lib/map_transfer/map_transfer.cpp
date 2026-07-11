@@ -499,7 +499,7 @@ InstallStatus MapTransferInstaller::activateStagedMap(
 
   const std::string activeJson = std::string("{\"mapId\":\"") + manifest.mapId +
                                  "\",\"root\":\"/VECTMAP\"}\n";
-  if (!writeTextFile(joinPath(storageRoot_, kActiveMapFile), activeJson)) {
+  if (!writeTextFileAtomic(joinPath(storageRoot_, kActiveMapFile), activeJson)) {
     clearPublishedMap();
     restorePublishedMap(rollbackRoot);
     removeTree(activationRoot);
@@ -514,13 +514,40 @@ InstallStatus MapTransferInstaller::activateStagedMap(
 
 InstallStatus
 MapTransferInstaller::readActiveMapId(std::string &mapId) const {
+  const std::string activePath = joinPath(storageRoot_, kActiveMapFile);
+  const std::string backupPath = activePath + ".bak";
   std::string text;
-  if (!readTextFile(joinPath(storageRoot_, kActiveMapFile), text, 1024))
-    return fail("active_missing", "active map metadata is missing");
+  if (!readTextFile(activePath, text, 1024)) {
+    if (!fileExists(backupPath) || ::rename(backupPath.c_str(), activePath.c_str()) != 0 ||
+        !readTextFile(activePath, text, 1024)) {
+      return fail("active_missing", "active map metadata is missing");
+    }
+  }
   mapId = jsonStringValue(text, "mapId");
   if (!safeId(mapId))
     return fail("active_invalid", "active map metadata is invalid");
   return {true, "ok", ""};
+}
+
+bool MapTransferInstaller::pruneStagingSessions(
+    const std::string &keepSessionId) const {
+  if (!safeId(keepSessionId))
+    return false;
+  const std::string root = joinPath(storageRoot_, "VECTMAP/.staging");
+  DIR *dir = ::opendir(root.c_str());
+  if (!dir)
+    return errno == ENOENT;
+  bool ok = true;
+  struct dirent *entry = nullptr;
+  while ((entry = ::readdir(dir)) != nullptr) {
+    const std::string name = entry->d_name;
+    if (name == "." || name == ".." || name == keepSessionId)
+      continue;
+    if (!safeId(name) || !removeTree(joinPath(root, name)))
+      ok = false;
+  }
+  ::closedir(dir);
+  return ok;
 }
 
 std::string MapTransferInstaller::stagingRoot(const std::string &sessionId) const {
@@ -795,6 +822,36 @@ bool MapTransferInstaller::writeTextFile(const std::string &path,
     return false;
   output << text;
   return output.good();
+}
+
+bool MapTransferInstaller::writeTextFileAtomic(const std::string &path,
+                                               const std::string &text) const {
+  const std::string temporaryPath = path + ".tmp";
+  const std::string backupPath = path + ".bak";
+  removeTree(temporaryPath);
+  if (!writeTextFile(temporaryPath, text))
+    return false;
+
+  // POSIX filesystems replace the destination atomically. Some embedded FAT
+  // implementations reject replacement, so retain a recoverable backup while
+  // using their two-rename fallback.
+  if (::rename(temporaryPath.c_str(), path.c_str()) == 0)
+    return true;
+
+  removeTree(backupPath);
+  const bool hadPrevious = fileExists(path);
+  if (hadPrevious && ::rename(path.c_str(), backupPath.c_str()) != 0) {
+    removeTree(temporaryPath);
+    return false;
+  }
+  if (::rename(temporaryPath.c_str(), path.c_str()) != 0) {
+    if (hadPrevious)
+      ::rename(backupPath.c_str(), path.c_str());
+    removeTree(temporaryPath);
+    return false;
+  }
+  removeTree(backupPath);
+  return true;
 }
 
 bool MapTransferInstaller::readTextFile(const std::string &path,

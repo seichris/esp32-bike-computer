@@ -94,7 +94,9 @@ nonisolated enum MapActivationReconciler {
             }
         }
 
-        if activeMapId == expectedMapId, previousMapId != expectedMapId {
+        if let previousMapId,
+           activeMapId == expectedMapId,
+           previousMapId != expectedMapId {
             return MapActivationEvaluation(
                 decision: .installed,
                 observedCurrentAttempt: observedCurrentAttempt
@@ -113,6 +115,15 @@ nonisolated enum MapActivationReconciler {
             decision: .pending(state),
             observedCurrentAttempt: observedCurrentAttempt
         )
+    }
+}
+
+nonisolated enum MapActivationTransport {
+    static func isAmbiguousResponseError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        guard nsError.domain == NSURLErrorDomain else { return false }
+        return nsError.code == NSURLErrorNetworkConnectionLost ||
+            nsError.code == NSURLErrorTimedOut
     }
 }
 
@@ -589,7 +600,9 @@ final class OfflineMapManager: ObservableObject {
                 try await client.activate(sessionId: sessionId)
                 activationRequestAcknowledged = true
             } catch {
-                guard isActivationResponseLoss(error) else { throw error }
+                guard MapActivationTransport.isAmbiguousResponseError(error) else {
+                    throw error
+                }
             }
 
             try await confirmActivatedMap(
@@ -620,23 +633,17 @@ final class OfflineMapManager: ObservableObject {
         }
     }
 
-    private func isActivationResponseLoss(_ error: Error) -> Bool {
-        let nsError = error as NSError
-        return nsError.domain == NSURLErrorDomain &&
-            nsError.code == NSURLErrorNetworkConnectionLost
-    }
-
-    private func confirmActivatedMap(expectedMapId: String,
-                                     sessionId: String,
-                                     previousMapId: String?,
-                                     previousSequence: UInt32?,
-                                     activationRequestAcknowledged: Bool,
-                                     client: MapTransferDeviceClient,
-                                     bleManager: BLEManager) async throws {
+    func confirmActivatedMap(expectedMapId: String,
+                             sessionId: String,
+                             previousMapId: String?,
+                             previousSequence: UInt32?,
+                             activationRequestAcknowledged: Bool,
+                             client: MapTransferDeviceClient,
+                             bleManager: BLEManager,
+                             timeout: TimeInterval = OfflineMapDefaults.activationConfirmationTimeout,
+                             pollIntervalNanoseconds: UInt64 = OfflineMapDefaults.activationPollIntervalNanoseconds) async throws {
         let startedAt = Date()
-        let deadline = startedAt.addingTimeInterval(
-            OfflineMapDefaults.activationConfirmationTimeout
-        )
+        let deadline = startedAt.addingTimeInterval(timeout)
         var lastObservedState = "activation request accepted"
         var observedCurrentAttempt = activationRequestAcknowledged
 
@@ -711,7 +718,7 @@ final class OfflineMapManager: ObservableObject {
             let elapsedSeconds = Int(Date().timeIntervalSince(startedAt))
             statusMessage = "activating \(displayName(forMapId: expectedMapId)) (\(elapsedSeconds)s)"
             try await Task.sleep(
-                nanoseconds: OfflineMapDefaults.activationPollIntervalNanoseconds
+                nanoseconds: pollIntervalNanoseconds
             )
         }
 
