@@ -174,12 +174,18 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   uint32_t w = (area->x2 - area->x1 + 1);
   uint32_t h = (area->y2 - area->y1 + 1);
 
-  // Use low-level Arduino_GFX methods for proper partial update
-  // This avoids potential issues with draw16bitRGBBitmap on partial regions
   gfx->startWrite();
   gfx->writeAddrWindow(area->x1, area->y1, w, h);
   gfx->writePixels((uint16_t *)px_map, w * h);
   gfx->endWrite();
+
+#ifdef WAVESHARE_AMOLED_206
+  // The 2.06-inch CO5300 presents the completed frame after a following window
+  // write. Rewriting the first framebuffer pixel commits it without changing
+  // the rendered image and leaves Arduino_GFX ready to resend the full window.
+  gfx->fillRect(area->x1, area->y1, 1, 1,
+                reinterpret_cast<uint16_t *>(px_map)[0]);
+#endif
 
   // Inform LVGL 9 that flushing is complete
   lv_display_flush_ready(disp);

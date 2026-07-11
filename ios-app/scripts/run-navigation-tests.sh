@@ -9,6 +9,7 @@ OUT="${TMPDIR:-/tmp}/open-bike-navigation-tests"
 cd "${REPO_DIR}"
 
 xcrun swiftc \
+  -D HOST_TESTING \
   -o "${OUT}" \
   ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
@@ -19,6 +20,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift \
   ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
   ios-app/BikeComputerTests/NavigationProtocolTests.swift

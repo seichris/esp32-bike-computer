@@ -1,0 +1,14 @@
+{
+  "name": "esp_codec_dev_local",
+  "version": "1.5.11",
+  "description": "Minimal vendored Espressif codec device support for the ES8311 speaker",
+  "license": "Apache-2.0",
+  "build": {
+    "srcFilter": [
+      "+<*>",
+      "-<platform/audio_codec_ctrl_i2c.c>",
+      "-<platform/audio_codec_ctrl_spi.c>",
+      "-<platform/audio_codec_data_adc.c>"
+    ]
+  }
+}

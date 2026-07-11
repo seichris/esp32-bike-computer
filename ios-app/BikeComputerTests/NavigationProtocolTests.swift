@@ -33,6 +33,23 @@ func readInt32LE(_ data: Data, offset: Int) -> Int32 {
     Int32(bitPattern: readUInt32LE(data, offset: offset))
 }
 
+func powerButtonHonkStatus(for packet: Data, applied: UInt8) -> Data {
+    assert(packet.count == 11, "tracked PWR honk packets include a UInt32 request ID")
+    var status = Data(DeviceBLEProtocol.powerButtonHonkStatusPrefix.utf8)
+    status.append(packet.subdata(in: 4..<8))
+    status.append(applied)
+    status.append(packet.subdata(in: 8..<11))
+    return status
+}
+
+func waitForMainLoop(timeout: TimeInterval, condition: () -> Bool) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() && Date() < deadline {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    }
+    return condition()
+}
+
 func appendUInt16LE(_ value: UInt16, to data: inout Data) {
     data.append(UInt8(value & 0xFF))
     data.append(UInt8((value >> 8) & 0xFF))
@@ -242,11 +259,20 @@ struct NavigationProtocolTests {
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
         testDeviceBLEProtocolConstants()
+        testDevicePacketRouting()
+        testDeviceSoundProtocol()
+        testDeviceCapabilitiesProtocol()
+        testDeviceCapabilitySynchronizesPowerButtonHonkOnce()
+        testDeviceCapabilityRetryPolicy()
         testDeviceScreenValidation()
         testHardwareLabelPreference()
         testBLEPairingAuthenticator()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
+        testBLEManagerSendsDeviceSoundFallback()
+        testBLEManagerSendsPowerButtonHonkFallback()
+        testPowerButtonHonkTimeoutAndTransportFailures()
+        testBLEManagerSendsDeviceCapabilityFallback()
         testBLEManagerSendsMapTransferControlFrames()
         testBLEManagerSendsDeviceTransferControlFrames()
         testBLEManagerParsesMapTransferStatus()
@@ -255,6 +281,7 @@ struct NavigationProtocolTests {
         testBLEManagerSendsDisconnectedSleepTimeoutSetting()
         testBLEManagerSendsDeviceScreenSettings()
         testBLEManagerPersistsNewMapSettings()
+        testBLEManagerPersistsDeviceSoundSettings()
         testNavigationSendTrackerReadinessRetry()
         testNavigationEngineResendsWhenBLEBecomesReady()
         testNavigationEngineResendsRouteGeometryNearLastLocation()
@@ -879,6 +906,58 @@ struct NavigationProtocolTests {
         assertEqual(sent, [Data([2]), Data([3])], "queue flushes remaining packet")
         assertEqual(labels, ["second", "third"], "queue flushes write metadata in order")
         assertEqual(queue.count, 0, "queue is empty after flush")
+
+        var pacedQueue = NavigationWriteQueue(maxCount: 3)
+        pacedQueue.enqueue(NavigationWrite(data: Data([1]), label: "first"))
+        pacedQueue.enqueue(NavigationWrite(data: Data([2]), label: "second"))
+        var pacedWrites: [Data] = []
+        pacedQueue.flush(canSend: { true }, maxWrites: 1) {
+            pacedWrites.append($0.data)
+        }
+        assertEqual(pacedWrites, [Data([1])],
+                    "paced flush sends only the configured batch size")
+        assertEqual(pacedQueue.count, 1,
+                    "paced flush retains later writes for the next transport tick")
+
+        var reconnectQueue = NavigationWriteQueue(
+            maxCount: DeviceBLEProtocol.fallbackWriteQueueCapacity
+        )
+        for index in 0..<30 {
+            assert(!reconnectQueue.enqueue(NavigationWrite(
+                data: Data([UInt8(index)]),
+                label: "reconnect-\(index)"
+            )), "bounded automatic reconnect traffic must not evict persisted settings")
+        }
+        var reconnectWrites: [NavigationWrite] = []
+        reconnectQueue.flush(canSend: { true }) { reconnectWrites.append($0) }
+        assertEqual(reconnectWrites.count, 30,
+                    "fallback queue retains the complete automatic reconnect burst")
+        assertEqual(reconnectWrites.first?.label, "reconnect-0",
+                    "fallback queue preserves the oldest reconnect setting")
+
+        var didNotifyDrop = false
+        var trackedQueue = NavigationWriteQueue(maxCount: 1)
+        trackedQueue.enqueue(NavigationWrite(
+            data: Data([1]),
+            label: "tracked",
+            onDrop: { didNotifyDrop = true }
+        ))
+        assert(trackedQueue.enqueue(NavigationWrite(data: Data([2]), label: "replacement")),
+               "overflow reports that the oldest write was dropped")
+        assert(didNotifyDrop, "tracked writes are notified when queue overflow evicts them")
+
+        var targetedWrites: [Data] = []
+        var fallbackWrites: [Data] = []
+        let targetedWrite = NavigationWrite(
+            data: Data([3]),
+            label: "targeted",
+            transportWrite: { targetedWrites.append($0) }
+        )
+        targetedWrite.perform { fallbackWrites.append($0) }
+        assertEqual(targetedWrites, [Data([3])],
+                    "targeted writes use their native characteristic transport")
+        assertEqual(fallbackWrites.count, 0,
+                    "targeted writes do not leak onto the fallback characteristic")
     }
 
     static func testDeviceBLEProtocolConstants() {
@@ -894,6 +973,10 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.mapTransferStatusPrefix, "MSTS", "map transfer status remains framed over navigation notifications")
         assertEqual(DeviceBLEProtocol.deviceTransferControlPrefix, "DTRN", "generic transfer control remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.deviceTransferStatusPrefix, "DSTS", "generic transfer status remains firmware-compatible")
+        assertEqual(DeviceBLEProtocol.soundPlayPrefix, "SNDP", "sound playback remains firmware-compatible")
+        assertEqual(DeviceBLEProtocol.powerButtonHonkPrefix, "SNDH", "PWR honk configuration remains firmware-compatible")
+        assertEqual(DeviceBLEProtocol.powerButtonHonkStatusPrefix, "SNHA", "PWR honk acknowledgement remains firmware-compatible")
+        assertEqual(DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask, 4, "PWR honk acknowledgement uses capability bit 2")
         assertEqual(DeviceBLEProtocol.brightnessSettingID, 12, "brightness uses firmware setting ID 12")
         assertEqual(DeviceBLEProtocol.enabledScreensSettingID, 13, "enabled screens use firmware setting ID 13")
         assertEqual(DeviceBLEProtocol.defaultScreenSettingID, 14, "default screen uses firmware setting ID 14")
@@ -927,6 +1010,266 @@ struct NavigationProtocolTests {
         assertEqual(DeviceScreen.fallbackDefault(for: DeviceScreen.navigation.rawValue, mask: mapAndStats),
                     .rideStats,
                     "disabled default follows the device screen display order")
+    }
+
+    static func testDeviceSoundProtocol() {
+        assertEqual(DeviceSound.allCases.map(\.rawValue), [1, 2, 3, 5], "sound IDs match firmware assets")
+        assertEqual(DeviceSound.defaultSelection, .plasticBicycleHorn, "bicycle horn is the default sound")
+        assertEqual(DeviceSound.defaultVolumePercent, 70, "device sound volume defaults to 70 percent")
+
+        let defaultPacket = DeviceSound.plasticBicycleHorn.playPacket(volumePercent: .nan)
+        assertEqual(String(data: defaultPacket.prefix(4), encoding: .utf8), "SNDP", "sound packet uses SNDP prefix")
+        assertEqual(defaultPacket[4], DeviceSound.plasticBicycleHorn.rawValue, "sound packet contains sound ID")
+        assertEqual(defaultPacket[5], 70, "non-finite volume falls back to the default")
+        assertEqual(DeviceSound.bellDing.playPacket(volumePercent: -1)[5], 0, "sound volume clamps below zero")
+        assertEqual(DeviceSound.squeezeHorn.playPacket(volumePercent: 101)[5], 100, "sound volume clamps above 100")
+
+        let honkPacket = DeviceSound.rotatingBicycleBell.powerButtonHonkPacket(
+            enabled: true,
+            volumePercent: 45
+        )
+        assertEqual(String(data: honkPacket.prefix(4), encoding: .utf8), "SNDH", "PWR honk packet uses SNDH prefix")
+        assertEqual(honkPacket[4], 1, "PWR honk packet contains enabled state")
+        assertEqual(honkPacket[5], DeviceSound.rotatingBicycleBell.rawValue, "PWR honk packet contains sound ID")
+        assertEqual(honkPacket[6], 45, "PWR honk packet contains volume")
+        assertEqual(DeviceSound.bellDing.powerButtonHonkPacket(enabled: false, volumePercent: 200)[4], 0, "PWR honk packet contains disabled state")
+        assertEqual(DeviceSound.bellDing.powerButtonHonkPacket(enabled: false, volumePercent: 200)[6], 100, "PWR honk volume clamps above 100")
+
+        let trackedHonkPacket = DeviceSound.squeezeHorn.powerButtonHonkPacket(
+            enabled: true,
+            volumePercent: 80,
+            requestID: 0xA1B2C3D4
+        )
+        assertEqual(trackedHonkPacket.count, 11, "tracked PWR honk packet includes the request ID")
+        assertEqual(readUInt32LE(trackedHonkPacket, offset: 4), 0xA1B2C3D4,
+                    "tracked PWR honk packet stores the request ID little-endian")
+        assertEqual(trackedHonkPacket[8], 1, "tracked PWR honk packet contains enabled state")
+        assertEqual(trackedHonkPacket[9], DeviceSound.squeezeHorn.rawValue,
+                    "tracked PWR honk packet contains sound ID")
+        assertEqual(trackedHonkPacket[10], 80, "tracked PWR honk packet contains volume")
+    }
+
+    static func testDevicePacketRouting() {
+        var attempts: [String] = []
+        let preferredSent = DevicePacketRouting.sendPreferredThenFallback(
+            preferred: {
+                attempts.append("preferred")
+                return true
+            },
+            fallback: {
+                attempts.append("fallback")
+                return true
+            }
+        )
+        assert(preferredSent, "successful preferred route reports success")
+        assertEqual(attempts, ["preferred"],
+                    "successful preferred route suppresses the fallback")
+
+        attempts.removeAll()
+        let fallbackSent = DevicePacketRouting.sendPreferredThenFallback(
+            preferred: {
+                attempts.append("preferred")
+                return false
+            },
+            fallback: {
+                attempts.append("fallback")
+                return true
+            }
+        )
+        assert(fallbackSent, "fallback success reports success")
+        assertEqual(attempts, ["preferred", "fallback"],
+                    "failed preferred route attempts the fallback once")
+
+        attempts.removeAll()
+        let failed = DevicePacketRouting.sendPreferredThenFallback(
+            preferred: {
+                attempts.append("preferred")
+                return false
+            },
+            fallback: {
+                attempts.append("fallback")
+                return false
+            }
+        )
+        assert(!failed, "two failed routes report failure")
+        assertEqual(attempts, ["preferred", "fallback"],
+                    "route failure still attempts each route exactly once")
+    }
+
+    static func testDeviceCapabilitiesProtocol() {
+        let manager = BLEManager()
+        let supportedFlags = DeviceBLEProtocol.deviceSoundsCapabilityMask |
+            DeviceBLEProtocol.powerButtonHonkCapabilityMask
+        let supported = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([supportedFlags])
+        assert(manager.handleDeviceCapabilitiesNotification(supported), "CAPS notification should be consumed")
+        assert(manager.supportsDeviceSounds, "CAPS bit enables device sounds")
+        assert(manager.supportsPowerButtonHonk, "CAPS bit enables PWR honk configuration")
+        assert(!manager.supportsPowerButtonHonkAcknowledgement,
+               "older PWR-capable firmware remains a one-shot configuration target")
+        assert(manager.hasReceivedDeviceCapabilities, "valid CAPS completes capability negotiation")
+
+        let acknowledgedFlags = supportedFlags |
+            DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask
+        let acknowledged = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([acknowledgedFlags])
+        assert(manager.handleDeviceCapabilitiesNotification(acknowledged),
+               "ACK-capable CAPS should be consumed")
+        assert(manager.supportsPowerButtonHonkAcknowledgement,
+               "CAPS bit enables PWR honk acknowledgement handling")
+
+        let deviceConfig = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([acknowledgedFlags, 1, DeviceSound.rotatingBicycleBell.rawValue, 65])
+        assert(manager.handleDeviceCapabilitiesNotification(deviceConfig),
+               "versioned CAPS configuration should be consumed")
+        assert(manager.isPowerButtonHonkEnabled,
+               "versioned CAPS restores the device-persisted PWR state")
+        assertEqual(manager.selectedDeviceSound, .rotatingBicycleBell,
+                    "versioned CAPS restores the device-persisted sound")
+        assertEqual(manager.deviceSoundVolumePercent, 65,
+                    "versioned CAPS restores the device-persisted volume")
+
+        let invalidDeviceConfig = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([acknowledgedFlags, 2, DeviceSound.bellDing.rawValue, 70])
+        assert(manager.handleDeviceCapabilitiesNotification(invalidDeviceConfig),
+               "invalid versioned CAPS configuration should be consumed")
+        assert(!manager.hasReceivedDeviceCapabilities,
+               "invalid versioned CAPS configuration remains retryable")
+
+        let soundOnly = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.deviceSoundsCapabilityMask])
+        assert(manager.handleDeviceCapabilitiesNotification(soundOnly), "sound-only CAPS should be consumed")
+        assert(manager.supportsDeviceSounds, "sound-only CAPS keeps device sounds enabled")
+        assert(!manager.supportsPowerButtonHonk, "clear PWR honk bit disables PWR configuration")
+        assert(!manager.supportsPowerButtonHonkAcknowledgement,
+               "PWR acknowledgement cannot be advertised without PWR support")
+        assert(manager.hasReceivedDeviceCapabilities, "sound-only CAPS still completes negotiation")
+
+        let malformed = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8)
+        assert(manager.handleDeviceCapabilitiesNotification(malformed), "malformed CAPS should be consumed")
+        assert(!manager.supportsPowerButtonHonk, "malformed CAPS clears PWR honk support")
+        assert(!manager.supportsPowerButtonHonkAcknowledgement,
+               "malformed CAPS clears PWR honk acknowledgement support")
+        assert(!manager.hasReceivedDeviceCapabilities, "malformed CAPS does not complete negotiation")
+
+        UserDefaults.standard.removeObject(forKey: "deviceSettings.selectedSound")
+        UserDefaults.standard.removeObject(forKey: "deviceSettings.soundVolumePercent")
+        UserDefaults.standard.removeObject(forKey: "deviceSettings.powerButtonHonkEnabled")
+    }
+
+    static func testDeviceCapabilitySynchronizesPowerButtonHonkOnce() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.isPowerButtonHonkEnabled = true
+        manager.selectedDeviceSound = .squeezeHorn
+        manager.deviceSoundVolumePercent = 55
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        let flags = DeviceBLEProtocol.deviceSoundsCapabilityMask |
+            DeviceBLEProtocol.powerButtonHonkCapabilityMask |
+            DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask
+        let capabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([flags])
+
+        assert(manager.handleDeviceCapabilitiesNotification(capabilities),
+               "first CAPS notification should be consumed")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        assertEqual(sentPackets.count, 1,
+                    "first PWR capability notification synchronizes configuration")
+        assertEqual(String(data: sentPackets[0].prefix(4), encoding: .utf8), "SNDH",
+                    "capability synchronization sends a PWR honk frame")
+
+        let staleDeviceConfig = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([flags, 0, DeviceSound.bellDing.rawValue, 20])
+        assert(manager.handleDeviceCapabilitiesNotification(staleDeviceConfig),
+               "versioned capability response should be consumed during an in-flight update")
+        assert(manager.isPowerButtonHonkEnabled,
+               "an in-flight local update wins over an older device snapshot")
+        assertEqual(manager.selectedDeviceSound, .squeezeHorn,
+                    "an older device snapshot does not replace the pending sound")
+        assertEqual(manager.deviceSoundVolumePercent, 55,
+                    "an older device snapshot does not replace the pending volume")
+
+        let successStatus = powerButtonHonkStatus(for: sentPackets[0], applied: 1)
+        assert(manager.handleNavigationCharacteristicNotification(successStatus),
+               "capability synchronization acknowledgement should be consumed")
+
+        assert(manager.handleDeviceCapabilitiesNotification(capabilities),
+               "duplicate CAPS notification should be consumed")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        assertEqual(sentPackets.count, 1,
+                    "duplicate PWR capability notification does not resend configuration")
+
+        let deviceConfig = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([flags, 1, DeviceSound.rotatingBicycleBell.rawValue, 60])
+        assert(manager.handleDeviceCapabilitiesNotification(deviceConfig),
+               "versioned capability response should restore device state")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        assertEqual(sentPackets.count, 1,
+                    "device-authoritative capability state is not written back")
+        assert(manager.isPowerButtonHonkEnabled,
+               "device-authoritative capability state remains enabled")
+        assertEqual(manager.selectedDeviceSound, .rotatingBicycleBell,
+                    "device-authoritative capability state selects the device sound")
+
+        let disabledDeviceConfig = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([flags, 0, DeviceSound.bellDing.rawValue, 20])
+        assert(manager.handleDeviceCapabilitiesNotification(disabledDeviceConfig),
+               "disabled device configuration should still restore the toggle")
+        assert(!manager.isPowerButtonHonkEnabled,
+               "disabled device configuration restores the disabled PWR state")
+        assertEqual(manager.selectedDeviceSound, .rotatingBicycleBell,
+                    "dormant PWR configuration does not replace the map-button sound")
+        assertEqual(manager.deviceSoundVolumePercent, 60,
+                    "dormant PWR configuration does not replace the map-button volume")
+    }
+
+    static func testDeviceCapabilityRetryPolicy() {
+        assert(DeviceCapabilityRetry.shouldRequest(isNavigationReady: true,
+                                                   hasReceivedCapabilities: false,
+                                                   attempt: 0),
+               "ready devices retry missing capabilities")
+        assert(!DeviceCapabilityRetry.shouldRequest(isNavigationReady: false,
+                                                    hasReceivedCapabilities: false,
+                                                    attempt: 0),
+               "disconnected devices do not retry capabilities")
+        assert(!DeviceCapabilityRetry.shouldRequest(isNavigationReady: true,
+                                                    hasReceivedCapabilities: true,
+                                                    attempt: 0),
+               "completed capability negotiation stops retries")
+        assert(!DeviceCapabilityRetry.shouldRequest(isNavigationReady: true,
+                                                    hasReceivedCapabilities: false,
+                                                    attempt: DeviceCapabilityRetry.maxAttempts),
+               "capability retries stop at the attempt limit")
+        assert(PowerButtonHonkRetry.shouldRetry(isNavigationReady: true, attempt: 0),
+               "PWR honk acknowledgement retries after the first attempt")
+        assert(PowerButtonHonkRetry.shouldRetry(isNavigationReady: true, attempt: 1),
+               "PWR honk acknowledgement allows the final attempt")
+        assert(!PowerButtonHonkRetry.shouldRetry(isNavigationReady: true, attempt: 2),
+               "PWR honk acknowledgement stops after three total attempts")
+        assert(!PowerButtonHonkRetry.shouldRetry(isNavigationReady: false, attempt: 0),
+               "PWR honk acknowledgement does not retry after disconnect")
+
+        let queue = DispatchQueue(label: "DeviceCapabilityRetryTests")
+        let scheduled = DispatchSemaphore(value: 0)
+        queue.suspend()
+        var didRun = false
+        DeviceCapabilityRetry.scheduleInitial(on: queue) {
+            didRun = true
+            scheduled.signal()
+        }
+        assert(!didRun, "initial capability retry is deferred past Published willSet")
+        queue.resume()
+        assertEqual(scheduled.wait(timeout: .now() + 1), .success,
+                    "deferred capability retry executes")
+        assert(didRun, "deferred capability retry runs its action")
     }
 
     static func testHardwareLabelPreference() {
@@ -1009,6 +1352,261 @@ struct NavigationProtocolTests {
             | (Int32(valueBytes[2]) << 16)
             | (Int32(valueBytes[3]) << 24)
         assertEqual(value, 7, "fallback settings packet includes little-endian value")
+    }
+
+    static func testBLEManagerSendsDeviceSoundFallback() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        assert(!manager.playDeviceSound(.squeezeHorn, volumePercent: 62),
+               "sound playback rejects devices without the negotiated capability")
+        assertEqual(sentPackets.count, 0, "unsupported devices receive no sound packet")
+
+        manager.supportsDeviceSounds = true
+        assert(manager.playDeviceSound(.squeezeHorn, volumePercent: 62),
+               "sound playback queues when BLE is ready and capability is present")
+        assertEqual(sentPackets.count, 1, "sound playback sends one route-equivalent fallback packet")
+        assertEqual(String(data: sentPackets[0].prefix(4), encoding: .utf8), "SNDP", "fallback packet uses SNDP prefix")
+        assertEqual(sentPackets[0][4], DeviceSound.squeezeHorn.rawValue, "fallback packet includes selected sound")
+        assertEqual(sentPackets[0][5], 62, "fallback packet includes selected volume")
+    }
+
+    static func testBLEManagerSendsPowerButtonHonkFallback() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        assert(!manager.sendPowerButtonHonkConfiguration(),
+               "PWR honk configuration rejects devices without the negotiated capability")
+        assertEqual(sentPackets.count, 0, "unsupported devices receive no PWR honk packet")
+
+        manager.supportsPowerButtonHonk = true
+        manager.isPowerButtonHonkEnabled = true
+        manager.selectedDeviceSound = .plasticBicycleHorn
+        manager.deviceSoundVolumePercent = 75
+        assert(manager.sendPowerButtonHonkConfiguration(),
+               "PWR honk configuration queues when BLE is ready and capability is present")
+        assertEqual(sentPackets.count, 1, "PWR honk configuration sends one fallback packet")
+        assertEqual(String(data: sentPackets[0].prefix(4), encoding: .utf8), "SNDH", "PWR honk fallback uses SNDH prefix")
+        assertEqual(sentPackets[0][4], 1, "PWR honk fallback includes enabled state")
+        assertEqual(sentPackets[0][5], DeviceSound.plasticBicycleHorn.rawValue, "PWR honk fallback includes selected sound")
+        assertEqual(sentPackets[0][6], 75, "PWR honk fallback includes selected volume")
+
+        var legacyFailedStatus = Data(DeviceBLEProtocol.powerButtonHonkStatusPrefix.utf8)
+        legacyFailedStatus.append(contentsOf: [
+            0,
+            1,
+            DeviceSound.plasticBicycleHorn.rawValue,
+            75
+        ])
+        assert(manager.handlePowerButtonHonkStatusNotification(legacyFailedStatus),
+               "an unsolicited PWR honk acknowledgement should be consumed")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        assertEqual(sentPackets.count, 1,
+                    "firmware without ACK capability receives no retry")
+
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.supportsPowerButtonHonk = true
+        manager.supportsPowerButtonHonkAcknowledgement = true
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+        sentPackets.removeAll()
+        assert(manager.sendPowerButtonHonkConfiguration(),
+               "ACK-capable firmware accepts a tracked PWR honk configuration")
+        let failedStatus = powerButtonHonkStatus(for: sentPackets[0], applied: 0)
+        assert(manager.handleNavigationCharacteristicNotification(failedStatus),
+               "failed PWR honk acknowledgement should be consumed")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        assertEqual(sentPackets.count, 2,
+                    "failed PWR honk acknowledgement retries the configuration")
+
+        let successStatus = powerButtonHonkStatus(for: sentPackets[0], applied: 1)
+        assert(manager.handlePowerButtonHonkStatusNotification(successStatus),
+               "successful PWR honk acknowledgement should be consumed")
+        assert(manager.handlePowerButtonHonkStatusNotification(failedStatus),
+               "stale PWR honk acknowledgement should still be consumed")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        assertEqual(sentPackets.count, 2,
+                    "successful acknowledgement cancels further PWR retries")
+        assert(manager.powerButtonHonkConfigurationError == nil,
+               "successful acknowledgement leaves no configuration error")
+
+        sentPackets.removeAll()
+        assert(manager.sendPowerButtonHonkConfiguration(),
+               "a new ACK-capable PWR configuration starts cleanly")
+        let terminalFailedStatus = powerButtonHonkStatus(for: sentPackets[0], applied: 0)
+        for expectedSendCount in 2...3 {
+            assert(manager.handlePowerButtonHonkStatusNotification(terminalFailedStatus),
+                   "failed PWR honk acknowledgement should be consumed")
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            assertEqual(sentPackets.count, expectedSendCount,
+                        "failed acknowledgement advances the bounded retry sequence")
+        }
+        assert(manager.handlePowerButtonHonkStatusNotification(terminalFailedStatus),
+               "terminal failed PWR honk acknowledgement should be consumed")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        assertEqual(sentPackets.count, 3,
+                    "PWR honk acknowledgement retries stop after three total attempts")
+        assert(manager.powerButtonHonkConfigurationError != nil,
+               "terminal PWR honk failure is surfaced to the settings UI")
+
+        sentPackets.removeAll()
+        assert(manager.sendPowerButtonHonkConfiguration(),
+               "a new PWR honk attempt is accepted after a terminal failure")
+        assert(manager.powerButtonHonkConfigurationError == nil,
+               "starting a new PWR honk attempt clears the stale error")
+        let recoveredStatus = powerButtonHonkStatus(for: sentPackets[0], applied: 1)
+        assert(manager.handlePowerButtonHonkStatusNotification(recoveredStatus),
+               "successful PWR honk acknowledgement should be consumed after retry exhaustion")
+
+        sentPackets.removeAll()
+        manager.selectedDeviceSound = .bellDing
+        assert(manager.sendPowerButtonHonkConfiguration(), "first A configuration should send")
+        let firstA = sentPackets.last!
+        manager.selectedDeviceSound = .squeezeHorn
+        assert(manager.sendPowerButtonHonkConfiguration(), "intervening B configuration should send")
+        manager.selectedDeviceSound = .bellDing
+        assert(manager.sendPowerButtonHonkConfiguration(), "second A configuration should send")
+        let secondA = sentPackets.last!
+        assert(readUInt32LE(firstA, offset: 4) != readUInt32LE(secondA, offset: 4),
+               "repeated configurations use distinct request IDs")
+        assert(manager.handlePowerButtonHonkStatusNotification(
+            powerButtonHonkStatus(for: firstA, applied: 1)
+        ), "delayed first-A acknowledgement should be consumed as stale")
+        assert(manager.handlePowerButtonHonkStatusNotification(
+            powerButtonHonkStatus(for: secondA, applied: 0)
+        ), "current second-A failure should still control retry state")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        assertEqual(sentPackets.count, 4,
+                    "delayed first-A acknowledgement cannot suppress second-A retry")
+        assert(manager.handlePowerButtonHonkStatusNotification(
+            powerButtonHonkStatus(for: secondA, applied: 1)
+        ), "second-A acknowledgement should complete the current request")
+
+        sentPackets.removeAll()
+        manager.deviceSoundVolumeEditingChanged(true)
+        assertEqual(sentPackets.count, 0,
+                    "editing the volume does not send intermediate PWR configuration")
+        manager.deviceSoundVolumeEditingChanged(false)
+        assertEqual(sentPackets.count, 1,
+                    "finishing a volume edit sends one PWR configuration")
+        manager.isPowerButtonHonkEnabled = false
+        manager.deviceSoundVolumeEditingChanged(false)
+        assertEqual(sentPackets.count, 1,
+                    "finishing a volume edit while PWR honk is disabled sends nothing")
+    }
+
+    static func testPowerButtonHonkTimeoutAndTransportFailures() {
+        let manager = BLEManager()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.supportsPowerButtonHonk = true
+        manager.supportsPowerButtonHonkAcknowledgement = true
+        manager.isPowerButtonHonkEnabled = true
+        manager.selectedDeviceSound = .squeezeHorn
+        manager.deviceSoundVolumePercent = 65
+        manager.installPowerButtonHonkRetryTiming(
+            ackTimeout: 0.02,
+            failureRetryDelay: 0.01
+        )
+
+        assert(!manager.sendPowerButtonHonkConfiguration(),
+               "initial PWR honk transport failure is reported")
+        assert(manager.powerButtonHonkConfigurationError != nil,
+               "initial PWR honk transport failure is visible")
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+        assert(manager.sendPowerButtonHonkConfiguration(),
+               "missing-ACK timeout test sends the initial configuration")
+        assert(waitForMainLoop(timeout: 1) {
+            manager.powerButtonHonkConfigurationError != nil
+        }, "missing acknowledgement reaches terminal failure")
+        assertEqual(sentPackets.count, 3,
+                    "missing acknowledgement retries three total attempts")
+
+        sentPackets.removeAll()
+        assert(manager.sendPowerButtonHonkConfiguration(),
+               "retry transport failure test sends the initial configuration")
+        let failedStatus = powerButtonHonkStatus(for: sentPackets[0], applied: 0)
+        manager.installNavigationWriteEndpoint(nil)
+        assert(manager.handleNavigationCharacteristicNotification(failedStatus),
+               "navigation notification dispatcher routes PWR failure status")
+        assert(waitForMainLoop(timeout: 1) {
+            manager.powerButtonHonkConfigurationError != nil
+        }, "retry transport failure reaches terminal failure")
+        assertEqual(sentPackets.count, 1,
+                    "failed retry transport does not report an unsent packet")
+
+        var transportReady = false
+        sentPackets.removeAll()
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { transportReady },
+            write: { sentPackets.append($0) }
+        ))
+        assert(manager.sendPowerButtonHonkConfiguration(),
+               "backpressured PWR configuration is accepted into the fallback queue")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.12))
+        assertEqual(sentPackets.count, 0,
+                    "backpressured PWR configuration is not reported as written")
+        assert(manager.powerButtonHonkConfigurationError == nil,
+               "ACK timeout does not start while the PWR configuration is queued")
+
+        transportReady = true
+        assert(waitForMainLoop(timeout: 1) { sentPackets.count == 1 },
+               "queued PWR configuration is eventually handed to the transport")
+        let recoveredAfterBackpressure = powerButtonHonkStatus(
+            for: sentPackets[0],
+            applied: 1
+        )
+        assert(manager.handlePowerButtonHonkStatusNotification(recoveredAfterBackpressure),
+               "queued PWR configuration can be acknowledged after transport recovery")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        assertEqual(sentPackets.count, 1,
+                    "successful ACK cancels retries after transport recovery")
+    }
+
+    static func testBLEManagerSendsDeviceCapabilityFallback() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        assert(manager.requestDeviceCapabilities(), "capability request should queue when BLE is ready")
+        assertEqual(sentPackets,
+                    [Data("CAPS".utf8) + Data([DeviceBLEProtocol.deviceCapabilitiesVersion])],
+                    "capability request negotiates device-persisted configuration")
     }
 
     static func testBLEManagerSendsMapTransferControlFrames() {
@@ -1103,7 +1701,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"firmware","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"abc123","firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_175","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"firmware","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"abc123","firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -1112,13 +1710,16 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceTransferBaseURL?.absoluteString, "http://192.168.4.1:8080", "status parser exposes base URL")
         assertEqual(manager.deviceTransferAccessPointSSID, "BikeComputer-Transfer", "status parser exposes SSID")
         assertEqual(manager.deviceTransferSessionToken, "abc123", "status parser exposes session token")
-        assertEqual(manager.firmwareTarget, "WAVESHARE_AMOLED_175", "status parser exposes firmware target")
+        assertEqual(manager.firmwareTarget, "WAVESHARE_AMOLED_206", "status parser exposes firmware target")
         assertEqual(manager.firmwareVersion, "0.2.2", "status parser exposes firmware version")
         assertEqual(manager.firmwareBuild, 86, "status parser exposes firmware build")
         assertEqual(manager.firmwareUpdateStatus, "receiving", "status parser exposes firmware update status")
         assertEqual(manager.firmwareUpdateReceivedBytes, 1024, "status parser exposes received bytes")
         assertEqual(manager.firmwareUpdateTotalBytes, 2048, "status parser exposes total bytes")
         assertEqual(manager.firmwareUpdateLastError, "previous: previous update failed", "status parser exposes firmware error")
+
+        let invalidPacket = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data("{".utf8)
+        assert(manager.handleDeviceTransferStatusNotification(invalidPacket), "invalid DSTS notification should be consumed")
     }
 
     static func testBLEManagerSendsBrightnessFallbackSetting() {
@@ -1222,6 +1823,41 @@ struct NavigationProtocolTests {
         assertEqual(reloaded.disconnectedSleepTimeout, .tenMinutes, "disconnected sleep timeout should persist across BLEManager reloads")
 
         keys.forEach { defaults.removeObject(forKey: $0) }
+    }
+
+    static func testBLEManagerPersistsDeviceSoundSettings() {
+        let defaults = UserDefaults.standard
+        let soundKey = "deviceSettings.selectedSound"
+        let volumeKey = "deviceSettings.soundVolumePercent"
+        let powerButtonHonkKey = "deviceSettings.powerButtonHonkEnabled"
+        defaults.removeObject(forKey: soundKey)
+        defaults.removeObject(forKey: volumeKey)
+        defaults.removeObject(forKey: powerButtonHonkKey)
+
+        let freshManager = BLEManager()
+        assertEqual(freshManager.selectedDeviceSound, .plasticBicycleHorn, "fresh installs use the bicycle horn")
+        assertEqual(freshManager.deviceSoundVolumePercent, 70, "fresh installs use 70 percent sound volume")
+        assert(!freshManager.isPowerButtonHonkEnabled, "fresh installs leave PWR honk disabled")
+
+        freshManager.selectedDeviceSound = .rotatingBicycleBell
+        freshManager.deviceSoundVolumePercent = 65
+        freshManager.isPowerButtonHonkEnabled = true
+        freshManager.saveSettings()
+
+        let reloaded = BLEManager()
+        assertEqual(reloaded.selectedDeviceSound, .rotatingBicycleBell, "selected sound persists")
+        assertEqual(reloaded.deviceSoundVolumePercent, 65, "sound volume persists")
+        assert(reloaded.isPowerButtonHonkEnabled, "PWR honk enabled state persists")
+
+        defaults.set(4, forKey: soundKey)
+        defaults.set(Double.nan, forKey: volumeKey)
+        let invalidValues = BLEManager()
+        assertEqual(invalidValues.selectedDeviceSound, .plasticBicycleHorn, "unknown sound IDs fall back safely")
+        assertEqual(invalidValues.deviceSoundVolumePercent, 70, "non-finite persisted volume falls back safely")
+
+        defaults.removeObject(forKey: soundKey)
+        defaults.removeObject(forKey: volumeKey)
+        defaults.removeObject(forKey: powerButtonHonkKey)
     }
 
     static func testNavigationSendTrackerReadinessRetry() {

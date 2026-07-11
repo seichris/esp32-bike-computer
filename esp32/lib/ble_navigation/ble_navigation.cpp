@@ -15,6 +15,7 @@
 #include "../firmware_update/firmware_update_http.hpp"
 #include "../map_transfer_http/map_transfer_http.hpp"
 #include "../route_overlay/route_overlay.hpp"
+#include "../speaker/speaker.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "../waveshare_board/display.hpp"
 #include "../waveshare_board/pcf85063.hpp"
@@ -463,6 +464,95 @@ static std::string trimAscii(const std::string &value) {
   return value.substr(begin, end - begin);
 }
 
+static void handleSoundPlaybackRequest(
+    const waveshare_board::speaker::PlaybackRequest &request,
+    const char *source) {
+  if (!waveshare_board::speaker::isSupported(request.sound)) {
+    Serial.printf("BLE Sound: sound ID %u is unavailable on this hardware\n",
+                  static_cast<unsigned>(request.sound));
+    return;
+  }
+
+  if (!waveshare_board::speaker::requestPlay(request.sound,
+                                             request.volumePercent)) {
+    Serial.printf("BLE Sound: failed to queue sound ID %u\n",
+                  static_cast<unsigned>(request.sound));
+    return;
+  }
+
+  Serial.printf("BLE Sound: queued sound ID %u at %u%% from %s\n",
+                static_cast<unsigned>(request.sound), request.volumePercent,
+                source == nullptr ? "unknown" : source);
+}
+
+static bool handleSoundPlayCommand(const std::string &value,
+                                   const char *authLabel,
+                                   const char *source) {
+  waveshare_board::speaker::PlaybackRequest request{};
+  const auto result = waveshare_board::speaker::classifyPlayCommand(
+      reinterpret_cast<const uint8_t *>(value.data()), value.length(),
+      bleSessionAuthenticated, request);
+  if (result == waveshare_board::speaker::PlayCommandResult::NotMatched) {
+    return false;
+  }
+  if (result == waveshare_board::speaker::PlayCommandResult::RejectedUnauthenticated) {
+    requireAuthenticated(authLabel);
+    return true;
+  }
+  if (result == waveshare_board::speaker::PlayCommandResult::RejectedMalformed) {
+    Serial.printf("BLE Sound: rejected %s payload\n",
+                  source == nullptr ? "unknown" : source);
+    return true;
+  }
+  handleSoundPlaybackRequest(request, source);
+  return true;
+}
+
+static void notifyPowerButtonHonkStatus(
+    NimBLECharacteristic *pChar,
+    const waveshare_board::speaker::PowerButtonHonkCommand &command,
+    bool applied);
+
+static bool handlePowerButtonHonkCommand(const std::string &value,
+                                         const char *authLabel,
+                                         const char *source,
+                                         NimBLECharacteristic *statusChar) {
+  waveshare_board::speaker::PowerButtonHonkCommand command{};
+  const auto result =
+      waveshare_board::speaker::classifyPowerButtonHonkCommand(
+          reinterpret_cast<const uint8_t *>(value.data()), value.length(),
+          bleSessionAuthenticated, command);
+  if (result == waveshare_board::speaker::PlayCommandResult::NotMatched) {
+    return false;
+  }
+  if (result ==
+      waveshare_board::speaker::PlayCommandResult::RejectedUnauthenticated) {
+    requireAuthenticated(authLabel);
+    return true;
+  }
+  if (result ==
+      waveshare_board::speaker::PlayCommandResult::RejectedMalformed) {
+    Serial.printf("BLE Sound: rejected PWR honk payload from %s\n",
+                  source == nullptr ? "unknown" : source);
+    return true;
+  }
+  const bool applied =
+      waveshare_board::speaker::configurePowerButtonHonk(command.config);
+  notifyPowerButtonHonkStatus(statusChar, command, applied);
+  if (!applied) {
+    Serial.printf("BLE Sound: failed to configure PWR honk from %s\n",
+                  source == nullptr ? "unknown" : source);
+    return true;
+  }
+  Serial.printf("BLE Sound: configured PWR honk enabled=%d sound=%u volume=%u "
+                "from %s\n",
+                command.config.enabled ? 1 : 0,
+                static_cast<unsigned>(command.config.sound),
+                command.config.volumePercent,
+                source == nullptr ? "unknown" : source);
+  return true;
+}
+
 static std::string jsonEscape(const std::string &value) {
   std::string out;
   out.reserve(value.size() + 8);
@@ -604,6 +694,80 @@ static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
   pChar->notify();
   Serial.printf("BLE Device Transfer: status notified (%u bytes)\n",
                 (unsigned)response.size());
+}
+
+static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
+                                     bool includePowerButtonConfig) {
+  if (pChar == nullptr) {
+    pChar = mapTransferStatusCharacteristic;
+  }
+  if (pChar == nullptr) {
+    return;
+  }
+
+  const bool speakerAvailable = waveshare_board::speaker::isAvailable();
+  const bool powerButtonHonkAvailable =
+      waveshare_board::speaker::isPowerButtonHonkAvailable();
+  uint8_t response[8] = {
+      'C', 'A', 'P', 'S',
+      waveshare_board::speaker::capabilityFlags(
+          speakerAvailable, powerButtonHonkAvailable,
+          powerButtonHonkAvailable),
+  };
+  size_t responseSize = 5;
+  waveshare_board::speaker::PowerButtonHonkConfig config{};
+  if (includePowerButtonConfig && powerButtonHonkAvailable) {
+    if (!waveshare_board::speaker::getPowerButtonHonkConfig(config) ||
+        !waveshare_board::speaker::encodePowerButtonHonkPayload(
+            config, response + responseSize,
+            waveshare_board::speaker::POWER_BUTTON_HONK_PAYLOAD_SIZE)) {
+      Serial.println("BLE Capabilities: PWR config unavailable; retry required");
+      return;
+    }
+    responseSize += waveshare_board::speaker::POWER_BUTTON_HONK_PAYLOAD_SIZE;
+  }
+  pChar->setValue(response, responseSize);
+  pChar->notify();
+  Serial.printf("BLE Capabilities: notified flags=0x%02X config=%d\n",
+                response[4], responseSize > 5 ? 1 : 0);
+}
+
+static void notifyPowerButtonHonkStatus(
+    NimBLECharacteristic *pChar,
+    const waveshare_board::speaker::PowerButtonHonkCommand &command,
+    bool applied) {
+  if (pChar == nullptr) {
+    pChar = mapTransferStatusCharacteristic;
+  }
+  if (pChar == nullptr) {
+    return;
+  }
+
+  uint8_t response[waveshare_board::speaker::POWER_BUTTON_HONK_STATUS_SIZE]{};
+  const size_t responseSize =
+      waveshare_board::speaker::powerButtonHonkStatusSize(command);
+  if (!waveshare_board::speaker::encodePowerButtonHonkStatus(
+          command, applied, response, responseSize)) {
+    return;
+  }
+  pChar->setValue(response, responseSize);
+  pChar->notify();
+  Serial.printf("BLE Sound: PWR honk apply status notified success=%d\n",
+                applied ? 1 : 0);
+}
+
+static bool handleDeviceCapabilitiesCommand(const std::string &value,
+                                            NimBLECharacteristic *pChar,
+                                            const char *authLabel) {
+  if (!hasPrefix(value, "CAPS")) {
+    return false;
+  }
+  if (requireAuthenticated(authLabel)) {
+    const bool includePowerButtonConfig =
+        value.length() == 5 && static_cast<uint8_t>(value[4]) >= 1;
+    notifyDeviceCapabilities(pChar, includePowerButtonConfig);
+  }
+  return true;
 }
 
 static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
@@ -1143,11 +1307,25 @@ public:
       return;
     }
 
+    if (handleDeviceCapabilitiesCommand(value, pChar,
+                                        "device capabilities")) {
+      return;
+    }
+
     if (hasPrefix(value, "DSTS")) {
       if (!requireAuthenticated("device transfer status")) {
         return;
       }
       notifyGenericTransferStatus(pChar);
+      return;
+    }
+
+    if (handleSoundPlayCommand(value, "sound playback", "fallback")) {
+      return;
+    }
+
+    if (handlePowerButtonHonkCommand(value, "PWR honk configuration",
+                                     "fallback", pChar)) {
       return;
     }
 
@@ -1226,11 +1404,27 @@ public:
       return;
     }
 
+    if (handleDeviceCapabilitiesCommand(value,
+                                        mapTransferStatusCharacteristic,
+                                        "native device capabilities")) {
+      return;
+    }
+
     if (hasPrefix(value, "DSTS")) {
       if (!requireAuthenticated("native device transfer status")) {
         return;
       }
       notifyGenericTransferStatus(mapTransferStatusCharacteristic);
+      return;
+    }
+
+    if (handleSoundPlayCommand(value, "native sound playback", "native")) {
+      return;
+    }
+
+    if (handlePowerButtonHonkCommand(value, "native PWR honk configuration",
+                                     "native",
+                                     mapTransferStatusCharacteristic)) {
       return;
     }
 
@@ -1328,7 +1522,7 @@ void BLENavigationServer::init(const char *deviceName) {
   // Create Navigation Instruction Characteristic (UUID 2A6E)
   pNavCharacteristic = pService->createCharacteristic(
       NAV_CHAR_UUID,
-      NIMBLE_PROPERTY::WRITE_NR |
+      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
           NIMBLE_PROPERTY::NOTIFY // Added NOTIFY support just in case
   );
   mapTransferStatusCharacteristic = pNavCharacteristic;
@@ -1338,24 +1532,29 @@ void BLENavigationServer::init(const char *deviceName) {
   // marks the device as navigation-ready.
   pAuthCharacteristic = pService->createCharacteristic(
       AUTH_CHAR_UUID,
-      NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::NOTIFY);
+      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
+          NIMBLE_PROPERTY::NOTIFY);
   pAuthCharacteristic->setCallbacks(new MyAuthCharacteristicCallbacks());
   pAuthCharacteristic->setValue("LOCKED");
   authCharacteristic = pAuthCharacteristic;
 
   pRouteCharacteristic = pService->createCharacteristic(
-      ROUTE_CHAR_UUID, NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::NOTIFY);
+      ROUTE_CHAR_UUID,
+      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
+          NIMBLE_PROPERTY::NOTIFY);
   pRouteCharacteristic->setCallbacks(new MyRouteCharacteristicCallbacks());
 
   // Create GPS Position Characteristic (UUID 2A72)
   NimBLECharacteristic *pGPSCharacteristic =
-      pService->createCharacteristic(GPS_CHAR_UUID, NIMBLE_PROPERTY::WRITE_NR);
+      pService->createCharacteristic(
+          GPS_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   pGPSCharacteristic->setCallbacks(new MyGPSCharacteristicCallbacks());
 
   // Create Settings Characteristic (UUID 2A73) for runtime configuration
   NimBLECharacteristic *pSettingsCharacteristic =
-      pService->createCharacteristic(SETTINGS_CHAR_UUID,
-                                     NIMBLE_PROPERTY::WRITE_NR);
+      pService->createCharacteristic(
+          SETTINGS_CHAR_UUID,
+          NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   pSettingsCharacteristic->setCallbacks(
       new MySettingsCharacteristicCallbacks());
 

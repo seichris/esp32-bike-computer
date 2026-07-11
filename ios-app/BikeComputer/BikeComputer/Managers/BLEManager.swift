@@ -38,6 +38,15 @@ enum DeviceBLEProtocol {
     static let mapTransferStatusPrefix = "MSTS"
     static let deviceTransferControlPrefix = "DTRN"
     static let deviceTransferStatusPrefix = "DSTS"
+    static let deviceCapabilitiesPrefix = "CAPS"
+    static let soundPlayPrefix = "SNDP"
+    static let powerButtonHonkPrefix = "SNDH"
+    static let powerButtonHonkStatusPrefix = "SNHA"
+    static let deviceSoundsCapabilityMask: UInt8 = 1 << 0
+    static let powerButtonHonkCapabilityMask: UInt8 = 1 << 1
+    static let powerButtonHonkAcknowledgementCapabilityMask: UInt8 = 1 << 2
+    static let deviceCapabilitiesVersion: UInt8 = 1
+    static let fallbackWriteQueueCapacity = 32
 
     static let brightnessSettingID: UInt8 = 12
     static let enabledScreensSettingID: UInt8 = 13
@@ -64,6 +73,88 @@ enum DeviceBLEProtocol {
             return hardware
         }
         return ""
+    }
+}
+
+enum DevicePacketRouting {
+    static func sendPreferredThenFallback(
+        preferred: () -> Bool,
+        fallback: () -> Bool
+    ) -> Bool {
+        if preferred() {
+            return true
+        }
+        return fallback()
+    }
+}
+
+enum DeviceSound: UInt8, CaseIterable, Identifiable {
+    case bellDing = 1
+    case plasticBicycleHorn = 2
+    case rotatingBicycleBell = 3
+    case squeezeHorn = 5
+
+    var id: UInt8 { rawValue }
+
+    static let defaultSelection: DeviceSound = .plasticBicycleHorn
+    static let defaultVolumePercent: Double = 70
+
+    static func normalizedVolumePercent(_ volumePercent: Double) -> Double {
+        guard volumePercent.isFinite else { return defaultVolumePercent }
+        return min(max(volumePercent, 0), 100)
+    }
+
+    func playPacket(volumePercent: Double) -> Data {
+        let volume = UInt8(Self.normalizedVolumePercent(volumePercent).rounded())
+        var packet = Data(DeviceBLEProtocol.soundPlayPrefix.utf8)
+        packet.append(rawValue)
+        packet.append(volume)
+        return packet
+    }
+
+    func powerButtonHonkPacket(
+        enabled: Bool,
+        volumePercent: Double,
+        requestID: UInt32? = nil
+    ) -> Data {
+        let volume = UInt8(Self.normalizedVolumePercent(volumePercent).rounded())
+        var packet = Data(DeviceBLEProtocol.powerButtonHonkPrefix.utf8)
+        if let requestID {
+            packet.append(UInt8(truncatingIfNeeded: requestID))
+            packet.append(UInt8(truncatingIfNeeded: requestID >> 8))
+            packet.append(UInt8(truncatingIfNeeded: requestID >> 16))
+            packet.append(UInt8(truncatingIfNeeded: requestID >> 24))
+        }
+        packet.append(enabled ? 1 : 0)
+        packet.append(rawValue)
+        packet.append(volume)
+        return packet
+    }
+
+    var title: String {
+        switch self {
+        case .bellDing:
+            return "Bell Ding"
+        case .plasticBicycleHorn:
+            return "Bicycle Horn"
+        case .rotatingBicycleBell:
+            return "Rotating Bicycle Bell"
+        case .squeezeHorn:
+            return "Squeeze Horn"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .bellDing:
+            return "bell.fill"
+        case .plasticBicycleHorn:
+            return "speaker.wave.2.fill"
+        case .rotatingBicycleBell:
+            return "bell.circle.fill"
+        case .squeezeHorn:
+            return "speaker.wave.3.fill"
+        }
     }
 }
 
@@ -243,6 +334,11 @@ class BLEManager: NSObject, ObservableObject {
     @Published var isConnected: Bool = false
     @Published var isNavigationReady: Bool = false
     @Published var supportsDeviceSettings: Bool = false
+    @Published var supportsDeviceSounds: Bool = false
+    @Published var supportsPowerButtonHonk: Bool = false
+    @Published var supportsPowerButtonHonkAcknowledgement: Bool = false
+    @Published private(set) var powerButtonHonkConfigurationError: String?
+    @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
     @Published var hardwareLabel: String = ""
     @Published var signalStrength: Int = 0
@@ -285,6 +381,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
     @Published var deviceBrightnessPercent: Double = 100
     @Published var disconnectedSleepTimeout: DisconnectedSleepTimeout = .twoMinutes
+    @Published var selectedDeviceSound: DeviceSound = .defaultSelection
+    @Published var deviceSoundVolumePercent: Double = DeviceSound.defaultVolumePercent
+    @Published var isPowerButtonHonkEnabled: Bool = false
     
     // Feature Visibility
     @Published var showBuildings: Bool = true
@@ -321,7 +420,10 @@ class BLEManager: NSObject, ObservableObject {
     private var settingsCharacteristic: CBCharacteristic?
     private var deviceInformation: [CBUUID: String] = [:]
     private var navigationWriteEndpoint: NavigationWriteEndpoint?
-    private var navigationWriteQueue = NavigationWriteQueue(maxCount: 16)
+    private var navigationWriteQueue = NavigationWriteQueue(
+        maxCount: DeviceBLEProtocol.fallbackWriteQueueCapacity
+    )
+    private var lastNavigationQueuePendingLogAt = Date.distantPast
     private var isConnecting: Bool = false
     private var isPairingMode: Bool = false
     private var pendingAuthNonce: String?
@@ -346,9 +448,16 @@ class BLEManager: NSObject, ObservableObject {
     private var reconnectTimer: Timer?
     private var rssiTimer: Timer?
     private var navigationFlushRetryTimer: Timer?
+    private var writeWithResponseInFlight = false
     private var connectionTimeoutTimer: Timer?
     private var authRetryTimer: Timer?
     private var authTimeoutTimer: Timer?
+    private var pendingPowerButtonHonkPacket: Data?
+    private var powerButtonHonkAttempt = 0
+    private var nextPowerButtonHonkRequestID: UInt32 = 1
+    private var powerButtonHonkRetryWorkItem: DispatchWorkItem?
+    private var powerButtonHonkAckTimeout: TimeInterval = 1.0
+    private var powerButtonHonkFailureRetryDelay: TimeInterval = 0.1
     private var shouldPairAfterDisconnect: Bool = false
     private var suppressNextReconnect: Bool = false
     private var hasActiveBLESession: Bool {
@@ -372,6 +481,9 @@ class BLEManager: NSObject, ObservableObject {
         static let defaultDeviceScreenMigrated = "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1"
         static let deviceBrightnessPercent = "deviceSettings.brightnessPercent"
         static let disconnectedSleepTimeoutSeconds = "deviceSettings.disconnectedSleepTimeoutSeconds"
+        static let selectedDeviceSound = "deviceSettings.selectedSound"
+        static let deviceSoundVolumePercent = "deviceSettings.soundVolumePercent"
+        static let powerButtonHonkEnabled = "deviceSettings.powerButtonHonkEnabled"
         static let showBuildings = "mapSettings.showBuildings"
         static let showGreenSpace = "mapSettings.showGreenSpace"
         static let showPaths = "mapSettings.showPaths"
@@ -390,7 +502,9 @@ class BLEManager: NSObject, ObservableObject {
     // MARK: - Initialization
     override init() {
         super.init()
+#if !HOST_TESTING
         centralManager = CBCentralManager(delegate: self, queue: nil)
+#endif
         loadSettings()
         loadLastPeripheralIdentifier()
         updateTrustedPeripheralDescription()
@@ -434,6 +548,17 @@ class BLEManager: NSObject, ObservableObject {
         disconnectedSleepTimeout = DisconnectedSleepTimeout.normalized(
             rawValue: defaults.object(forKey: SettingsKeys.disconnectedSleepTimeoutSeconds) as? Int ?? DisconnectedSleepTimeout.twoMinutes.rawValue
         )
+        let storedSoundID = defaults.object(forKey: SettingsKeys.selectedDeviceSound) as? Int
+            ?? Int(DeviceSound.defaultSelection.rawValue)
+        selectedDeviceSound = UInt8(exactly: storedSoundID)
+            .flatMap(DeviceSound.init(rawValue:))
+            ?? .defaultSelection
+        let storedSoundVolume = defaults.object(forKey: SettingsKeys.deviceSoundVolumePercent) as? Double
+            ?? DeviceSound.defaultVolumePercent
+        deviceSoundVolumePercent = DeviceSound.normalizedVolumePercent(storedSoundVolume)
+        isPowerButtonHonkEnabled = defaults.object(
+            forKey: SettingsKeys.powerButtonHonkEnabled
+        ) as? Bool ?? false
         showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
         let legacyNature = defaults.object(forKey: SettingsKeys.legacyShowNature) as? Bool ?? true
         let legacyMinorRoads = defaults.object(forKey: SettingsKeys.legacyShowMinorRoads) as? Bool ?? true
@@ -474,6 +599,10 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(defaultDeviceScreen.rawValue, forKey: SettingsKeys.defaultDeviceScreen)
         defaults.set(deviceBrightnessPercent, forKey: SettingsKeys.deviceBrightnessPercent)
         defaults.set(disconnectedSleepTimeout.rawValue, forKey: SettingsKeys.disconnectedSleepTimeoutSeconds)
+        defaults.set(Int(selectedDeviceSound.rawValue), forKey: SettingsKeys.selectedDeviceSound)
+        deviceSoundVolumePercent = DeviceSound.normalizedVolumePercent(deviceSoundVolumePercent)
+        defaults.set(deviceSoundVolumePercent, forKey: SettingsKeys.deviceSoundVolumePercent)
+        defaults.set(isPowerButtonHonkEnabled, forKey: SettingsKeys.powerButtonHonkEnabled)
         defaults.set(showBuildings, forKey: SettingsKeys.showBuildings)
         defaults.set(showGreenSpace, forKey: SettingsKeys.showGreenSpace)
         defaults.set(showPaths, forKey: SettingsKeys.showPaths)
@@ -584,14 +713,23 @@ class BLEManager: NSObject, ObservableObject {
         }
 
         let maxLength = peripheral.maximumWriteValueLength(for: .withoutResponse)
-        if let characteristic = routeGeometryCharacteristic {
+        if let characteristic = routeGeometryCharacteristic,
+           let endpoint = navigationWriteEndpoint {
             guard data.count <= maxLength else {
                 log("Cannot send geometry: \(data.count) bytes exceeds write limit \(maxLength)")
                 return
             }
 
-            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-            log("Sent route geometry: \(data.count) bytes")
+            enqueueNavigationWrite(
+                data,
+                endpoint: endpoint,
+                label: "native route geometry",
+                transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
+                    guard let self, let peripheral, let characteristic else { return }
+                    self.writeDeviceData(payload, to: characteristic, on: peripheral)
+                }
+            )
+            log("Queued native route geometry: \(data.count) bytes")
             return
         }
 
@@ -640,9 +778,18 @@ class BLEManager: NSObject, ObservableObject {
             routeRemainingMeters: routeRemainingMeters
         )
 
-        if let characteristic = gpsPositionCharacteristic {
-            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-            log(String(format: "Sent GPS position: %.6f, %.6f heading=%.0f", lat, lon, heading))
+        if let characteristic = gpsPositionCharacteristic,
+           let endpoint = navigationWriteEndpoint {
+            enqueueNavigationWrite(
+                data,
+                endpoint: endpoint,
+                label: "native GPS position",
+                transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
+                    guard let self, let peripheral, let characteristic else { return }
+                    self.writeDeviceData(payload, to: characteristic, on: peripheral)
+                }
+            )
+            log(String(format: "Queued native GPS position: %.6f, %.6f heading=%.0f", lat, lon, heading))
             return
         }
 
@@ -667,9 +814,19 @@ class BLEManager: NSObject, ObservableObject {
         data.append(id)
         withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
 
-        if let peripheral = connectedPeripheral, let characteristic = settingsCharacteristic {
-            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-            log("Sent setting: id=\(id), value=\(value)")
+        if let peripheral = connectedPeripheral,
+           let characteristic = settingsCharacteristic,
+           let endpoint = navigationWriteEndpoint {
+            enqueueNavigationWrite(
+                data,
+                endpoint: endpoint,
+                label: "native setting id=\(id)",
+                transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
+                    guard let self, let peripheral, let characteristic else { return }
+                    self.writeDeviceData(payload, to: characteristic, on: peripheral)
+                }
+            )
+            log("Queued native setting: id=\(id), value=\(value)")
             return
         }
 
@@ -754,6 +911,162 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
+    func playDeviceSound(_ sound: DeviceSound, volumePercent: Double) -> Bool {
+        guard supportsDeviceSounds else {
+            log("Cannot play device sound: connected device does not advertise sound support")
+            return false
+        }
+
+        let packet = sound.playPacket(volumePercent: volumePercent)
+        let volume = packet.last ?? UInt8(DeviceSound.defaultVolumePercent)
+
+        let label = "sound \(sound.rawValue) at \(volume)%"
+        return DevicePacketRouting.sendPreferredThenFallback(
+            preferred: { sendNativeMapTransferPacket(packet, label: label) },
+            fallback: { sendFallbackMapPacket(packet, label: label) }
+        )
+    }
+
+    @discardableResult
+    func playSelectedDeviceSound() -> Bool {
+        playDeviceSound(selectedDeviceSound, volumePercent: deviceSoundVolumePercent)
+    }
+
+    @discardableResult
+    func sendPowerButtonHonkConfiguration() -> Bool {
+        guard supportsPowerButtonHonk else {
+            log("Cannot configure PWR honk: connected device does not advertise support")
+            return false
+        }
+
+        let requestID: UInt32?
+        if supportsPowerButtonHonkAcknowledgement {
+            requestID = nextPowerButtonHonkRequestID
+            nextPowerButtonHonkRequestID &+= 1
+            if nextPowerButtonHonkRequestID == 0 {
+                nextPowerButtonHonkRequestID = 1
+            }
+        } else {
+            requestID = nil
+        }
+        let packet = selectedDeviceSound.powerButtonHonkPacket(
+            enabled: isPowerButtonHonkEnabled,
+            volumePercent: deviceSoundVolumePercent,
+            requestID: requestID
+        )
+        powerButtonHonkConfigurationError = nil
+        clearPendingPowerButtonHonkConfiguration()
+        guard supportsPowerButtonHonkAcknowledgement else {
+            let sent = routePowerButtonHonkConfiguration(packet)
+            if !sent {
+                reportPowerButtonHonkConfigurationFailure(
+                    "PWR honk configuration could not be sent"
+                )
+            }
+            return sent
+        }
+
+        pendingPowerButtonHonkPacket = packet
+        powerButtonHonkAttempt = 0
+        let sent = transmitPowerButtonHonkConfiguration(packet)
+        if !sent {
+            reportPowerButtonHonkConfigurationFailure(
+                "PWR honk configuration could not be sent"
+            )
+        }
+        return sent
+    }
+
+    func deviceSoundVolumeEditingChanged(_ isEditing: Bool) {
+        guard !isEditing, isPowerButtonHonkEnabled else { return }
+        sendPowerButtonHonkConfiguration()
+    }
+
+    private func transmitPowerButtonHonkConfiguration(_ packet: Data) -> Bool {
+        let label = powerButtonHonkConfigurationLabel(packet)
+        if sendNativeMapTransferPacket(packet, label: label) {
+            schedulePowerButtonHonkRetry(
+                for: packet,
+                after: powerButtonHonkAckTimeout
+            )
+            return true
+        }
+
+        return sendFallbackMapPacket(
+            packet,
+            label: label,
+            onWrite: { [weak self] in
+                guard let self, self.pendingPowerButtonHonkPacket == packet else { return }
+                self.schedulePowerButtonHonkRetry(
+                    for: packet,
+                    after: self.powerButtonHonkAckTimeout
+                )
+            },
+            onDrop: { [weak self] in
+                guard let self, self.pendingPowerButtonHonkPacket == packet else { return }
+                self.reportPowerButtonHonkConfigurationFailure(
+                    "PWR honk configuration was dropped before it could be sent"
+                )
+            }
+        )
+    }
+
+    private func routePowerButtonHonkConfiguration(_ packet: Data) -> Bool {
+        let label = powerButtonHonkConfigurationLabel(packet)
+        return DevicePacketRouting.sendPreferredThenFallback(
+            preferred: { sendNativeMapTransferPacket(packet, label: label) },
+            fallback: { sendFallbackMapPacket(packet, label: label) }
+        )
+    }
+
+    private func powerButtonHonkConfigurationLabel(_ packet: Data) -> String {
+        let enabled = packet.count >= 3 && packet[packet.count - 3] == 1
+        return "PWR honk \(enabled ? "enabled" : "disabled")"
+    }
+
+    private func schedulePowerButtonHonkRetry(
+        for packet: Data,
+        after delay: TimeInterval
+    ) {
+        powerButtonHonkRetryWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.pendingPowerButtonHonkPacket == packet else { return }
+            guard PowerButtonHonkRetry.shouldRetry(
+                isNavigationReady: self.isNavigationReady,
+                attempt: self.powerButtonHonkAttempt
+            ) else {
+                self.reportPowerButtonHonkConfigurationFailure(
+                    "PWR honk configuration was not acknowledged"
+                )
+                return
+            }
+
+            self.powerButtonHonkAttempt += 1
+            if !self.transmitPowerButtonHonkConfiguration(packet) {
+                self.reportPowerButtonHonkConfigurationFailure(
+                    "PWR honk configuration retry could not be sent"
+                )
+            }
+        }
+        powerButtonHonkRetryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func reportPowerButtonHonkConfigurationFailure(_ logMessage: String) {
+        log(logMessage)
+        powerButtonHonkConfigurationError =
+            "Could not apply PWR honk settings on the device."
+        clearPendingPowerButtonHonkConfiguration()
+    }
+
+    private func clearPendingPowerButtonHonkConfiguration() {
+        powerButtonHonkRetryWorkItem?.cancel()
+        powerButtonHonkRetryWorkItem = nil
+        pendingPowerButtonHonkPacket = nil
+        powerButtonHonkAttempt = 0
+    }
+
+    @discardableResult
     func requestMapTransferMode(enabled: Bool) -> Bool {
         var packet = Data(DeviceBLEProtocol.mapTransferControlPrefix.utf8)
         packet.append(Data((enabled ? "enter" : "exit").utf8))
@@ -795,6 +1108,20 @@ class BLEManager: NSObject, ObservableObject {
         let sentNative = sendNativeMapTransferPacket(packet, label: "device transfer status")
         let sentFallback = sendFallbackMapPacket(packet, label: "device transfer status")
         return sentNative || sentFallback
+    }
+
+    @discardableResult
+    func requestDeviceCapabilities() -> Bool {
+        var packet = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8)
+        packet.append(DeviceBLEProtocol.deviceCapabilitiesVersion)
+        return DevicePacketRouting.sendPreferredThenFallback(
+            preferred: {
+                sendNativeMapTransferPacket(packet, label: "device capabilities")
+            },
+            fallback: {
+                sendFallbackMapPacket(packet, label: "device capabilities")
+            }
+        )
     }
 
     func sendDebugNavigationPacket() {
@@ -938,11 +1265,13 @@ class BLEManager: NSObject, ObservableObject {
         settingsCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
+        writeWithResponseInFlight = false
         pendingAuthNonce = nil
         authWriteState = .idle
         navigationWriteQueue.removeAll()
         navigationFlushRetryTimer?.invalidate()
         navigationFlushRetryTimer = nil
+        lastNavigationQueuePendingLogAt = .distantPast
         connectionTimeoutTimer?.invalidate()
         connectionTimeoutTimer = nil
         authRetryTimer?.invalidate()
@@ -964,9 +1293,19 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferAccessPointSSID = nil
         deviceTransferSessionToken = nil
         firmwareUpdateStatus = "unknown"
+        firmwareTarget = ""
+        firmwareVersion = ""
+        firmwareBuild = 0
+        firmwareGitSha = ""
         firmwareUpdateReceivedBytes = 0
         firmwareUpdateTotalBytes = 0
         firmwareUpdateLastError = nil
+        supportsDeviceSounds = false
+        supportsPowerButtonHonk = false
+        supportsPowerButtonHonkAcknowledgement = false
+        powerButtonHonkConfigurationError = nil
+        hasReceivedDeviceCapabilities = false
+        clearPendingPowerButtonHonkConfiguration()
     }
 
     private func updateTrustedPeripheralDescription() {
@@ -1004,8 +1343,16 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
-    func installNavigationWriteEndpoint(_ endpoint: NavigationWriteEndpoint) {
+    func installNavigationWriteEndpoint(_ endpoint: NavigationWriteEndpoint?) {
         navigationWriteEndpoint = endpoint
+    }
+
+    func installPowerButtonHonkRetryTiming(
+        ackTimeout: TimeInterval,
+        failureRetryDelay: TimeInterval
+    ) {
+        powerButtonHonkAckTimeout = max(0, ackTimeout)
+        powerButtonHonkFailureRetryDelay = max(0, failureRetryDelay)
     }
 
     private func scheduleAuthenticationRetry(for peripheral: CBPeripheral) {
@@ -1047,7 +1394,7 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
 
-        guard let writeType = authWriteType(for: authCharacteristic) else {
+        guard let writeType = preferredWriteType(for: authCharacteristic) else {
             log("Auth characteristic does not support writes; props=\(authCharacteristic.properties.debugDescription)")
             return
         }
@@ -1065,12 +1412,14 @@ class BLEManager: NSObject, ObservableObject {
         log("Sent BLE auth challenge via \(authWriteLabel(writeType)); props=\(authCharacteristic.properties.debugDescription)")
     }
 
-    private func authWriteType(for characteristic: CBCharacteristic) -> CBCharacteristicWriteType? {
-        if characteristic.properties.contains(.writeWithoutResponse) {
-            return .withoutResponse
-        }
+    private func preferredWriteType(
+        for characteristic: CBCharacteristic
+    ) -> CBCharacteristicWriteType? {
         if characteristic.properties.contains(.write) {
             return .withResponse
+        }
+        if characteristic.properties.contains(.writeWithoutResponse) {
+            return .withoutResponse
         }
         return nil
     }
@@ -1125,15 +1474,28 @@ class BLEManager: NSObject, ObservableObject {
 
     private func completeAuthentication(for peripheral: CBPeripheral) {
         guard let characteristic = navigationCharacteristic else { return }
+        guard let navigationWriteType = preferredWriteType(for: characteristic) else {
+            log("Navigation characteristic is not writable after authentication")
+            return
+        }
 
         installNavigationWriteEndpoint(NavigationWriteEndpoint(
-            maximumWriteLength: peripheral.maximumWriteValueLength(for: .withoutResponse),
-            canSend: { [weak peripheral] in
-                peripheral?.canSendWriteWithoutResponse == true
+            maximumWriteLength: peripheral.maximumWriteValueLength(for: navigationWriteType),
+            canSend: { [weak self, weak peripheral] in
+                guard let self, let peripheral else { return false }
+                if navigationWriteType == .withResponse {
+                    return !self.writeWithResponseInFlight
+                }
+                return peripheral.canSendWriteWithoutResponse
             },
-            write: { [weak peripheral, weak characteristic] data in
-                guard let peripheral, let characteristic else { return }
-                peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+            write: { [weak self, weak peripheral, weak characteristic] data in
+                guard let self, let peripheral, let characteristic else { return }
+                self.writeDeviceData(
+                    data,
+                    to: characteristic,
+                    on: peripheral,
+                    type: navigationWriteType
+                )
             }
         ))
 
@@ -1151,6 +1513,7 @@ class BLEManager: NSObject, ObservableObject {
         UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: SettingsKeys.lastPeripheralIdentifier)
         updateTrustedPeripheralDescription()
         log("BLE peripheral authenticated")
+        requestDeviceCapabilities()
         sendVisibilityMask()
         sendSetting(id: 1, value: Int32(minPolygonSize))
         sendSetting(id: 2, value: Int32(detailLevel))
@@ -1166,6 +1529,7 @@ class BLEManager: NSObject, ObservableObject {
         sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(deviceBrightnessPercent))
         sendSetting(id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
                     value: disconnectedSleepTimeout.settingValue)
+        requestDeviceTransferStatus()
     }
 
     private func sendOrQueueClientProof(_ proofData: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {
@@ -1181,7 +1545,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func writeClientAuthProof(_ proofData: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {
-        guard let writeType = authWriteType(for: characteristic) else {
+        guard let writeType = preferredWriteType(for: characteristic) else {
             log("Cannot send BLE client auth proof: auth characteristic is not writable")
             isPairingMode = false
             clearConnectionState()
@@ -1207,8 +1571,21 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
-    private func enqueueNavigationWrite(_ data: Data, endpoint: NavigationWriteEndpoint, label: String) {
-        if navigationWriteQueue.enqueue(NavigationWrite(data: data, label: label)) {
+    private func enqueueNavigationWrite(
+        _ data: Data,
+        endpoint: NavigationWriteEndpoint,
+        label: String,
+        transportWrite: ((Data) -> Void)? = nil,
+        onWrite: (() -> Void)? = nil,
+        onDrop: (() -> Void)? = nil
+    ) {
+        if navigationWriteQueue.enqueue(NavigationWrite(
+            data: data,
+            label: label,
+            transportWrite: transportWrite,
+            onWrite: onWrite,
+            onDrop: onDrop
+        )) {
             log("Navigation write queue full; dropped oldest packet")
         }
 
@@ -1217,7 +1594,12 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
-    private func sendFallbackMapPacket(_ data: Data, label: String) -> Bool {
+    private func sendFallbackMapPacket(
+        _ data: Data,
+        label: String,
+        onWrite: (() -> Void)? = nil,
+        onDrop: (() -> Void)? = nil
+    ) -> Bool {
         guard let endpoint = navigationWriteEndpoint,
               isConnected,
               isNavigationReady else {
@@ -1225,7 +1607,13 @@ class BLEManager: NSObject, ObservableObject {
             return false
         }
 
-        enqueueNavigationWrite(data, endpoint: endpoint, label: "fallback \(label)")
+        enqueueNavigationWrite(
+            data,
+            endpoint: endpoint,
+            label: "fallback \(label)",
+            onWrite: onWrite,
+            onDrop: onDrop
+        )
         log("Queued fallback \(label): \(data.count) bytes")
         return true
     }
@@ -1236,12 +1624,21 @@ class BLEManager: NSObject, ObservableObject {
               isNavigationReady,
               let peripheral = connectedPeripheral,
               let characteristic = settingsCharacteristic,
-              data.count <= peripheral.maximumWriteValueLength(for: .withoutResponse) else {
+              let endpoint = navigationWriteEndpoint,
+              data.count <= endpoint.maximumWriteLength else {
             return false
         }
 
-        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-        log("Sent native \(label): \(data.count) bytes")
+        enqueueNavigationWrite(
+            data,
+            endpoint: endpoint,
+            label: "native \(label)",
+            transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
+                guard let self, let peripheral, let characteristic else { return }
+                self.writeDeviceData(payload, to: characteristic, on: peripheral)
+            }
+        )
+        log("Queued native \(label): \(data.count) bytes")
         return true
     }
 
@@ -1264,23 +1661,41 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
-        navigationWriteQueue.flush(canSend: endpoint.canSend) { write in
-            endpoint.write(write.data)
+        navigationWriteQueue.flush(canSend: endpoint.canSend, maxWrites: 1) { write in
+            write.perform(using: endpoint.write)
             log("Sent \(write.label): \(write.data.count) bytes")
         }
         if navigationWriteQueue.count == 0 {
             navigationFlushRetryTimer?.invalidate()
             navigationFlushRetryTimer = nil
-        } else {
+            lastNavigationQueuePendingLogAt = .distantPast
+        } else if Date().timeIntervalSince(lastNavigationQueuePendingLogAt) >= 1 {
             log("Navigation write queue pending: \(navigationWriteQueue.count)")
+            lastNavigationQueuePendingLogAt = Date()
         }
+    }
+
+    private func writeDeviceData(
+        _ data: Data,
+        to characteristic: CBCharacteristic,
+        on peripheral: CBPeripheral,
+        type explicitType: CBCharacteristicWriteType? = nil
+    ) {
+        guard let writeType = explicitType ?? preferredWriteType(for: characteristic) else {
+            log("Cannot write characteristic \(characteristic.uuid): unsupported properties")
+            return
+        }
+        if writeType == .withResponse {
+            writeWithResponseInFlight = true
+        }
+        peripheral.writeValue(data, for: characteristic, type: writeType)
     }
 
     private func scheduleNavigationFlushRetryIfNeeded() {
         guard navigationWriteQueue.count > 0,
               navigationFlushRetryTimer == nil else { return }
 
-        navigationFlushRetryTimer = Timer.scheduledTimer(withTimeInterval: 0.1,
+        navigationFlushRetryTimer = Timer.scheduledTimer(withTimeInterval: 0.05,
                                                          repeats: false) { [weak self] _ in
             guard let self else { return }
             self.navigationFlushRetryTimer = nil
@@ -1545,8 +1960,8 @@ extension BLEManager: CBPeripheralDelegate {
             }
             
             if characteristic.uuid == characteristicUUID {
-                guard characteristic.properties.contains(.writeWithoutResponse) else {
-                    log("Navigation characteristic does not support write without response")
+                guard preferredWriteType(for: characteristic) != nil else {
+                    log("Navigation characteristic is not writable")
                     continue
                 }
 
@@ -1570,24 +1985,24 @@ extension BLEManager: CBPeripheralDelegate {
             }
 
             if characteristic.uuid == routeGeometryCharacteristicUUID {
-                guard characteristic.properties.contains(.writeWithoutResponse) else {
-                    log("Route geometry characteristic does not support write without response")
+                guard preferredWriteType(for: characteristic) != nil else {
+                    log("Route geometry characteristic is not writable")
                     continue
                 }
                 routeGeometryCharacteristic = characteristic
             }
 
             if characteristic.uuid == gpsPositionCharacteristicUUID {
-                guard characteristic.properties.contains(.writeWithoutResponse) else {
-                    log("GPS characteristic does not support write without response")
+                guard preferredWriteType(for: characteristic) != nil else {
+                    log("GPS characteristic is not writable")
                     continue
                 }
                 gpsPositionCharacteristic = characteristic
             }
 
             if characteristic.uuid == settingsCharacteristicUUID {
-                guard characteristic.properties.contains(.writeWithoutResponse) else {
-                    log("Settings characteristic does not support write without response")
+                guard preferredWriteType(for: characteristic) != nil else {
+                    log("Settings characteristic is not writable")
                     continue
                 }
                 settingsCharacteristic = characteristic
@@ -1611,12 +2026,17 @@ extension BLEManager: CBPeripheralDelegate {
 
     func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
         guard isNavigationReady, let endpoint = navigationWriteEndpoint else { return }
+        log("BLE transport ready; pending writes=\(navigationWriteQueue.count)")
         flushPendingNavigationWrites(endpoint: endpoint)
+        scheduleNavigationFlushRetryIfNeeded()
     }
     
     func peripheral(_ peripheral: CBPeripheral, 
                    didWriteValueFor characteristic: CBCharacteristic, 
                    error: Error?) {
+        if characteristic.uuid != authCharacteristicUUID {
+            writeWithResponseInFlight = false
+        }
         if let error = error {
             log("Error writing characteristic \(characteristic.uuid): \(error.localizedDescription); props=\(characteristic.properties.debugDescription)")
             if characteristic.uuid == authCharacteristicUUID {
@@ -1625,11 +2045,19 @@ extension BLEManager: CBPeripheralDelegate {
                 clearConnectionState()
                 centralManager.cancelPeripheralConnection(peripheral)
             }
+            if characteristic.uuid != authCharacteristicUUID,
+               let endpoint = navigationWriteEndpoint {
+                flushPendingNavigationWrites(endpoint: endpoint)
+                scheduleNavigationFlushRetryIfNeeded()
+            }
             return
         }
 
         if characteristic.uuid == authCharacteristicUUID {
             authWriteCompleted(for: peripheral, characteristic: characteristic)
+        } else if let endpoint = navigationWriteEndpoint {
+            flushPendingNavigationWrites(endpoint: endpoint)
+            scheduleNavigationFlushRetryIfNeeded()
         }
     }
     
@@ -1649,12 +2077,7 @@ extension BLEManager: CBPeripheralDelegate {
         }
 
         if characteristic.uuid == characteristicUUID,
-           handleDeviceTransferStatusNotification(data) {
-            return
-        }
-
-        if characteristic.uuid == characteristicUUID,
-           handleMapTransferStatusNotification(data) {
+           handleNavigationCharacteristicNotification(data) {
             return
         }
 
@@ -1680,6 +2103,144 @@ extension BLEManager: CBPeripheralDelegate {
             model: deviceInformation[modelNumberCharacteristicUUID],
             hardware: deviceInformation[hardwareRevisionCharacteristicUUID]
         )
+    }
+
+    @discardableResult
+    func handleDeviceCapabilitiesNotification(_ data: Data) -> Bool {
+        guard data.count >= 4,
+              String(data: data.prefix(4), encoding: .utf8) == DeviceBLEProtocol.deviceCapabilitiesPrefix else {
+            return false
+        }
+
+        guard data.count == 5 || data.count == 8 else {
+            supportsDeviceSounds = false
+            supportsPowerButtonHonk = false
+            supportsPowerButtonHonkAcknowledgement = false
+            hasReceivedDeviceCapabilities = false
+            clearPendingPowerButtonHonkConfiguration()
+            log("Received invalid device capabilities payload")
+            return true
+        }
+
+        let flags = data[4]
+        let hasDeviceSounds = flags & DeviceBLEProtocol.deviceSoundsCapabilityMask != 0
+        let hasPowerButtonHonk = hasDeviceSounds &&
+            flags & DeviceBLEProtocol.powerButtonHonkCapabilityMask != 0
+        let hasPowerButtonHonkAcknowledgement = hasPowerButtonHonk &&
+            flags & DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask != 0
+        let hasDevicePowerButtonConfig = data.count == 8
+        if hasDevicePowerButtonConfig {
+            guard hasPowerButtonHonk,
+                  data[5] <= 1,
+                  let deviceSound = DeviceSound(rawValue: data[6]),
+                  data[7] <= 100 else {
+                supportsDeviceSounds = false
+                supportsPowerButtonHonk = false
+                supportsPowerButtonHonkAcknowledgement = false
+                hasReceivedDeviceCapabilities = false
+                clearPendingPowerButtonHonkConfiguration()
+                log("Received invalid device capabilities configuration")
+                return true
+            }
+            if pendingPowerButtonHonkPacket == nil {
+                let deviceHonkEnabled = data[5] == 1
+                isPowerButtonHonkEnabled = deviceHonkEnabled
+                if deviceHonkEnabled {
+                    selectedDeviceSound = deviceSound
+                    deviceSoundVolumePercent = Double(data[7])
+                }
+                saveSettings()
+            } else {
+                log("Ignored device capabilities configuration while a local update is pending")
+            }
+        }
+        let shouldSynchronizePowerButtonHonk = hasPowerButtonHonk &&
+            !hasDevicePowerButtonConfig &&
+            (!hasReceivedDeviceCapabilities || !supportsPowerButtonHonk)
+        supportsDeviceSounds = hasDeviceSounds
+        supportsPowerButtonHonk = hasPowerButtonHonk
+        supportsPowerButtonHonkAcknowledgement = hasPowerButtonHonkAcknowledgement
+        if !hasPowerButtonHonkAcknowledgement {
+            clearPendingPowerButtonHonkConfiguration()
+        }
+        hasReceivedDeviceCapabilities = true
+        log("Device capabilities: flags=0x\(String(format: "%02X", flags))")
+        if shouldSynchronizePowerButtonHonk {
+            // @Published updates in willSet. Defer until the support flag is
+            // observable so the guarded send uses the negotiated capability.
+            DispatchQueue.main.async { [weak self] in
+                _ = self?.sendPowerButtonHonkConfiguration()
+            }
+        }
+        return true
+    }
+
+    @discardableResult
+    func handleNavigationCharacteristicNotification(_ data: Data) -> Bool {
+        if handlePowerButtonHonkStatusNotification(data) {
+            return true
+        }
+        if handleDeviceCapabilitiesNotification(data) {
+            return true
+        }
+        if handleDeviceTransferStatusNotification(data) {
+            return true
+        }
+        return handleMapTransferStatusNotification(data)
+    }
+
+    @discardableResult
+    func handlePowerButtonHonkStatusNotification(_ data: Data) -> Bool {
+        guard data.count >= 4,
+              String(data: data.prefix(4), encoding: .utf8) ==
+                DeviceBLEProtocol.powerButtonHonkStatusPrefix else {
+            return false
+        }
+
+        let appliedIndex: Int
+        let configStartIndex: Int
+        var acknowledgedPacket = Data(DeviceBLEProtocol.powerButtonHonkPrefix.utf8)
+        switch data.count {
+        case 8:
+            appliedIndex = 4
+            configStartIndex = 5
+        case 12:
+            acknowledgedPacket.append(data.subdata(in: 4..<8))
+            appliedIndex = 8
+            configStartIndex = 9
+        default:
+            log("Received invalid PWR honk apply status")
+            return true
+        }
+
+        guard data[appliedIndex] <= 1,
+              data[configStartIndex] <= 1,
+              DeviceSound(rawValue: data[configStartIndex + 1]) != nil,
+              data[configStartIndex + 2] <= 100 else {
+            log("Received invalid PWR honk apply status")
+            return true
+        }
+
+        acknowledgedPacket.append(
+            data.subdata(in: configStartIndex..<(configStartIndex + 3))
+        )
+        guard acknowledgedPacket == pendingPowerButtonHonkPacket else {
+            log("Ignored stale PWR honk apply status")
+            return true
+        }
+
+        if data[appliedIndex] == 1 {
+            log("PWR honk configuration acknowledged")
+            powerButtonHonkConfigurationError = nil
+            clearPendingPowerButtonHonkConfiguration()
+        } else {
+            log("Device rejected PWR honk configuration; retrying")
+            schedulePowerButtonHonkRetry(
+                for: acknowledgedPacket,
+                after: powerButtonHonkFailureRetryDelay
+            )
+        }
+        return true
     }
 
     @discardableResult

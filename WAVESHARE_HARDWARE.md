@@ -172,17 +172,67 @@ Connected-device SD findings:
 
 | Signal / Function | GPIO / Device | Notes |
 |---|---:|---|
-| I2S MCLK | GPIO 41 | Vendor `08_ES8311` passes this as first `i2s.setPins()` arg |
-| I2S SCLK / BCLK | GPIO 45 | Vendor `08_ES8311` |
-| I2S LRCK / WS | GPIO 40 | Vendor `08_ES8311` |
-| I2S ASDOUT / speaker data out | GPIO 42 | Vendor `08_ES8311` |
-| I2S DSDIN / mic data in | GPIO 16 | Vendor `08_ES8311` |
-| PA control | GPIO 46 | Vendor `08_ES8311` drives this high before codec init |
-| Codec | ES8311 | I2C control plus I2S audio |
-| Mic ADC/front-end | ES7210 | Schematic and product page; not yet brought up here |
+| I2S MCLK | GPIO 16 | Master clock |
+| I2S SCLK / BCLK | GPIO 41 | Bit clock |
+| I2S LRCK / WS | GPIO 45 | Word select |
+| I2S DSDIN | GPIO 40 | ESP32 `dout` to speaker DAC |
+| I2S ASDOUT | GPIO 42 | Codec/microphone data to ESP32 `din` |
+| PA control | GPIO 46 | Active high |
+| Speaker codec | ES8311 at I2C `0x18` | I2C control and I2S audio |
+| Microphone front-end | ES7210 | Separate microphone path |
 
-Audio is still a separate bring-up track for this repo. Note that GPIO41 is an
-audio MCLK pin on 2.06, while GPIO41 was SD CS on 1.75.
+GPIO41 is audio BCLK on the 2.06; SD CS is GPIO17. Speaker playback uses the
+ESP-IDF standard I2S driver and Espressif `esp_codec_dev` with:
+
+- ESP32 I2S master and ES8311 slave DAC mode with MCLK enabled.
+- Signed 16-bit little-endian stereo PCM at 16 kHz and 256x MCLK.
+- Volume through `esp_codec_dev_set_out_vol()`, range `0...100`, default `70`.
+- PCM output through `esp_codec_dev_write()` followed by a short silence drain.
+
+The implementation is in `esp32/lib/speaker/`, with codec sources in
+`esp32/lib/esp_codec_dev/`. It uses the shared mutex-protected I2C bus,
+initializes the codec on first playback, and processes requests through a
+four-entry FreeRTOS queue outside the BLE callback. It powers the codec and PA
+down when the queue drains. PCM recordings are embedded
+with PlatformIO `board_build.embed_files`.
+
+#### Sounds And BLE
+
+| Sound ID | App label | Implementation |
+|---:|---|---|
+| `1` | Bell Ding | Generated PCM |
+| `2` | Plastic Bicycle Horn | Embedded PCM recording |
+| `3` | Rotating Bicycle Bell | Embedded PCM recording |
+| `5` | Squeeze Horn | Embedded PCM recording |
+
+Authenticated playback uses:
+
+```text
+"SNDP" | SoundID: UInt8 | VolumePercent: UInt8
+```
+
+`VolumePercent` is `0...100`. A legacy frame without it uses `70%`. The command
+uses settings characteristic `2A73`, with navigation characteristic `2A6E` as
+a compatibility fallback. The production curve preserves the existing level
+through `70%`, then ramps to `+20 dB` ES8311 DAC gain at `100%`. Playback above
+the DAC's unity-gain point uses a soft limiter to prevent hard clipping.
+
+The iOS app stores the selected sound and volume locally. The selector and
+volume slider are under **Hardware Customization > Device Sounds**. Pressing
+the sound button at the center-right of the main map sends the selected sound
+and volume to the bike computer. Healthy serial output includes
+`Speaker: playback task ready`, `Speaker: ES8311 ready at 70% default volume`,
+and `Speaker: playing sound N at V% volume`.
+
+The same settings group can enable the PWR button as a honk control. The app
+sends the authenticated configuration as `"SNDH" | Enabled | SoundID | Volume`
+and firmware persists it in NVS. On the 2.06 board, a short PWR press is read
+from AXP2101 interrupt-enable/status register pair `0x41`/`0x49`, bit `3`.
+Firmware polls the latched status only while honk mode is enabled and queues
+playback on the existing speaker task; the PMU's six-second hard power-off is
+unchanged. Versioned capability discovery also returns this persisted
+configuration, so reconnecting from a fresh app does not overwrite device
+state with app defaults.
 
 ### Buttons, External Pads, And Power
 
@@ -234,7 +284,7 @@ card, and factory firmware.
 | SD Card | Verified | SD map renders from `CS=17, MOSI=1, MISO=3, SCK=2` |
 | RTC | Partially verified | PCF85063 found at `0x51`; retention behavior still needs battery-backed power-removal validation |
 | IMU | Partially verified | QMI8658 found at `0x6B` and reports motion; axis/sign tests still need validation on 2.06 |
-| Audio | Vendor demo exists | ES8311/ES7210/I2S pins known; repo audio support not implemented |
+| Audio | Verified / implemented | ES8311 speaker plays generated and embedded 16 kHz PCM; app selects the sound and `0...100%` playback volume, defaulting to 70% |
 | Power / Battery | Partially verified | AXP2101 status readable; current app preserves rails during boot; deeper sleep/rail shutdown still needs testing |
 
 ## 2.06 Bring-up Rules
@@ -244,11 +294,17 @@ card, and factory firmware.
 - Do not copy the 1.75" TCA9554/CST9217 reset path to the 2.06. Touch reset is
   direct GPIO9.
 - Do not copy 1.75" display CLK/RST pins. 2.06 uses CLK GPIO11 and reset GPIO8.
-- Do not use 1.75" SD CS GPIO41. 2.06 SD CS is GPIO17; GPIO41 is audio MCLK.
+- Do not use 1.75" SD CS GPIO41. 2.06 SD CS is GPIO17; GPIO41 is audio BCLK.
+- Use `esp_codec_dev` and the ES8311 driver with the audio pin assignments
+  documented above.
 - If the display is black, first flash the standalone vendor-shaped HelloWorld
   or color-cycle test before debugging app code. The verified baseline is
   CO5300 `410x502`, gap `(22,0,0,0)`, rotation `0`, QSPI pins
   `CS=12, SCLK=11, D0=4, D1=5, D2=6, D3=7`, reset `8`.
+- The verified 2.06 LVGL flush sequence sends the RGB565 frame, then rewrites
+  its first pixel through a 1x1 window to present the completed frame.
+- USB CDC logging uses a 1 ms TX timeout so display rendering remains
+  independent of whether a serial reader is attached.
 - A full USB and battery power removal can matter after failed experiments; the
   verified standalone display test became visible after power removal and
   USB-only replug.

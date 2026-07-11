@@ -75,6 +75,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "i2c_bus.hpp"
 #include "pcf85063.hpp"
 #include "qmi8658.hpp"
+#include "speaker.hpp"
 #include "waveshare_board.hpp"
 #endif
 
@@ -360,7 +361,9 @@ void setup() {
 
   // Initialize Serial for debug
   Serial.begin(115200);
-  Serial.setTxTimeoutMs(0); // Prevent blocking if no host connected
+  // HWCDC uses this value as both a timeout and a retry counter. Zero
+  // underflows that counter when the USB host stops reading and stalls the UI.
+  Serial.setTxTimeoutMs(1);
   delay(2000);              // Give time for USB CDC to attach
   log_i("Starting Setup...");
   Serial.printf("Reset reason: CPU0=%d CPU1=%d\n", esp_reset_reason(),
@@ -535,6 +538,10 @@ void setup() {
   log_i("Loading Splash Screen...");
   splashScreen();
 
+#ifdef WAVESHARE_AMOLED_206
+  waveshare_board::speaker::begin();
+#endif
+
   // Initialize BLE early so device is discoverable while showing waiting screen
   bleNavServer.init("BikeComputer");
 
@@ -594,6 +601,9 @@ void loop() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   waveshare_board::imu::process();
   processWaveshareBootButton();
+#endif
+#ifdef WAVESHARE_AMOLED_206
+  waveshare_board::speaker::processPowerButtonHonk();
 #endif
 
   logSystemDebugHeartbeat();
