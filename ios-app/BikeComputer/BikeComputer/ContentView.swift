@@ -105,7 +105,7 @@ struct ContentView: View {
             coordinator.updateSelectedView(newValue)
         }
         .onAppear {
-            offlineMapManager.resumePendingMapJobIfNeeded()
+            offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
         }
         .onChange(of: offlineMapManager.isMapAreaSelectionActive) { isActive in
             if isActive {
@@ -222,10 +222,7 @@ struct ContentView: View {
         } label: {
             HStack(spacing: 10) {
                 if offlineMapManager.isBusy {
-                    ProgressView(
-                        value: offlineMapManager.mapPreparationProgress ??
-                            (offlineMapManager.downloadProgress > 0 ? offlineMapManager.downloadProgress : nil)
-                    )
+                    ProgressView(value: offlineMapManager.activityProgress)
                         .frame(width: 22, height: 22)
                 } else {
                     Image(systemName: offlineMapManager.downloadedPackURL == nil ? "map" : "checkmark.circle.fill")

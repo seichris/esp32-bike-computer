@@ -240,6 +240,7 @@ enum OfflineMapJobPoller {
 
 nonisolated enum OfflineMapJobPersistence {
     private static let activeJobIdKey = "offlineMap.activeJobId"
+    private static let installOnDeviceKey = "offlineMap.activeJobInstallOnDevice"
 
     static func activeJobId(defaults: UserDefaults) -> String? {
         guard let value = defaults.string(forKey: activeJobIdKey), !value.isEmpty else {
@@ -248,12 +249,18 @@ nonisolated enum OfflineMapJobPersistence {
         return value
     }
 
-    static func save(jobId: String, defaults: UserDefaults) {
+    static func shouldInstallOnDevice(defaults: UserDefaults) -> Bool {
+        defaults.bool(forKey: installOnDeviceKey)
+    }
+
+    static func save(jobId: String, installOnDevice: Bool = false, defaults: UserDefaults) {
         defaults.set(jobId, forKey: activeJobIdKey)
+        defaults.set(installOnDevice, forKey: installOnDeviceKey)
     }
 
     static func clear(defaults: UserDefaults) {
         defaults.removeObject(forKey: activeJobIdKey)
+        defaults.removeObject(forKey: installOnDeviceKey)
     }
 }
 
@@ -289,9 +296,15 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var lastTransferMapId: String
     @Published private(set) var lastTransferOutcome: String
 
-    var mapPreparationProgress: Double? {
-        guard currentJob?.status == "converting_features" else { return nil }
-        return currentJob?.progress?.fraction
+    var activityProgress: Double? {
+        OfflineMapProgressPresentation.value(
+            job: currentJob,
+            downloadProgress: downloadProgress
+        )
+    }
+
+    var hasPendingMapJob: Bool {
+        OfflineMapJobPersistence.activeJobId(defaults: defaults) != nil
     }
 
     private let defaults: UserDefaults
@@ -364,7 +377,7 @@ final class OfflineMapManager: ObservableObject {
                 sideLengthKm: Double(manager.sideLengthKm) ?? 25
             ))
             manager.currentJob = try await client.createJob(request)
-            manager.persistCurrentJob()
+            manager.persistCurrentJob(installOnDevice: true)
             manager.downloadURL = nil
             manager.downloadedPackURL = nil
             manager.downloadProgress = 0
@@ -375,26 +388,31 @@ final class OfflineMapManager: ObservableObject {
             try await manager.waitForReadyMap(client: client)
             try await manager.downloadReadyPack(client: client)
             try await manager.transferReadyPack(bleManager: bleManager)
+            manager.clearPersistedJob()
         }
     }
 
-    func resumePendingMapJobIfNeeded() {
+    func resumePendingMapJobIfNeeded(bleManager: BLEManager? = nil) {
         guard mapJobTask == nil,
               !isBusy,
               let jobId = OfflineMapJobPersistence.activeJobId(defaults: defaults) else {
             return
         }
+        let shouldInstallOnDevice = OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults)
 
         startMapJobTask { manager in
             do {
                 let client = try manager.makeClient()
-                let job = try await client.job(id: jobId)
-                manager.currentJob = job
-                manager.statusMessage = job.status
-                if job.status != "ready" || job.mapId == nil {
-                    try await manager.waitForReadyMap(client: client)
-                }
+                try await manager.waitForReadyMap(client: client, jobId: jobId)
                 try await manager.downloadReadyPack(client: client)
+                if shouldInstallOnDevice {
+                    guard let bleManager else {
+                        manager.statusMessage = "map downloaded; reconnect device to install"
+                        return
+                    }
+                    try await manager.transferReadyPack(bleManager: bleManager)
+                }
+                manager.clearPersistedJob()
             } catch {
                 if manager.shouldForgetPersistedJob(after: error) {
                     manager.clearPersistedJob()
@@ -402,6 +420,12 @@ final class OfflineMapManager: ObservableObject {
                 throw error
             }
         }
+    }
+
+    func pausePendingMapJob() {
+        guard mapJobTask != nil else { return }
+        mapJobTask?.cancel()
+        statusMessage = "map preparation paused"
     }
 
     func refreshJob() {
@@ -605,10 +629,11 @@ final class OfflineMapManager: ObservableObject {
             manager.statusMessage = "creating map job"
 
             manager.currentJob = try await client.createJob(request)
-            manager.persistCurrentJob()
+            manager.persistCurrentJob(installOnDevice: false)
             manager.statusMessage = manager.currentJob?.status ?? ""
             try await manager.waitForReadyMap(client: client)
             try await manager.downloadReadyPack(client: client)
+            manager.clearPersistedJob()
         }
     }
 
@@ -656,8 +681,11 @@ final class OfflineMapManager: ObservableObject {
         return mapId
     }
 
-    private func waitForReadyMap(client: OfflineMapPlatformClient) async throws {
-        guard let jobId = currentJob?.jobId else {
+    private func waitForReadyMap(
+        client: OfflineMapPlatformClient,
+        jobId explicitJobId: String? = nil
+    ) async throws {
+        guard let jobId = explicitJobId ?? currentJob?.jobId else {
             throw OfflineMapPlatformError.invalidResponse
         }
 
@@ -716,12 +744,15 @@ final class OfflineMapManager: ObservableObject {
         downloadByteProgress = nil
         transferProgress = 0
         statusMessage = "pack downloaded"
-        clearPersistedJob()
     }
 
-    private func persistCurrentJob() {
+    private func persistCurrentJob(installOnDevice: Bool) {
         guard let jobId = currentJob?.jobId else { return }
-        OfflineMapJobPersistence.save(jobId: jobId, defaults: defaults)
+        OfflineMapJobPersistence.save(
+            jobId: jobId,
+            installOnDevice: installOnDevice,
+            defaults: defaults
+        )
     }
 
     private func clearPersistedJob() {

@@ -26,21 +26,20 @@ class MapWorker:
         *,
         worker_id: str | None = None,
         interrupted_job_stale_seconds: float = 15 * 60,
+        heartbeat_interval_seconds: float = 30.0,
     ):
         self.store = store
         self.pipeline = pipeline
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
         self.interrupted_job_stale_seconds = interrupted_job_stale_seconds
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
 
     def run_next(self) -> WorkerResult:
-        # Production runs a single worker. A stale job owned by a different
-        # process was interrupted and must be claimed again from scratch.
-        self.store.requeue_interrupted_jobs(
-            self.worker_id,
-            stale_after_seconds=self.interrupted_job_stale_seconds,
-        )
         self.store.requeue_retryable_failures()
-        job = self.store.claim_next(self.worker_id)
+        job = self.store.claim_next(
+            self.worker_id,
+            interrupted_job_stale_seconds=self.interrupted_job_stale_seconds,
+        )
         if job is None:
             return WorkerResult(worker_id=self.worker_id, job=None, processed=False)
 
@@ -56,11 +55,16 @@ class MapWorker:
             )
 
         try:
-            map_id, archive_path = self.pipeline.build(
-                job,
-                on_status=update,
-                on_progress=update_progress,
-            )
+            with self.store.keep_worker_lease_alive(
+                job.job_id,
+                worker_id=self.worker_id,
+                interval_seconds=self.heartbeat_interval_seconds,
+            ):
+                map_id, archive_path = self.pipeline.build(
+                    job,
+                    on_status=update,
+                    on_progress=update_progress,
+                )
             finished = self.store.update_status_unless_cancelled(
                 job.job_id,
                 JobStatus.READY,

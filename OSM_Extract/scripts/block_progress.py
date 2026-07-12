@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import sys
-from typing import TextIO
+from collections.abc import Iterable, Iterator
+from typing import TextIO, TypeVar
+
+
+T = TypeVar("T")
 
 
 class BlockProgressReporter:
@@ -27,3 +31,8 @@ class BlockProgressReporter:
             file=self.stream,
             flush=True,
         )
+
+    def track(self, items: Iterable[T]) -> Iterator[T]:
+        for item in items:
+            yield item
+            self.advance()

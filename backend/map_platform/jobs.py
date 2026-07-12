@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -165,37 +166,100 @@ class JobStore:
             self.save(job)
             return job
 
-    def claim_next(self, worker_id: str) -> MapJob | None:
+    def heartbeat_unless_cancelled(self, job_id: str, *, worker_id: str) -> MapJob:
+        with self._queue_lock():
+            job = self.get(job_id)
+            if job.status == JobStatus.CANCELLED:
+                raise RuntimeError("job was cancelled")
+            if job.worker_id != worker_id:
+                raise RuntimeError("job is owned by another worker")
+            job.updated_at = utc_now_iso()
+            self.save(job)
+            return job
+
+    @contextmanager
+    def keep_worker_lease_alive(self, job_id: str, *, worker_id: str, interval_seconds: float = 30.0):
+        if interval_seconds <= 0:
+            raise ValueError("heartbeat interval must be positive")
+        stop = threading.Event()
+
+        def heartbeat_loop() -> None:
+            while not stop.wait(interval_seconds):
+                try:
+                    self.heartbeat_unless_cancelled(job_id, worker_id=worker_id)
+                except (KeyError, RuntimeError):
+                    return
+
+        thread = threading.Thread(target=heartbeat_loop, name=f"map-job-heartbeat-{job_id}", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=max(interval_seconds, 1.0))
+
+    def claim(self, job_id: str, worker_id: str) -> MapJob:
+        with self._queue_lock():
+            job = self.get(job_id)
+            if job.status != JobStatus.QUEUED:
+                raise JobClaimError(f"job is {job.status.value}, not queued")
+            return self._claim_unlocked(job, worker_id)
+
+    def claim_next(self, worker_id: str, *, interrupted_job_stale_seconds: float | None = None) -> MapJob | None:
         with self._queue_lock():
             for job in self.list():
                 if job.status != JobStatus.QUEUED:
                     continue
-                if job.attempts >= job.max_attempts:
-                    self._update_status_unlocked(
-                        job.job_id,
-                        JobStatus.FAILED,
-                        error="maximum retry attempts exceeded",
-                        finished=True,
-                    )
+                claimed = self._claim_unlocked(job, worker_id)
+                if claimed.status == JobStatus.VALIDATING:
+                    return claimed
+            if interrupted_job_stale_seconds is None:
+                return None
+            for job in self.list():
+                if not self._is_interrupted(job, worker_id, interrupted_job_stale_seconds):
                     continue
-                job.status = JobStatus.VALIDATING
+                job.status = JobStatus.QUEUED
                 job.updated_at = utc_now_iso()
-                job.started_at = job.started_at or job.updated_at
-                job.worker_id = worker_id
-                job.attempts += 1
-                job.error = None
+                job.finished_at = None
                 job.progress_completed = None
                 job.progress_total = None
                 job.events.append(
                     {
                         "at": job.updated_at,
-                        "status": job.status.value,
-                        "message": f"claimed by worker {worker_id}",
+                        "status": JobStatus.QUEUED.value,
+                        "message": "requeued after worker restart",
                     }
                 )
-                self.save(job)
-                return job
+                claimed = self._claim_unlocked(job, worker_id)
+                if claimed.status == JobStatus.VALIDATING:
+                    return claimed
             return None
+
+    def _claim_unlocked(self, job: MapJob, worker_id: str) -> MapJob:
+        if job.attempts >= job.max_attempts:
+            return self._update_status_unlocked(
+                job.job_id,
+                JobStatus.FAILED,
+                error="maximum retry attempts exceeded",
+                finished=True,
+            )
+        job.status = JobStatus.VALIDATING
+        job.updated_at = utc_now_iso()
+        job.started_at = job.started_at or job.updated_at
+        job.worker_id = worker_id
+        job.attempts += 1
+        job.error = None
+        job.progress_completed = None
+        job.progress_total = None
+        job.events.append(
+            {
+                "at": job.updated_at,
+                "status": job.status.value,
+                "message": f"claimed by worker {worker_id}",
+            }
+        )
+        self.save(job)
+        return job
 
     def requeue_retryable_failures(self) -> int:
         count = 0
@@ -212,7 +276,7 @@ class JobStore:
                     count += 1
         return count
 
-    def requeue_interrupted_jobs(self, worker_id: str, *, stale_after_seconds: float) -> int:
+    def _is_interrupted(self, job: MapJob, worker_id: str, stale_after_seconds: float) -> bool:
         active_statuses = {
             JobStatus.VALIDATING,
             JobStatus.RESOLVING_SOURCE,
@@ -220,31 +284,12 @@ class JobStore:
             JobStatus.CONVERTING_FEATURES,
             JobStatus.PACKAGING,
         }
-        count = 0
-        with self._queue_lock():
-            for job in self.list():
-                if job.status not in active_statuses:
-                    continue
-                if not job.worker_id or job.worker_id == worker_id:
-                    continue
-                if _age_seconds(job.updated_at) < stale_after_seconds:
-                    continue
-                job.status = JobStatus.QUEUED
-                job.updated_at = utc_now_iso()
-                job.finished_at = None
-                job.worker_id = None
-                job.progress_completed = None
-                job.progress_total = None
-                job.events.append(
-                    {
-                        "at": job.updated_at,
-                        "status": JobStatus.QUEUED.value,
-                        "message": "requeued after worker restart",
-                    }
-                )
-                self.save(job)
-                count += 1
-        return count
+        return (
+            job.status in active_statuses
+            and bool(job.worker_id)
+            and job.worker_id != worker_id
+            and _age_seconds(job.updated_at) >= stale_after_seconds
+        )
 
     def _path(self, job_id: str) -> Path:
         if not re.match(r"^[a-zA-Z0-9_-]+$", job_id):
@@ -324,6 +369,10 @@ class MapJobService:
 
     def _new_job_id(self) -> str:
         return uuid.uuid4().hex[:20]
+
+
+class JobClaimError(RuntimeError):
+    pass
 
 
 def _age_seconds(value: str) -> float:

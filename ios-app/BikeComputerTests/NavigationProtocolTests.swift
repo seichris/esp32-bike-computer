@@ -298,6 +298,7 @@ struct NavigationProtocolTests {
         testOfflineMapPreparationTimeEstimate()
         testOfflineMapJobProgressDecoding()
         testOfflineMapJobProgressAbsentFallback()
+        testOfflineMapProgressPresentation()
         testOfflineMapJobPersistence()
         await testOfflineMapPollerOutlivesLegacyAttemptLimit()
         await testOfflineMapPollerRetriesTransientFailure()
@@ -532,17 +533,55 @@ struct NavigationProtocolTests {
         }
         defer { defaults.removePersistentDomain(forName: suite) }
 
-        OfflineMapJobPersistence.save(jobId: "job-resume", defaults: defaults)
+        OfflineMapJobPersistence.save(
+            jobId: "job-resume",
+            installOnDevice: true,
+            defaults: defaults
+        )
         assertEqual(
             OfflineMapJobPersistence.activeJobId(defaults: defaults),
             "job-resume",
             "active map job survives app relaunch"
+        )
+        assert(
+            OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults),
+            "onboarding map job preserves install intent"
         )
         OfflineMapJobPersistence.clear(defaults: defaults)
         assertEqual(
             OfflineMapJobPersistence.activeJobId(defaults: defaults),
             nil,
             "completed map job clears persisted recovery state"
+        )
+        assert(
+            !OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults),
+            "completed map job clears install intent"
+        )
+    }
+
+    static func testOfflineMapProgressPresentation() {
+        let legacy = offlineMapJob(status: "converting_features")
+        let progressPayload = Data(
+            """
+            {"jobId":"progress-job","status":"converting_features","progress":{"completedBlocks":4,"totalBlocks":10}}
+            """.utf8
+        )
+        let progressJob = try? JSONDecoder().decode(OfflineMapJob.self, from: progressPayload)
+
+        assertEqual(
+            OfflineMapProgressPresentation.value(job: legacy, downloadProgress: 0),
+            nil,
+            "older servers keep the indeterminate progress view"
+        )
+        assertEqual(
+            OfflineMapProgressPresentation.value(job: progressJob, downloadProgress: 0),
+            0.4,
+            "generation block progress drives the determinate progress view"
+        )
+        assertEqual(
+            OfflineMapProgressPresentation.value(job: progressJob, downloadProgress: 0.75),
+            0.4,
+            "generation progress takes precedence while conversion is active"
         )
     }
 

@@ -208,6 +208,7 @@ private struct MainFirmwareUpdateSection: View {
 }
 
 private struct DownloadingMapsSettingsSection: View {
+    @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
 
     var body: some View {
@@ -259,6 +260,20 @@ private struct DownloadingMapsSettingsSection: View {
                 Text(error)
                     .font(.caption)
                     .foregroundColor(.red)
+            }
+
+            if manager.isBusy, manager.hasPendingMapJob {
+                Button(role: .destructive) {
+                    manager.pausePendingMapJob()
+                } label: {
+                    Label("Pause Map Preparation", systemImage: "pause.circle")
+                }
+            } else if manager.hasPendingMapJob {
+                Button {
+                    manager.resumePendingMapJobIfNeeded(bleManager: bleManager)
+                } label: {
+                    Label("Resume Map Preparation", systemImage: "play.circle")
+                }
             }
         }
     }

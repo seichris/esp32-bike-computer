@@ -3,6 +3,7 @@ from funcs import process_features, clip_lines, clip_polygons, style_features, r
 from feature_types import get_type_id
 from map_format import write_fmb
 from block_progress import BlockProgressReporter
+from itertools import product
 from shapely import box
 import json, yaml
 import os, sys
@@ -52,8 +53,7 @@ y_positions = range(area_min_y, area_max_y, 4096)
 total = len(x_positions) * len(y_positions)
 progress = BlockProgressReporter(total)
 
-for init_x in x_positions:
-    for init_y in y_positions:
+for init_x, init_y in progress.track(product(x_positions, y_positions)):
         # print("--------------------")
         # print("init_x, init_y", init_x, init_y)
         min_x = init_x & (~mapblock_mask)
@@ -64,7 +64,6 @@ for init_x in x_positions:
         clipped_lines = clip_lines( lines, mapblock_bbox)
         clipped_polygons = clip_polygons( polygons, mapblock_bbox)
         if len(clipped_lines) == 0 and len( clipped_polygons) == 0:
-            progress.advance()
             continue
 
         # export map files
@@ -81,7 +80,6 @@ for init_x in x_positions:
         # SKIP if file already exists (RESUME feature)
         if os.path.exists(f"{file_name}.fmb"):
             print(f"  Step 5/5 Skipping existing block {block_x}_{block_y}      ", end='\r')
-            progress.advance()
             continue
 
         os.makedirs( folder_name, exist_ok=True)
@@ -130,5 +128,3 @@ for init_x in x_positions:
             min_x,
             min_y,
         )
-
-        progress.advance()

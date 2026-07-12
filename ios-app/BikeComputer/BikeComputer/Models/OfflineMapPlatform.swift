@@ -154,6 +154,15 @@ struct OfflineMapJobProgress: Decodable, Equatable {
     }
 }
 
+enum OfflineMapProgressPresentation {
+    static func value(job: OfflineMapJob?, downloadProgress: Double) -> Double? {
+        if job?.status == "converting_features", let progress = job?.progress {
+            return progress.fraction
+        }
+        return downloadProgress > 0 ? downloadProgress : nil
+    }
+}
+
 struct OfflineMapJobGeometry: Decodable, Equatable {
     let mode: String
     let bounds: [Double]

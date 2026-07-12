@@ -15,10 +15,13 @@ class BlockProgressReporterTests(unittest.TestCase):
         output = io.StringIO()
         progress = BlockProgressReporter(3, stream=output)
 
-        progress.advance()  # empty block path
-        progress.advance()  # resumed/skipped block path
-        progress.advance()  # rendered block path
+        visited = []
+        for branch in progress.track(["empty", "skipped", "rendered"]):
+            visited.append(branch)
+            if branch in {"empty", "skipped"}:
+                continue
 
+        self.assertEqual(visited, ["empty", "skipped", "rendered"])
         self.assertEqual(progress.completed, 3)
         self.assertEqual(
             [line for line in output.getvalue().splitlines() if line.startswith("MAP_PROGRESS:")],

@@ -244,9 +244,9 @@ class MapBuildPipeline:
         return PipelineMetadata(osmium_version=osmium_version)
 
 
-def run_job(store, pipeline: MapBuildPipeline, job_id: str) -> MapJob:
+def run_job(store, pipeline: MapBuildPipeline, job_id: str, *, heartbeat_interval_seconds: float = 30.0) -> MapJob:
     worker_id = f"api-{uuid.uuid4().hex[:8]}"
-    job = store.update_status(job_id, JobStatus.VALIDATING, worker_id=worker_id)
+    job = store.claim(job_id, worker_id)
 
     def update(status: JobStatus) -> None:
         store.update_status_unless_cancelled(job_id, status, worker_id=worker_id)
@@ -255,7 +255,12 @@ def run_job(store, pipeline: MapBuildPipeline, job_id: str) -> MapJob:
         store.update_progress_unless_cancelled(job_id, completed, total, worker_id=worker_id)
 
     try:
-        map_id, archive_path = pipeline.build(job, on_status=update, on_progress=update_progress)
+        with store.keep_worker_lease_alive(
+            job_id,
+            worker_id=worker_id,
+            interval_seconds=heartbeat_interval_seconds,
+        ):
+            map_id, archive_path = pipeline.build(job, on_status=update, on_progress=update_progress)
         return store.update_status_unless_cancelled(
             job_id,
             JobStatus.READY,

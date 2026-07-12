@@ -1,8 +1,10 @@
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
-from map_platform.jobs import JobStore, MapJobService
+from map_platform.jobs import JobClaimError, JobStore, MapJobService
 from map_platform.models import Bounds, JobStatus, SourceRegion
 from map_platform.pipeline import run_job
 from map_platform.sources import SourceIndex
@@ -34,6 +36,22 @@ class CancellingPipeline:
         if on_progress:
             on_progress(1, 10)
         return "map-123", Path("/tmp/map-123.zip")
+
+
+class BlockingPipeline:
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def build(self, job, on_status=None, on_progress=None):
+        if on_status:
+            on_status(JobStatus.EXTRACTING_PBF)
+        self.started.set()
+        if not self.release.wait(timeout=2):
+            raise TimeoutError("test pipeline was not released")
+        pack_path = Path(tempfile.gettempdir()) / f"map-blocking-{job.job_id}.zip"
+        pack_path.write_bytes(b"zip-data")
+        return "map-blocking", pack_path
 
 
 class WorkerTests(unittest.TestCase):
@@ -159,10 +177,10 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNotNone(store.claim_next("worker-old"))
             store.update_status(job.job_id, JobStatus.CONVERTING_FEATURES, worker_id="worker-old")
 
-            requeued = store.requeue_interrupted_jobs("worker-new", stale_after_seconds=60)
+            claimed = store.claim_next("worker-new", interrupted_job_stale_seconds=60)
             loaded = store.get(job.job_id)
 
-            self.assertEqual(requeued, 0)
+            self.assertIsNone(claimed)
             self.assertEqual(loaded.status, JobStatus.CONVERTING_FEATURES)
             self.assertEqual(loaded.worker_id, "worker-old")
 
@@ -173,8 +191,8 @@ class WorkerTests(unittest.TestCase):
             job = service.create_job({"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]})
             self.assertIsNotNone(store.claim_next("worker-old"))
             store.update_status(job.job_id, JobStatus.CONVERTING_FEATURES, worker_id="worker-old")
-            self.assertEqual(store.requeue_interrupted_jobs("worker-new", stale_after_seconds=0), 1)
-            self.assertIsNotNone(store.claim_next("worker-new"))
+            reclaimed = store.claim_next("worker-new", interrupted_job_stale_seconds=0)
+            self.assertIsNotNone(reclaimed)
 
             with self.assertRaisesRegex(RuntimeError, "owned by another worker"):
                 store.update_progress_unless_cancelled(job.job_id, 7, 10, worker_id="worker-old")
@@ -182,6 +200,40 @@ class WorkerTests(unittest.TestCase):
             loaded = store.get(job.job_id)
             self.assertEqual(loaded.worker_id, "worker-new")
             self.assertIsNone(loaded.progress_completed)
+
+    def test_live_worker_heartbeat_prevents_reclaim_during_long_phase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(tmp)
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job({"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]})
+            pipeline = BlockingPipeline()
+            first_worker = MapWorker(
+                store,
+                pipeline,
+                worker_id="worker-live",
+                interrupted_job_stale_seconds=0.03,
+                heartbeat_interval_seconds=0.005,
+            )
+            results = []
+            thread = threading.Thread(target=lambda: results.append(first_worker.run_next()))
+            thread.start()
+            self.assertTrue(pipeline.started.wait(timeout=1))
+            time.sleep(0.06)
+
+            second = MapWorker(
+                store,
+                FakePipeline(),
+                worker_id="worker-second",
+                interrupted_job_stale_seconds=0.03,
+                heartbeat_interval_seconds=0.005,
+            ).run_next()
+            pipeline.release.set()
+            thread.join(timeout=2)
+
+            self.assertFalse(second.processed)
+            self.assertEqual(len(results), 1)
+            self.assertEqual(store.get(job.job_id).status, JobStatus.READY)
+            self.assertEqual(store.get(job.job_id).worker_id, "worker-live")
 
     def test_synchronous_run_preserves_cancellation_from_progress_callback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -193,6 +245,23 @@ class WorkerTests(unittest.TestCase):
 
             self.assertEqual(result.status, JobStatus.CANCELLED)
             self.assertEqual(store.get(job.job_id).status, JobStatus.CANCELLED)
+
+    def test_synchronous_run_rejects_cancelled_or_owned_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(tmp)
+            service = MapJobService(SourceIndex([self.source]), store)
+            cancelled = service.create_job({"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]})
+            service.cancel_job(cancelled.job_id)
+
+            with self.assertRaisesRegex(JobClaimError, "cancelled, not queued"):
+                run_job(store, FakePipeline(), cancelled.job_id)
+            self.assertEqual(store.get(cancelled.job_id).status, JobStatus.CANCELLED)
+
+            active = service.create_job({"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]})
+            self.assertIsNotNone(store.claim_next("worker-active"))
+            with self.assertRaisesRegex(JobClaimError, "validating, not queued"):
+                run_job(store, FakePipeline(), active.job_id)
+            self.assertEqual(store.get(active.job_id).worker_id, "worker-active")
 
     def test_expire_ready_jobs_and_cleanup_work_dirs(self):
         with tempfile.TemporaryDirectory() as tmp:
