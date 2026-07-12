@@ -158,10 +158,10 @@ final class DeviceTransferManager {
                         }
                         return
                     }
-                    self.joinedAccessPointSSID = ssid
                     continuation.resume()
                 }
             }
+            joinedAccessPointSSID = ssid
         } catch {
             if await isTransferServerReachable(baseURL: session.baseURL,
                                                statusPath: statusPath,
