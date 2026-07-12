@@ -97,11 +97,38 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install backend test dependencies
-        run: python -m pip install -e '.[test]'
+        run: python -m pip install -e '.[test,object-storage]'
       - name: Python syntax
         run: python -m py_compile map_platform/*.py tests/*.py
       - name: Unit tests
         run: python -m unittest discover -s tests
+      - name: Production Compose config
+        env:
+          MAP_PLATFORM_API_TOKEN: ci-api-token
+          MAP_PLATFORM_DOWNLOAD_SECRET: ci-download-secret
+          MAP_PLATFORM_INSTALLATION_SECRET: ci-installation-secret-32-bytes-minimum
+          MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS: "86400"
+        run: docker compose config
+      - name: Build backend production image
+        run: docker build --file Dockerfile --tag open-bike-map-platform-ci ..
+      - name: Smoke-start backend production image
+        run: >-
+          docker run --rm
+          -e MAP_PLATFORM_API_TOKEN=ci-api-token
+          -e MAP_PLATFORM_DOWNLOAD_SECRET=ci-download-secret
+          -e MAP_PLATFORM_INSTALLATION_SECRET=ci-installation-secret-32-bytes-minimum
+          -e MAP_PLATFORM_DATA_ROOT=/tmp/map-platform-data
+          open-bike-map-platform-ci
+          python -c "from map_platform.api import create_app; app = create_app(); assert app.title"
+      - name: Smoke worker heartbeat
+        run: >-
+          docker run --rm
+          -e MAP_PLATFORM_DATA_ROOT=/tmp/map-platform-data
+          -e MAP_PLATFORM_WORKER_HEARTBEAT_PATH=/tmp/map-platform-data/health/worker
+          open-bike-map-platform-ci
+          bash -ec 'map-platform worker-loop --idle-sleep-seconds 0.1 & worker=$!;
+          for attempt in {1..50}; do test -s /tmp/map-platform-data/health/worker && break; sleep 0.1; done;
+          test -s /tmp/map-platform-data/health/worker; kill "$worker"; wait "$worker" || true'
 
   esp32-host:
     name: ESP32 Host Tests

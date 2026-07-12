@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+from .artifacts import ArtifactRecord
+
 
 class GeometryMode(str, Enum):
     CUSTOM_BBOX = "custom_bbox"
@@ -99,7 +101,7 @@ class SourceRegion:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "id": self.id,
             "provider": self.provider,
             "name": self.name,
@@ -110,6 +112,7 @@ class SourceRegion:
             "checksum": self.checksum,
             "license": self.license,
         }
+        return result
 
 
 @dataclass
@@ -125,9 +128,14 @@ class MapJob:
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
     error: str | None = None
+    error_code: str | None = None
     map_id: str | None = None
     pack_path: str | None = None
     pack_bytes: int | None = None
+    artifacts: list[ArtifactRecord] = field(default_factory=list)
+    artifact_metrics: dict[str, Any] | None = None
+    pending_artifact_keys: list[str] = field(default_factory=list)
+    artifact_gc_keys: list[str] = field(default_factory=list)
     attempts: int = 0
     max_attempts: int = 3
     worker_id: str | None = None
@@ -137,8 +145,8 @@ class MapJob:
     progress_total: int | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def to_dict(self, *, include_internal: bool = False) -> dict[str, Any]:
+        result = {
             "jobId": self.job_id,
             "status": self.status.value,
             "request": self.request,
@@ -150,9 +158,12 @@ class MapJob:
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
             "error": self.error,
+            "errorCode": self.error_code,
             "mapId": self.map_id,
             "packPath": self.pack_path,
             "packBytes": self.pack_bytes,
+            "artifacts": [artifact.to_dict() for artifact in self.artifacts],
+            "artifactMetrics": self.artifact_metrics,
             "attempts": self.attempts,
             "maxAttempts": self.max_attempts,
             "workerId": self.worker_id,
@@ -162,6 +173,10 @@ class MapJob:
             "events": self.events,
             "phaseTimings": self.phase_timings(),
         }
+        if include_internal:
+            result["pendingArtifactKeys"] = self.pending_artifact_keys
+            result["artifactGcKeys"] = self.artifact_gc_keys
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MapJob":
@@ -187,9 +202,14 @@ class MapJob:
             created_at=str(data["createdAt"]),
             updated_at=str(data["updatedAt"]),
             error=data.get("error"),
+            error_code=data.get("errorCode"),
             map_id=data.get("mapId"),
             pack_path=data.get("packPath"),
             pack_bytes=data.get("packBytes"),
+            artifacts=[ArtifactRecord.from_dict(value) for value in data.get("artifacts", [])],
+            artifact_metrics=dict(data["artifactMetrics"]) if data.get("artifactMetrics") else None,
+            pending_artifact_keys=[str(value) for value in data.get("pendingArtifactKeys", [])],
+            artifact_gc_keys=[str(value) for value in data.get("artifactGcKeys", [])],
             attempts=int(data.get("attempts", 0)),
             max_attempts=int(data.get("maxAttempts", 3)),
             worker_id=data.get("workerId"),

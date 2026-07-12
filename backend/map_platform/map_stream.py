@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import struct
+import time
+import uuid
 from copy import deepcopy
 from dataclasses import dataclass
-from pathlib import PurePosixPath
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, Protocol
 
 from .manifest import (
     MAX_PACK_MAP_ID_BYTES,
@@ -39,7 +42,11 @@ FIXED_HEADER_BYTES = _HEADER.size
 
 
 class MapStreamFormatError(ValueError):
-    pass
+    code = "map_stream_format_invalid"
+
+
+class MapStreamBuildError(RuntimeError):
+    code = "map_stream_build_failed"
 
 
 @dataclass(frozen=True)
@@ -174,6 +181,25 @@ class MapStreamSignatureEnvelope:
         return self
 
 
+class MapStreamSigner(Protocol):
+    key_id: str
+
+    def sign(self, manifest: bytes) -> MapStreamSignatureEnvelope: ...
+
+
+@dataclass(frozen=True)
+class MapStreamArtifactBuild:
+    path: Path
+    bytes: int
+    sha256: str
+    manifest_receipt: str
+    signed_manifest_receipt: str
+    signature_key_id: str
+    file_count: int
+    payload_bytes: int
+    timings: dict[str, float]
+
+
 def canonical_manifest_bytes(manifest: dict[str, Any]) -> bytes:
     normalized = deepcopy(manifest)
     if normalized.get("schemaVersion") != 1:
@@ -263,6 +289,143 @@ def build_stream_prefix(
     return header.encode() + manifest + encoded_envelope
 
 
+def write_map_stream_artifact(
+    map_root: str | Path,
+    manifest: dict[str, Any],
+    signer: MapStreamSigner,
+    output_path: str | Path,
+) -> MapStreamArtifactBuild:
+    total_started = time.perf_counter()
+    root = Path(map_root)
+    resolved_root = root.resolve()
+    destination = Path(output_path)
+    canonicalization_started = time.perf_counter()
+    manifest_bytes = canonical_manifest_bytes(manifest)
+    canonical_manifest = json.loads(manifest_bytes)
+    files = canonical_manifest["files"]
+    file_count = len(files)
+    payload_bytes = sum(file["bytes"] for file in files)
+    canonicalization_seconds = time.perf_counter() - canonicalization_started
+    signing_started = time.perf_counter()
+    envelope = signer.sign(manifest_bytes)
+    signing_seconds = time.perf_counter() - signing_started
+    if envelope.key_id != signer.key_id:
+        raise MapStreamBuildError("map signer returned an unexpected key ID")
+    envelope_bytes = envelope.encode()
+    prefix = build_stream_prefix(
+        manifest_bytes,
+        envelope,
+        file_count=file_count,
+        payload_bytes=payload_bytes,
+    )
+
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise MapStreamBuildError(f"map stream output directory is unavailable: {exc}") from exc
+    temporary = destination.parent / f".{destination.name}.{uuid.uuid4().hex}.tmp"
+    artifact_digest = hashlib.sha256()
+    written_bytes = 0
+    hashing_seconds = 0.0
+    artifact_write_seconds = 0.0
+    try:
+        try:
+            output_file = temporary.open("xb")
+        except OSError as exc:
+            raise MapStreamBuildError(f"map stream output file is unavailable: {exc}") from exc
+        with output_file as output:
+            operation_started = time.perf_counter()
+            try:
+                output.write(prefix)
+            except OSError as exc:
+                raise MapStreamBuildError(f"map stream output write failed: {exc}") from exc
+            artifact_write_seconds += time.perf_counter() - operation_started
+            operation_started = time.perf_counter()
+            artifact_digest.update(prefix)
+            hashing_seconds += time.perf_counter() - operation_started
+            written_bytes += len(prefix)
+            for entry in files:
+                source = root.joinpath(*PurePosixPath(entry["path"]).parts)
+                file_digest = hashlib.sha256()
+                file_bytes = 0
+                try:
+                    resolved_source = source.resolve(strict=True)
+                    resolved_source.relative_to(resolved_root)
+                    if source.is_symlink():
+                        raise MapStreamBuildError(
+                            f"map payload file may not be a symlink: {entry['path']}"
+                        )
+                    input_file = resolved_source.open("rb")
+                    with input_file:
+                        while True:
+                            try:
+                                chunk = input_file.read(1024 * 1024)
+                            except OSError as exc:
+                                raise MapStreamBuildError(
+                                    f"map payload file read failed: {entry['path']}"
+                                ) from exc
+                            if not chunk:
+                                break
+                            operation_started = time.perf_counter()
+                            try:
+                                output.write(chunk)
+                            except OSError as exc:
+                                raise MapStreamBuildError(
+                                    f"map stream output write failed: {exc}"
+                                ) from exc
+                            artifact_write_seconds += time.perf_counter() - operation_started
+                            operation_started = time.perf_counter()
+                            artifact_digest.update(chunk)
+                            file_digest.update(chunk)
+                            hashing_seconds += time.perf_counter() - operation_started
+                            file_bytes += len(chunk)
+                            written_bytes += len(chunk)
+                except (OSError, ValueError) as exc:
+                    raise MapStreamBuildError(f"map payload file is unavailable: {entry['path']}") from exc
+                if file_bytes != entry["bytes"]:
+                    raise MapStreamBuildError(f"map payload file size changed: {entry['path']}")
+                if file_digest.hexdigest() != entry["sha256"]:
+                    raise MapStreamBuildError(f"map payload file digest changed: {entry['path']}")
+            operation_started = time.perf_counter()
+            try:
+                output.flush()
+                os.fsync(output.fileno())
+            except OSError as exc:
+                raise MapStreamBuildError(f"map stream output sync failed: {exc}") from exc
+            artifact_write_seconds += time.perf_counter() - operation_started
+        expected_bytes = len(prefix) + payload_bytes
+        if written_bytes != expected_bytes:
+            raise MapStreamBuildError("map stream artifact length is inconsistent")
+        try:
+            os.replace(temporary, destination)
+            _fsync_directory(destination.parent)
+        except OSError as exc:
+            raise MapStreamBuildError(f"map stream output commit failed: {exc}") from exc
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    return MapStreamArtifactBuild(
+        path=destination,
+        bytes=written_bytes,
+        sha256=artifact_digest.hexdigest(),
+        manifest_receipt=manifest_receipt(manifest_bytes),
+        signed_manifest_receipt=signed_manifest_receipt(manifest_bytes, envelope_bytes),
+        signature_key_id=envelope.key_id,
+        file_count=file_count,
+        payload_bytes=payload_bytes,
+        timings={
+            "canonicalizationSeconds": canonicalization_seconds,
+            "signingSeconds": signing_seconds,
+            "hashingSeconds": hashing_seconds,
+            "artifactWriteSeconds": artifact_write_seconds,
+            "totalSeconds": time.perf_counter() - total_started,
+        },
+    )
+
+
 def _validate_header(header: MapStreamHeader) -> None:
     if header.format_version != FORMAT_VERSION:
         raise MapStreamFormatError("map stream format version is unsupported")
@@ -277,3 +440,11 @@ def _validate_header(header: MapStreamHeader) -> None:
         raise MapStreamFormatError("map stream file count is invalid")
     if not 0 < header.payload_bytes <= MAX_PAYLOAD_BYTES:
         raise MapStreamFormatError("map stream payload length is invalid")
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

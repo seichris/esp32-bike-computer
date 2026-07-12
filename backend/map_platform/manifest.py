@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .models import MapJob, utc_now_iso
+from .models import MapJob
 
 ALLOWED_PACK_FILE_RE = re.compile(r"VECTMAP/[A-Za-z0-9._-]+/[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\.fm[bp]")
 MAX_PACK_MAP_ID_BYTES = 64
@@ -98,7 +98,7 @@ def build_manifest(job: MapJob, map_root: Path, pipeline: PipelineMetadata) -> d
         "displayName": str(job.request.get("displayName", map_id)),
         "geometryType": job.geometry.mode.value,
         "bounds": job.geometry.bounds.to_list(),
-        "createdAt": utc_now_iso(),
+        "createdAt": job.created_at,
         "target": {
             "renderer": "esp32-fmb",
             "formatVersion": 1,
@@ -145,5 +145,12 @@ def write_pack_archive(map_root: Path, manifest: dict[str, Any], archive_path: P
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
         for relative in sorted(archived_paths):
             path = map_root / relative
-            archive.write(path, relative)
+            info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            info.create_system = 3
+            info.external_attr = 0o100644 << 16
+            info.file_size = path.stat().st_size
+            with path.open("rb") as source, archive.open(info, "w") as destination:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    destination.write(chunk)
     return archive_path

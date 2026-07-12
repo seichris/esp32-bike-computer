@@ -28,7 +28,12 @@ Status as of 2026-07-12:
 - Protocol v1 recovery, background archive upload, five-step progress, durable
   activation state, and atomic active-map selection are merged on `main` through
   PR #54.
-- Protocol v2 is specified by this document but is not implemented.
+- Protocol v2 implementation is in progress on PR #55. Phase 1 freezes the
+  signed stream contract and cross-language vectors; Phase 2 adds deterministic
+  production signing, dual artifacts, content-addressed filesystem/S3 storage,
+  persisted artifact metadata, stable errors/metrics, retention-safe publication
+  leases, bounded out-of-process garbage collection, stateless
+  installation-bound authorization, and identity-bound URL refresh.
 - No production capability should advertise v2 until the signed stream parser,
   one-pass writer, checkpoint recovery, and pointer transaction all exist and
   pass the acceptance gate below.

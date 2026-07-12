@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+import hashlib
 from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
@@ -13,13 +15,16 @@ from map_platform.map_stream import (
     P256_ORDER,
     SIGNATURE_DOMAIN,
     MapStreamFormatError,
+    MapStreamBuildError,
     MapStreamHeader,
     MapStreamLayout,
     MapStreamSignatureEnvelope,
     canonical_manifest_bytes,
     manifest_receipt,
     signed_manifest_receipt,
+    write_map_stream_artifact,
 )
+from map_platform.map_signing import P256MapArtifactSigner
 from tools.generate_map_stream_golden import build_vector
 
 
@@ -178,6 +183,68 @@ class MapStreamFormatTests(unittest.TestCase):
         fixture = read_fixture()
         self.assertEqual(build_vector(), build_vector())
         self.assertEqual(build_vector(), fixture)
+
+    def test_artifact_writer_is_deterministic_one_pass_and_payload_ordered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            map_id = "writer-map"
+            first_path = f"VECTMAP/{map_id}/+0000+0000/1.fmb"
+            second_path = f"VECTMAP/{map_id}/+0000+0000/2.fmp"
+            first = root / first_path
+            second = root / second_path
+            first.parent.mkdir(parents=True)
+            first.write_bytes(b"first-payload")
+            second.write_bytes(b"second-payload")
+            manifest = {
+                "schemaVersion": 1,
+                "mapId": map_id,
+                "files": [
+                    {
+                        "path": second_path,
+                        "bytes": second.stat().st_size,
+                        "sha256": hashlib.sha256(second.read_bytes()).hexdigest(),
+                    },
+                    {
+                        "path": first_path,
+                        "bytes": first.stat().st_size,
+                        "sha256": hashlib.sha256(first.read_bytes()).hexdigest(),
+                    },
+                ],
+            }
+            signer = P256MapArtifactSigner(
+                "map-writer-test",
+                ec.derive_private_key(4, ec.SECP256R1()),
+            )
+
+            first_build = write_map_stream_artifact(root, manifest, signer, root / "first.bmap")
+            second_build = write_map_stream_artifact(root, manifest, signer, root / "second.bmap")
+            self.assertEqual(first_build.sha256, second_build.sha256)
+            self.assertEqual(first_build.path.read_bytes(), second_build.path.read_bytes())
+            self.assertEqual(first_build.sha256, hashlib.sha256(first_build.path.read_bytes()).hexdigest())
+            self.assertEqual(first_build.file_count, 2)
+            self.assertEqual(first_build.payload_bytes, len(b"first-payloadsecond-payload"))
+            stream = first_build.path.read_bytes()
+            header = MapStreamHeader.decode(stream[:FIXED_HEADER_BYTES])
+            layout = MapStreamLayout.from_header(header, len(stream))
+            self.assertEqual(stream[layout.payload_offset :], b"first-payloadsecond-payload")
+            self.assertTrue(all(value >= 0 for value in first_build.timings.values()))
+
+            second.write_bytes(b"changed-after-manifest")
+            failed_output = root / "failed.bmap"
+            with self.assertRaises(MapStreamBuildError):
+                write_map_stream_artifact(root, manifest, signer, failed_output)
+            self.assertFalse(failed_output.exists())
+
+            blocked_parent = root / "not-a-directory"
+            blocked_parent.write_bytes(b"file")
+            with self.assertRaises(MapStreamBuildError) as raised:
+                write_map_stream_artifact(
+                    root,
+                    manifest,
+                    signer,
+                    blocked_parent / "failed.bmap",
+                )
+            self.assertEqual(raised.exception.code, "map_stream_build_failed")
 
 
 if __name__ == "__main__":

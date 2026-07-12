@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import tempfile
 import unittest
@@ -24,6 +25,11 @@ class MapJobRunAPITests(unittest.TestCase):
                 "MAP_PLATFORM_API_TOKEN": "",
                 "MAP_PLATFORM_ADMIN_TOKEN": "admin-secret",
                 "MAP_PLATFORM_DOWNLOAD_SECRET": "test-secret",
+                "MAP_PLATFORM_INSTALLATION_SECRET": "test-installation-secret-32-bytes-minimum",
+                "MAP_PLATFORM_ARTIFACT_STORE": "filesystem",
+                "MAP_PLATFORM_ARTIFACT_ROOT": str(Path(self.tmp.name) / "artifacts"),
+                "MAP_PLATFORM_MAP_STREAM_ENABLED": "0",
+                "MAP_PLATFORM_INLINE_WORKER_ENABLED": "1",
             },
             clear=False,
         )
@@ -68,6 +74,31 @@ class MapJobRunAPITests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ready")
+
+    def test_stream_rollout_keeps_signing_out_of_inline_api_worker(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MAP_PLATFORM_MAP_STREAM_ENABLED": "1",
+                "MAP_PLATFORM_MAP_SIGNING_KEY_ID": "",
+                "MAP_PLATFORM_MAP_SIGNING_PRIVATE_KEY_BASE64": "",
+            },
+            clear=False,
+        ):
+            client = TestClient(create_app())
+            try:
+                created = client.post(
+                    "/v1/map-jobs",
+                    json={"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]},
+                )
+                response = client.post(
+                    f"/v1/map-jobs/{created.json()['jobId']}/run",
+                    headers={"Authorization": "Bearer admin-secret"},
+                )
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.json()["detail"], "inline map workers are disabled")
+            finally:
+                client.close()
 
     def test_same_map_jobs_publish_and_download_exact_job_artifacts(self):
         def create_owned(request_id: str) -> str:
@@ -135,6 +166,180 @@ class MapJobRunAPITests(unittest.TestCase):
             self.assertEqual(downloaded.status_code, 200)
             self.assertEqual(downloaded.content, expected)
         self.assertNotEqual(pack_paths[0], pack_paths[1])
+
+    def test_artifact_url_refresh_is_identity_bound_and_downloads_immutable_object(self):
+        installation = self.client.post("/v1/installations").json()
+        installation_id = installation["clientInstallationId"]
+        installation_token = installation["clientInstallationToken"]
+        installation_headers = {"X-Installation-Token": installation_token}
+        response = self.client.post(
+            "/v1/map-jobs",
+            json={
+                "mode": "custom_bbox",
+                "bbox": [103.75, 1.24, 103.93, 1.37],
+                "clientInstallationId": installation_id,
+                "clientRequestId": "request-artifact-123",
+            },
+            headers=installation_headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        job_id = response.json()["jobId"]
+        source = Path(self.tmp.name) / "built.bmap"
+        source.write_bytes(b"immutable-bike-map-stream")
+        sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+        receipt = "4" * 64
+        object_key = f"maps/map-artifact/bike-map-stream-v1/map-prod-1/{receipt}.bmap"
+        self.client.app.state.artifact_store.put(
+            source,
+            object_key,
+            sha256=sha256,
+            media_type="application/vnd.openbikecomputer.map-stream",
+        )
+        self.update_job(
+            job_id,
+            status="ready",
+            mapId="map-artifact",
+            artifacts=[
+                {
+                    "format": "bike-map-stream-v1",
+                    "mediaType": "application/vnd.openbikecomputer.map-stream",
+                    "filename": "map-artifact.bmap",
+                    "objectKey": object_key,
+                    "bytes": source.stat().st_size,
+                    "sha256": sha256,
+                    "manifestReceipt": "3" * 64,
+                    "signedManifestReceipt": receipt,
+                    "signatureKeyId": "map-prod-1",
+                }
+            ],
+        )
+        self.assertEqual(
+            self.client.get(
+                "/v1/map-jobs",
+                params={"clientInstallationId": installation_id},
+            ).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.get(
+                "/v1/map-packs/map-artifact",
+                params={"clientInstallationId": installation_id},
+            ).status_code,
+            401,
+        )
+
+        signed = self.client.post(
+            "/v1/map-packs/map-artifact/artifacts/bike-map-stream-v1/download-url",
+            params={
+                "clientInstallationId": installation_id,
+                "jobId": job_id,
+                "signedManifestReceipt": receipt,
+            },
+            headers=installation_headers,
+        )
+        self.assertEqual(signed.status_code, 200)
+        self.assertEqual(signed.json()["signedManifestReceipt"], receipt)
+        self.assertEqual(signed.json()["sha256"], sha256)
+        downloaded = self.client.get(signed.json()["url"])
+        self.assertEqual(downloaded.status_code, 200)
+        self.assertEqual(downloaded.content, source.read_bytes())
+        tampered_url = signed.json()["url"].replace("signature=", "signature=0", 1)
+        self.assertEqual(self.client.get(tampered_url).status_code, 403)
+
+        wrong_identity = self.client.post(
+            "/v1/map-packs/map-artifact/artifacts/bike-map-stream-v1/download-url",
+            params={
+                "clientInstallationId": installation_id,
+                "jobId": job_id,
+                "signedManifestReceipt": "5" * 64,
+            },
+            headers=installation_headers,
+        )
+        other_installation = self.client.post(
+            "/v1/map-packs/map-artifact/artifacts/bike-map-stream-v1/download-url",
+            params={
+                "clientInstallationId": installation_id,
+                "jobId": job_id,
+            },
+            headers={"X-Installation-Token": "wrong-installation-token"},
+        )
+        missing_identity = self.client.post(
+            "/v1/map-packs/map-artifact/artifacts/bike-map-stream-v1/download-url",
+            params={
+                "clientInstallationId": installation_id,
+                "jobId": job_id,
+            },
+            headers=installation_headers,
+        )
+        self.assertEqual(wrong_identity.status_code, 404)
+        self.assertEqual(other_installation.status_code, 401)
+        self.assertEqual(missing_identity.status_code, 400)
+
+    def test_artifact_url_refresh_returns_object_store_presigned_url(self):
+        class PresigningStore:
+            def create_download_url(self, object_key, **options):
+                return f"https://objects.invalid/{object_key}?ttl={options['expires_in_seconds']}"
+
+            def local_path(self, object_key):
+                return None
+
+        with patch(
+            "map_platform.api.create_artifact_store_from_environment",
+            return_value=PresigningStore(),
+        ):
+            client = TestClient(create_app())
+        try:
+            installation = client.post("/v1/installations").json()
+            headers = {
+                "X-Installation-Token": installation["clientInstallationToken"]
+            }
+            created = client.post(
+                "/v1/map-jobs",
+                json={
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                    "clientInstallationId": installation["clientInstallationId"],
+                    "clientRequestId": "request-presign-123",
+                },
+                headers=headers,
+            ).json()
+            receipt = "6" * 64
+            self.update_job(
+                created["jobId"],
+                status="ready",
+                mapId="map-presigned",
+                artifacts=[
+                    {
+                        "format": "bike-map-stream-v1",
+                        "mediaType": "application/vnd.openbikecomputer.map-stream",
+                        "filename": "map-presigned.bmap",
+                        "objectKey": (
+                            "maps/map-presigned/bike-map-stream-v1/"
+                            f"map-prod-1/{receipt}.bmap"
+                        ),
+                        "bytes": 123,
+                        "sha256": "7" * 64,
+                        "manifestReceipt": "8" * 64,
+                        "signedManifestReceipt": receipt,
+                        "signatureKeyId": "map-prod-1",
+                    }
+                ],
+            )
+
+            response = client.post(
+                "/v1/map-packs/map-presigned/artifacts/bike-map-stream-v1/download-url",
+                params={
+                    "jobId": created["jobId"],
+                    "clientInstallationId": installation["clientInstallationId"],
+                    "signedManifestReceipt": receipt,
+                },
+                headers=headers,
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()["url"].startswith("https://objects.invalid/"))
+            self.assertIn("ttl=900", response.json()["url"])
+        finally:
+            client.close()
 
     def test_pre_deploy_signed_url_can_download_legacy_shared_artifact(self):
         legacy_job_id = self.create_job()
