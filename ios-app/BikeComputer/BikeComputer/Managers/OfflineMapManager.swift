@@ -607,27 +607,6 @@ final class OfflineMapManager: ObservableObject {
         }
     }
 
-    func recoverServerMap(jobId: String) {
-        guard canStartNewMapJob() else { return }
-        let normalized = jobId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard normalized.range(of: "^[A-Za-z0-9_-]{8,128}$", options: .regularExpression) != nil else {
-            errorMessage = "Enter a valid server job ID."
-            return
-        }
-        errorMessage = nil
-        startMapJobTask { manager in
-            let client = try manager.makeClient()
-            manager.currentJob = try await client.job(id: normalized)
-            manager.persistCurrentJob(installOnDevice: false)
-            try await manager.finishRecoveredJob(
-                jobId: normalized,
-                installOnDevice: false,
-                client: client,
-                bleManager: nil
-            )
-        }
-    }
-
     func pausePendingMapJob() {
         guard mapJobTask != nil else { return }
         mapJobTask?.cancel()

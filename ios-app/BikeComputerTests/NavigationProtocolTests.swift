@@ -1157,49 +1157,6 @@ struct NavigationProtocolTests {
             discoveryManager.deleteCachedPack(at: url)
         }
 
-        let manualSuite = "offline-map-manual-route-\(UUID().uuidString)"
-        let manualDefaults = UserDefaults(suiteName: manualSuite)!
-        defer { manualDefaults.removePersistentDomain(forName: manualSuite) }
-        manualDefaults.set("https://manual.example", forKey: "offlineMap.serverURL")
-        let manualCache = FileManager.default.temporaryDirectory
-            .appendingPathComponent("offline-map-manual-cache-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: manualCache) }
-        let manualManager = OfflineMapManager(
-            defaults: manualDefaults,
-            mapPlatformSession: session,
-            cacheDirectory: manualCache,
-            packDownload: { _, onProgress, _ in
-                onProgress(1)
-                let url = FileManager.default.temporaryDirectory
-                    .appendingPathComponent(UUID().uuidString)
-                    .appendingPathExtension("zip")
-                try packData(mapId: "map-manual").write(to: url)
-                return url
-            }
-        )
-        OfflineMapTestURLProtocol.configure { request in
-            if request.url?.path == "/v1/map-jobs/job-manual" {
-                return (200, jobData(jobId: "job-manual", mapId: "map-manual"))
-            }
-            if request.url?.path == "/v1/map-packs/map-manual/download-url" {
-                return (200, downloadURLData(mapId: "map-manual"))
-            }
-            return (404, Data())
-        }
-        manualManager.recoverServerMap(jobId: "job-manual")
-        let manualCompleted = await waitForMapTaskCompletion(manualManager)
-        assert(manualCompleted, "manual legacy recovery should complete")
-        assert(!manualManager.hasPendingMapJob, "manual recovery clears completed durable state")
-        assert(
-            OfflineMapTestURLProtocol.requests().contains {
-                $0.url?.query?.contains("clientInstallationId=") == true
-            },
-            "manual recovery scopes job and download reads to this installation"
-        )
-        if let url = manualManager.downloadedPackURL {
-            manualManager.deleteCachedPack(at: url)
-        }
-
         let retrySuite = "offline-map-discovery-retry-\(UUID().uuidString)"
         let retryDefaults = UserDefaults(suiteName: retrySuite)!
         defer { retryDefaults.removePersistentDomain(forName: retrySuite) }

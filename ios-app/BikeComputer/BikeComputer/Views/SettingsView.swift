@@ -313,7 +313,6 @@ private struct DownloadingMapsSettingsSection: View {
 private struct SavedMapsSettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
-    @State private var recoveryJobId = ""
     @FocusState private var focusedPackFilename: String?
 
     var body: some View {
@@ -347,24 +346,6 @@ private struct SavedMapsSettingsSection: View {
             }
             .disabled(manager.isBusy || manager.hasPendingMapJob)
 
-            DisclosureGroup("Recover a Server Map") {
-                TextField("Server job ID", text: $recoveryJobId)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                Button {
-                    manager.recoverServerMap(jobId: recoveryJobId)
-                } label: {
-                    Label("Download Recovered Map", systemImage: "arrow.clockwise.icloud")
-                }
-                .disabled(
-                    manager.isBusy ||
-                        manager.hasPendingMapJob ||
-                        recoveryJobId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
-                Text("Use this for a map created before automatic recovery was available.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
         }
         .onTapGesture {
             focusedPackFilename = nil
