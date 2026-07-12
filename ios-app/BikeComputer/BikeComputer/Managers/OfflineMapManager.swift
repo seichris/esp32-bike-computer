@@ -176,8 +176,17 @@ nonisolated enum MapActivationTransport {
     static func isAmbiguousResponseError(_ error: Error) -> Bool {
         let nsError = error as NSError
         guard nsError.domain == NSURLErrorDomain else { return false }
-        return nsError.code == NSURLErrorNetworkConnectionLost ||
-            nsError.code == NSURLErrorTimedOut
+        return [
+            NSURLErrorTimedOut,
+            NSURLErrorCannotFindHost,
+            NSURLErrorCannotConnectToHost,
+            NSURLErrorNetworkConnectionLost,
+            NSURLErrorDNSLookupFailed,
+            NSURLErrorNotConnectedToInternet,
+            NSURLErrorInternationalRoamingOff,
+            NSURLErrorCallIsActive,
+            NSURLErrorDataNotAllowed,
+        ].contains(nsError.code)
     }
 }
 
@@ -1325,6 +1334,16 @@ final class OfflineMapManager: ObservableObject {
                 statusMessage = "map downloaded; reconnect device to install"
                 return
             }
+            if let downloadedPackURL,
+               await waitForInstalledCachedPack(
+                    downloadedPackURL,
+                    bleManager: bleManager
+               ) {
+                statusMessage = "map installed: \(displayName(forCachedPack: downloadedPackURL))"
+                updateLastTransferOutcome("installed")
+                clearPersistedJob(markHandled: true)
+                return
+            }
             try await transferReadyPack(bleManager: bleManager)
             clearPersistedJob(markHandled: true)
             return
@@ -1354,9 +1373,46 @@ final class OfflineMapManager: ObservableObject {
                 statusMessage = "map downloaded; reconnect device to install"
                 return
             }
+            if let downloadedPackURL,
+               await waitForInstalledCachedPack(
+                    downloadedPackURL,
+                    bleManager: bleManager
+               ) {
+                statusMessage = "map installed: \(displayName(forCachedPack: downloadedPackURL))"
+                updateLastTransferOutcome("installed")
+                clearPersistedJob(markHandled: true)
+                return
+            }
             try await transferReadyPack(bleManager: bleManager)
         }
         clearPersistedJob(markHandled: true)
+    }
+
+    private func waitForInstalledCachedPack(
+        _ packURL: URL,
+        bleManager: BLEManager
+    ) async -> Bool {
+        if isCachedPackInstalled(
+            packURL,
+            activeMapId: bleManager.mapTransferActiveMapId,
+            activeSessionId: bleManager.mapTransferActiveSessionId
+        ) {
+            return true
+        }
+        guard bleManager.requestMapTransferStatus() else { return false }
+        _ = await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2)
+        for _ in 0..<20 {
+            if Task.isCancelled { return false }
+            if isCachedPackInstalled(
+                packURL,
+                activeMapId: bleManager.mapTransferActiveMapId,
+                activeSessionId: bleManager.mapTransferActiveSessionId
+            ) {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return false
     }
 
     private func restoreDownloadedPackIfAvailable(jobId: String) -> Bool {

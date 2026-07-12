@@ -23,6 +23,7 @@ public:
   bool activationHasError() const;
   bool takeActivatedMapRoot(std::string &root);
   bool takeAutomaticExitRequest();
+  void resumePendingArchiveActivation();
 
 private:
   std::string storageRoot_ = "/sdcard";

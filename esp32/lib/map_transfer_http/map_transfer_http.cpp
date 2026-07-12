@@ -447,6 +447,13 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     }
   }
 
+  if (isArchive && !installer_.markPendingArchiveActivation(sessionId)) {
+    installer_.discardStagedSession(sessionId);
+    sendError(client, 500, "activation_marker",
+              "could not persist pending archive activation");
+    return true;
+  }
+
   Serial.printf("MAP_TRANSFER_HTTP: staged session=%s path=%s bytes=%llu\n",
                 sessionId.c_str(), relativePath.c_str(),
                 static_cast<unsigned long long>(contentLength));
@@ -464,6 +471,11 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     if (beginResult == ActivationBeginResult::Started) {
       startActivationTask(sessionId, true);
     } else if (beginResult == ActivationBeginResult::AlreadyInstalled) {
+      if (!installer_.discardStagedSession(sessionId) ||
+          !installer_.clearPendingArchiveActivation()) {
+        setLastError("staging_cleanup",
+                     "could not remove redundant installed archive");
+      }
       requestAutomaticExit();
     }
   }
@@ -611,6 +623,31 @@ bool MapTransferHttpServer::takeAutomaticExitRequest() {
   return requested;
 }
 
+void MapTransferHttpServer::resumePendingArchiveActivation() {
+  std::string sessionId;
+  if (!installer_.readPendingArchiveActivation(sessionId))
+    return;
+
+  ActiveMapSelection active;
+  if (installer_.readActiveMap(active).ok && active.sessionId == sessionId) {
+    if (!installer_.discardStagedSession(sessionId) ||
+        !installer_.clearPendingArchiveActivation()) {
+      setLastError("staging_cleanup",
+                   "could not clean completed pending archive");
+    }
+    return;
+  }
+
+  lockState();
+  const ActivationBeginResult beginResult = activationState_.begin(sessionId);
+  unlockState();
+  if (beginResult == ActivationBeginResult::Started) {
+    Serial.printf("MAP_TRANSFER_HTTP: resuming pending archive session=%s\n",
+                  sessionId.c_str());
+    startActivationTask(sessionId, true);
+  }
+}
+
 void MapTransferHttpServer::requestAutomaticExit() {
   lockState();
   pendingAutomaticExit_ = true;
@@ -708,8 +745,13 @@ void MapTransferHttpServer::activationTaskThunk(void *arg) {
     const bool automaticExit = context->automaticExit;
     delete context;
     server->runActivationTask(sessionId);
-    if (automaticExit)
+    if (automaticExit) {
+      if (!server->installer_.clearPendingArchiveActivation()) {
+        server->setLastError("activation_marker",
+                             "could not clear pending archive activation");
+      }
       server->requestAutomaticExit();
+    }
   } else {
     delete context;
   }

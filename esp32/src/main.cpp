@@ -571,6 +571,7 @@ void setup() {
 
   log_i("Setup Complete");
   firmwareUpdateHttp.markRunningAppValid();
+  mapTransferHttp.resumePendingArchiveActivation();
 }
 
 /**

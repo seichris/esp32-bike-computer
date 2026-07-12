@@ -21,6 +21,8 @@ constexpr const char *kVectMapPrefix = "VECTMAP/";
 constexpr const char *kActiveMapFile = "/VECTMAP/active-map.json";
 constexpr const char *kActivationTransactionFile =
     "/VECTMAP/.activation-transaction.json";
+constexpr const char *kPendingArchiveActivationFile =
+    "/VECTMAP/.pending-archive-activation";
 constexpr const char *kInstalledManifestFile = ".manifest.json";
 constexpr const char *kInstalledReceiptFile = ".verified.sha256";
 // Large city packs can contain several thousand map files; their hash manifest
@@ -1076,6 +1078,35 @@ bool MapTransferInstaller::pruneObsoleteInstalledMaps() const {
     ::closedir(legacy);
   }
   return ok;
+}
+
+bool MapTransferInstaller::markPendingArchiveActivation(
+    const std::string &sessionId) const {
+  if (!safeId(sessionId))
+    return false;
+  const std::string path = joinPath(storageRoot_, kPendingArchiveActivationFile);
+  return mkdirs(dirnameOf(path)) && writeTextFileAtomic(path, sessionId);
+}
+
+bool MapTransferInstaller::readPendingArchiveActivation(
+    std::string &sessionId) const {
+  const std::string path = joinPath(storageRoot_, kPendingArchiveActivationFile);
+  std::string value;
+  if (!readTextFile(path, value, 80) || !safeId(value))
+    return false;
+  sessionId = value;
+  return true;
+}
+
+bool MapTransferInstaller::clearPendingArchiveActivation() const {
+  const std::string path = joinPath(storageRoot_, kPendingArchiveActivationFile);
+  return removeTree(path) && removeTree(path + ".bak") &&
+         removeTree(path + ".tmp");
+}
+
+bool MapTransferInstaller::discardStagedSession(
+    const std::string &sessionId) const {
+  return safeId(sessionId) && removeTree(stagingRoot(sessionId));
 }
 
 std::string MapTransferInstaller::stagingRoot(const std::string &sessionId) const {

@@ -824,6 +824,25 @@ static void testStoredArchiveRejectsMissingCentralDirectory() {
   assert(!exists(installer.stagingRoot(session) + "/manifest.json"));
 }
 
+static void testPendingArchiveActivationSurvivesRestart() {
+  const std::string root = tempRoot();
+  MapTransferInstaller first(root);
+  const std::string session = "session-pending-archive";
+  assert(::system((std::string("mkdir -p ") + first.stagingRoot(session))
+                      .c_str()) == 0);
+  writeFile(first.stagedArchivePath(session), "archive");
+  assert(first.markPendingArchiveActivation(session));
+
+  MapTransferInstaller afterRestart(root);
+  std::string recoveredSession;
+  assert(afterRestart.readPendingArchiveActivation(recoveredSession));
+  assert(recoveredSession == session);
+  assert(afterRestart.discardStagedSession(session));
+  assert(!exists(afterRestart.stagingRoot(session)));
+  assert(afterRestart.clearPendingArchiveActivation());
+  assert(!afterRestart.readPendingArchiveActivation(recoveredSession));
+}
+
 int main() {
   testSha256KnownVector();
   testActivationStateTracksAttemptsAndCompactStatus();
@@ -852,6 +871,7 @@ int main() {
   testVerificationReceiptControlsResumeEligibility();
   testStoredArchivePreparesAndActivatesInBackgroundTransferPath();
   testStoredArchiveRejectsMissingCentralDirectory();
+  testPendingArchiveActivationSurvivesRestart();
   std::cout << "map_transfer tests passed\n";
   return 0;
 }

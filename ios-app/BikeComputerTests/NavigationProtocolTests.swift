@@ -2839,8 +2839,12 @@ struct NavigationProtocolTests {
             "lost activation response enters reconciliation"
         )
         assert(
-            !MapActivationTransport.isAmbiguousResponseError(URLError(.cannotConnectToHost)),
-            "a connection failure before delivery remains a hard error"
+            MapActivationTransport.isAmbiguousResponseError(URLError(.cannotConnectToHost)),
+            "automatic activation may close device HTTP before the redundant POST connects"
+        )
+        assert(
+            MapActivationTransport.isAmbiguousResponseError(URLError(.notConnectedToInternet)),
+            "accessory AP shutdown proceeds to BLE activation reconciliation"
         )
     }
 

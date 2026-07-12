@@ -111,6 +111,10 @@ public:
   InstallStatus readActiveMapId(std::string &mapId) const;
   bool pruneStagingSessions(const std::string &keepSessionId) const;
   bool pruneObsoleteInstalledMaps() const;
+  bool markPendingArchiveActivation(const std::string &sessionId) const;
+  bool readPendingArchiveActivation(std::string &sessionId) const;
+  bool clearPendingArchiveActivation() const;
+  bool discardStagedSession(const std::string &sessionId) const;
 
   std::string stagingRoot(const std::string &sessionId) const;
   std::string stagedArchivePath(const std::string &sessionId) const;

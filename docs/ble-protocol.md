@@ -344,7 +344,9 @@ bulk upload:
 
 The archive route starts activation after its response is durably staged so a
 background iOS upload remains installable even if iOS terminates the originating
-app process. Firmware disables transfer mode after that activation finishes.
+app process. A pending-session marker is committed before the upload response;
+firmware resumes it after a board reset until activation reaches a terminal
+result. Firmware disables transfer mode after that activation finishes.
 The explicit activation route remains idempotent for the foreground per-file
 fallback and for clients that are still alive after the archive upload.
 
