@@ -388,6 +388,7 @@ struct NavigationProtocolTests {
         testOfflineMapJobProgressDecoding()
         testOfflineMapJobProgressAbsentFallback()
         testOfflineMapProgressPresentation()
+        testMapActivationProgressPresentation()
         testOfflineMapDownloadingSectionPresentation()
         testOfflineMapActivityCounterOverlappingOperations()
         testBackgroundTransferCompletionGate()
@@ -977,6 +978,27 @@ struct NavigationProtocolTests {
             OfflineMapProgressPresentation.value(job: progressJob, downloadProgress: 0.75),
             0.4,
             "generation progress takes precedence while conversion is active"
+        )
+    }
+
+    static func testMapActivationProgressPresentation() {
+        let progress = MapActivationProgressPresentation.make(
+            status: "activating",
+            step: 1,
+            stepCount: 4,
+            percentage: 6
+        )
+        assertEqual(progress?.label, "Step 1 - 6%", "activation progress stays concise")
+        assertEqual(progress?.fraction, 0.06, "activation percentage drives the progress bar")
+        assertEqual(
+            MapActivationProgressPresentation.make(
+                status: "installed",
+                step: 4,
+                stepCount: 4,
+                percentage: 100
+            ),
+            nil,
+            "completed activation hides the in-progress presentation"
         )
     }
 
@@ -4326,7 +4348,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2"},"lastError":{"code":"previous","message":"previous upload failed"}}
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":4,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
         """
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -4339,6 +4361,9 @@ struct NavigationProtocolTests {
         assertEqual(manager.mapTransferActivationSequence, 12, "status parser exposes activation sequence")
         assertEqual(manager.mapTransferActivationSessionId, "tokyo-v2", "status parser exposes activation session")
         assertEqual(manager.mapTransferActivationMapId, "tokyo-v2", "status parser exposes activating map id")
+        assertEqual(manager.mapTransferActivationStep, 1, "status parser exposes activation step")
+        assertEqual(manager.mapTransferActivationStepCount, 4, "status parser exposes activation step count")
+        assertEqual(manager.mapTransferActivationProgress, 6, "status parser exposes activation percentage")
         assertEqual(manager.deviceHasSDCard, true, "status parser exposes physical SD state")
         assertEqual(manager.deviceMapFoundForCurrentLocation, false, "status parser exposes current map coverage")
         assertEqual(manager.deviceMapBlockCount, 0, "status parser exposes current map block count")

@@ -590,6 +590,7 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var selectedMapBounds: OfflineMapBounds?
     @Published private(set) var statusMessage = ""
     @Published private(set) var errorMessage: String?
+    @Published private(set) var activationProgress: MapActivationProgressPresentation?
     @Published private(set) var lastTransferMapId: String
     @Published private(set) var lastTransferOutcome: String
 
@@ -629,6 +630,7 @@ final class OfflineMapManager: ObservableObject {
     @Published private var packDisplayNames: [String: String]
     private var mapJobTask: Task<Void, Never>?
     private var mapJobTaskID: UUID?
+    private var activationReconciliationTask: Task<Void, Never>?
     private var activityCounter = OfflineMapActivityCounter()
 
     init(
@@ -966,6 +968,12 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func reconcileLastTransfer(bleManager: BLEManager) {
+        updateActivationProgress(
+            status: bleManager.mapTransferActivationStatus,
+            step: bleManager.mapTransferActivationStep,
+            stepCount: bleManager.mapTransferActivationStepCount,
+            percentage: bleManager.mapTransferActivationProgress
+        )
         guard lastTransferOutcome == "unconfirmed",
               !lastTransferMapId.isEmpty,
               let sessionId = defaults.string(
@@ -1020,6 +1028,7 @@ final class OfflineMapManager: ObservableObject {
         case .pending:
             statusMessage = "Activation continues on device"
             errorMessage = nil
+            startActivationReconciliationMonitor(bleManager: bleManager)
         }
     }
 
@@ -1651,6 +1660,7 @@ final class OfflineMapManager: ObservableObject {
                     outcome: "activating"
                 )
                 statusMessage = "activating \(displayName(forMapId: expectedMapId))"
+                activationProgress = nil
                 bleManager.resetMapTransferActivationObservation()
                 var acceptedSequence = activationAlreadyStarted
                     ? statusBeforeActivation?.activation?.sequence
@@ -1690,6 +1700,7 @@ final class OfflineMapManager: ObservableObject {
                 case .continuesOnDevice:
                     statusMessage = "Activation continues on device"
                     updateLastTransferOutcome("unconfirmed")
+                    startActivationReconciliationMonitor(bleManager: bleManager)
                 }
                 bleManager.requestMapTransferStatus()
             }
@@ -1738,9 +1749,10 @@ final class OfflineMapManager: ObservableObject {
                              timeout: TimeInterval = OfflineMapDefaults.activationConfirmationTimeout,
                              pollIntervalNanoseconds: UInt64 = OfflineMapDefaults.activationPollIntervalNanoseconds) async throws -> MapActivationConfirmationResult {
         let startedAt = Date()
-        let deadline = startedAt.addingTimeInterval(timeout)
+        var deadline = startedAt.addingTimeInterval(timeout)
         var lastObservedState = "activation request accepted"
         var observedCurrentAttempt = false
+        var lastProgress: MapActivationProgressPresentation?
 
         while Date() < deadline {
             var receivedHTTPStatus = false
@@ -1748,6 +1760,17 @@ final class OfflineMapManager: ObservableObject {
                 let status = try await client.status()
                 receivedHTTPStatus = true
                 let activation = status.activation
+                updateActivationProgress(
+                    status: activation?.status,
+                    step: activation?.step,
+                    stepCount: activation?.steps,
+                    percentage: activation?.progress
+                )
+                if let activationProgress,
+                   activationProgress != lastProgress {
+                    lastProgress = activationProgress
+                    deadline = Date().addingTimeInterval(timeout)
+                }
                 let evaluation = MapActivationReconciler.evaluate(
                     expectedMapId: expectedMapId,
                     sessionId: sessionId,
@@ -1786,6 +1809,17 @@ final class OfflineMapManager: ObservableObject {
 
             if !receivedHTTPStatus {
                 bleManager.requestMapTransferStatus()
+                updateActivationProgress(
+                    status: bleManager.mapTransferActivationStatus,
+                    step: bleManager.mapTransferActivationStep,
+                    stepCount: bleManager.mapTransferActivationStepCount,
+                    percentage: bleManager.mapTransferActivationProgress
+                )
+                if let activationProgress,
+                   activationProgress != lastProgress {
+                    lastProgress = activationProgress
+                    deadline = Date().addingTimeInterval(timeout)
+                }
                 let evaluation = MapActivationReconciler.evaluate(
                     expectedMapId: expectedMapId,
                     sessionId: sessionId,
@@ -1814,8 +1848,8 @@ final class OfflineMapManager: ObservableObject {
                 }
             }
 
-            let elapsedSeconds = Int(Date().timeIntervalSince(startedAt))
-            statusMessage = "activating \(displayName(forMapId: expectedMapId)) (\(elapsedSeconds)s)"
+            statusMessage = activationProgress?.label ??
+                "activating \(displayName(forMapId: expectedMapId))"
             try await Task.sleep(
                 nanoseconds: pollIntervalNanoseconds
             )
@@ -1824,6 +1858,42 @@ final class OfflineMapManager: ObservableObject {
         return .continuesOnDevice(
             lastState: lastObservedState
         )
+    }
+
+    private func updateActivationProgress(
+        status: String?,
+        step: Int?,
+        stepCount: Int?,
+        percentage: Int?
+    ) {
+        activationProgress = MapActivationProgressPresentation.make(
+            status: status,
+            step: step,
+            stepCount: stepCount,
+            percentage: percentage
+        )
+    }
+
+    private func startActivationReconciliationMonitor(bleManager: BLEManager) {
+        guard activationReconciliationTask == nil,
+              lastTransferOutcome == "unconfirmed" else {
+            return
+        }
+        activationReconciliationTask = Task { @MainActor [weak self, weak bleManager] in
+            while !Task.isCancelled,
+                  let self,
+                  let bleManager,
+                  self.lastTransferOutcome == "unconfirmed" {
+                if bleManager.isNavigationReady {
+                    bleManager.requestMapTransferStatus()
+                    self.reconcileLastTransfer(bleManager: bleManager)
+                }
+                try? await Task.sleep(
+                    nanoseconds: OfflineMapDefaults.activationPollIntervalNanoseconds
+                )
+            }
+            self?.activationReconciliationTask = nil
+        }
     }
 
     private func recordTransfer(mapId: String,
@@ -1849,6 +1919,10 @@ final class OfflineMapManager: ObservableObject {
     private func updateLastTransferOutcome(_ outcome: String) {
         lastTransferOutcome = outcome
         defaults.set(outcome, forKey: OfflineMapDefaults.lastTransferOutcomeKey)
+        if outcome != "unconfirmed" {
+            activationReconciliationTask?.cancel()
+            activationReconciliationTask = nil
+        }
     }
 
     private func displayNameForCurrentJob() -> String? {

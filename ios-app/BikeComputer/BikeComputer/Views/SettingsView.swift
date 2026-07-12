@@ -238,7 +238,14 @@ private struct DownloadingMapsSettingsSection: View {
                 )
             }
 
-            if !manager.statusMessage.isEmpty {
+            if let activationProgress = manager.activationProgress {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(activationProgress.label)
+                    ProgressView(value: activationProgress.fraction)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Map activation \(activationProgress.label)")
+            } else if !manager.statusMessage.isEmpty {
                 StatusValueRow(status: manager.statusMessage, isBusy: manager.isBusy)
             } else if manager.hasPendingDeviceActivation {
                 StatusValueRow(status: "Activation continues on device", isBusy: false)
@@ -370,6 +377,12 @@ private struct SavedMapsSettingsSection: View {
             manager.reconcileLastTransfer(bleManager: bleManager)
         }
         .onChange(of: bleManager.mapTransferActivationSequence) { _ in
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
+        .onChange(of: bleManager.mapTransferActivationStep) { _ in
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
+        .onChange(of: bleManager.mapTransferActivationProgress) { _ in
             manager.reconcileLastTransfer(bleManager: bleManager)
         }
     }

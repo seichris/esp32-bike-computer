@@ -596,6 +596,13 @@ std::string MapTransferHttpServer::activationStatusJson(bool compact) const {
   return body;
 }
 
+MapActivationSnapshot MapTransferHttpServer::activationSnapshot() const {
+  lockState();
+  MapActivationSnapshot snapshot = activationState_.snapshot();
+  unlockState();
+  return snapshot;
+}
+
 bool MapTransferHttpServer::activationHasError() const {
   lockState();
   const bool hasError = !activationState_.snapshot().errorCode.empty();
@@ -666,6 +673,13 @@ void MapTransferHttpServer::finishActivation(const std::string &status,
   }
 }
 
+void MapTransferHttpServer::updateActivationProgress(
+    const ActivationProgress &progress) {
+  lockState();
+  activationState_.updateProgress(progress);
+  unlockState();
+}
+
 bool MapTransferHttpServer::startActivationTask(const std::string &sessionId,
                                                 bool automaticExit) {
   auto *context =
@@ -695,7 +709,11 @@ void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
     finishActivation("failed", "", recovery.code, recovery.message);
     return;
   }
-  InstallStatus prepared = installer_.prepareStagedArchive(sessionId);
+  const auto onProgress = [this](const ActivationProgress &progress) {
+    updateActivationProgress(progress);
+  };
+  InstallStatus prepared =
+      installer_.prepareStagedArchive(sessionId, onProgress);
   if (!prepared.ok) {
     Serial.printf("MAP_TRANSFER_HTTP: archive preparation failed code=%s message=%s\n",
                   prepared.code.c_str(), prepared.message.c_str());
@@ -705,7 +723,8 @@ void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
   }
 
   MapManifest manifest;
-  InstallStatus validated = installer_.validateStagedMap(sessionId, manifest);
+  InstallStatus validated =
+      installer_.validateStagedMap(sessionId, manifest, onProgress);
   if (!validated.ok) {
     Serial.printf("MAP_TRANSFER_HTTP: activate validation failed code=%s message=%s\n",
                   validated.code.c_str(), validated.message.c_str());
@@ -714,7 +733,8 @@ void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
     return;
   }
 
-  InstallStatus activated = installer_.activateStagedMap(sessionId, manifest);
+  InstallStatus activated =
+      installer_.activateStagedMap(sessionId, manifest, onProgress);
   if (!activated.ok) {
     Serial.printf("MAP_TRANSFER_HTTP: activate failed code=%s message=%s\n",
                   activated.code.c_str(), activated.message.c_str());

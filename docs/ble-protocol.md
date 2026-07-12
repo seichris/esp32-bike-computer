@@ -294,10 +294,11 @@ Status responses should include:
 - `enabled`: whether Wi-Fi/HTTP upload mode is enabled.
 - `baseUrl`: temporary HTTP base URL when transfer mode is enabled.
 - `activation`: the latest activation `status`, monotonic boot-local
-  `sequence`, `sessionId`, optional `mapId`, and structured `error`, when
-  present. Status is `idle`, `activating`, `failed`, or `installed`. BLE uses a
-  compact form that omits error messages and duplicate `lastError`; HTTP retains
-  the full diagnostic text.
+  `sequence`, `sessionId`, optional `mapId`, numbered `step`, total `steps`,
+  integer `progress` percentage, and structured `error`, when present. Status
+  is `idle`, `activating`, `failed`, or `installed`. BLE uses a compact form
+  that omits error messages and duplicate `lastError`; HTTP retains the full
+  diagnostic text.
 - `lastError`: last installer/upload error code, when present. HTTP also includes
   the diagnostic message.
 - `activeError`: active-map metadata error code, when no active map is installed.
@@ -314,6 +315,10 @@ The ESP32 map installer validates staged packs before activation:
 - declared byte size and SHA-256 must match the staged file. New uploads are
   hashed while streaming to SD and receive a verification receipt, avoiding a
   second full read during activation.
+- archive entries are hashed while they are extracted. Each completed file gets
+  a durable verification receipt, so boot recovery skips completed entries and
+  only redoes a file interrupted in progress. The original archive remains on
+  SD until activation commits, so recovery never requires another phone upload.
 - activation moves verified files into `.maps/<sessionId>` using same-volume
   renames, then switches `/sdcard/VECTMAP/active-map.json` to that immutable
   root. Each installed root retains a hidden manifest and verification receipt,

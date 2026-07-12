@@ -165,6 +165,11 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(first.sequence == 1);
   assert(first.status == "activating");
   assert(first.sessionId == "session-1");
+  assert(first.step == 1);
+  assert(first.totalSteps == 4);
+  assert(first.progress == 0);
+  state.updateProgress({1, 4, 6, 100});
+  assert(state.snapshot().progress == 6);
   assert(state.begin("session-1") == ActivationBeginResult::AlreadyRunning);
   assert(state.begin("session-2") == ActivationBeginResult::Busy);
   assert(state.snapshot().sequence == 1);
@@ -182,6 +187,8 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(full.find("staged map file sha256 mismatch") != std::string::npos);
   std::string compact = state.json(true);
   assert(compact.find("\"sequence\":1") != std::string::npos);
+  assert(compact.find("\"step\":1") != std::string::npos);
+  assert(compact.find("\"progress\":6") != std::string::npos);
   assert(compact.find("\"code\":\"file_sha256\"") != std::string::npos);
   assert(compact.find("mapId") == std::string::npos);
   assert(compact.find("mismatch") == std::string::npos);
@@ -845,6 +852,60 @@ static void testStoredArchivePreparesAndActivatesInBackgroundTransferPath() {
   assert(!exists(installer.stagingRoot(session)));
 }
 
+static void testStoredArchiveResumesVerifiedFileCheckpoints() {
+  const std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string session = "session-archive-resume";
+  const std::string firstPath =
+      "VECTMAP/map-resume/+0032+0008/100_100.fmb";
+  const std::string secondPath =
+      "VECTMAP/map-resume/+0032+0008/200_200.fmb";
+  const std::string firstData = "already-verified";
+  const std::string secondData = "finish-after-reboot";
+  const std::string manifest =
+      "{\"schemaVersion\":1,\"mapId\":\"map-resume\",\"files\":[{"
+      "\"path\":\"" + firstPath + "\",\"bytes\":" +
+      std::to_string(firstData.size()) + ",\"sha256\":\"" +
+      sha(firstData) + "\"},{\"path\":\"" + secondPath +
+      "\",\"bytes\":" + std::to_string(secondData.size()) +
+      ",\"sha256\":\"" + sha(secondData) + "\"}]}\n";
+  const std::string firstStaged =
+      installer.stagingRoot(session) + "/" + firstPath;
+  assert(::system((std::string("mkdir -p ") +
+                   firstStaged.substr(0, firstStaged.find_last_of('/')))
+                      .c_str()) == 0);
+  writeFile(installer.stagingRoot(session) + "/manifest.json", manifest);
+  writeFile(firstStaged, firstData);
+  MapManifest stagedManifest;
+  assert(installer.readStagedManifest(session, stagedManifest).ok);
+  assert(installer.markStagedFileVerified(session, stagedManifest.files[0]));
+  struct stat before = {};
+  assert(::stat(firstStaged.c_str(), &before) == 0);
+
+  writeStoredZip(installer.stagedArchivePath(session),
+                 {{"manifest.json", manifest},
+                  {firstPath, firstData},
+                  {secondPath, secondData}});
+  std::vector<map_transfer::ActivationProgress> progress;
+  auto prepared = installer.prepareStagedArchive(
+      session, [&](const map_transfer::ActivationProgress &value) {
+        progress.push_back(value);
+      });
+  assert(prepared.ok);
+  struct stat after = {};
+  assert(::stat(firstStaged.c_str(), &after) == 0);
+  assert(before.st_ino == after.st_ino);
+  assert(readFile(installer.stagingRoot(session) + "/" + secondPath) ==
+         secondData);
+  MapManifest validated;
+  assert(installer.validateStagedMap(session, validated).ok);
+  assert(installer.stagedFileVerified(session, validated.files[0]));
+  assert(installer.stagedFileVerified(session, validated.files[1]));
+  assert(!progress.empty());
+  assert(progress.back().step == 1);
+  assert(progress.back().completed == progress.back().total);
+}
+
 static void testStoredArchiveRejectsMissingCentralDirectory() {
   const std::string root = tempRoot();
   MapTransferInstaller installer(root);
@@ -908,6 +969,7 @@ int main() {
   testRejectsChecksumMismatch();
   testVerificationReceiptControlsResumeEligibility();
   testStoredArchivePreparesAndActivatesInBackgroundTransferPath();
+  testStoredArchiveResumesVerifiedFileCheckpoints();
   testStoredArchiveRejectsMissingCentralDirectory();
   testPendingArchiveActivationSurvivesRestart();
   std::cout << "map_transfer tests passed\n";

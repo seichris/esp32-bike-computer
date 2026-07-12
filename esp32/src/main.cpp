@@ -87,6 +87,64 @@ device_transfer::HttpTransferServer deviceTransferHttp;
 map_transfer::MapTransferHttpServer mapTransferHttp;
 firmware_update::FirmwareUpdateHttpServer firmwareUpdateHttp;
 
+static lv_obj_t *mapActivationProgressPanel = nullptr;
+static lv_obj_t *mapActivationProgressLabel = nullptr;
+static lv_obj_t *mapActivationProgressBar = nullptr;
+
+static void updateMapActivationProgressOverlay() {
+  static uint32_t lastUpdateMs = 0;
+  const uint32_t now = millis();
+  if (now - lastUpdateMs < 250)
+    return;
+  lastUpdateMs = now;
+
+  const map_transfer::MapActivationSnapshot activation =
+      mapTransferHttp.activationSnapshot();
+  if (!activation.running) {
+    if (mapActivationProgressPanel != nullptr)
+      lv_obj_add_flag(mapActivationProgressPanel, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+
+  if (mapActivationProgressPanel == nullptr) {
+    mapActivationProgressPanel = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(mapActivationProgressPanel, TFT_WIDTH - 32, 94);
+    lv_obj_align(mapActivationProgressPanel, LV_ALIGN_BOTTOM_MID, 0, -24);
+    lv_obj_set_style_bg_color(mapActivationProgressPanel,
+                              lv_color_hex(0x101010), 0);
+    lv_obj_set_style_bg_opa(mapActivationProgressPanel, 235, 0);
+    lv_obj_set_style_border_color(mapActivationProgressPanel,
+                                  lv_color_hex(0x4A90E2), 0);
+    lv_obj_set_style_border_width(mapActivationProgressPanel, 2, 0);
+    lv_obj_set_style_radius(mapActivationProgressPanel, 14, 0);
+    lv_obj_set_style_pad_all(mapActivationProgressPanel, 14, 0);
+    lv_obj_clear_flag(mapActivationProgressPanel, LV_OBJ_FLAG_SCROLLABLE);
+
+    mapActivationProgressLabel = lv_label_create(mapActivationProgressPanel);
+    lv_obj_set_style_text_font(mapActivationProgressLabel,
+                               &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(mapActivationProgressLabel,
+                                lv_color_white(), 0);
+    lv_obj_align(mapActivationProgressLabel, LV_ALIGN_TOP_MID, 0, -2);
+
+    mapActivationProgressBar = lv_bar_create(mapActivationProgressPanel);
+    lv_obj_set_size(mapActivationProgressBar, LV_PCT(100), 12);
+    lv_obj_align(mapActivationProgressBar, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_bar_set_range(mapActivationProgressBar, 0, 100);
+    lv_obj_set_style_bg_color(mapActivationProgressBar,
+                              lv_color_hex(0x303030), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(mapActivationProgressBar,
+                              lv_color_hex(0x4A90E2), LV_PART_INDICATOR);
+  }
+
+  lv_label_set_text_fmt(mapActivationProgressLabel, "Step %u - %u%%",
+                        static_cast<unsigned>(activation.step),
+                        static_cast<unsigned>(activation.progress));
+  lv_bar_set_value(mapActivationProgressBar, activation.progress, LV_ANIM_OFF);
+  lv_obj_clear_flag(mapActivationProgressPanel, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(mapActivationProgressPanel);
+}
+
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 static void processWaveshareBootButton() {
   constexpr uint32_t DEBOUNCE_MS = 50;
@@ -602,6 +660,7 @@ void loop() {
   // Process app-provided GPS transitions before any periodic work that can
   // briefly block on display, sensor, BLE, or debug output.
   checkPendingMapTransition();
+  updateMapActivationProgressOverlay();
 
   if (!waitScreenRefresh) {
     uint32_t startUs = micros();

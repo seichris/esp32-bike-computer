@@ -389,6 +389,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferActivationSequence: UInt32?
     @Published var mapTransferActivationSessionId: String = ""
     @Published var mapTransferActivationMapId: String = ""
+    @Published var mapTransferActivationStep: Int?
+    @Published var mapTransferActivationStepCount: Int?
+    @Published var mapTransferActivationProgress: Int?
     @Published var mapTransferActivationError: String?
     @Published var mapTransferLastError: String?
     @Published var mapTransferStatusDescription: String = "unknown"
@@ -1428,6 +1431,9 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferActivationSequence = nil
         mapTransferActivationSessionId = ""
         mapTransferActivationMapId = ""
+        mapTransferActivationStep = nil
+        mapTransferActivationStepCount = nil
+        mapTransferActivationProgress = nil
         mapTransferActivationError = nil
     }
 
@@ -1639,6 +1645,9 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferActivationSequence = nil
         mapTransferActivationSessionId = ""
         mapTransferActivationMapId = ""
+        mapTransferActivationStep = nil
+        mapTransferActivationStepCount = nil
+        mapTransferActivationProgress = nil
         mapTransferActivationError = nil
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
@@ -2730,6 +2739,9 @@ extension BLEManager: CBPeripheralDelegate {
                 (activation["sequence"] as? NSNumber)?.uint32Value
             mapTransferActivationSessionId = activation["sessionId"] as? String ?? ""
             mapTransferActivationMapId = activation["mapId"] as? String ?? ""
+            mapTransferActivationStep = (activation["step"] as? NSNumber)?.intValue
+            mapTransferActivationStepCount = (activation["steps"] as? NSNumber)?.intValue
+            mapTransferActivationProgress = (activation["progress"] as? NSNumber)?.intValue
             if let activationError = activation["error"] as? [String: Any] {
                 let code = activationError["code"] as? String ?? "activation_error"
                 let message = activationError["message"] as? String ?? ""
@@ -2742,6 +2754,9 @@ extension BLEManager: CBPeripheralDelegate {
             mapTransferActivationSequence = nil
             mapTransferActivationSessionId = ""
             mapTransferActivationMapId = ""
+            mapTransferActivationStep = nil
+            mapTransferActivationStepCount = nil
+            mapTransferActivationProgress = nil
             mapTransferActivationError = nil
         }
         deviceHasSDCard = object["sdPresent"] as? Bool

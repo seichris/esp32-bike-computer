@@ -265,6 +265,41 @@ enum OfflineMapDownloadingSectionPresentation {
     }
 }
 
+struct MapActivationProgressPresentation: Equatable {
+    let step: Int
+    let stepCount: Int
+    let percentage: Int
+
+    var fraction: Double {
+        Double(percentage) / 100
+    }
+
+    var label: String {
+        "Step \(step) - \(percentage)%"
+    }
+
+    static func make(
+        status: String?,
+        step: Int?,
+        stepCount: Int?,
+        percentage: Int?
+    ) -> Self? {
+        guard status == "activating",
+              let step,
+              let stepCount,
+              let percentage,
+              step > 0,
+              stepCount >= step else {
+            return nil
+        }
+        return Self(
+            step: step,
+            stepCount: stepCount,
+            percentage: min(max(percentage, 0), 100)
+        )
+    }
+}
+
 enum OfflineMapAutomaticRecoveryTrigger {
     static func shouldResume(
         hasPendingInstall: Bool,
@@ -391,6 +426,9 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
         let sequence: UInt32?
         let sessionId: String?
         let mapId: String?
+        let step: Int?
+        let steps: Int?
+        let progress: Int?
         let error: TransferError?
     }
 

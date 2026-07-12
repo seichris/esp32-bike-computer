@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <array>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,16 @@ struct InstallStatus {
   std::string code;
   std::string message;
 };
+
+struct ActivationProgress {
+  uint8_t step = 1;
+  uint8_t totalSteps = 4;
+  uint64_t completed = 0;
+  uint64_t total = 0;
+};
+
+using ActivationProgressCallback =
+    std::function<void(const ActivationProgress &progress)>;
 
 struct ActiveMapSelection {
   std::string mapId;
@@ -64,6 +75,9 @@ struct MapActivationSnapshot {
   std::string status = "idle";
   std::string sessionId;
   std::string mapId;
+  uint8_t step = 0;
+  uint8_t totalSteps = 4;
+  uint8_t progress = 0;
   std::string errorCode;
   std::string errorMessage;
 };
@@ -71,6 +85,7 @@ struct MapActivationSnapshot {
 class MapActivationState {
 public:
   ActivationBeginResult begin(const std::string &sessionId);
+  void updateProgress(const ActivationProgress &progress);
   void finish(const std::string &status, const std::string &mapId,
               const std::string &errorCode,
               const std::string &errorMessage);
@@ -92,8 +107,11 @@ public:
   InstallStatus readStagedManifest(const std::string &sessionId,
                                    MapManifest &manifest) const;
   InstallStatus validateStagedMap(const std::string &sessionId,
-                                  MapManifest &manifest) const;
-  InstallStatus prepareStagedArchive(const std::string &sessionId) const;
+                                  MapManifest &manifest,
+                                  const ActivationProgressCallback &onProgress = {}) const;
+  InstallStatus prepareStagedArchive(
+      const std::string &sessionId,
+      const ActivationProgressCallback &onProgress = {}) const;
   InstallStatus expectedStagedFile(const std::string &sessionId,
                                    const std::string &path,
                                    ManifestFile &file) const;
@@ -104,7 +122,8 @@ public:
   void clearStagedFileVerification(const std::string &sessionId,
                                    const ManifestFile &file) const;
   InstallStatus activateStagedMap(const std::string &sessionId,
-                                  const MapManifest &manifest) const;
+                                  const MapManifest &manifest,
+                                  const ActivationProgressCallback &onProgress = {}) const;
   InstallStatus recoverInterruptedActivation() const;
   bool hasInterruptedActivation() const;
   InstallStatus readActiveMap(ActiveMapSelection &selection) const;
@@ -139,7 +158,8 @@ private:
                                const ManifestFile &file) const;
   bool publishStagedFiles(const std::string &sessionId,
                           const MapManifest &manifest,
-                          const std::string &destinationRoot) const;
+                          const std::string &destinationRoot,
+                          const ActivationProgressCallback &onProgress) const;
   bool publishInstalledMetadata(const std::string &sessionId,
                                 const MapManifest &manifest,
                                 const std::string &destinationRoot) const;

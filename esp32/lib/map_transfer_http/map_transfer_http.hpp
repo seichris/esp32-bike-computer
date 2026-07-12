@@ -19,6 +19,7 @@ public:
   void setLastError(const std::string &code, const std::string &message);
   void process();
   HttpTransferStatus status() const;
+  MapActivationSnapshot activationSnapshot() const;
   std::string activationStatusJson(bool compact = false) const;
   bool activationHasError() const;
   bool takeActivatedMapRoot(std::string &root);
@@ -53,6 +54,7 @@ private:
   void finishActivation(const std::string &status, const std::string &mapId,
                         const std::string &errorCode,
                         const std::string &errorMessage);
+  void updateActivationProgress(const ActivationProgress &progress);
   bool startActivationTask(const std::string &sessionId, bool automaticExit);
   void requestAutomaticExit();
   void runActivationTask(const std::string &sessionId);
