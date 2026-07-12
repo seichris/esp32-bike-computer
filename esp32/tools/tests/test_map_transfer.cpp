@@ -166,9 +166,9 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(first.status == "activating");
   assert(first.sessionId == "session-1");
   assert(first.step == 1);
-  assert(first.totalSteps == 4);
+  assert(first.totalSteps == 5);
   assert(first.progress == 0);
-  state.updateProgress({1, 4, 6, 100});
+  state.updateProgress({1, 5, 6, 100});
   assert(state.snapshot().progress == 6);
   assert(state.begin("session-1") == ActivationBeginResult::AlreadyRunning);
   assert(state.begin("session-2") == ActivationBeginResult::Busy);
@@ -902,7 +902,9 @@ static void testStoredArchiveResumesVerifiedFileCheckpoints() {
   assert(installer.stagedFileVerified(session, validated.files[0]));
   assert(installer.stagedFileVerified(session, validated.files[1]));
   assert(!progress.empty());
-  assert(progress.back().step == 1);
+  assert(progress.front().step == 1);
+  assert(progress.front().completed == 0);
+  assert(progress.back().step == 2);
   assert(progress.back().completed == progress.back().total);
 }
 

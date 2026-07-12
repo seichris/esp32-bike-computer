@@ -1026,7 +1026,12 @@ final class OfflineMapManager: ObservableObject {
                 .mapActivationFailed(message)
                 .localizedDescription
         case .pending:
-            statusMessage = "Activation continues on device"
+            let deviceIsIdleOnAnotherMap =
+                bleManager.mapTransferActivationStatus == "idle" &&
+                bleManager.mapTransferActiveSessionId != sessionId
+            statusMessage = deviceIsIdleOnAnotherMap
+                ? "Activation paused. Tap Upload to resume."
+                : "Activation continues on device"
             errorMessage = nil
             startActivationReconciliationMonitor(bleManager: bleManager)
         }

@@ -985,7 +985,7 @@ struct NavigationProtocolTests {
         let progress = MapActivationProgressPresentation.make(
             status: "activating",
             step: 1,
-            stepCount: 4,
+            stepCount: 5,
             percentage: 6
         )
         assertEqual(progress?.label, "Step 1 - 6%", "activation progress stays concise")
@@ -994,7 +994,7 @@ struct NavigationProtocolTests {
             MapActivationProgressPresentation.make(
                 status: "installed",
                 step: 4,
-                stepCount: 4,
+                stepCount: 5,
                 percentage: 100
             ),
             nil,
@@ -2224,6 +2224,7 @@ struct NavigationProtocolTests {
 
         defaults.set("custom-map-shanghai", forKey: "offlineMap.lastTransfer.mapId")
         defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+        defaults.set("shanghai-session", forKey: "offlineMap.lastTransfer.sessionId")
         defaults.set(
             ["custom-map-shanghai.zip": "Shanghai"],
             forKey: "offlineMap.packDisplayNames"
@@ -2235,6 +2236,17 @@ struct NavigationProtocolTests {
         assertEqual(manager.lastTransferDescription, "Shanghai — unconfirmed", "last transfer identifies the selected saved map")
         assert(manager.hasPendingDeviceActivation,
                "unconfirmed activation keeps its status visible after app restart")
+
+        let bleManager = BLEManager()
+        bleManager.mapTransferActiveMapId = "old-map"
+        bleManager.mapTransferActiveSessionId = "old-session"
+        bleManager.mapTransferActivationStatus = "idle"
+        manager.reconcileLastTransfer(bleManager: bleManager)
+        assertEqual(
+            manager.statusMessage,
+            "Activation paused. Tap Upload to resume.",
+            "an idle rebooted device does not claim activation is still running"
+        )
     }
 
     @MainActor
@@ -4348,7 +4360,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":4,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
         """
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -4362,7 +4374,7 @@ struct NavigationProtocolTests {
         assertEqual(manager.mapTransferActivationSessionId, "tokyo-v2", "status parser exposes activation session")
         assertEqual(manager.mapTransferActivationMapId, "tokyo-v2", "status parser exposes activating map id")
         assertEqual(manager.mapTransferActivationStep, 1, "status parser exposes activation step")
-        assertEqual(manager.mapTransferActivationStepCount, 4, "status parser exposes activation step count")
+        assertEqual(manager.mapTransferActivationStepCount, 5, "status parser exposes activation step count")
         assertEqual(manager.mapTransferActivationProgress, 6, "status parser exposes activation percentage")
         assertEqual(manager.deviceHasSDCard, true, "status parser exposes physical SD state")
         assertEqual(manager.deviceMapFoundForCurrentLocation, false, "status parser exposes current map coverage")

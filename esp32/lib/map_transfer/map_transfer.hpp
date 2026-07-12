@@ -30,7 +30,7 @@ struct InstallStatus {
 
 struct ActivationProgress {
   uint8_t step = 1;
-  uint8_t totalSteps = 4;
+  uint8_t totalSteps = 5;
   uint64_t completed = 0;
   uint64_t total = 0;
 };
@@ -76,7 +76,7 @@ struct MapActivationSnapshot {
   std::string sessionId;
   std::string mapId;
   uint8_t step = 0;
-  uint8_t totalSteps = 4;
+  uint8_t totalSteps = 5;
   uint8_t progress = 0;
   std::string errorCode;
   std::string errorMessage;

@@ -352,7 +352,7 @@ ActivationBeginResult MapActivationState::begin(const std::string &sessionId) {
   state_.sessionId = sessionId;
   state_.mapId.clear();
   state_.step = 1;
-  state_.totalSteps = 4;
+  state_.totalSteps = 5;
   state_.progress = 0;
   state_.errorCode.clear();
   state_.errorMessage.clear();
@@ -488,7 +488,7 @@ MapTransferInstaller::validateStagedMap(const std::string &sessionId,
   uint64_t completed = 0;
   const uint64_t total = manifest.files.size();
   if (onProgress)
-    onProgress({2, 4, 0, total});
+    onProgress({3, 5, 0, total});
   for (const ManifestFile &file : manifest.files) {
     const std::string stagedPath = joinPath(stagingRoot(sessionId), file.path);
     uint64_t size = 0;
@@ -518,7 +518,7 @@ MapTransferInstaller::validateStagedMap(const std::string &sessionId,
     }
     completed++;
     if (onProgress)
-      onProgress({2, 4, completed, total});
+      onProgress({3, 5, completed, total});
   }
   return {true, "ok", ""};
 }
@@ -549,6 +549,20 @@ MapTransferInstaller::prepareStagedArchive(
   bool sawCentralDirectory = false;
   bool foundManifest = false;
   uint64_t offset = 0;
+  int lastScanPercent = -1;
+  const auto reportScanProgress = [&](uint64_t completed, bool force = false) {
+    if (!onProgress)
+      return;
+    const int percent = archiveBytes == 0
+                            ? 0
+                            : static_cast<int>(std::min<uint64_t>(
+                                  100, completed * 100 / archiveBytes));
+    if (force || percent != lastScanPercent) {
+      lastScanPercent = percent;
+      onProgress({1, 5, completed, archiveBytes});
+    }
+  };
+  reportScanProgress(0, true);
   while (offset + 4 <= archiveBytes) {
     uint8_t signatureBytes[4] = {};
     input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
@@ -558,6 +572,7 @@ MapTransferInstaller::prepareStagedArchive(
     const uint32_t signature = readLe32(signatureBytes);
     if (signature == kZipCentralHeaderSignature || signature == kZipEndSignature) {
       sawCentralDirectory = true;
+      reportScanProgress(archiveBytes, true);
       break;
     }
     if (signature != kZipLocalHeaderSignature) {
@@ -614,6 +629,7 @@ MapTransferInstaller::prepareStagedArchive(
       manifestBytes = compressedSize;
     }
     offset = dataOffset + compressedSize;
+    reportScanProgress(offset);
   }
 
   if (!sawCentralDirectory || !foundManifest)
@@ -675,7 +691,7 @@ MapTransferInstaller::prepareStagedArchive(
                                            totalMapBytes));
     if (force || percent != lastReportedPercent) {
       lastReportedPercent = percent;
-      onProgress({1, 4, completedMapBytes, totalMapBytes});
+      onProgress({2, 5, completedMapBytes, totalMapBytes});
     }
   };
   reportProgress(true);
@@ -904,7 +920,7 @@ InstallStatus MapTransferInstaller::activateStagedMap(
   if (!removeTree(destinationRoot))
     return fail("install_cleanup", "could not clear incomplete map version");
   if (onProgress)
-    onProgress({3, 4, 0, manifest.files.size()});
+    onProgress({4, 5, 0, manifest.files.size()});
   if (!writeTextFileAtomic(transactionPath, transactionJson("publishing"))) {
     return fail("transaction", "could not start map activation transaction");
   }
@@ -922,7 +938,7 @@ InstallStatus MapTransferInstaller::activateStagedMap(
   }
 
   if (onProgress)
-    onProgress({4, 4, 0, 1});
+    onProgress({5, 5, 0, 1});
 
   ActiveMapSelection selected;
   selected.mapId = manifest.mapId;
@@ -940,7 +956,7 @@ InstallStatus MapTransferInstaller::activateStagedMap(
     return fail("active_write", "could not select installed map version");
   }
   if (onProgress)
-    onProgress({4, 4, 1, 1});
+    onProgress({5, 5, 1, 1});
   if (!writeTextFileAtomic(transactionPath, transactionJson("committed"))) {
     return {true, "cleanup_pending",
             "map selected; activation journal cleanup will retry"};
@@ -1470,7 +1486,7 @@ bool MapTransferInstaller::publishStagedFiles(
       return false;
     completed++;
     if (onProgress)
-      onProgress({3, 4, completed, manifest.files.size()});
+      onProgress({4, 5, completed, manifest.files.size()});
   }
   return true;
 }

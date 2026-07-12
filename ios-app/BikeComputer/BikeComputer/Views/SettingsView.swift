@@ -248,7 +248,7 @@ private struct DownloadingMapsSettingsSection: View {
             } else if !manager.statusMessage.isEmpty {
                 StatusValueRow(status: manager.statusMessage, isBusy: manager.isBusy)
             } else if manager.hasPendingDeviceActivation {
-                StatusValueRow(status: "Activation continues on device", isBusy: false)
+                StatusValueRow(status: "Checking device activation", isBusy: false)
             }
 
             if let generationProgress {
