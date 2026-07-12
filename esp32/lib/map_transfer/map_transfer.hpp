@@ -19,6 +19,9 @@ struct ManifestFile {
 struct MapManifest {
   uint32_t schemaVersion = 0;
   std::string mapId;
+  std::string renderer;
+  uint32_t formatVersion = 0;
+  std::string minimumFirmwareVersion;
   std::vector<ManifestFile> files;
 };
 

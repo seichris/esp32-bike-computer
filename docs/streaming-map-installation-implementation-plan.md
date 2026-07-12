@@ -34,6 +34,11 @@ Status as of 2026-07-12:
   persisted artifact metadata, stable errors/metrics, retention-safe publication
   leases, bounded out-of-process garbage collection, stateless
   installation-bound authorization, and identity-bound URL refresh.
+- Phase 3 adds the host-tested transport-independent firmware parser, exact-byte
+  P-256 trust verification with rotation support, hardware-backed SHA-256,
+  canonical UTF-8 manifest validation, checked PSRAM ownership, and compact
+  Shanghai-scale file descriptors. Protocol v2 remains unadvertised until the
+  Phase 4/5 installation and HTTP state machines are complete.
 - No production capability should advertise v2 until the signed stream parser,
   one-pass writer, checkpoint recovery, and pointer transaction all exist and
   pass the acceptance gate below.

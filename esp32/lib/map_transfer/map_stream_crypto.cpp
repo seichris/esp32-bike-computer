@@ -37,12 +37,34 @@ int checkedSha256Finish(mbedtls_sha256_context *context, uint8_t digest[32]) {
 
 namespace map_transfer {
 
+bool isValidMapStreamP256PublicKey(const uint8_t *publicKeyX963,
+                                   size_t publicKeySize) {
+  if (publicKeyX963 == nullptr || publicKeySize != 65 ||
+      publicKeyX963[0] != 0x04) {
+    return false;
+  }
+  mbedtls_ecp_group group;
+  mbedtls_ecp_point publicKey;
+  mbedtls_ecp_group_init(&group);
+  mbedtls_ecp_point_init(&publicKey);
+  int result = mbedtls_ecp_group_load(&group, MBEDTLS_ECP_DP_SECP256R1);
+  if (result == 0) {
+    result = mbedtls_ecp_point_read_binary(&group, &publicKey, publicKeyX963,
+                                           publicKeySize);
+  }
+  if (result == 0)
+    result = mbedtls_ecp_check_pubkey(&group, &publicKey);
+  mbedtls_ecp_point_free(&publicKey);
+  mbedtls_ecp_group_free(&group);
+  return result == 0;
+}
+
 bool verifyMapStreamP256Signature(
     const uint8_t *manifest, size_t manifestSize,
     const MapStreamSignatureEnvelope &envelope, const uint8_t *publicKeyX963,
     size_t publicKeySize) {
-  if ((manifest == nullptr && manifestSize != 0) || publicKeyX963 == nullptr ||
-      publicKeySize != 65 ||
+  if ((manifest == nullptr && manifestSize != 0) ||
+      !isValidMapStreamP256PublicKey(publicKeyX963, publicKeySize) ||
       envelope.algorithmId != MAP_STREAM_ALGORITHM_P256_SHA256 ||
       !isCanonicalMapStreamP256Signature(envelope.rawSignature.data(),
                                          envelope.rawSignature.size()))

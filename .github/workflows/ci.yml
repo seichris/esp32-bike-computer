@@ -176,6 +176,9 @@ jobs:
             lib/map_transfer/map_transfer.cpp \
             lib/map_transfer/map_stream_format.cpp \
             lib/map_transfer/map_stream_crypto.cpp \
+            lib/map_transfer/map_stream_sha.cpp \
+            lib/map_transfer/map_stream_trust.cpp \
+            lib/map_transfer/map_stream_parser.cpp \
             tools/tests/test_map_stream_format.cpp \
             $(pkg-config --cflags --libs mbedcrypto) \
             -o /tmp/test_map_stream_format
