@@ -208,12 +208,13 @@ nonisolated enum MapTransferOutcomePolicy {
         if error is CancellationError && activationMayBeInFlight {
             return "unconfirmed"
         }
-        if let platformError = error as? OfflineMapPlatformError,
-           case .mapActivationTimedOut = platformError {
-            return "unconfirmed"
-        }
         return "failed"
     }
+}
+
+nonisolated enum MapActivationConfirmationResult: Equatable {
+    case installed
+    case continuesOnDevice(lastState: String)
 }
 
 nonisolated enum CachedPackRecoveryDecision: Equatable {
@@ -602,6 +603,10 @@ final class OfflineMapManager: ObservableObject {
     var hasPendingMapJob: Bool {
         OfflineMapJobPersistence.activeJobId(defaults: defaults) != nil ||
             isServerRecoveryCheckPending
+    }
+
+    var hasPendingDeviceActivation: Bool {
+        lastTransferOutcome == "unconfirmed"
     }
 
     var hasDownloadedPendingDeviceInstall: Bool {
@@ -1004,10 +1009,17 @@ final class OfflineMapManager: ObservableObject {
         switch evaluation.decision {
         case .installed:
             updateLastTransferOutcome("installed")
-        case .failed:
+            statusMessage = "map installed: \(displayName(forMapId: lastTransferMapId))"
+            errorMessage = nil
+        case .failed(let message):
             updateLastTransferOutcome("failed")
+            statusMessage = ""
+            errorMessage = OfflineMapPlatformError
+                .mapActivationFailed(message)
+                .localizedDescription
         case .pending:
-            break
+            statusMessage = "Activation continues on device"
+            errorMessage = nil
         }
     }
 
@@ -1660,7 +1672,7 @@ final class OfflineMapManager: ObservableObject {
                     }
                 }
 
-                try await confirmActivatedMap(
+                let confirmation = try await confirmActivatedMap(
                     expectedMapId: expectedMapId,
                     sessionId: sessionId,
                     previousMapId: previousMapId,
@@ -1671,8 +1683,14 @@ final class OfflineMapManager: ObservableObject {
                     bleManager: bleManager
                 )
                 transferProgress = 1
-                statusMessage = "map installed: \(displayName(forMapId: expectedMapId))"
-                updateLastTransferOutcome("installed")
+                switch confirmation {
+                case .installed:
+                    statusMessage = "map installed: \(displayName(forMapId: expectedMapId))"
+                    updateLastTransferOutcome("installed")
+                case .continuesOnDevice:
+                    statusMessage = "Activation continues on device"
+                    updateLastTransferOutcome("unconfirmed")
+                }
                 bleManager.requestMapTransferStatus()
             }
         } catch {
@@ -1718,7 +1736,7 @@ final class OfflineMapManager: ObservableObject {
                              client: MapTransferDeviceClient,
                              bleManager: BLEManager,
                              timeout: TimeInterval = OfflineMapDefaults.activationConfirmationTimeout,
-                             pollIntervalNanoseconds: UInt64 = OfflineMapDefaults.activationPollIntervalNanoseconds) async throws {
+                             pollIntervalNanoseconds: UInt64 = OfflineMapDefaults.activationPollIntervalNanoseconds) async throws -> MapActivationConfirmationResult {
         let startedAt = Date()
         let deadline = startedAt.addingTimeInterval(timeout)
         var lastObservedState = "activation request accepted"
@@ -1749,7 +1767,7 @@ final class OfflineMapManager: ObservableObject {
                 observedCurrentAttempt = evaluation.observedCurrentAttempt
                 switch evaluation.decision {
                 case .installed:
-                    return
+                    return .installed
                 case .failed(let message):
                     throw OfflineMapPlatformError.mapActivationFailed(message)
                 case .pending(let state):
@@ -1788,7 +1806,7 @@ final class OfflineMapManager: ObservableObject {
                 observedCurrentAttempt = evaluation.observedCurrentAttempt
                 switch evaluation.decision {
                 case .installed:
-                    return
+                    return .installed
                 case .failed(let message):
                     throw OfflineMapPlatformError.mapActivationFailed(message)
                 case .pending(let state):
@@ -1803,8 +1821,8 @@ final class OfflineMapManager: ObservableObject {
             )
         }
 
-        throw OfflineMapPlatformError.mapActivationTimedOut(
-            "expected \(expectedMapId); last device state was \(lastObservedState)"
+        return .continuesOnDevice(
+            lastState: lastObservedState
         )
     }
 

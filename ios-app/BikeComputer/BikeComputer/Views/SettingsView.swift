@@ -61,6 +61,7 @@ struct SettingsView: View {
                 if OfflineMapDownloadingSectionPresentation.isVisible(
                     isBusy: offlineMapManager.isBusy,
                     hasPendingJob: offlineMapManager.hasPendingMapJob,
+                    hasPendingActivation: offlineMapManager.hasPendingDeviceActivation,
                     errorMessage: offlineMapManager.errorMessage
                 ) {
                     DownloadingMapsSettingsSection(manager: offlineMapManager)
@@ -239,6 +240,8 @@ private struct DownloadingMapsSettingsSection: View {
 
             if !manager.statusMessage.isEmpty {
                 StatusValueRow(status: manager.statusMessage, isBusy: manager.isBusy)
+            } else if manager.hasPendingDeviceActivation {
+                StatusValueRow(status: "Activation continues on device", isBusy: false)
             }
 
             if let generationProgress {

@@ -985,6 +985,7 @@ struct NavigationProtocolTests {
             OfflineMapDownloadingSectionPresentation.isVisible(
                 isBusy: false,
                 hasPendingJob: true,
+                hasPendingActivation: false,
                 errorMessage: nil
             ),
             "paused persisted jobs keep the resume section reachable"
@@ -993,9 +994,19 @@ struct NavigationProtocolTests {
             !OfflineMapDownloadingSectionPresentation.isVisible(
                 isBusy: false,
                 hasPendingJob: false,
+                hasPendingActivation: false,
                 errorMessage: nil
             ),
             "idle map settings omit an empty downloading section"
+        )
+        assert(
+            OfflineMapDownloadingSectionPresentation.isVisible(
+                isBusy: false,
+                hasPendingJob: false,
+                hasPendingActivation: true,
+                errorMessage: nil
+            ),
+            "device-owned activation keeps its status section visible"
         )
         assert(
             OfflineMapAutomaticRecoveryTrigger.shouldResume(
@@ -2200,6 +2211,8 @@ struct NavigationProtocolTests {
         assertEqual(manager.lastTransferMapId, "custom-map-shanghai", "last transfer map id survives app restart")
         assertEqual(manager.lastTransferOutcome, "unconfirmed", "last transfer outcome survives app restart")
         assertEqual(manager.lastTransferDescription, "Shanghai — unconfirmed", "last transfer identifies the selected saved map")
+        assert(manager.hasPendingDeviceActivation,
+               "unconfirmed activation keeps its status visible after app restart")
     }
 
     @MainActor
@@ -2227,6 +2240,8 @@ struct NavigationProtocolTests {
         manager.reconcileLastTransfer(bleManager: bleManager)
 
         assertEqual(manager.lastTransferOutcome, "installed", "durable exact-session status reconciles after device restart")
+        assert(!manager.hasPendingDeviceActivation,
+               "installed reconciliation clears pending activation status")
     }
 
     @MainActor
@@ -2510,14 +2525,6 @@ struct NavigationProtocolTests {
             ),
             "failed",
             "cancelling before activation does not claim a device-side attempt"
-        )
-        assertEqual(
-            MapTransferOutcomePolicy.outcome(
-                after: OfflineMapPlatformError.mapActivationTimedOut("pending"),
-                activationMayBeInFlight: true
-            ),
-            "unconfirmed",
-            "activation timeout remains reconcilable over BLE"
         )
     }
 
@@ -2908,8 +2915,9 @@ struct NavigationProtocolTests {
         bleManager.mapTransferActivationStatus = "installed"
         bleManager.mapTransferActivationSequence = 8
         bleManager.mapTransferActivationSessionId = "session-1"
+        var confirmation: MapActivationConfirmationResult?
         await runMainActorAsyncTest {
-            try await manager.confirmActivatedMap(
+            confirmation = try await manager.confirmActivatedMap(
                 expectedMapId: "map-1",
                 sessionId: "session-1",
                 previousMapId: "map-1",
@@ -2922,6 +2930,7 @@ struct NavigationProtocolTests {
                 pollIntervalNanoseconds: 1_000_000
             )
         }
+        assertEqual(confirmation, .installed, "BLE fallback confirms installation")
         assertEqual(statusRequests, 1, "HTTP status failure falls back to BLE")
 
         statusRequests = 0
@@ -2937,8 +2946,9 @@ struct NavigationProtocolTests {
             )!
             return (response, body)
         }
+        confirmation = nil
         await runMainActorAsyncTest {
-            try await manager.confirmActivatedMap(
+            confirmation = try await manager.confirmActivatedMap(
                 expectedMapId: "map-1",
                 sessionId: "session-1",
                 previousMapId: "map-1",
@@ -2951,6 +2961,7 @@ struct NavigationProtocolTests {
                 pollIntervalNanoseconds: 1_000_000
             )
         }
+        assertEqual(confirmation, .installed, "HTTP polling confirms installation")
         assertEqual(statusRequests, 2,
                     "confirmation polls from activating through installed")
 
@@ -2966,26 +2977,29 @@ struct NavigationProtocolTests {
             )!
             return (response, body)
         }
+        confirmation = nil
         await runMainActorAsyncTest {
-            do {
-                try await manager.confirmActivatedMap(
-                    expectedMapId: "map-1",
-                    sessionId: "session-1",
-                    previousMapId: "map-1",
-                    previousSessionId: "session-1",
-                    previousSequence: 7,
-                    acceptedSequence: nil,
-                    client: client,
-                    bleManager: bleManager,
-                    timeout: 0.02,
-                    pollIntervalNanoseconds: 1_000_000
-                )
-                assert(false, "retained activation should time out")
-            } catch OfflineMapPlatformError.mapActivationTimedOut {
-                // Expected.
-            }
+            confirmation = try await manager.confirmActivatedMap(
+                expectedMapId: "map-1",
+                sessionId: "session-1",
+                previousMapId: "map-1",
+                previousSessionId: "session-1",
+                previousSequence: 7,
+                acceptedSequence: nil,
+                client: client,
+                bleManager: bleManager,
+                timeout: 0.02,
+                pollIntervalNanoseconds: 1_000_000
+            )
         }
-        assert(statusRequests > 1, "timeout covers repeated pending polls")
+        guard let confirmation,
+              case .continuesOnDevice = confirmation else {
+            assert(false, "retained activation should continue on device without an error")
+            return
+        }
+        assertEqual(manager.statusMessage.hasPrefix("activating map-1"), true,
+                    "pending confirmation retains activation status")
+        assert(statusRequests > 1, "confirmation limit covers repeated pending polls")
     }
 
     static func testMapTransferDeviceStatusDecodesActivationFailure() {
