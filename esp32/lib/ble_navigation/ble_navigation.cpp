@@ -7,6 +7,7 @@
 
 #include "ble_navigation.hpp"
 #include "map_profile_persistence.hpp"
+#include "transfer_control_dispatch.hpp"
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
 #include "../gui/src/globalGuiDef.h"
@@ -69,6 +70,7 @@ static NimBLECharacteristic *mapTransferStatusCharacteristic = nullptr;
 static BLEDebugStats bleDebugStats;
 static uint16_t activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
 static bool unauthTimeoutDisconnectRequested = false;
+static ble_transfer::PendingRequest pendingTransferControl;
 
 NavigationData getCurrentNavigationData() { return currentNavData; }
 
@@ -744,6 +746,80 @@ static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
                 (unsigned)response.size());
 }
 
+static void queueTransferControl(ble_transfer::Action action,
+                                 uint8_t notifications) {
+  pendingTransferControl.merge(action, notifications);
+}
+
+static void processPendingTransferControl() {
+  const ble_transfer::Request request = pendingTransferControl.take();
+  if (request.empty()) {
+    return;
+  }
+
+  switch (request.action) {
+  case ble_transfer::Action::EnableMap: {
+    const device_transfer::HttpTransferStatus transferStatus =
+        deviceTransferHttp.status();
+    if (transferStatus.enabled && !transferStatus.mode.empty() &&
+        transferStatus.mode != "map") {
+      mapTransferHttp.setLastError("transfer_busy",
+                                   "another transfer mode is active");
+      Serial.println("BLE Map Transfer: enter rejected, transfer is busy");
+    } else if (!storage.getSdLoaded()) {
+      mapTransferHttp.setLastError("sd_unavailable",
+                                   "SD card is not mounted");
+      Serial.println(
+          "BLE Map Transfer: enter rejected, SD card is not mounted");
+    } else {
+      const bool enabled = mapTransferHttp.setEnabled(true);
+      Serial.printf("BLE Map Transfer: enter applied, enabled=%d\n", enabled);
+    }
+    break;
+  }
+  case ble_transfer::Action::EnableFirmware: {
+    const device_transfer::HttpTransferStatus transferStatus =
+        deviceTransferHttp.status();
+    if (transferStatus.enabled && !transferStatus.mode.empty() &&
+        transferStatus.mode != "firmware") {
+      firmwareUpdateHttp.setLastError("transfer_busy",
+                                      "another transfer mode is active");
+      Serial.println(
+          "BLE Device Transfer: firmware enter rejected, transfer is busy");
+    } else {
+      const bool enabled = firmwareUpdateHttp.setEnabled(true);
+      Serial.printf(
+          "BLE Device Transfer: firmware enter applied, enabled=%d\n",
+          enabled);
+    }
+    break;
+  }
+  case ble_transfer::Action::DisableMap: {
+    bool disabled = true;
+    if (deviceTransferHttp.status().mode == "map") {
+      disabled = mapTransferHttp.setEnabled(false);
+    }
+    Serial.printf("BLE Map Transfer: exit applied, disabled=%d\n", disabled);
+    break;
+  }
+  case ble_transfer::Action::DisableAll: {
+    const bool disabled = deviceTransferHttp.setEnabled(false);
+    Serial.printf("BLE Device Transfer: exit applied, disabled=%d\n",
+                  disabled);
+    break;
+  }
+  case ble_transfer::Action::None:
+    break;
+  }
+
+  if (request.notifications & ble_transfer::NotifyMap) {
+    notifyMapTransferStatus(mapTransferStatusCharacteristic);
+  }
+  if (request.notifications & ble_transfer::NotifyGeneric) {
+    notifyGenericTransferStatus(mapTransferStatusCharacteristic);
+  }
+}
+
 static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
                                      bool includePowerButtonConfig) {
   if (pChar == nullptr) {
@@ -824,7 +900,7 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
 }
 
 static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
-                                            NimBLECharacteristic *pChar) {
+                                            NimBLECharacteristic *) {
   std::string command;
   if (data != nullptr && len > 0) {
     command.assign(reinterpret_cast<const char *>(data), len);
@@ -832,47 +908,27 @@ static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
   }
 
   if (command == "enter") {
-    device_transfer::HttpTransferStatus transferStatus =
-        deviceTransferHttp.status();
-    if (transferStatus.enabled && !transferStatus.mode.empty() &&
-        transferStatus.mode != "map") {
-      mapTransferHttp.setLastError("transfer_busy",
-                                   "another transfer mode is active");
-      Serial.println("BLE Map Transfer: enter rejected, transfer is busy");
-      notifyMapTransferStatus(pChar);
-      return;
-    }
-    if (!storage.getSdLoaded()) {
-      mapTransferHttp.setLastError("sd_unavailable",
-                                   "SD card is not mounted");
-      Serial.println("BLE Map Transfer: enter rejected, SD card is not mounted");
-      notifyMapTransferStatus(pChar);
-      return;
-    }
-    bool enabled = mapTransferHttp.setEnabled(true);
-    Serial.printf("BLE Map Transfer: enter requested, enabled=%d\n", enabled);
-    notifyMapTransferStatus(pChar);
+    queueTransferControl(ble_transfer::Action::EnableMap,
+                         ble_transfer::NotifyMap);
+    Serial.println("BLE Map Transfer: enter queued");
     return;
   }
 
   if (command == "exit") {
-    bool disabled = true;
-    if (deviceTransferHttp.status().mode == "map") {
-      disabled = mapTransferHttp.setEnabled(false);
-    }
-    Serial.printf("BLE Map Transfer: exit requested, disabled=%d\n",
-                  disabled);
-    notifyMapTransferStatus(pChar);
+    queueTransferControl(ble_transfer::Action::DisableMap,
+                         ble_transfer::NotifyMap);
+    Serial.println("BLE Map Transfer: exit queued");
     return;
   }
 
   Serial.printf("BLE Map Transfer: rejected unknown command '%s'\n",
                 command.c_str());
-  notifyMapTransferStatus(pChar);
+  queueTransferControl(ble_transfer::Action::None,
+                       ble_transfer::NotifyMap);
 }
 
 static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
-                                                NimBLECharacteristic *pChar) {
+                                                NimBLECharacteristic *) {
   std::string command;
   if (data != nullptr && len > 0) {
     command.assign(reinterpret_cast<const char *>(data), len);
@@ -880,42 +936,32 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
   }
 
   if (command == "enter|map") {
-    handleMapTransferControlPayload(reinterpret_cast<const uint8_t *>("enter"),
-                                    strlen("enter"), pChar);
-    notifyGenericTransferStatus(pChar);
+    queueTransferControl(ble_transfer::Action::EnableMap,
+                         ble_transfer::NotifyMap |
+                             ble_transfer::NotifyGeneric);
+    Serial.println("BLE Device Transfer: map enter queued");
     return;
   }
 
   if (command == "enter|firmware") {
-    device_transfer::HttpTransferStatus transferStatus =
-        deviceTransferHttp.status();
-    if (transferStatus.enabled && !transferStatus.mode.empty() &&
-        transferStatus.mode != "firmware") {
-      firmwareUpdateHttp.setLastError("transfer_busy",
-                                      "another transfer mode is active");
-      Serial.println(
-          "BLE Device Transfer: firmware enter rejected, transfer is busy");
-      notifyGenericTransferStatus(pChar);
-      return;
-    }
-    bool enabled = firmwareUpdateHttp.setEnabled(true);
-    Serial.printf("BLE Device Transfer: firmware enter requested, enabled=%d\n",
-                  enabled);
-    notifyGenericTransferStatus(pChar);
+    queueTransferControl(ble_transfer::Action::EnableFirmware,
+                         ble_transfer::NotifyGeneric);
+    Serial.println("BLE Device Transfer: firmware enter queued");
     return;
   }
 
   if (command == "exit") {
-    mapTransferHttp.setEnabled(false);
-    firmwareUpdateHttp.setEnabled(false);
-    Serial.println("BLE Device Transfer: exit requested");
-    notifyGenericTransferStatus(pChar);
+    queueTransferControl(ble_transfer::Action::DisableAll,
+                         ble_transfer::NotifyMap |
+                             ble_transfer::NotifyGeneric);
+    Serial.println("BLE Device Transfer: exit queued");
     return;
   }
 
   Serial.printf("BLE Device Transfer: rejected unknown command '%s'\n",
                 command.c_str());
-  notifyGenericTransferStatus(pChar);
+  queueTransferControl(ble_transfer::Action::None,
+                       ble_transfer::NotifyGeneric);
 }
 
 static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
@@ -1357,9 +1403,8 @@ public:
   }
 
   void onDisconnect(NimBLEServer *pServer) override {
-    if (deviceTransferHttp.status().mode == "map") {
-      mapTransferHttp.setEnabled(false);
-    }
+    queueTransferControl(ble_transfer::Action::DisableMap,
+                         ble_transfer::NotifyNone);
     server->connected = false;
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
@@ -1425,7 +1470,8 @@ public:
       if (!requireAuthenticated("map transfer status")) {
         return;
       }
-      notifyMapTransferStatus(pChar);
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyMap);
       return;
     }
 
@@ -1447,7 +1493,8 @@ public:
       if (!requireAuthenticated("device transfer status")) {
         return;
       }
-      notifyGenericTransferStatus(pChar);
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
       return;
     }
 
@@ -1521,7 +1568,8 @@ public:
       if (!requireAuthenticated("native map transfer status")) {
         return;
       }
-      notifyMapTransferStatus(mapTransferStatusCharacteristic);
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyMap);
       return;
     }
 
@@ -1545,7 +1593,8 @@ public:
       if (!requireAuthenticated("native device transfer status")) {
         return;
       }
-      notifyGenericTransferStatus(mapTransferStatusCharacteristic);
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
       return;
     }
 
@@ -1705,6 +1754,8 @@ void BLENavigationServer::init(const char *deviceName) {
 }
 
 void BLENavigationServer::process() {
+  processPendingTransferControl();
+
   static uint32_t lastLog = 0;
   if (connected && !bleSessionAuthenticated &&
       !unauthTimeoutDisconnectRequested &&

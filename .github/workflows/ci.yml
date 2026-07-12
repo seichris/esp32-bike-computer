@@ -141,6 +141,12 @@ jobs:
             tools/tests/test_map_transfer.cpp \
             -o /tmp/test_map_transfer
           /tmp/test_map_transfer
+      - name: Transfer control dispatch host tests
+        run: |
+          g++ -std=c++17 \
+            tools/tests/test_transfer_control_dispatch.cpp \
+            -o /tmp/test_transfer_control_dispatch
+          /tmp/test_transfer_control_dispatch
       - name: Sound protocol host tests
         run: |
           g++ -std=c++17 \
