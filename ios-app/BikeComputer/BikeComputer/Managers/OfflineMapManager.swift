@@ -422,6 +422,14 @@ final class OfflineMapManager: ObservableObject {
             isServerRecoveryCheckPending
     }
 
+    var hasDownloadedPendingDeviceInstall: Bool {
+        guard OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults),
+              let activeJobId = OfflineMapJobPersistence.activeJobId(defaults: defaults) else {
+            return false
+        }
+        return OfflineMapJobPersistence.downloadedJobId(defaults: defaults) == activeJobId
+    }
+
     private let defaults: UserDefaults
     private let mapPlatformSession: URLSession
     private let packDownload: PackDownloadOperation

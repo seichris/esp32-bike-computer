@@ -108,10 +108,10 @@ struct ContentView: View {
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
         }
         .onChange(of: coordinator.bleManager.isConnected) { _ in
-            resumePendingMapInstallIfReady()
+            schedulePendingMapInstallResume()
         }
         .onChange(of: coordinator.bleManager.isNavigationReady) { _ in
-            resumePendingMapInstallIfReady()
+            schedulePendingMapInstallResume()
         }
         .onChange(of: offlineMapManager.isMapAreaSelectionActive) { isActive in
             if isActive {
@@ -125,9 +125,19 @@ struct ContentView: View {
         }
     }
 
+    private func schedulePendingMapInstallResume() {
+        guard offlineMapManager.hasDownloadedPendingDeviceInstall else { return }
+        Task { @MainActor in
+            while offlineMapManager.isBusy {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            resumePendingMapInstallIfReady()
+        }
+    }
+
     private func resumePendingMapInstallIfReady() {
         guard OfflineMapAutomaticRecoveryTrigger.shouldResume(
-            hasPendingJob: offlineMapManager.hasPendingMapJob,
+            hasPendingInstall: offlineMapManager.hasDownloadedPendingDeviceInstall,
             isBusy: offlineMapManager.isBusy,
             isConnected: coordinator.bleManager.isConnected,
             isNavigationReady: coordinator.bleManager.isNavigationReady

@@ -224,12 +224,12 @@ enum OfflineMapDownloadingSectionPresentation {
 
 enum OfflineMapAutomaticRecoveryTrigger {
     static func shouldResume(
-        hasPendingJob: Bool,
+        hasPendingInstall: Bool,
         isBusy: Bool,
         isConnected: Bool,
         isNavigationReady: Bool
     ) -> Bool {
-        hasPendingJob && !isBusy && isConnected && isNavigationReady
+        hasPendingInstall && !isBusy && isConnected && isNavigationReady
     }
 }
 

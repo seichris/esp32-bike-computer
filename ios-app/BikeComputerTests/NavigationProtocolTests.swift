@@ -838,7 +838,7 @@ struct NavigationProtocolTests {
         )
         assert(
             OfflineMapAutomaticRecoveryTrigger.shouldResume(
-                hasPendingJob: true,
+                hasPendingInstall: true,
                 isBusy: false,
                 isConnected: true,
                 isNavigationReady: true
@@ -847,7 +847,7 @@ struct NavigationProtocolTests {
         )
         assert(
             !OfflineMapAutomaticRecoveryTrigger.shouldResume(
-                hasPendingJob: true,
+                hasPendingInstall: true,
                 isBusy: false,
                 isConnected: true,
                 isNavigationReady: false
@@ -1055,6 +1055,10 @@ struct NavigationProtocolTests {
         let firstPersistedPassCompleted = await waitForMapTaskCompletion(persistedManager)
         assert(firstPersistedPassCompleted, "persisted recovery should finish its first pass")
         assert(persistedManager.hasPendingMapJob, "disconnected device preserves pending install intent")
+        assert(
+            persistedManager.hasDownloadedPendingDeviceInstall,
+            "downloaded deferred install becomes eligible for BLE-ready auto-resume"
+        )
         assertEqual(
             OfflineMapJobPersistence.downloadedJobId(defaults: persistedDefaults),
             "job-persisted",
