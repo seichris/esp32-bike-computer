@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 
 from map_platform.api import create_app
+from map_platform.downloads import DownloadSigner
 
 
 class MapJobRunAPITests(unittest.TestCase):
@@ -57,6 +58,107 @@ class MapJobRunAPITests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ready")
+
+    def test_same_map_jobs_publish_and_download_exact_job_artifacts(self):
+        def create_owned(request_id: str) -> str:
+            response = self.client.post(
+                "/v1/map-jobs",
+                json={
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                    "clientInstallationId": "installation-owner",
+                    "clientRequestId": request_id,
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            return response.json()["jobId"]
+
+        first_job_id = create_owned("request-first-map")
+        second_job_id = create_owned("request-second-map")
+        first_built_archive = Path(self.tmp.name) / "work" / "first-built.zip"
+        second_built_archive = Path(self.tmp.name) / "work" / "second-built.zip"
+        first_built_archive.parent.mkdir(parents=True)
+        first_built_archive.write_bytes(b"first-job-exact-bytes")
+        second_built_archive.write_bytes(b"second-job-exact-bytes")
+
+        with patch(
+            "map_platform.api.MapBuildPipeline.build",
+            side_effect=[
+                ("map-shared", first_built_archive),
+                ("map-shared", second_built_archive),
+            ],
+        ):
+            first_worker_run = self.client.post("/v1/workers/run-next")
+            second_worker_run = self.client.post("/v1/workers/run-next")
+
+        self.assertEqual(first_worker_run.status_code, 200)
+        self.assertEqual(second_worker_run.status_code, 200)
+        first_result = first_worker_run.json()["job"]
+        second_result = second_worker_run.json()["job"]
+        self.assertEqual(first_result["jobId"], first_job_id)
+        self.assertEqual(second_result["jobId"], second_job_id)
+        first_pack_path = Path(first_result["packPath"])
+        second_pack_path = Path(second_result["packPath"])
+        self.assertEqual(
+            first_pack_path,
+            Path(self.tmp.name) / "packs" / "map-shared" / f"{first_job_id}.zip",
+        )
+        self.assertEqual(
+            second_pack_path,
+            Path(self.tmp.name) / "packs" / "map-shared" / f"{second_job_id}.zip",
+        )
+        self.assertNotEqual(first_pack_path, second_pack_path)
+
+        for job_id, expected in [
+            (first_job_id, b"first-job-exact-bytes"),
+            (second_job_id, b"second-job-exact-bytes"),
+        ]:
+            signed = self.client.post(
+                "/v1/map-packs/map-shared/download-url",
+                params={
+                    "clientInstallationId": "installation-owner",
+                    "jobId": job_id,
+                },
+            )
+            self.assertEqual(signed.status_code, 200)
+            downloaded = self.client.get(signed.json()["url"])
+            self.assertEqual(downloaded.status_code, 200)
+            self.assertEqual(downloaded.content, expected)
+
+    def test_pre_deploy_signed_url_can_download_legacy_shared_artifact(self):
+        legacy_job_id = self.create_job()
+        legacy_pack_path = Path(self.tmp.name) / "packs" / "map-legacy.zip"
+        legacy_pack_path.parent.mkdir(parents=True)
+        legacy_pack_path.write_bytes(b"legacy-shared-bytes")
+        self.update_job(
+            legacy_job_id,
+            mapId="map-legacy",
+            packPath=str(legacy_pack_path),
+            createdAt="2026-07-12T01:00:00Z",
+        )
+
+        newer_job_id = self.create_job()
+        newer_pack_path = Path(self.tmp.name) / "packs" / "map-legacy" / f"{newer_job_id}.zip"
+        newer_pack_path.parent.mkdir(parents=True)
+        newer_pack_path.write_bytes(b"new-job-bytes")
+        self.update_job(
+            newer_job_id,
+            mapId="map-legacy",
+            packPath=str(newer_pack_path),
+            createdAt="2026-07-12T02:00:00Z",
+        )
+        signed = DownloadSigner("test-secret").sign(
+            "map-legacy",
+            legacy_pack_path,
+            ttl_seconds=900,
+        )
+
+        response = self.client.get(
+            f"/v1/map-packs/map-legacy/download?{signed.query()}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"legacy-shared-bytes")
 
     def test_run_route_rejects_active_job(self):
         job_id = self.create_job()

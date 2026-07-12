@@ -209,11 +209,26 @@ def create_app():
             job = service.find_by_map_id(map_id, allow_owned_without_installation=True)
         if not job or not job.pack_path:
             raise HTTPException(status_code=404, detail="map pack not ready")
-        try:
-            download_signer.verify(map_id, job.pack_path, expires_at=expires, signature=signature)
-        except DownloadTokenError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
         pack_path = Path(job.pack_path)
+        try:
+            download_signer.verify(map_id, pack_path, expires_at=expires, signature=signature)
+        except DownloadTokenError as exc:
+            if jobId is not None:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+            # URLs issued before job-specific artifacts were deployed did not
+            # include a job ID and were signed against packs/<mapId>.zip.
+            legacy_pack_path = pipeline.paths.pack_root / f"{map_id}.zip"
+            try:
+                download_signer.verify(
+                    map_id,
+                    legacy_pack_path,
+                    expires_at=expires,
+                    signature=signature,
+                )
+            except DownloadTokenError as legacy_exc:
+                raise HTTPException(status_code=403, detail=str(legacy_exc)) from legacy_exc
+            pack_path = legacy_pack_path
         if not pack_path.exists():
             raise HTTPException(status_code=404, detail="map pack file not found")
         return FileResponse(pack_path, media_type="application/zip", filename=pack_path.name)

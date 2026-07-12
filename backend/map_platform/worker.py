@@ -66,7 +66,7 @@ class MapWorker:
                     on_progress=update_progress,
                 )
             published_archive = (
-                self.pipeline.published_archive_path(map_id)
+                self.pipeline.published_archive_path(map_id, job.job_id)
                 if hasattr(self.pipeline, "published_archive_path")
                 else archive_path
             )
