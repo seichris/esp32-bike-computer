@@ -31,6 +31,38 @@ private enum OfflineMapDefaults {
     ]
 }
 
+nonisolated enum OfflineMapServerIdentity {
+    private static let managedIdentity = "managed-production"
+
+    static func normalized(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: trimmed) else {
+            return trimmed.lowercased()
+        }
+        components.scheme = components.scheme?.lowercased()
+        components.host = components.host?.lowercased()
+        while !components.path.isEmpty && components.path.hasSuffix("/") {
+            components.path.removeLast()
+        }
+        components.query = nil
+        components.fragment = nil
+        return components.string ?? trimmed.lowercased()
+    }
+
+    static func isManaged(_ value: String?) -> Bool {
+        guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return true
+        }
+        let normalizedValue = normalized(value)
+        return ([OfflineMapServiceConfig.productionServerURLString] + OfflineMapDefaults.legacyServerURLs)
+            .contains { normalized($0) == normalizedValue }
+    }
+
+    static func recoveryKey(_ value: String) -> String {
+        isManaged(value) ? managedIdentity : normalized(value)
+    }
+}
+
 nonisolated enum MapActivationDecision: Equatable {
     case pending(String)
     case installed
@@ -424,23 +456,13 @@ nonisolated enum OfflineMapRecoveryHistory {
         let identity = serverIdentity(serverURLString)
         var servers = Set(defaults.stringArray(forKey: forgottenDiscoveryServersKey) ?? [])
         guard servers.remove(identity) != nil else { return false }
-        defaults.set(Array(servers).sorted(), forKey: forgottenDiscoveryServersKey)
         markHandled(jobIds: jobIds, defaults: defaults)
+        defaults.set(Array(servers).sorted(), forKey: forgottenDiscoveryServersKey)
         return true
     }
 
     private static func serverIdentity(_ value: String) -> String {
-        guard var components = URLComponents(string: value) else {
-            return value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        }
-        components.scheme = components.scheme?.lowercased()
-        components.host = components.host?.lowercased()
-        while !components.path.isEmpty && components.path.hasSuffix("/") {
-            components.path.removeLast()
-        }
-        components.query = nil
-        components.fragment = nil
-        return components.string ?? value.lowercased()
+        OfflineMapServerIdentity.recoveryKey(value)
     }
 }
 
@@ -650,10 +672,12 @@ final class OfflineMapManager: ObservableObject {
         }
 
         startMapJobTask { manager in
-            let usesManagedServer = manager.isManagedServerURL(persistedServerURL)
-            let recoveryServerURL = usesManagedServer ?
-                manager.serverURLString : (persistedServerURL ?? manager.serverURLString)
-            let recoveryAPIToken = usesManagedServer ? manager.apiToken : persistedAPIToken
+            let recoveryConnection = manager.recoveryConnection(
+                persistedServerURL: persistedServerURL,
+                persistedAPIToken: persistedAPIToken
+            )
+            let recoveryServerURL = recoveryConnection.serverURL
+            let recoveryAPIToken = recoveryConnection.apiToken
             let client = try manager.makeClient(
                 serverURLString: recoveryServerURL,
                 apiTokenString: recoveryAPIToken
@@ -1077,13 +1101,26 @@ final class OfflineMapManager: ObservableObject {
         )
     }
 
-    private func isManagedServerURL(_ value: String?) -> Bool {
-        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty else {
-            return true
+    private func recoveryConnection(
+        persistedServerURL: String?,
+        persistedAPIToken: String?
+    ) -> (serverURL: String, apiToken: String?) {
+        guard let persistedServerURL,
+              !persistedServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (serverURLString, apiToken)
         }
-        return value == OfflineMapServiceConfig.productionServerURLString ||
-            OfflineMapDefaults.legacyServerURLs.contains(value)
+        if OfflineMapServerIdentity.isManaged(persistedServerURL) {
+            let bundledToken = OfflineMapServiceConfig.apiToken
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let managedToken = bundledToken.isEmpty &&
+                OfflineMapServerIdentity.isManaged(serverURLString) ? apiToken : bundledToken
+            return (OfflineMapServiceConfig.productionServerURLString, managedToken)
+        }
+        if OfflineMapServerIdentity.normalized(persistedServerURL) ==
+            OfflineMapServerIdentity.normalized(serverURLString) {
+            return (serverURLString, apiToken)
+        }
+        return (persistedServerURL, persistedAPIToken)
     }
 
     private func adoptRecoveredJob(_ job: OfflineMapJob) {
@@ -1099,7 +1136,7 @@ final class OfflineMapManager: ObservableObject {
 
     nonisolated static func resolvedServerURL(defaults: UserDefaults) -> String {
         let stored = defaults.string(forKey: OfflineMapDefaults.serverURLKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if stored.isEmpty || OfflineMapDefaults.legacyServerURLs.contains(stored) {
+        if OfflineMapServerIdentity.isManaged(stored) {
             return OfflineMapServiceConfig.productionServerURLString
         }
         return stored
@@ -1113,9 +1150,7 @@ final class OfflineMapManager: ObservableObject {
         let stored = defaults.string(forKey: OfflineMapDefaults.apiTokenKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let storedServer = defaults.string(forKey: OfflineMapDefaults.serverURLKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let usesBundledServer = storedServer.isEmpty ||
-            storedServer == OfflineMapServiceConfig.productionServerURLString ||
-            OfflineMapDefaults.legacyServerURLs.contains(storedServer)
+        let usesBundledServer = OfflineMapServerIdentity.isManaged(storedServer)
         if usesBundledServer, !bundled.isEmpty {
             return bundled
         }
@@ -1179,7 +1214,14 @@ final class OfflineMapManager: ObservableObject {
             })
             temporaryURL = downloadedURL
             _ = try await Task.detached(priority: .userInitiated) {
-                try OfflineMapPackArchive(url: downloadedURL)
+                let archive = try OfflineMapPackArchive(url: downloadedURL)
+                let downloadedMapId = try archive.manifest().mapId
+                guard downloadedMapId == mapId else {
+                    throw OfflineMapPlatformError.invalidPack(
+                        "manifest mapId \(downloadedMapId ?? "missing") does not match \(mapId)"
+                    )
+                }
+                return archive
             }.value
         } catch {
             if let temporaryURL {
@@ -1193,10 +1235,16 @@ final class OfflineMapManager: ObservableObject {
             throw OfflineMapPlatformError.missingDownloadURL
         }
         let destination = try cachedPackURL(mapId: mapId)
-        if FileManager.default.fileExists(atPath: destination.path) {
-            _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporaryURL)
-        } else {
-            try FileManager.default.moveItem(at: temporaryURL, to: destination)
+        do {
+            if FileManager.default.fileExists(atPath: destination.path) {
+                _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporaryURL)
+            } else {
+                try FileManager.default.moveItem(at: temporaryURL, to: destination)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            downloadURL = nil
+            throw error
         }
         downloadedPackURL = destination
         if let jobId = currentJob?.jobId {

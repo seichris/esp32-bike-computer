@@ -475,7 +475,11 @@ class MapJobService:
             if client_installation_id is not None
             else None
         )
-        candidates = [job for job in self.store.list() if job.map_id == map_id]
+        candidates = [
+            job
+            for job in self.store.list()
+            if job.map_id == map_id and job.status == JobStatus.READY
+        ]
         if normalized is not None:
             owned = [job for job in candidates if job.client_installation_id == normalized]
             candidates = owned or [job for job in candidates if job.client_installation_id is None]

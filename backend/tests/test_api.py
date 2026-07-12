@@ -164,6 +164,7 @@ class MapJobRunAPITests(unittest.TestCase):
 
     def test_expired_job_cannot_issue_a_new_download_url(self):
         job_id = self.create_job()
+        protecting_job_id = self.create_job()
         pack_path = Path(self.tmp.name) / "packs" / "map-expired" / f"{job_id}.zip"
         pack_path.parent.mkdir(parents=True)
         pack_path.write_bytes(b"expired")
@@ -173,6 +174,15 @@ class MapJobRunAPITests(unittest.TestCase):
             mapId="map-expired",
             packPath=str(pack_path),
         )
+        # Keep the artifact present after expiry so the signed-download
+        # assertion below proves READY-state gating, not a missing file.
+        self.update_job(protecting_job_id, packPath=str(pack_path))
+
+        issued = self.client.post(
+            "/v1/map-packs/map-expired/download-url",
+            params={"jobId": job_id},
+        )
+        self.assertEqual(issued.status_code, 200)
 
         expired = self.client.post(
             "/v1/maintenance/expire",
@@ -185,11 +195,13 @@ class MapJobRunAPITests(unittest.TestCase):
                 "jobId": job_id,
             },
         )
+        previously_issued_download = self.client.get(issued.json()["url"])
 
         self.assertEqual(expired.status_code, 200)
         self.assertEqual(expired.json()["expired"], 1)
         self.assertEqual(download.status_code, 404)
-        self.assertFalse(pack_path.exists())
+        self.assertEqual(previously_issued_download.status_code, 404)
+        self.assertTrue(pack_path.exists())
 
     def test_run_route_rejects_active_job(self):
         job_id = self.create_job()
