@@ -108,7 +108,7 @@ static void updateMapActivationProgressOverlay() {
 
   if (mapActivationProgressPanel == nullptr) {
     mapActivationProgressPanel = lv_obj_create(lv_layer_top());
-    lv_obj_set_size(mapActivationProgressPanel, TFT_WIDTH - 32, 94);
+    lv_obj_set_size(mapActivationProgressPanel, TFT_WIDTH - 32, 120);
     lv_obj_align(mapActivationProgressPanel, LV_ALIGN_BOTTOM_MID, 0, -24);
     lv_obj_set_style_bg_color(mapActivationProgressPanel,
                               lv_color_hex(0x101010), 0);
@@ -125,6 +125,9 @@ static void updateMapActivationProgressOverlay() {
                                &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(mapActivationProgressLabel,
                                 lv_color_white(), 0);
+    lv_obj_set_width(mapActivationProgressLabel, LV_PCT(100));
+    lv_obj_set_style_text_align(mapActivationProgressLabel,
+                                LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(mapActivationProgressLabel, LV_ALIGN_TOP_MID, 0, -2);
 
     mapActivationProgressBar = lv_bar_create(mapActivationProgressPanel);
@@ -137,7 +140,8 @@ static void updateMapActivationProgressOverlay() {
                               lv_color_hex(0x4A90E2), LV_PART_INDICATOR);
   }
 
-  lv_label_set_text_fmt(mapActivationProgressLabel, "Step %u - %u%%",
+  lv_label_set_text_fmt(mapActivationProgressLabel,
+                        "Map Upload Progress:\nStep %u - %u%%",
                         static_cast<unsigned>(activation.step),
                         static_cast<unsigned>(activation.progress));
   lv_bar_set_value(mapActivationProgressBar, activation.progress, LV_ANIM_OFF);

@@ -988,7 +988,7 @@ struct NavigationProtocolTests {
             stepCount: 5,
             percentage: 6
         )
-        assertEqual(progress?.label, "Step 1 - 6%", "activation progress stays concise")
+        assertEqual(progress?.label, "Step 1/5 - 6%", "activation progress includes the total step count")
         assertEqual(progress?.fraction, 0.06, "activation percentage drives the progress bar")
         assertEqual(
             MapActivationProgressPresentation.make(

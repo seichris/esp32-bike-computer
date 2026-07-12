@@ -240,7 +240,7 @@ private struct DownloadingMapsSettingsSection: View {
 
             if let activationProgress = manager.activationProgress {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(activationProgress.label)
+                    StatusValueRow(status: activationProgress.label, isBusy: false)
                     ProgressView(value: activationProgress.fraction)
                 }
                 .accessibilityElement(children: .combine)

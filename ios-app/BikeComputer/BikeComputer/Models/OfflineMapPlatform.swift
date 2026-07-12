@@ -275,7 +275,7 @@ struct MapActivationProgressPresentation: Equatable {
     }
 
     var label: String {
-        "Step \(step) - \(percentage)%"
+        "Step \(step)/\(stepCount) - \(percentage)%"
     }
 
     static func make(
