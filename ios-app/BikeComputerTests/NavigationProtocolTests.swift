@@ -642,6 +642,7 @@ struct NavigationProtocolTests {
             jobId: "job-resume",
             installOnDevice: true,
             serverURLString: "https://maps.example.com",
+            apiTokenString: "job-token",
             defaults: defaults
         )
         OfflineMapJobPersistence.markPackDownloaded(jobId: "job-resume", defaults: defaults)
@@ -664,6 +665,11 @@ struct NavigationProtocolTests {
             "job-resume",
             "downloaded pack state survives transfer interruption"
         )
+        assertEqual(
+            OfflineMapJobPersistence.apiTokenString(defaults: defaults),
+            "job-token",
+            "pending job preserves its originating server credential"
+        )
         OfflineMapJobPersistence.clear(defaults: defaults)
         assertEqual(
             OfflineMapJobPersistence.activeJobId(defaults: defaults),
@@ -683,6 +689,11 @@ struct NavigationProtocolTests {
             OfflineMapJobPersistence.downloadedJobId(defaults: defaults),
             nil,
             "completed map job clears downloaded recovery state"
+        )
+        assertEqual(
+            OfflineMapJobPersistence.apiTokenString(defaults: defaults),
+            nil,
+            "completed map job clears its originating credential"
         )
         OfflineMapRecoveryHistory.markHandled(jobId: "job-resume", defaults: defaults)
         OfflineMapRecoveryHistory.markHandled(jobId: "job-other", defaults: defaults)
@@ -1023,9 +1034,11 @@ struct NavigationProtocolTests {
             jobId: "job-persisted",
             installOnDevice: true,
             serverURLString: "https://persisted.example",
+            apiTokenString: "persisted-token",
             defaults: persistedDefaults
         )
         persistedDefaults.set("https://current-setting.example", forKey: "offlineMap.serverURL")
+        persistedDefaults.set("current-token", forKey: "offlineMap.apiToken")
         var persistedDownloadCount = 0
         OfflineMapTestURLProtocol.configure { request in
             if request.url?.path == "/v1/map-jobs/job-persisted" {
@@ -1067,6 +1080,12 @@ struct NavigationProtocolTests {
         assert(
             OfflineMapTestURLProtocol.requests().contains { $0.url?.host == "persisted.example" },
             "persisted recovery uses its originating server"
+        )
+        assert(
+            OfflineMapTestURLProtocol.requests().allSatisfy {
+                $0.value(forHTTPHeaderField: "Authorization") == "Bearer persisted-token"
+            },
+            "persisted recovery uses its originating server credential"
         )
         persistedManager.resumePendingMapJobIfNeeded(bleManager: disconnectedBLE)
         let secondPersistedPassCompleted = await waitForMapTaskCompletion(persistedManager)
@@ -1459,7 +1478,10 @@ struct NavigationProtocolTests {
             apiToken: "secret",
             path: "/v1/map-packs/map-12345678/download-url",
             method: "POST",
-            clientInstallationId: "installation-test"
+            clientInstallationId: "installation-test",
+            additionalQueryItems: [
+                URLQueryItem(name: "jobId", value: "job-12345678")
+            ]
         ) else {
             assert(false, "installation-scoped requests should build")
             return
@@ -1473,6 +1495,10 @@ struct NavigationProtocolTests {
         assert(
             downloadRequest.url?.query?.contains("clientInstallationId=installation-test") == true,
             "download URL lookup is scoped to the installation"
+        )
+        assert(
+            downloadRequest.url?.query?.contains("jobId=job-12345678") == true,
+            "download URL lookup stays bound to the recovered job"
         )
     }
 

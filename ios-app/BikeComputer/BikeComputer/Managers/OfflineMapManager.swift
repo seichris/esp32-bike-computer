@@ -285,6 +285,7 @@ nonisolated enum OfflineMapJobPersistence {
     private static let activeJobIdKey = "offlineMap.activeJobId"
     private static let installOnDeviceKey = "offlineMap.activeJobInstallOnDevice"
     private static let serverURLKey = "offlineMap.activeJobServerURL"
+    private static let apiTokenKey = "offlineMap.activeJobAPIToken"
     private static let downloadedJobIdKey = "offlineMap.activeJobDownloadedJobId"
 
     static func activeJobId(defaults: UserDefaults) -> String? {
@@ -312,10 +313,16 @@ nonisolated enum OfflineMapJobPersistence {
         return value
     }
 
+    static func apiTokenString(defaults: UserDefaults) -> String? {
+        guard defaults.object(forKey: apiTokenKey) != nil else { return nil }
+        return defaults.string(forKey: apiTokenKey) ?? ""
+    }
+
     static func save(
         jobId: String,
         installOnDevice: Bool = false,
         serverURLString: String? = nil,
+        apiTokenString: String? = nil,
         defaults: UserDefaults
     ) {
         defaults.set(jobId, forKey: activeJobIdKey)
@@ -325,6 +332,9 @@ nonisolated enum OfflineMapJobPersistence {
         }
         if let serverURLString, !serverURLString.isEmpty {
             defaults.set(serverURLString, forKey: serverURLKey)
+        }
+        if let apiTokenString {
+            defaults.set(apiTokenString, forKey: apiTokenKey)
         }
     }
 
@@ -337,6 +347,7 @@ nonisolated enum OfflineMapJobPersistence {
         defaults.removeObject(forKey: activeJobIdKey)
         defaults.removeObject(forKey: installOnDeviceKey)
         defaults.removeObject(forKey: serverURLKey)
+        defaults.removeObject(forKey: apiTokenKey)
         defaults.removeObject(forKey: downloadedJobIdKey)
     }
 }
@@ -557,13 +568,17 @@ final class OfflineMapManager: ObservableObject {
         let persistedJobId = OfflineMapJobPersistence.activeJobId(defaults: defaults)
         let persistedInstallIntent = OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults)
         let persistedServerURL = OfflineMapJobPersistence.serverURLString(defaults: defaults)
+        let persistedAPIToken = OfflineMapJobPersistence.apiTokenString(defaults: defaults)
         if persistedJobId == nil {
             isServerRecoveryCheckPending = true
         }
 
         startMapJobTask { manager in
             let recoveryServerURL = persistedServerURL ?? manager.serverURLString
-            let client = try manager.makeClient(serverURLString: recoveryServerURL)
+            let client = try manager.makeClient(
+                serverURLString: recoveryServerURL,
+                apiTokenString: persistedAPIToken
+            )
             var jobId = persistedJobId
             var shouldInstallOnDevice = persistedInstallIntent
 
@@ -653,14 +668,15 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func fetchDownloadURL() {
-        guard let mapId = currentJob?.mapId else {
+        guard let mapId = currentJob?.mapId,
+              let jobId = currentJob?.jobId else {
             errorMessage = OfflineMapPlatformError.missingMapId.localizedDescription
             return
         }
         Task {
             await runBusy {
                 let client = try self.makeClient()
-                self.downloadURL = try await client.downloadURL(mapId: mapId)
+                self.downloadURL = try await client.downloadURL(mapId: mapId, jobId: jobId)
                 self.statusMessage = "download ready"
             }
         }
@@ -942,14 +958,17 @@ final class OfflineMapManager: ObservableObject {
         return true
     }
 
-    private func makeClient(serverURLString: String? = nil) throws -> OfflineMapPlatformClient {
+    private func makeClient(
+        serverURLString: String? = nil,
+        apiTokenString: String? = nil
+    ) throws -> OfflineMapPlatformClient {
         let value = serverURLString ?? self.serverURLString
         guard let url = URL(string: value), url.scheme != nil else {
             throw OfflineMapPlatformError.invalidBaseURL
         }
         return OfflineMapPlatformClient(
             baseURL: url,
-            apiToken: apiToken,
+            apiToken: apiTokenString ?? apiToken,
             clientInstallationId: clientInstallationId,
             session: mapPlatformSession
         )
@@ -1019,11 +1038,14 @@ final class OfflineMapManager: ObservableObject {
 
     private func downloadReadyPack(client: OfflineMapPlatformClient) async throws {
         let mapId = try readyMapId()
+        guard let jobId = currentJob?.jobId else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
         let url: URL
         if let downloadURL {
             url = downloadURL
         } else {
-            url = try await client.downloadURL(mapId: mapId)
+            url = try await client.downloadURL(mapId: mapId, jobId: jobId)
             downloadURL = url
         }
 
@@ -1096,6 +1118,7 @@ final class OfflineMapManager: ObservableObject {
             jobId: jobId,
             installOnDevice: installOnDevice,
             serverURLString: serverURLString,
+            apiTokenString: apiToken,
             defaults: defaults
         )
     }

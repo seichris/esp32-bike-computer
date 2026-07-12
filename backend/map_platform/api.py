@@ -160,14 +160,26 @@ def create_app():
         return job.to_dict()
 
     @app.post("/v1/map-packs/{map_id}/download-url", dependencies=[Depends(require_api_token)])
-    def create_download_url(map_id: str, clientInstallationId: str | None = None) -> dict[str, Any]:
+    def create_download_url(
+        map_id: str,
+        clientInstallationId: str | None = None,
+        jobId: str | None = None,
+    ) -> dict[str, Any]:
         try:
-            job = service.find_by_map_id(
-                map_id,
-                client_installation_id=clientInstallationId,
-            )
+            if jobId is not None:
+                job = service.get_job_for_installation(jobId, clientInstallationId)
+                if job.map_id != map_id:
+                    job = None
+            else:
+                # Preserve older clients that only identify a stable map ID.
+                job = service.find_by_map_id(
+                    map_id,
+                    client_installation_id=clientInstallationId,
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="map pack not ready") from exc
         if not job or not job.pack_path:
             raise HTTPException(status_code=404, detail="map pack not ready")
         signed = download_signer.sign(map_id, job.pack_path, ttl_seconds=900)

@@ -706,13 +706,14 @@ struct OfflineMapPlatformClient {
         return try JSONDecoder().decode(OfflineMapJobsResponse.self, from: data).jobs
     }
 
-    func downloadURL(mapId: String) async throws -> URL {
+    func downloadURL(mapId: String, jobId: String) async throws -> URL {
         let request = try Self.makeInstallationScopedURLRequest(
             baseURL: baseURL,
             apiToken: apiToken,
             path: "/v1/map-packs/\(mapId)/download-url",
             method: "POST",
-            clientInstallationId: clientInstallationId
+            clientInstallationId: clientInstallationId,
+            additionalQueryItems: [URLQueryItem(name: "jobId", value: jobId)]
         )
         let response: OfflineMapDownloadURL = try await send(request: request)
         return try absoluteURL(for: response.url, baseURL: baseURL)
@@ -759,7 +760,8 @@ struct OfflineMapPlatformClient {
         apiToken: String?,
         path: String,
         method: String,
-        clientInstallationId: String
+        clientInstallationId: String,
+        additionalQueryItems: [URLQueryItem] = []
     ) throws -> URLRequest {
         let endpoint = try endpointURL(baseURL: baseURL, path: path)
         guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
@@ -767,7 +769,7 @@ struct OfflineMapPlatformClient {
         }
         components.queryItems = [
             URLQueryItem(name: "clientInstallationId", value: clientInstallationId)
-        ]
+        ] + additionalQueryItems
         guard let url = components.url else {
             throw OfflineMapPlatformError.invalidBaseURL
         }

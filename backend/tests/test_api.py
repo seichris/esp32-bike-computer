@@ -257,7 +257,24 @@ class MapJobRunAPITests(unittest.TestCase):
         unscoped = self.client.get("/v1/map-packs/map-shared")
         download = self.client.post(
             "/v1/map-packs/map-shared/download-url",
-            params={"clientInstallationId": "installation-owner"},
+            params={
+                "clientInstallationId": "installation-owner",
+                "jobId": newer,
+            },
+        )
+        older_download = self.client.post(
+            "/v1/map-packs/map-shared/download-url",
+            params={
+                "clientInstallationId": "installation-owner",
+                "jobId": older,
+            },
+        )
+        cross_install_download = self.client.post(
+            "/v1/map-packs/map-shared/download-url",
+            params={
+                "clientInstallationId": "installation-owner",
+                "jobId": other,
+            },
         )
 
         self.assertEqual(matching.status_code, 200)
@@ -268,6 +285,11 @@ class MapJobRunAPITests(unittest.TestCase):
         downloaded = self.client.get(download.json()["url"])
         self.assertEqual(downloaded.status_code, 200)
         self.assertEqual(downloaded.content, b"newer")
+        self.assertEqual(older_download.status_code, 200)
+        older_file = self.client.get(older_download.json()["url"])
+        self.assertEqual(older_file.status_code, 200)
+        self.assertEqual(older_file.content, b"older")
+        self.assertEqual(cross_install_download.status_code, 404)
 
         legacy = self.create_job()
         legacy_path = Path(self.tmp.name) / "legacy.zip"
@@ -280,7 +302,10 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(self.client.get("/v1/map-packs/map-legacy").status_code, 200)
         legacy_download = self.client.post(
             "/v1/map-packs/map-legacy/download-url",
-            params={"clientInstallationId": "installation-owner"},
+            params={
+                "clientInstallationId": "installation-owner",
+                "jobId": legacy,
+            },
         )
         self.assertEqual(legacy_download.status_code, 200)
         legacy_file = self.client.get(legacy_download.json()["url"])
