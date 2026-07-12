@@ -2119,6 +2119,21 @@ struct NavigationProtocolTests {
             source.contains(".onChange(of: focusedPackFilename) { newValue in\n            scheduleRenameCommitIfNeeded(focusedFilename: newValue)\n        }"),
             "Saved Maps commits a rename when form focus moves away"
         )
+        assert(
+            !source.contains("title: \"Installed on Device\"") &&
+                !source.contains("title: \"Last Transfer\""),
+            "Saved Maps omits redundant device and transfer summary rows"
+        )
+        assert(
+            source.contains("if isInstalled {") &&
+                source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
+                source.contains("Image(systemName: \"arrow.up.circle\")"),
+            "each saved map shows installed status or upload as mutually exclusive actions"
+        )
+        assert(
+            source.contains(".alert(\"Already on Device\""),
+            "tapping installed status explains that the map is already on the device"
+        )
     }
 
     @MainActor

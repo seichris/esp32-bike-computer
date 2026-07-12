@@ -325,16 +325,6 @@ private struct SavedMapsSettingsSection: View {
 
     var body: some View {
         Section(header: Text("Saved Maps")) {
-            if !bleManager.mapTransferActiveMapId.isEmpty {
-                SettingsValueRow(
-                    title: "Installed on Device",
-                    value: manager.displayName(forMapId: bleManager.mapTransferActiveMapId)
-                )
-            }
-            if let lastTransferDescription = manager.lastTransferDescription {
-                SettingsValueRow(title: "Last Transfer", value: lastTransferDescription)
-            }
-
             if manager.cachedPackURLs.isEmpty {
                 Text("0 maps downloaded yet")
                     .foregroundColor(.secondary)
@@ -411,9 +401,15 @@ private struct DownloadedMapRow: View {
     @FocusState.Binding var focusedPackFilename: String?
     @Binding var renameInteraction: SavedMapRenameInteraction
     let onCommitRename: (SavedMapRenameCommit) -> Void
+    @State private var isShowingInstalledConfirmation = false
 
     var body: some View {
         let displayName = manager.displayName(forCachedPack: packURL)
+        let isInstalled = manager.isCachedPackInstalled(
+            packURL,
+            activeMapId: bleManager.mapTransferActiveMapId,
+            activeSessionId: bleManager.mapTransferActiveSessionId
+        )
 
         HStack(spacing: 12) {
             if renameInteraction.editingFilename == packURL.lastPathComponent {
@@ -457,33 +453,38 @@ private struct DownloadedMapRow: View {
                 .accessibilityHint("Edits this saved map name")
             }
 
-            if manager.isCachedPackInstalled(
-                packURL,
-                activeMapId: bleManager.mapTransferActiveMapId,
-                activeSessionId: bleManager.mapTransferActiveSessionId
-            ) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-                    .accessibilityLabel("Installed on device")
-            }
-
             Spacer()
                 .contentShape(Rectangle())
                 .onTapGesture {
                     focusedPackFilename = nil
                 }
 
-            Button {
-                finishRenaming()
-                focusedPackFilename = nil
-                manager.transferCachedPack(at: packURL, bleManager: bleManager)
-            } label: {
-                Image(systemName: "arrow.up.circle")
-                    .frame(width: 32, height: 32)
+            if isInstalled {
+                Button {
+                    finishRenaming()
+                    focusedPackFilename = nil
+                    isShowingInstalledConfirmation = true
+                } label: {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("\(displayName) is installed on device")
+                .accessibilityHint("Shows the installed map status")
+            } else {
+                Button {
+                    finishRenaming()
+                    focusedPackFilename = nil
+                    manager.transferCachedPack(at: packURL, bleManager: bleManager)
+                } label: {
+                    Image(systemName: "arrow.up.circle")
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.borderless)
+                .disabled(manager.isBusy || !bleManager.isNavigationReady)
+                .accessibilityLabel("Transfer \(displayName) to device")
             }
-            .buttonStyle(.borderless)
-            .disabled(manager.isBusy || !bleManager.isNavigationReady)
-            .accessibilityLabel("Transfer \(displayName) to device")
 
             Button(role: .destructive) {
                 finishRenaming()
@@ -496,6 +497,11 @@ private struct DownloadedMapRow: View {
             .buttonStyle(.borderless)
             .disabled(manager.isBusy)
             .accessibilityLabel("Delete \(displayName)")
+        }
+        .alert("Already on Device", isPresented: $isShowingInstalledConfirmation) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("This map is already installed on the device.")
         }
     }
 
