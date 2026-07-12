@@ -969,7 +969,12 @@ final class OfflineMapManager: ObservableObject {
     ) -> String {
         let bundled = bundledToken
         let stored = defaults.string(forKey: OfflineMapDefaults.apiTokenKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !bundled.isEmpty {
+        let storedServer = defaults.string(forKey: OfflineMapDefaults.serverURLKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let usesBundledServer = storedServer.isEmpty ||
+            storedServer == OfflineMapServiceConfig.productionServerURLString ||
+            OfflineMapDefaults.legacyServerURLs.contains(storedServer)
+        if usesBundledServer, !bundled.isEmpty {
             return bundled
         }
         return stored

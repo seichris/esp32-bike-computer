@@ -221,22 +221,28 @@ class MapJobRunAPITests(unittest.TestCase):
             "request-other-new",
             [103.77, 1.26, 103.95, 1.39],
         )
+        older_path = Path(self.tmp.name) / "older.zip"
+        newer_path = Path(self.tmp.name) / "newer.zip"
+        other_path = Path(self.tmp.name) / "other.zip"
+        older_path.write_bytes(b"older")
+        newer_path.write_bytes(b"newer")
+        other_path.write_bytes(b"other")
         self.update_job(
             older,
             mapId="map-shared",
-            packPath=str(Path(self.tmp.name) / "older.zip"),
+            packPath=str(older_path),
             createdAt="2026-07-12T01:00:00Z",
         )
         self.update_job(
             newer,
             mapId="map-shared",
-            packPath=str(Path(self.tmp.name) / "newer.zip"),
+            packPath=str(newer_path),
             createdAt="2026-07-12T03:00:00Z",
         )
         self.update_job(
             other,
             mapId="map-shared",
-            packPath=str(Path(self.tmp.name) / "other.zip"),
+            packPath=str(other_path),
             createdAt="2026-07-12T04:00:00Z",
         )
 
@@ -259,18 +265,27 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(unknown.status_code, 404)
         self.assertEqual(unscoped.status_code, 404)
         self.assertEqual(download.status_code, 200)
+        downloaded = self.client.get(download.json()["url"])
+        self.assertEqual(downloaded.status_code, 200)
+        self.assertEqual(downloaded.content, b"newer")
 
         legacy = self.create_job()
+        legacy_path = Path(self.tmp.name) / "legacy.zip"
+        legacy_path.write_bytes(b"legacy")
         self.update_job(
             legacy,
             mapId="map-legacy",
-            packPath=str(Path(self.tmp.name) / "legacy.zip"),
+            packPath=str(legacy_path),
         )
         self.assertEqual(self.client.get("/v1/map-packs/map-legacy").status_code, 200)
-        self.assertEqual(
-            self.client.post("/v1/map-packs/map-legacy/download-url").status_code,
-            200,
+        legacy_download = self.client.post(
+            "/v1/map-packs/map-legacy/download-url",
+            params={"clientInstallationId": "installation-owner"},
         )
+        self.assertEqual(legacy_download.status_code, 200)
+        legacy_file = self.client.get(legacy_download.json()["url"])
+        self.assertEqual(legacy_file.status_code, 200)
+        self.assertEqual(legacy_file.content, b"legacy")
 
     def test_modern_job_mutations_require_matching_installation(self):
         response = self.client.post(

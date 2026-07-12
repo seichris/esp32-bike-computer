@@ -1500,6 +1500,17 @@ struct NavigationProtocolTests {
             "new-bundled-token",
             "new bundled map API token replaces a stale token after app update"
         )
+
+        defaults.set("https://custom-map-server.example", forKey: "offlineMap.serverURL")
+        defaults.set("custom-server-token", forKey: "offlineMap.apiToken")
+        assertEqual(
+            OfflineMapManager.resolvedAPIToken(
+                defaults: defaults,
+                bundledToken: "new-bundled-token"
+            ),
+            "custom-server-token",
+            "custom server keeps its deliberate custom credential"
+        )
     }
 
     @MainActor

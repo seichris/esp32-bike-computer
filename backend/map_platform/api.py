@@ -173,14 +173,28 @@ def create_app():
         signed = download_signer.sign(map_id, job.pack_path, ttl_seconds=900)
         return {
             "mapId": map_id,
-            "url": f"/v1/map-packs/{map_id}/download?{signed.query()}",
+            "url": f"/v1/map-packs/{map_id}/download?jobId={job.job_id}&{signed.query()}",
             "expiresAt": signed.expires_at,
             "expiresInSeconds": 900,
         }
 
     @app.get("/v1/map-packs/{map_id}/download")
-    def download_map_pack(map_id: str, expires: int, signature: str):
-        job = service.find_by_map_id(map_id, allow_owned_without_installation=True)
+    def download_map_pack(
+        map_id: str,
+        expires: int,
+        signature: str,
+        jobId: str | None = None,
+    ):
+        if jobId is not None:
+            try:
+                job = service.get_job(jobId)
+            except (KeyError, ValueError) as exc:
+                raise HTTPException(status_code=404, detail="map pack not ready") from exc
+            if job.map_id != map_id:
+                raise HTTPException(status_code=404, detail="map pack not ready")
+        else:
+            # Preserve already-issued pre-deploy URLs for their short TTL.
+            job = service.find_by_map_id(map_id, allow_owned_without_installation=True)
         if not job or not job.pack_path:
             raise HTTPException(status_code=404, detail="map pack not ready")
         try:
