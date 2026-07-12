@@ -107,6 +107,12 @@ struct ContentView: View {
         .onAppear {
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
         }
+        .onChange(of: coordinator.bleManager.isConnected) { _ in
+            schedulePendingMapInstallResume()
+        }
+        .onChange(of: coordinator.bleManager.isNavigationReady) { _ in
+            schedulePendingMapInstallResume()
+        }
         .onChange(of: offlineMapManager.isMapAreaSelectionActive) { isActive in
             if isActive {
                 showingSettings = false
@@ -117,6 +123,26 @@ struct ContentView: View {
                 offlineMapSelectionDragStartFrame = nil
             }
         }
+    }
+
+    private func schedulePendingMapInstallResume() {
+        guard offlineMapManager.hasDownloadedPendingDeviceInstall else { return }
+        Task { @MainActor in
+            while offlineMapManager.isBusy {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            resumePendingMapInstallIfReady()
+        }
+    }
+
+    private func resumePendingMapInstallIfReady() {
+        guard OfflineMapAutomaticRecoveryTrigger.shouldResume(
+            hasPendingInstall: offlineMapManager.hasDownloadedPendingDeviceInstall,
+            isBusy: offlineMapManager.isBusy,
+            isConnected: coordinator.bleManager.isConnected,
+            isNavigationReady: coordinator.bleManager.isNavigationReady
+        ) else { return }
+        offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
     }
 
     private var shouldShowOfflineMapOnboarding: Bool {

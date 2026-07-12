@@ -66,7 +66,7 @@ class MapWorker:
                     on_progress=update_progress,
                 )
             published_archive = (
-                self.pipeline.published_archive_path(map_id)
+                self.pipeline.published_archive_path(map_id, job.job_id)
                 if hasattr(self.pipeline, "published_archive_path")
                 else archive_path
             )
@@ -111,6 +111,8 @@ class MapWorker:
 
 
 def expire_ready_jobs(store: JobStore, *, older_than_days: int) -> int:
+    if isinstance(older_than_days, bool) or not 1 <= older_than_days <= 3_650:
+        raise ValueError("older_than_days must be between 1 and 3650")
     cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
     count = 0
     for job in store.list():
@@ -121,7 +123,32 @@ def expire_ready_jobs(store: JobStore, *, older_than_days: int) -> int:
             continue
         store.update_status(job.job_id, JobStatus.EXPIRED, event="expired by retention policy", finished=True)
         count += 1
+    cleanup_expired_pack_artifacts(store)
     return count
+
+
+def cleanup_expired_pack_artifacts(store: JobStore) -> int:
+    jobs = store.list()
+    protected_paths = {
+        Path(job.pack_path)
+        for job in jobs
+        if job.pack_path and job.status != JobStatus.EXPIRED
+    }
+    removed = 0
+    for pack_path in {
+        Path(job.pack_path)
+        for job in jobs
+        if job.pack_path and job.status == JobStatus.EXPIRED
+    }:
+        if pack_path in protected_paths or not pack_path.exists():
+            continue
+        pack_path.unlink()
+        removed += 1
+        try:
+            pack_path.parent.rmdir()
+        except OSError:
+            pass
+    return removed
 
 
 def cleanup_work_dirs(work_root: Path, store: JobStore) -> int:

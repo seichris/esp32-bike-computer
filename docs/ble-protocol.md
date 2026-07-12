@@ -294,10 +294,11 @@ Status responses should include:
 - `enabled`: whether Wi-Fi/HTTP upload mode is enabled.
 - `baseUrl`: temporary HTTP base URL when transfer mode is enabled.
 - `activation`: the latest activation `status`, monotonic boot-local
-  `sequence`, `sessionId`, optional `mapId`, and structured `error`, when
-  present. Status is `idle`, `activating`, `failed`, or `installed`. BLE uses a
-  compact form that omits error messages and duplicate `lastError`; HTTP retains
-  the full diagnostic text.
+  `sequence`, `sessionId`, optional `mapId`, numbered `step`, total `steps`,
+  integer `progress` percentage, and structured `error`, when present. Status
+  is `idle`, `activating`, `failed`, or `installed`. BLE uses a compact form
+  that omits error messages and duplicate `lastError`; HTTP retains the full
+  diagnostic text.
 - `lastError`: last installer/upload error code, when present. HTTP also includes
   the diagnostic message.
 - `activeError`: active-map metadata error code, when no active map is installed.
@@ -314,6 +315,10 @@ The ESP32 map installer validates staged packs before activation:
 - declared byte size and SHA-256 must match the staged file. New uploads are
   hashed while streaming to SD and receive a verification receipt, avoiding a
   second full read during activation.
+- archive entries are hashed while they are extracted. Each completed file gets
+  a durable verification receipt, so boot recovery skips completed entries and
+  only redoes a file interrupted in progress. The original archive remains on
+  SD until activation commits, so recovery never requires another phone upload.
 - activation moves verified files into `.maps/<sessionId>` using same-volume
   renames, then switches `/sdcard/VECTMAP/active-map.json` to that immutable
   root. Each installed root retains a hidden manifest and verification receipt,
@@ -337,9 +342,18 @@ bulk upload:
 | Method | Path | Meaning |
 | --- | --- | --- |
 | `GET` | `/map-transfer/status` | Read transfer status and active map metadata. |
+| `PUT` | `/map-transfer/sessions/{sessionId}/pack.zip` | Store one complete archive, then start durable device-owned activation. |
 | `PUT` | `/map-transfer/sessions/{sessionId}/manifest.json` | Upload the map pack manifest. |
 | `PUT` | `/map-transfer/sessions/{sessionId}/VECTMAP/{mapId}/{folder}/{file}` | Upload one `.fmb` or `.fmp` file. |
 | `POST` | `/map-transfer/sessions/{sessionId}/activate` | Validate and atomically activate the staged map. |
+
+The archive route starts activation after its response is durably staged so a
+background iOS upload remains installable even if iOS terminates the originating
+app process. A pending-session marker is committed before the upload response;
+firmware resumes it after a board reset until activation reaches a terminal
+result. Firmware disables transfer mode after that activation finishes.
+The explicit activation route remains idempotent for the foreground per-file
+fallback and for clients that are still alive after the archive upload.
 
 An accepted activation returns HTTP 202 with the boot-local activation
 `sequence`. The app matches that acknowledgement to later HTTP/BLE terminal

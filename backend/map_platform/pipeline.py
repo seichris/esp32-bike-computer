@@ -142,8 +142,8 @@ class MapBuildPipeline:
         write_pack_archive(pack_root, manifest, archive_path)
         return map_id, archive_path
 
-    def published_archive_path(self, map_id: str) -> Path:
-        return self.paths.pack_root / f"{map_id}.zip"
+    def published_archive_path(self, map_id: str, job_id: str) -> Path:
+        return self.paths.pack_root / map_id / f"{job_id}.zip"
 
     def _source_pbf_path(self, job: MapJob) -> Path:
         return self.source_cache.ensure(job.source_region).path
@@ -265,7 +265,7 @@ def run_job(store, pipeline: MapBuildPipeline, job_id: str, *, heartbeat_interva
         ):
             map_id, archive_path = pipeline.build(job, on_status=update, on_progress=update_progress)
         published_archive = (
-            pipeline.published_archive_path(map_id)
+            pipeline.published_archive_path(map_id, job.job_id)
             if hasattr(pipeline, "published_archive_path")
             else archive_path
         )

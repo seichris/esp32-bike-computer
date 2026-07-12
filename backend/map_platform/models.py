@@ -119,6 +119,9 @@ class MapJob:
     request: dict[str, Any]
     geometry: NormalizedGeometry
     source_region: SourceRegion
+    client_installation_id: str | None = None
+    client_request_id: str | None = None
+    install_on_device: bool = False
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
     error: str | None = None
@@ -141,6 +144,9 @@ class MapJob:
             "request": self.request,
             "geometry": self.geometry.to_dict(),
             "sourceRegion": self.source_region.to_dict(),
+            "clientInstallationId": self.client_installation_id,
+            "clientRequestId": self.client_request_id,
+            "installOnDevice": self.install_on_device,
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
             "error": self.error,
@@ -175,6 +181,9 @@ class MapJob:
             request=dict(data["request"]),
             geometry=geometry,
             source_region=SourceRegion.from_dict(data["sourceRegion"]),
+            client_installation_id=data.get("clientInstallationId") or data.get("request", {}).get("clientInstallationId"),
+            client_request_id=data.get("clientRequestId") or data.get("request", {}).get("clientRequestId"),
+            install_on_device=bool(data.get("installOnDevice", data.get("request", {}).get("installOnDevice", False))),
             created_at=str(data["createdAt"]),
             updated_at=str(data["updatedAt"]),
             error=data.get("error"),

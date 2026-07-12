@@ -38,6 +38,16 @@ def main() -> int:
     worker_loop = subparsers.add_parser("worker-loop")
     worker_loop.add_argument("--idle-sleep-seconds", type=float, default=10.0)
     worker_loop.add_argument("--max-jobs", type=int, default=None)
+    worker_loop.add_argument(
+        "--retention-days",
+        type=int,
+        default=int(os.environ.get("MAP_PLATFORM_JOB_RETENTION_DAYS", "30")),
+    )
+    worker_loop.add_argument(
+        "--maintenance-interval-seconds",
+        type=float,
+        default=float(os.environ.get("MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS", "3600")),
+    )
 
     refresh_source = subparsers.add_parser("refresh-source")
     refresh_source.add_argument("region_id")
@@ -120,7 +130,24 @@ def main() -> int:
         )
         worker = MapWorker(store, pipeline)
         processed = 0
+        next_maintenance_at = 0.0
         while args.max_jobs is None or processed < args.max_jobs:
+            now = time.monotonic()
+            if now >= next_maintenance_at:
+                expired = expire_ready_jobs(store, older_than_days=args.retention_days)
+                removed_work_dirs = cleanup_work_dirs(data_root / "work", store)
+                if expired or removed_work_dirs:
+                    print(
+                        json.dumps(
+                            {
+                                "maintenance": True,
+                                "expired": expired,
+                                "removedWorkDirs": removed_work_dirs,
+                            }
+                        ),
+                        flush=True,
+                    )
+                next_maintenance_at = now + max(args.maintenance_interval_seconds, 1.0)
             result = worker.run_next()
             if result.processed:
                 processed += 1

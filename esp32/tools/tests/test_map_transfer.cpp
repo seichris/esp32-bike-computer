@@ -8,6 +8,8 @@
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 
 using map_transfer::MapManifest;
 using map_transfer::MapActivationState;
@@ -63,6 +65,48 @@ static std::string tempRoot() {
 
 static std::string sha(const std::string &text) {
   return sha256Hex(reinterpret_cast<const uint8_t *>(text.data()), text.size());
+}
+
+static void writeLe16(std::ofstream &out, uint16_t value) {
+  const uint8_t bytes[] = {static_cast<uint8_t>(value & 0xff),
+                           static_cast<uint8_t>((value >> 8) & 0xff)};
+  out.write(reinterpret_cast<const char *>(bytes), sizeof(bytes));
+}
+
+static void writeLe32(std::ofstream &out, uint32_t value) {
+  const uint8_t bytes[] = {
+      static_cast<uint8_t>(value & 0xff),
+      static_cast<uint8_t>((value >> 8) & 0xff),
+      static_cast<uint8_t>((value >> 16) & 0xff),
+      static_cast<uint8_t>((value >> 24) & 0xff)};
+  out.write(reinterpret_cast<const char *>(bytes), sizeof(bytes));
+}
+
+static void writeStoredZip(
+    const std::string &path,
+    const std::vector<std::pair<std::string, std::string>> &entries,
+    bool includeCentralDirectory = true) {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  assert(out.good());
+  for (const auto &entry : entries) {
+    writeLe32(out, 0x04034b50);
+    writeLe16(out, 20);
+    writeLe16(out, 0);
+    writeLe16(out, 0);
+    writeLe16(out, 0);
+    writeLe16(out, 0);
+    writeLe32(out, 0);
+    writeLe32(out, static_cast<uint32_t>(entry.second.size()));
+    writeLe32(out, static_cast<uint32_t>(entry.second.size()));
+    writeLe16(out, static_cast<uint16_t>(entry.first.size()));
+    writeLe16(out, 0);
+    out.write(entry.first.data(), static_cast<std::streamsize>(entry.first.size()));
+    out.write(entry.second.data(), static_cast<std::streamsize>(entry.second.size()));
+  }
+  if (includeCentralDirectory)
+    writeLe32(out, 0x02014b50);
+  out.close();
+  assert(out.good());
 }
 
 static void prepareInterruptedSelectedVersion(const std::string &root,
@@ -121,6 +165,11 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(first.sequence == 1);
   assert(first.status == "activating");
   assert(first.sessionId == "session-1");
+  assert(first.step == 1);
+  assert(first.totalSteps == 5);
+  assert(first.progress == 0);
+  state.updateProgress({1, 5, 6, 100});
+  assert(state.snapshot().progress == 6);
   assert(state.begin("session-1") == ActivationBeginResult::AlreadyRunning);
   assert(state.begin("session-2") == ActivationBeginResult::Busy);
   assert(state.snapshot().sequence == 1);
@@ -138,6 +187,8 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(full.find("staged map file sha256 mismatch") != std::string::npos);
   std::string compact = state.json(true);
   assert(compact.find("\"sequence\":1") != std::string::npos);
+  assert(compact.find("\"step\":1") != std::string::npos);
+  assert(compact.find("\"progress\":6") != std::string::npos);
   assert(compact.find("\"code\":\"file_sha256\"") != std::string::npos);
   assert(compact.find("mapId") == std::string::npos);
   assert(compact.find("mismatch") == std::string::npos);
@@ -148,6 +199,12 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(second.sequence == 2);
   assert(second.status == "activating");
   assert(second.errorCode.empty());
+
+  state.finish("installed", "map-1", "", "");
+  assert(state.begin("session-1") == ActivationBeginResult::AlreadyInstalled);
+  assert(state.snapshot().sequence == 2);
+  assert(state.begin("session-2") == ActivationBeginResult::Started);
+  assert(state.snapshot().sequence == 3);
 }
 
 static void testRejectsUnsafeManifestPath() {
@@ -453,6 +510,43 @@ static void testRollsBackInterruptedVersionPublish() {
   assert(!exists(vectmap + "/.activation-transaction.json"));
 }
 
+static void testRollbackPreservesPendingArchiveForBootResume() {
+  std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string vectmap = root + "/VECTMAP";
+  const std::string session = "session-new";
+  const std::string oldRoot = vectmap + "/.maps/session-old";
+  const std::string newRoot = vectmap + "/.maps/" + session;
+  const std::string staging = installer.stagingRoot(session);
+  assert(::system((std::string("mkdir -p ") + oldRoot).c_str()) == 0);
+  assert(::system((std::string("mkdir -p ") + newRoot).c_str()) == 0);
+  assert(::system((std::string("mkdir -p ") + staging).c_str()) == 0);
+  writeFile(oldRoot + "/old.fmb", "old");
+  writeFile(newRoot + "/partial.fmb", "partial");
+  writeFile(staging + "/manifest.json", "partial");
+  writeFile(installer.stagedArchivePath(session), "complete-archive");
+  assert(installer.markPendingArchiveActivation(session));
+  writeFile(vectmap + "/active-map.json",
+            "{\"mapId\":\"map-old\",\"sessionId\":\"session-old\","
+            "\"root\":\"/VECTMAP/.maps/session-old\"}\n");
+  writeFile(vectmap + "/.activation-transaction.json",
+            "{\"sessionId\":\"session-new\",\"mapId\":\"map-new\","
+            "\"root\":\"/VECTMAP/.maps/session-new\","
+            "\"previousMapId\":\"map-old\","
+            "\"previousSessionId\":\"session-old\","
+            "\"previousRoot\":\"/VECTMAP/.maps/session-old\","
+            "\"phase\":\"publishing\"}\n");
+
+  auto recovered = installer.recoverInterruptedActivation();
+  assert(recovered.ok);
+  assert(recovered.code == "recovered_rollback");
+  assert(!exists(newRoot));
+  assert(exists(installer.stagedArchivePath(session)));
+  std::string pendingSession;
+  assert(installer.readPendingArchiveActivation(pendingSession));
+  assert(pendingSession == session);
+}
+
 static void testCompletesPointerSwitchInterruptedBeforeJournalCommit() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
@@ -724,6 +818,131 @@ static void testVerificationReceiptControlsResumeEligibility() {
   assert(installer.stagedFileVerified(session, manifest.files[0]));
 }
 
+static void testStoredArchivePreparesAndActivatesInBackgroundTransferPath() {
+  const std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string session = "session-archive";
+  const std::string blockPath =
+      "VECTMAP/map-archive/+0032+0008/123_456.fmb";
+  const std::string blockData = "background-map-block";
+  const std::string manifest =
+      "{\"schemaVersion\":1,\"mapId\":\"map-archive\",\"files\":[{"
+      "\"path\":\"" + blockPath + "\",\"bytes\":" +
+      std::to_string(blockData.size()) + ",\"sha256\":\"" +
+      sha(blockData) + "\"}]}\n";
+  assert(::system((std::string("mkdir -p ") + installer.stagingRoot(session))
+                      .c_str()) == 0);
+  writeStoredZip(installer.stagedArchivePath(session),
+                 {{"manifest.json", manifest},
+                  {blockPath, blockData},
+                  {"ATTRIBUTION.txt", "OpenStreetMap"}});
+
+  auto prepared = installer.prepareStagedArchive(session);
+  assert(prepared.ok);
+  assert(prepared.code == "archive_extracted");
+  MapManifest parsed;
+  assert(installer.validateStagedMap(session, parsed).ok);
+  assert(parsed.mapId == "map-archive");
+  assert(installer.activateStagedMap(session, parsed).ok);
+  ActiveMapSelection selected;
+  assert(installer.readActiveMap(selected).ok);
+  assert(selected.mapId == "map-archive");
+  assert(readFile(root + selected.root + "/+0032+0008/123_456.fmb") ==
+         blockData);
+  assert(!exists(installer.stagingRoot(session)));
+}
+
+static void testStoredArchiveResumesVerifiedFileCheckpoints() {
+  const std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string session = "session-archive-resume";
+  const std::string firstPath =
+      "VECTMAP/map-resume/+0032+0008/100_100.fmb";
+  const std::string secondPath =
+      "VECTMAP/map-resume/+0032+0008/200_200.fmb";
+  const std::string firstData = "already-verified";
+  const std::string secondData = "finish-after-reboot";
+  const std::string manifest =
+      "{\"schemaVersion\":1,\"mapId\":\"map-resume\",\"files\":[{"
+      "\"path\":\"" + firstPath + "\",\"bytes\":" +
+      std::to_string(firstData.size()) + ",\"sha256\":\"" +
+      sha(firstData) + "\"},{\"path\":\"" + secondPath +
+      "\",\"bytes\":" + std::to_string(secondData.size()) +
+      ",\"sha256\":\"" + sha(secondData) + "\"}]}\n";
+  const std::string firstStaged =
+      installer.stagingRoot(session) + "/" + firstPath;
+  assert(::system((std::string("mkdir -p ") +
+                   firstStaged.substr(0, firstStaged.find_last_of('/')))
+                      .c_str()) == 0);
+  writeFile(installer.stagingRoot(session) + "/manifest.json", manifest);
+  writeFile(firstStaged, firstData);
+  MapManifest stagedManifest;
+  assert(installer.readStagedManifest(session, stagedManifest).ok);
+  assert(installer.markStagedFileVerified(session, stagedManifest.files[0]));
+  struct stat before = {};
+  assert(::stat(firstStaged.c_str(), &before) == 0);
+
+  writeStoredZip(installer.stagedArchivePath(session),
+                 {{"manifest.json", manifest},
+                  {firstPath, firstData},
+                  {secondPath, secondData}});
+  std::vector<map_transfer::ActivationProgress> progress;
+  auto prepared = installer.prepareStagedArchive(
+      session, [&](const map_transfer::ActivationProgress &value) {
+        progress.push_back(value);
+      });
+  assert(prepared.ok);
+  struct stat after = {};
+  assert(::stat(firstStaged.c_str(), &after) == 0);
+  assert(before.st_ino == after.st_ino);
+  assert(readFile(installer.stagingRoot(session) + "/" + secondPath) ==
+         secondData);
+  MapManifest validated;
+  assert(installer.validateStagedMap(session, validated).ok);
+  assert(installer.stagedFileVerified(session, validated.files[0]));
+  assert(installer.stagedFileVerified(session, validated.files[1]));
+  assert(!progress.empty());
+  assert(progress.front().step == 1);
+  assert(progress.front().completed == 0);
+  assert(progress.back().step == 2);
+  assert(progress.back().completed == progress.back().total);
+}
+
+static void testStoredArchiveRejectsMissingCentralDirectory() {
+  const std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string session = "session-truncated-archive";
+  assert(::system((std::string("mkdir -p ") + installer.stagingRoot(session))
+                      .c_str()) == 0);
+  writeStoredZip(installer.stagedArchivePath(session),
+                 {{"manifest.json", "{}"}}, false);
+
+  auto prepared = installer.prepareStagedArchive(session);
+  assert(!prepared.ok);
+  assert(prepared.code == "archive_truncated");
+  assert(exists(installer.stagedArchivePath(session)));
+  assert(!exists(installer.stagingRoot(session) + "/manifest.json"));
+}
+
+static void testPendingArchiveActivationSurvivesRestart() {
+  const std::string root = tempRoot();
+  MapTransferInstaller first(root);
+  const std::string session = "session-pending-archive";
+  assert(::system((std::string("mkdir -p ") + first.stagingRoot(session))
+                      .c_str()) == 0);
+  writeFile(first.stagedArchivePath(session), "archive");
+  assert(first.markPendingArchiveActivation(session));
+
+  MapTransferInstaller afterRestart(root);
+  std::string recoveredSession;
+  assert(afterRestart.readPendingArchiveActivation(recoveredSession));
+  assert(recoveredSession == session);
+  assert(afterRestart.discardStagedSession(session));
+  assert(!exists(afterRestart.stagingRoot(session)));
+  assert(afterRestart.clearPendingArchiveActivation());
+  assert(!afterRestart.readPendingArchiveActivation(recoveredSession));
+}
+
 int main() {
   testSha256KnownVector();
   testActivationStateTracksAttemptsAndCompactStatus();
@@ -737,6 +956,7 @@ int main() {
   testPrunesPreviousAndObsoleteVersionsBeforeNextUpload();
   testPrunesLegacyRollbackAfterVersionedMapIsActive();
   testRollsBackInterruptedVersionPublish();
+  testRollbackPreservesPendingArchiveForBootResume();
   testCompletesPointerSwitchInterruptedBeforeJournalCommit();
   testJournalRecoveryRollsBackPartialSelectedVersion();
   testJournalRecoveryRollsBackSameSizeCorruptSelectedVersion();
@@ -750,6 +970,10 @@ int main() {
   testCorruptJournalRollsBackUnverifiableSelectedMap();
   testRejectsChecksumMismatch();
   testVerificationReceiptControlsResumeEligibility();
+  testStoredArchivePreparesAndActivatesInBackgroundTransferPath();
+  testStoredArchiveResumesVerifiedFileCheckpoints();
+  testStoredArchiveRejectsMissingCentralDirectory();
+  testPendingArchiveActivationSurvivesRestart();
   std::cout << "map_transfer tests passed\n";
   return 0;
 }

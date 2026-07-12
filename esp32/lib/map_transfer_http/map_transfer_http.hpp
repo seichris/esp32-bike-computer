@@ -19,9 +19,12 @@ public:
   void setLastError(const std::string &code, const std::string &message);
   void process();
   HttpTransferStatus status() const;
+  MapActivationSnapshot activationSnapshot() const;
   std::string activationStatusJson(bool compact = false) const;
   bool activationHasError() const;
   bool takeActivatedMapRoot(std::string &root);
+  bool takeAutomaticExitRequest();
+  void resumePendingArchiveActivation();
 
 private:
   std::string storageRoot_ = "/sdcard";
@@ -32,6 +35,7 @@ private:
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
   MapActivationState activationState_;
   std::string pendingMapRoot_;
+  bool pendingAutomaticExit_ = false;
   bool recoveryBlocked_ = false;
 
   bool handleRequest(const device_transfer::HttpRequest &request,
@@ -50,6 +54,9 @@ private:
   void finishActivation(const std::string &status, const std::string &mapId,
                         const std::string &errorCode,
                         const std::string &errorMessage);
+  void updateActivationProgress(const ActivationProgress &progress);
+  bool startActivationTask(const std::string &sessionId, bool automaticExit);
+  void requestAutomaticExit();
   void runActivationTask(const std::string &sessionId);
   static void activationTaskThunk(void *arg);
 };

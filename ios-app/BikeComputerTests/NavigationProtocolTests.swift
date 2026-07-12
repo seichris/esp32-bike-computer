@@ -83,6 +83,95 @@ func makeStoredZip(entries: [(String, Data)]) -> Data {
     return zip
 }
 
+final class OfflineMapTestURLProtocol: URLProtocol {
+    typealias Handler = (URLRequest) throws -> (Int, Data)
+    nonisolated(unsafe) private static var handler: Handler?
+    nonisolated(unsafe) private static var recordedRequests: [URLRequest] = []
+    private static let lock = NSLock()
+
+    static func configure(handler: @escaping Handler) {
+        lock.lock()
+        self.handler = handler
+        recordedRequests = []
+        lock.unlock()
+    }
+
+    static func requests() -> [URLRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedRequests
+    }
+
+    static func reset() {
+        lock.lock()
+        handler = nil
+        recordedRequests = []
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.lock.lock()
+        Self.recordedRequests.append(request)
+        let handler = Self.handler
+        Self.lock.unlock()
+        guard let handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        do {
+            let (status, data) = try handler(request)
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: status,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+@MainActor
+func waitForMapTaskCompletion(
+    _ manager: OfflineMapManager,
+    timeout: TimeInterval = 3
+) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    var observedBusy = false
+    while Date() < deadline {
+        observedBusy = observedBusy || manager.isBusy
+        if !manager.isBusy &&
+            (observedBusy || manager.currentJob != nil || manager.errorMessage != nil) {
+            return true
+        }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    return false
+}
+
+@MainActor
+func waitForMapBusyState(
+    _ manager: OfflineMapManager,
+    expected: Bool,
+    timeout: TimeInterval = 2
+) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if manager.isBusy == expected { return true }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    return manager.isBusy == expected
+}
+
 func assertCoordinate(
     _ actual: CLLocationCoordinate2D,
     latitude expectedLatitude: CLLocationDegrees,
@@ -299,32 +388,47 @@ struct NavigationProtocolTests {
         testOfflineMapJobProgressDecoding()
         testOfflineMapJobProgressAbsentFallback()
         testOfflineMapProgressPresentation()
+        testMapActivationProgressPresentation()
         testOfflineMapDownloadingSectionPresentation()
+        testOfflineMapActivityCounterOverlappingOperations()
+        testBackgroundTransferCompletionGate()
         testOfflineMapJobPersistence()
+        testOfflineMapInstallationIdentity()
+        testOfflineMapJobRecoverySelection()
+        testOfflineMapDownloadResponseValidation()
+        await testOfflineMapPackDownloaderRejectsHTTPError()
         testPendingOfflineMapJobBlocksEveryCreationIngress()
+        await testOfflineMapJobCreatorReconcilesAmbiguousResponse()
         await testOfflineMapPollerOutlivesLegacyAttemptLimit()
         await testOfflineMapPollerRetriesTransientFailure()
         await testOfflineMapPollerStopsOnTerminalAndCancellation()
         testOfflineMapCreateJobURLRequest()
+        testOfflineMapListJobsURLRequest()
         testOfflineMapManagerMigratesProductionConfig()
+        testOfflineMapManagerRenamesCachedPack()
+        testSavedMapRenameViewWiring()
         testOfflineMapManagerRestoresLastTransferIdentity()
         testOfflineMapManagerReconcilesInterruptedActivation()
         testOfflineMapManagerReconcilesAcknowledgedFirstInstall()
         testOfflineMapPolygonClosesRing()
         testOfflineMapStoredZipReader()
+        await testOfflineMapArchiveValidationCancellation()
         testCachedMapInstalledIdentityUsesManifestSession()
         testOfflineMapManifestDecoding()
         testMapTransferUploadURLEncodesPlusPathComponents()
-        testMapTransferUploadResumeContract()
-        testMapTransferActivationAcknowledgementSequence()
+        testMapTransferOutcomePolicy()
+        testCachedPackRecoveryDecision()
+        await testMapTransferUploadResumeContract()
+        await testMapTransferActivationAcknowledgementSequence()
         testMapTransferSessionIdentityUsesManifestContent()
         testMapActivationReconciliationMatrix()
-        testMapActivationConfirmationOrchestration()
+        await testMapActivationConfirmationOrchestration()
         testMapTransferDeviceStatusDecodesActivationFailure()
         testFirmwareManifestDecodingAndHash()
         testFirmwareUpdateManagerRestoresPendingStatus()
         testFirmwareUpdateAvailabilitySemantics()
         testFirmwareDeviceClientSendsSignedBeginRequest()
+        await testOfflineMapRecoveryRoutes()
         print("NavigationProtocolTests passed")
     }
 
@@ -467,6 +571,15 @@ struct NavigationProtocolTests {
         assert(request.bbox != nil, "custom cut-out includes bbox")
         assert(abs((request.bbox?[1] ?? 0) - 34.9) < 0.001, "bbox min latitude uses requested size")
         assert(abs((request.bbox?[3] ?? 0) - 35.1) < 0.001, "bbox max latitude uses requested size")
+
+        let identified = request.identified(
+            clientInstallationId: "installation-test",
+            clientRequestId: "request-test-123",
+            installOnDevice: true
+        )
+        assertEqual(identified.clientInstallationId, "installation-test", "request includes installation identity")
+        assertEqual(identified.clientRequestId, "request-test-123", "request includes idempotency identity")
+        assertEqual(identified.installOnDevice, true, "request preserves install workflow intent")
     }
 
     static func testOfflineMapPreparationTimeEstimate() {
@@ -538,6 +651,13 @@ struct NavigationProtocolTests {
         OfflineMapJobPersistence.save(
             jobId: "job-resume",
             installOnDevice: true,
+            serverURLString: "https://maps.example.com",
+            apiTokenString: "job-token",
+            defaults: defaults
+        )
+        OfflineMapJobPersistence.markPackDownloaded(
+            jobId: "job-resume",
+            mapId: "map-resume",
             defaults: defaults
         )
         assertEqual(
@@ -549,6 +669,26 @@ struct NavigationProtocolTests {
             OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults),
             "onboarding map job preserves install intent"
         )
+        assertEqual(
+            OfflineMapJobPersistence.serverURLString(defaults: defaults),
+            "https://maps.example.com",
+            "pending job preserves its originating server"
+        )
+        assertEqual(
+            OfflineMapJobPersistence.downloadedJobId(defaults: defaults),
+            "job-resume",
+            "downloaded pack state survives transfer interruption"
+        )
+        assertEqual(
+            OfflineMapJobPersistence.downloadedMapId(defaults: defaults),
+            "map-resume",
+            "downloaded pack identity survives app relaunch without server access"
+        )
+        assertEqual(
+            OfflineMapJobPersistence.apiTokenString(defaults: defaults),
+            "job-token",
+            "pending job preserves its originating server credential"
+        )
         OfflineMapJobPersistence.clear(defaults: defaults)
         assertEqual(
             OfflineMapJobPersistence.activeJobId(defaults: defaults),
@@ -559,6 +699,260 @@ struct NavigationProtocolTests {
             !OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults),
             "completed map job clears install intent"
         )
+        assertEqual(
+            OfflineMapJobPersistence.serverURLString(defaults: defaults),
+            nil,
+            "completed map job clears its originating server"
+        )
+        assertEqual(
+            OfflineMapJobPersistence.downloadedJobId(defaults: defaults),
+            nil,
+            "completed map job clears downloaded recovery state"
+        )
+        assertEqual(
+            OfflineMapJobPersistence.downloadedMapId(defaults: defaults),
+            nil,
+            "completed map job clears downloaded map identity"
+        )
+        assertEqual(
+            OfflineMapJobPersistence.apiTokenString(defaults: defaults),
+            nil,
+            "completed map job clears its originating credential"
+        )
+        OfflineMapRecoveryHistory.markHandled(jobId: "job-resume", defaults: defaults)
+        OfflineMapRecoveryHistory.markHandled(jobId: "job-other", defaults: defaults)
+        assertEqual(
+            OfflineMapRecoveryHistory.handledJobIds(defaults: defaults),
+            ["job-resume", "job-other"],
+            "handled server jobs remain excluded from automatic redownload"
+        )
+        OfflineMapRecoveryHistory.forgetNextDiscovery(
+            serverURLString: "https://maps-a.example:443/",
+            defaults: defaults
+        )
+        assert(
+            OfflineMapRecoveryHistory.shouldForgetNextDiscovery(
+                serverURLString: "https://maps-a.example",
+                defaults: defaults
+            ),
+            "forgetting discovery survives relaunch and default-port normalization"
+        )
+        assert(
+            !OfflineMapRecoveryHistory.shouldForgetNextDiscovery(
+                serverURLString: "https://maps-b.example",
+                defaults: defaults
+            ),
+            "forgetting one server does not suppress another server"
+        )
+        assert(
+            OfflineMapRecoveryHistory.consumeForgottenDiscovery(
+                serverURLString: "https://maps-a.example",
+                jobIds: ["job-existing-at-forget"],
+                defaults: defaults
+            ),
+            "next successful discovery consumes the durable forget marker"
+        )
+        assert(
+            OfflineMapRecoveryHistory.handledJobIds(defaults: defaults)
+                .contains("job-existing-at-forget"),
+            "forget snapshot durably excludes the server jobs it observed"
+        )
+        assert(
+            !OfflineMapRecoveryHistory.shouldForgetNextDiscovery(
+                serverURLString: "https://maps-a.example",
+                defaults: defaults
+            ),
+            "consuming a forgotten snapshot is one-shot"
+        )
+        OfflineMapRecoveryHistory.forgetNextDiscovery(
+            serverURLString: "http://rhi0maej6bwo33hn0im6h4lf.178.18.245.246.sslip.io/",
+            defaults: defaults
+        )
+        assert(
+            OfflineMapRecoveryHistory.shouldForgetNextDiscovery(
+                serverURLString: OfflineMapServiceConfig.productionServerURLString,
+                defaults: defaults
+            ),
+            "managed endpoint migration preserves the forgotten snapshot marker"
+        )
+        _ = OfflineMapRecoveryHistory.consumeForgottenDiscovery(
+            serverURLString: OfflineMapServiceConfig.productionServerURLString,
+            jobIds: [],
+            defaults: defaults
+        )
+    }
+
+    static func testOfflineMapInstallationIdentity() {
+        let suite = "offline-map-installation-identity-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "installation identity test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("bad", forKey: "offlineMap.clientInstallationId")
+
+        let first = OfflineMapInstallationIdentity.resolve(defaults: defaults)
+        let second = OfflineMapInstallationIdentity.resolve(defaults: defaults)
+
+        assert(first != "bad", "invalid installation identity is replaced")
+        assertEqual(second, first, "installation identity survives app relaunch")
+    }
+
+    static func testOfflineMapJobRecoverySelection() {
+        let jobs = [
+            offlineMapJob(
+                jobId: "job-other",
+                status: "converting_features",
+                createdAt: "2026-07-12T01:00:00Z",
+                clientInstallationId: "installation-other"
+            ),
+            offlineMapJob(
+                jobId: "job-cached-old",
+                status: "ready",
+                mapId: "map-same-area",
+                createdAt: "2026-07-12T02:00:00Z",
+                clientInstallationId: "installation-mine"
+            ),
+            offlineMapJob(
+                jobId: "job-running",
+                status: "converting_features",
+                createdAt: "2026-07-12T03:00:00Z",
+                clientInstallationId: "installation-mine"
+            ),
+            offlineMapJob(
+                jobId: "job-regenerated",
+                status: "ready",
+                mapId: "map-same-area",
+                createdAt: "2026-07-12T04:00:00Z",
+                clientInstallationId: "installation-mine",
+                installOnDevice: true
+            ),
+            offlineMapJob(
+                jobId: "job-failed",
+                status: "failed",
+                createdAt: "2026-07-12T05:00:00Z",
+                clientInstallationId: "installation-mine"
+            ),
+            offlineMapJob(
+                jobId: "job-expired",
+                status: "expired",
+                createdAt: "2026-07-12T06:00:00Z",
+                clientInstallationId: "installation-mine"
+            ),
+            offlineMapJob(
+                jobId: "job-cancelled",
+                status: "cancelled",
+                createdAt: "2026-07-12T07:00:00Z",
+                clientInstallationId: "installation-mine"
+            ),
+            offlineMapJob(
+                jobId: "job-ready-without-map",
+                status: "ready",
+                createdAt: "2026-07-12T08:00:00Z",
+                clientInstallationId: "installation-mine"
+            ),
+        ].compactMap { $0 }
+
+        let selected = OfflineMapJobRecoverySelector.select(
+            jobs: jobs,
+            clientInstallationId: "installation-mine"
+        )
+
+        assertEqual(selected?.jobId, "job-regenerated", "recovery selects the regenerated same-area job")
+        assertEqual(selected?.mapId, "map-same-area", "same stable map ID does not suppress a new job")
+        assertEqual(selected?.installOnDevice, true, "recovery restores install workflow intent")
+
+        let afterHandling = OfflineMapJobRecoverySelector.select(
+            jobs: jobs,
+            clientInstallationId: "installation-mine",
+            excludedJobIds: ["job-regenerated"]
+        )
+        assertEqual(
+            afterHandling?.status,
+            "converting_features",
+            "recovery does not redownload a handled ready job"
+        )
+        assertEqual(afterHandling?.jobId, "job-running", "handled exclusion removes only that job")
+
+        let none = OfflineMapJobRecoverySelector.select(
+            jobs: jobs,
+            clientInstallationId: "installation-mine",
+            excludedJobIds: ["job-regenerated", "job-running", "job-cached-old"]
+        )
+        assertEqual(none, nil, "terminal and ready-without-map jobs are not recoverable")
+
+    }
+
+    static func testOfflineMapDownloadResponseValidation() {
+        let success = HTTPURLResponse(
+            url: URL(string: "https://maps.example/download")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )
+        do {
+            try OfflineMapDownloadResponseValidator.validate(
+                response: success,
+                errorBody: "unused"
+            )
+        } catch {
+            assert(false, "successful map download response should validate")
+        }
+
+        let forbidden = HTTPURLResponse(
+            url: URL(string: "https://maps.example/download")!,
+            statusCode: 403,
+            httpVersion: nil,
+            headerFields: nil
+        )
+        do {
+            try OfflineMapDownloadResponseValidator.validate(
+                response: forbidden,
+                errorBody: "download URL expired"
+            )
+            assert(false, "HTTP error body must not be cached as a map pack")
+        } catch let error as OfflineMapPlatformError {
+            guard case .serverStatus(let status, let body) = error else {
+                assert(false, "HTTP error should retain its server status")
+                return
+            }
+            assertEqual(status, 403, "download validation preserves HTTP status")
+            assertEqual(body, "download URL expired", "download validation preserves error body")
+        } catch {
+            assert(false, "HTTP error should use OfflineMapPlatformError")
+        }
+    }
+
+    @MainActor
+    static func testOfflineMapPackDownloaderRejectsHTTPError() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        OfflineMapTestURLProtocol.configure { _ in
+            (403, Data("download URL expired".utf8))
+        }
+        defer { OfflineMapTestURLProtocol.reset() }
+
+        do {
+            _ = try await OfflineMapPackDownloader.download(
+                from: URL(string: "https://maps.example/expired.zip")!,
+                onProgress: { _ in },
+                onByteProgress: { _ in },
+                configuration: configuration
+            )
+            assert(false, "real downloader must reject an HTTP error body")
+        } catch let error as OfflineMapPlatformError {
+            guard case .serverStatus(let status, let body) = error else {
+                assert(false, "real downloader should surface the HTTP status")
+                return
+            }
+            assertEqual(status, 403, "real downloader preserves HTTP failure status")
+            assert(
+                body.contains("download URL expired"),
+                "real downloader preserves the server error body"
+            )
+        } catch {
+            assert(false, "real downloader should use OfflineMapPlatformError")
+        }
     }
 
     static func testOfflineMapProgressPresentation() {
@@ -587,11 +981,33 @@ struct NavigationProtocolTests {
         )
     }
 
+    static func testMapActivationProgressPresentation() {
+        let progress = MapActivationProgressPresentation.make(
+            status: "activating",
+            step: 1,
+            stepCount: 5,
+            percentage: 6
+        )
+        assertEqual(progress?.label, "Step 1/5 - 6%", "activation progress includes the total step count")
+        assertEqual(progress?.fraction, 0.06, "activation percentage drives the progress bar")
+        assertEqual(
+            MapActivationProgressPresentation.make(
+                status: "installed",
+                step: 4,
+                stepCount: 5,
+                percentage: 100
+            ),
+            nil,
+            "completed activation hides the in-progress presentation"
+        )
+    }
+
     static func testOfflineMapDownloadingSectionPresentation() {
         assert(
             OfflineMapDownloadingSectionPresentation.isVisible(
                 isBusy: false,
                 hasPendingJob: true,
+                hasPendingActivation: false,
                 errorMessage: nil
             ),
             "paused persisted jobs keep the resume section reachable"
@@ -600,9 +1016,76 @@ struct NavigationProtocolTests {
             !OfflineMapDownloadingSectionPresentation.isVisible(
                 isBusy: false,
                 hasPendingJob: false,
+                hasPendingActivation: false,
                 errorMessage: nil
             ),
             "idle map settings omit an empty downloading section"
+        )
+        assert(
+            OfflineMapDownloadingSectionPresentation.isVisible(
+                isBusy: false,
+                hasPendingJob: false,
+                hasPendingActivation: true,
+                errorMessage: nil
+            ),
+            "device-owned activation keeps its status section visible"
+        )
+        assert(
+            OfflineMapAutomaticRecoveryTrigger.shouldResume(
+                hasPendingInstall: true,
+                isBusy: false,
+                isConnected: true,
+                isNavigationReady: true
+            ),
+            "pending device install resumes when BLE becomes ready"
+        )
+        assert(
+            !OfflineMapAutomaticRecoveryTrigger.shouldResume(
+                hasPendingInstall: true,
+                isBusy: false,
+                isConnected: true,
+                isNavigationReady: false
+            ),
+            "pending device install waits for navigation readiness"
+        )
+    }
+
+    static func testOfflineMapActivityCounterOverlappingOperations() {
+        var counter = OfflineMapActivityCounter()
+        counter.begin()
+        counter.begin()
+        counter.end()
+        assert(
+            counter.isBusy,
+            "finishing a cancelled older operation keeps a newer map operation busy"
+        )
+        counter.end()
+        assert(!counter.isBusy, "busy state clears after the final operation finishes")
+    }
+
+    static func testBackgroundTransferCompletionGate() {
+        var gate = BackgroundTransferCompletionGate()
+        gate.beginWorkflow()
+        assert(
+            !gate.didFinishEvents(),
+            "background session completion waits for activation and cleanup"
+        )
+        assert(
+            gate.finishWorkflow(),
+            "completion is released after the transfer workflow finishes"
+        )
+
+        gate.beginWorkflow()
+        gate.beginWorkflow()
+        assert(!gate.didFinishEvents(), "multiple workflows hold completion")
+        assert(!gate.finishWorkflow(), "one remaining workflow still holds completion")
+        assert(gate.finishWorkflow(), "the final workflow releases completion")
+
+        gate.beginWorkflow()
+        assert(!gate.finishWorkflow(), "workflow completion waits for URL session events")
+        assert(
+            gate.didFinishEvents(),
+            "URL session events release completion after the workflow already finished"
         )
     }
 
@@ -638,6 +1121,748 @@ struct NavigationProtocolTests {
             "job-existing",
             "all creation ingresses preserve the paused job recovery ID"
         )
+
+        manager.forgetPendingMapJob()
+        manager.beginMapAreaSelection()
+        assertEqual(
+            OfflineMapJobPersistence.activeJobId(defaults: defaults),
+            nil,
+            "forgetting an unrecoverable job clears its durable lock"
+        )
+        assert(
+            manager.isMapAreaSelectionActive,
+            "forgetting an unrecoverable job restores new-map creation"
+        )
+        assert(
+            OfflineMapRecoveryHistory.handledJobIds(defaults: defaults).contains("job-existing"),
+            "forgotten server job stays excluded from future discovery"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapJobCreatorReconcilesAmbiguousResponse() async {
+        let request = OfflineMapJobRequest
+            .customBBox(OfflineMapBounds(minLon: 10, minLat: 20, maxLon: 11, maxLat: 21))
+            .identified(
+                clientInstallationId: "installation-test",
+                clientRequestId: "request-test-123",
+                installOnDevice: false
+            )
+        guard let committed = offlineMapJob(
+            jobId: "job-committed",
+            status: "queued",
+            clientInstallationId: "installation-test",
+            clientRequestId: "request-test-123"
+        ) else {
+            assert(false, "committed job fixture should decode")
+            return
+        }
+        var createRequestIds: [String?] = []
+        var listCount = 0
+        let recovered = try? await OfflineMapJobCreator.create(
+            request: request,
+            create: { attempt in
+                createRequestIds.append(attempt.clientRequestId)
+                throw URLError(.networkConnectionLost)
+            },
+            list: {
+                listCount += 1
+                return [committed]
+            },
+            sleep: { _ in
+                assert(false, "committed ambiguous response should reconcile before retry sleep")
+            },
+            onRetry: {}
+        )
+
+        assertEqual(recovered?.jobId, "job-committed", "ambiguous POST response reconciles by request ID")
+        assertEqual(createRequestIds, ["request-test-123"], "reconciliation preserves the submitted request ID")
+        assertEqual(listCount, 1, "ambiguous create checks durable server jobs")
+
+        var retryRequestIds: [String?] = []
+        let retried = try? await OfflineMapJobCreator.create(
+            request: request,
+            create: { attempt in
+                retryRequestIds.append(attempt.clientRequestId)
+                if retryRequestIds.count == 1 {
+                    throw URLError(.timedOut)
+                }
+                return committed
+            },
+            list: { [] },
+            sleep: { _ in },
+            onRetry: {}
+        )
+        assertEqual(retried?.jobId, "job-committed", "ambiguous create retries when reconciliation is empty")
+        assertEqual(
+            retryRequestIds,
+            ["request-test-123", "request-test-123"],
+            "every transport retry reuses the idempotency token"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapRecoveryRoutes() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            OfflineMapTestURLProtocol.reset()
+        }
+
+        func jobData(
+            jobId: String,
+            mapId: String,
+            installationId: String? = nil,
+            installOnDevice: Bool? = nil,
+            createdAt: String = "2026-07-12T04:00:00Z"
+        ) -> Data {
+            var payload: [String: Any] = [
+                "jobId": jobId,
+                "status": "ready",
+                "mapId": mapId,
+                "createdAt": createdAt,
+            ]
+            if let installationId { payload["clientInstallationId"] = installationId }
+            if let installOnDevice { payload["installOnDevice"] = installOnDevice }
+            return try! JSONSerialization.data(withJSONObject: payload)
+        }
+
+        func downloadURLData(mapId: String) -> Data {
+            try! JSONSerialization.data(withJSONObject: [
+                "mapId": mapId,
+                "url": "/downloads/\(mapId).zip",
+                "expiresAt": 2_000_000_000,
+                "expiresInSeconds": 900,
+            ])
+        }
+
+        func packData(
+            mapId: String,
+            storedMapData: Data = Data([0x01]),
+            hashedMapData: Data? = nil
+        ) -> Data {
+            let mapPath = "VECTMAP/0/0/0.pbf"
+            let declaredData = hashedMapData ?? storedMapData
+            let manifest = try! JSONSerialization.data(withJSONObject: [
+                "mapId": mapId,
+                "displayName": "Recovery Test",
+                "files": [[
+                    "path": mapPath,
+                    "bytes": declaredData.count,
+                    "sha256": FirmwareUpdateManager.sha256Hex(declaredData),
+                ]],
+            ])
+            return makeStoredZip(entries: [
+                ("manifest.json", manifest),
+                (mapPath, storedMapData),
+            ])
+        }
+
+        let corruptCacheSuite = "offline-map-corrupt-cache-route-\(UUID().uuidString)"
+        let corruptCacheDefaults = UserDefaults(suiteName: corruptCacheSuite)!
+        defer { corruptCacheDefaults.removePersistentDomain(forName: corruptCacheSuite) }
+        let corruptCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-corrupt-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: corruptCache) }
+        try! FileManager.default.createDirectory(at: corruptCache, withIntermediateDirectories: true)
+        let corruptCachedPack = corruptCache.appendingPathComponent("map-corrupt-cache.zip")
+        try! packData(
+            mapId: "map-corrupt-cache",
+            storedMapData: Data([0x02]),
+            hashedMapData: Data([0x01])
+        ).write(to: corruptCachedPack)
+        let corruptCacheManager = OfflineMapManager(
+            defaults: corruptCacheDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: corruptCache
+        )
+        corruptCacheManager.transferCachedPack(at: corruptCachedPack, bleManager: BLEManager())
+        let corruptCacheDeadline = Date().addingTimeInterval(3)
+        while corruptCacheManager.errorMessage == nil && Date() < corruptCacheDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        assert(
+            corruptCacheManager.errorMessage?.contains("hash mismatch") == true,
+            "cached packs are hash-validated before device transfer"
+        )
+
+        let persistedSuite = "offline-map-persisted-route-\(UUID().uuidString)"
+        let persistedDefaults = UserDefaults(suiteName: persistedSuite)!
+        defer { persistedDefaults.removePersistentDomain(forName: persistedSuite) }
+        persistedDefaults.set("https://persisted.example", forKey: "offlineMap.serverURL")
+        let persistedCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-persisted-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: persistedCache) }
+        OfflineMapJobPersistence.save(
+            jobId: "job-persisted",
+            installOnDevice: true,
+            serverURLString: "https://persisted.example",
+            apiTokenString: "persisted-token",
+            defaults: persistedDefaults
+        )
+        persistedDefaults.set("https://current-setting.example", forKey: "offlineMap.serverURL")
+        persistedDefaults.set("current-token", forKey: "offlineMap.apiToken")
+        var persistedDownloadCount = 0
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs/job-persisted" {
+                return (200, jobData(jobId: "job-persisted", mapId: "map-persisted"))
+            }
+            if request.url?.path == "/v1/map-packs/map-persisted/download-url" {
+                return (200, downloadURLData(mapId: "map-persisted"))
+            }
+            return (404, Data())
+        }
+        let persistedManager = OfflineMapManager(
+            defaults: persistedDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: persistedCache,
+            packDownload: { _, onProgress, _ in
+                persistedDownloadCount += 1
+                onProgress(1)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension("zip")
+                try packData(mapId: "map-persisted").write(to: url)
+                return url
+            }
+        )
+        let disconnectedBLE = BLEManager()
+        persistedManager.resumePendingMapJobIfNeeded(bleManager: disconnectedBLE)
+        let firstPersistedPassCompleted = await waitForMapTaskCompletion(persistedManager)
+        assert(firstPersistedPassCompleted, "persisted recovery should finish its first pass")
+        assert(persistedManager.hasPendingMapJob, "disconnected device preserves pending install intent")
+        assert(
+            persistedManager.hasDownloadedPendingDeviceInstall,
+            "downloaded deferred install becomes eligible for BLE-ready auto-resume"
+        )
+        assertEqual(
+            OfflineMapJobPersistence.downloadedJobId(defaults: persistedDefaults),
+            "job-persisted",
+            "downloaded persisted job is reusable for a later install"
+        )
+        assert(
+            OfflineMapTestURLProtocol.requests().contains { $0.url?.host == "persisted.example" },
+            "persisted recovery uses its originating server"
+        )
+        assert(
+            OfflineMapTestURLProtocol.requests().allSatisfy {
+                $0.value(forHTTPHeaderField: "Authorization") == "Bearer persisted-token"
+            },
+            "persisted recovery uses its originating server credential"
+        )
+        let relaunchedPersistedManager = OfflineMapManager(
+            defaults: persistedDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: persistedCache,
+            packDownload: { _, _, _ in
+                persistedDownloadCount += 1
+                throw URLError(.cannotConnectToHost)
+            }
+        )
+        OfflineMapTestURLProtocol.configure { _ in
+            throw URLError(.cannotConnectToHost)
+        }
+        relaunchedPersistedManager.resumePendingMapJobIfNeeded(bleManager: disconnectedBLE)
+        let localRestoreDeadline = Date().addingTimeInterval(3)
+        while relaunchedPersistedManager.downloadedPackURL == nil &&
+                Date() < localRestoreDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        assert(
+            relaunchedPersistedManager.downloadedPackURL != nil,
+            "app relaunch restores the deferred local pack without the map server"
+        )
+        assertEqual(
+            OfflineMapTestURLProtocol.requests().count,
+            0,
+            "deferred local install does not poll the map server"
+        )
+        assertEqual(persistedDownloadCount, 1, "deferred device install reuses the downloaded pack")
+        if let url = relaunchedPersistedManager.downloadedPackURL {
+            relaunchedPersistedManager.deleteCachedPack(at: url)
+        }
+        relaunchedPersistedManager.forgetPendingMapJob()
+
+        let managedSuite = "offline-map-managed-token-route-\(UUID().uuidString)"
+        let managedDefaults = UserDefaults(suiteName: managedSuite)!
+        defer { managedDefaults.removePersistentDomain(forName: managedSuite) }
+        let managedCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-managed-token-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: managedCache) }
+        OfflineMapJobPersistence.save(
+            jobId: "job-managed-token",
+            serverURLString: "https://maps.8o.vc:443/",
+            apiTokenString: "stale-bundled-token",
+            defaults: managedDefaults
+        )
+        managedDefaults.set("https://unrelated-custom.example", forKey: "offlineMap.serverURL")
+        managedDefaults.set("unrelated-custom-token", forKey: "offlineMap.apiToken")
+        let managedManager = OfflineMapManager(
+            defaults: managedDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: managedCache,
+            packDownload: { _, onProgress, _ in
+                onProgress(1)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension("zip")
+                try packData(mapId: "map-managed-token").write(to: url)
+                return url
+            }
+        )
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs/job-managed-token" {
+                return (200, jobData(jobId: "job-managed-token", mapId: "map-managed-token"))
+            }
+            if request.url?.path == "/v1/map-packs/map-managed-token/download-url" {
+                return (200, downloadURLData(mapId: "map-managed-token"))
+            }
+            return (404, Data())
+        }
+        managedManager.resumePendingMapJobIfNeeded()
+        let managedCompleted = await waitForMapTaskCompletion(managedManager)
+        assert(managedCompleted, "managed-server recovery should complete after token rotation")
+        let expectedManagedAuthorization = OfflineMapServiceConfig.apiToken.isEmpty ?
+            nil : "Bearer \(OfflineMapServiceConfig.apiToken)"
+        assert(
+            OfflineMapTestURLProtocol.requests().allSatisfy {
+                $0.url?.host == URL(string: OfflineMapServiceConfig.productionServerURLString)?.host &&
+                    $0.value(forHTTPHeaderField: "Authorization") == expectedManagedAuthorization
+            },
+            "managed-server recovery uses the updated bundled endpoint and credential"
+        )
+        assert(
+            OfflineMapTestURLProtocol.requests().allSatisfy {
+                $0.value(forHTTPHeaderField: "Authorization") != "Bearer stale-bundled-token"
+            },
+            "managed-server recovery never reuses a stale bundled credential"
+        )
+        assert(
+            OfflineMapTestURLProtocol.requests().allSatisfy {
+                $0.url?.host != "unrelated-custom.example" &&
+                    $0.value(forHTTPHeaderField: "Authorization") != "Bearer unrelated-custom-token"
+            },
+            "managed recovery ignores unrelated current custom settings"
+        )
+        if let url = managedManager.downloadedPackURL {
+            managedManager.deleteCachedPack(at: url)
+        }
+
+        let rotatedCustomSuite = "offline-map-rotated-custom-token-\(UUID().uuidString)"
+        let rotatedCustomDefaults = UserDefaults(suiteName: rotatedCustomSuite)!
+        defer { rotatedCustomDefaults.removePersistentDomain(forName: rotatedCustomSuite) }
+        let rotatedCustomCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-rotated-custom-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rotatedCustomCache) }
+        OfflineMapJobPersistence.save(
+            jobId: "job-rotated-custom-token",
+            serverURLString: "https://custom-rotation.example:443/",
+            apiTokenString: "old-custom-token",
+            defaults: rotatedCustomDefaults
+        )
+        rotatedCustomDefaults.set("https://custom-rotation.example", forKey: "offlineMap.serverURL")
+        rotatedCustomDefaults.set("new-custom-token", forKey: "offlineMap.apiToken")
+        let rotatedCustomManager = OfflineMapManager(
+            defaults: rotatedCustomDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: rotatedCustomCache,
+            packDownload: { _, onProgress, _ in
+                onProgress(1)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension("zip")
+                try packData(mapId: "map-rotated-custom-token").write(to: url)
+                return url
+            }
+        )
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs/job-rotated-custom-token" {
+                return (200, jobData(jobId: "job-rotated-custom-token", mapId: "map-rotated-custom-token"))
+            }
+            if request.url?.path == "/v1/map-packs/map-rotated-custom-token/download-url" {
+                return (200, downloadURLData(mapId: "map-rotated-custom-token"))
+            }
+            return (404, Data())
+        }
+        rotatedCustomManager.resumePendingMapJobIfNeeded()
+        let rotatedCustomCompleted = await waitForMapTaskCompletion(rotatedCustomManager)
+        assert(rotatedCustomCompleted, "same-origin custom recovery should complete after token rotation")
+        assert(
+            OfflineMapTestURLProtocol.requests().allSatisfy {
+                $0.url?.host == "custom-rotation.example" &&
+                    $0.value(forHTTPHeaderField: "Authorization") == "Bearer new-custom-token"
+            },
+            "same-origin custom recovery uses the current rotated credential"
+        )
+        if let url = rotatedCustomManager.downloadedPackURL {
+            rotatedCustomManager.deleteCachedPack(at: url)
+        }
+
+        let discoverySuite = "offline-map-discovery-route-\(UUID().uuidString)"
+        let discoveryDefaults = UserDefaults(suiteName: discoverySuite)!
+        defer { discoveryDefaults.removePersistentDomain(forName: discoverySuite) }
+        discoveryDefaults.set("https://discovery.example", forKey: "offlineMap.serverURL")
+        let discoveryCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-discovery-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: discoveryCache) }
+        let discoveryManager = OfflineMapManager(
+            defaults: discoveryDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: discoveryCache,
+            packDownload: { _, onProgress, _ in
+                onProgress(1)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension("zip")
+                try packData(mapId: "map-discovered").write(to: url)
+                return url
+            }
+        )
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs" {
+                let job = try! JSONSerialization.jsonObject(
+                    with: jobData(
+                        jobId: "job-discovered",
+                        mapId: "map-discovered",
+                        installationId: discoveryManager.clientInstallationId,
+                        installOnDevice: false
+                    )
+                )
+                return (200, try! JSONSerialization.data(withJSONObject: ["jobs": [job]]))
+            }
+            if request.url?.path == "/v1/map-jobs/job-discovered" {
+                return (
+                    200,
+                    jobData(
+                        jobId: "job-discovered",
+                        mapId: "map-discovered",
+                        installationId: discoveryManager.clientInstallationId,
+                        installOnDevice: false
+                    )
+                )
+            }
+            if request.url?.path == "/v1/map-packs/map-discovered/download-url" {
+                return (200, downloadURLData(mapId: "map-discovered"))
+            }
+            return (404, Data())
+        }
+        discoveryManager.resumePendingMapJobIfNeeded()
+        let discoveryCompleted = await waitForMapTaskCompletion(discoveryManager)
+        assert(discoveryCompleted, "launch discovery should complete")
+        assert(!discoveryManager.hasPendingMapJob, "download-only discovery clears durable pending state")
+        assert(
+            OfflineMapRecoveryHistory.handledJobIds(defaults: discoveryDefaults).contains("job-discovered"),
+            "launch discovery marks the exact recovered job handled"
+        )
+        if let url = discoveryManager.downloadedPackURL {
+            discoveryManager.deleteCachedPack(at: url)
+        }
+
+        let downloadRetrySuite = "offline-map-download-retry-\(UUID().uuidString)"
+        let downloadRetryDefaults = UserDefaults(suiteName: downloadRetrySuite)!
+        defer { downloadRetryDefaults.removePersistentDomain(forName: downloadRetrySuite) }
+        downloadRetryDefaults.set("https://download-retry.example", forKey: "offlineMap.serverURL")
+        downloadRetryDefaults.set(
+            ["map-download-retry.zip": "Shanghai Riverside"],
+            forKey: "offlineMap.packDisplayNames"
+        )
+        OfflineMapJobPersistence.save(
+            jobId: "job-download-retry",
+            serverURLString: "https://download-retry.example",
+            defaults: downloadRetryDefaults
+        )
+        let downloadRetryCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-download-retry-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: downloadRetryCache) }
+        try! FileManager.default.createDirectory(
+            at: downloadRetryCache,
+            withIntermediateDirectories: true
+        )
+        let downloadRetryPack = downloadRetryCache.appendingPathComponent("map-download-retry.zip")
+        let originalDownloadRetryPackData = packData(mapId: "map-download-retry")
+        try! originalDownloadRetryPackData.write(to: downloadRetryPack)
+        var downloadURLIssueCount = 0
+        var packDownloadAttemptCount = 0
+        var rejectedTemporaryURLs: [URL] = []
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs/job-download-retry" {
+                return (200, jobData(jobId: "job-download-retry", mapId: "map-download-retry"))
+            }
+            if request.url?.path == "/v1/map-packs/map-download-retry/download-url" {
+                downloadURLIssueCount += 1
+                return (
+                    200,
+                    try! JSONSerialization.data(withJSONObject: [
+                        "mapId": "map-download-retry",
+                        "url": "/downloads/map-download-retry-\(downloadURLIssueCount).zip",
+                        "expiresAt": 2_000_000_000,
+                        "expiresInSeconds": 900,
+                    ])
+                )
+            }
+            return (404, Data())
+        }
+        let downloadRetryManager = OfflineMapManager(
+            defaults: downloadRetryDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: downloadRetryCache,
+            packDownload: { _, onProgress, _ in
+                packDownloadAttemptCount += 1
+                if packDownloadAttemptCount <= 2 {
+                    let url = FileManager.default.temporaryDirectory
+                        .appendingPathComponent(UUID().uuidString)
+                        .appendingPathExtension("zip")
+                    if packDownloadAttemptCount == 1 {
+                        try packData(mapId: "map-from-wrong-job").write(to: url)
+                    } else {
+                        try packData(
+                            mapId: "map-download-retry",
+                            storedMapData: Data([0x02]),
+                            hashedMapData: Data([0x01])
+                        ).write(to: url)
+                    }
+                    rejectedTemporaryURLs.append(url)
+                    return url
+                }
+                onProgress(1)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension("zip")
+                try packData(mapId: "map-download-retry").write(to: url)
+                return url
+            }
+        )
+        downloadRetryManager.resumePendingMapJobIfNeeded()
+        let firstDownloadAttemptCompleted = await waitForMapTaskCompletion(downloadRetryManager)
+        assert(firstDownloadAttemptCompleted, "failed download attempt should stop cleanly")
+        assert(downloadRetryManager.hasPendingMapJob, "failed download remains recoverable")
+        assertEqual(downloadRetryManager.downloadURL, nil, "failed signed URL is discarded")
+        assert(
+            rejectedTemporaryURLs.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) },
+            "mismatched downloaded archive is removed"
+        )
+        assertEqual(
+            try? Data(contentsOf: downloadRetryPack),
+            originalDownloadRetryPackData,
+            "wrong-map replacement preserves the existing cached map"
+        )
+
+        downloadRetryManager.resumePendingMapJobIfNeeded()
+        let corruptAttemptDeadline = Date().addingTimeInterval(3)
+        while downloadURLIssueCount < 2 && Date() < corruptAttemptDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let corruptDownloadAttemptCompleted = await waitForMapTaskCompletion(downloadRetryManager)
+        assert(corruptDownloadAttemptCompleted, "corrupt download attempt should stop cleanly")
+        assert(downloadRetryManager.hasPendingMapJob, "corrupt download remains recoverable")
+        assertEqual(downloadRetryManager.downloadURL, nil, "corrupt download URL is discarded")
+        assert(
+            rejectedTemporaryURLs.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) },
+            "hash-mismatched archive is removed"
+        )
+        assertEqual(
+            try? Data(contentsOf: downloadRetryPack),
+            originalDownloadRetryPackData,
+            "corrupt replacement preserves the existing cached map"
+        )
+
+        downloadRetryManager.resumePendingMapJobIfNeeded()
+        let retryDeadline = Date().addingTimeInterval(3)
+        while downloadURLIssueCount < 3 && Date() < retryDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let retriedDownloadCompleted = await waitForMapTaskCompletion(downloadRetryManager)
+        assert(retriedDownloadCompleted, "download retry should complete")
+        assertEqual(downloadURLIssueCount, 3, "each download retry obtains a fresh exact-job URL")
+        assertEqual(packDownloadAttemptCount, 3, "download retry performs a clean third transfer")
+        assert(!downloadRetryManager.hasPendingMapJob, "successful download retry clears recovery state")
+        assertEqual(
+            downloadRetryManager.displayName(forCachedPack: downloadRetryPack),
+            "Shanghai Riverside",
+            "same-map replacement preserves the user rename"
+        )
+        downloadRetryManager.deleteCachedPack(at: downloadRetryPack)
+
+        let retrySuite = "offline-map-discovery-retry-\(UUID().uuidString)"
+        let retryDefaults = UserDefaults(suiteName: retrySuite)!
+        defer { retryDefaults.removePersistentDomain(forName: retrySuite) }
+        retryDefaults.set("https://retry.example", forKey: "offlineMap.serverURL")
+        let retryCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-retry-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: retryCache) }
+        let retryManager = OfflineMapManager(
+            defaults: retryDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: retryCache
+        )
+        OfflineMapTestURLProtocol.configure { _ in
+            throw URLError(.notConnectedToInternet)
+        }
+        retryManager.resumePendingMapJobIfNeeded()
+        let retryStarted = await waitForMapBusyState(retryManager, expected: true)
+        assert(retryStarted, "transient launch discovery enters a retryable busy state")
+        assert(retryManager.hasPendingMapJob, "transient launch discovery exposes pause and resume")
+        retryManager.pausePendingMapJob()
+        let retryPaused = await waitForMapBusyState(retryManager, expected: false)
+        assert(retryPaused, "server recovery retry can be paused")
+        assert(retryManager.hasPendingMapJob, "paused discovery remains resumable")
+        retryManager.forgetPendingMapJob()
+        assert(!retryManager.hasPendingMapJob, "paused discovery can be explicitly forgotten")
+        let relaunchedRetryManager = OfflineMapManager(
+            defaults: retryDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: retryCache
+        )
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs" {
+                let oldJob = try! JSONSerialization.jsonObject(
+                    with: jobData(
+                        jobId: "job-forgotten-before-discovery",
+                        mapId: "map-forgotten-before-discovery",
+                        installationId: relaunchedRetryManager.clientInstallationId,
+                        createdAt: "1970-01-01T00:00:00Z"
+                    )
+                )
+                return (200, try! JSONSerialization.data(withJSONObject: ["jobs": [oldJob]]))
+            }
+            return (404, Data())
+        }
+        relaunchedRetryManager.resumePendingMapJobIfNeeded()
+        let forgottenDeadline = Date().addingTimeInterval(3)
+        while relaunchedRetryManager.hasPendingMapJob && Date() < forgottenDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        assert(
+            !relaunchedRetryManager.hasPendingMapJob,
+            "forgotten discovery cutoff survives relaunch"
+        )
+        assertEqual(
+            relaunchedRetryManager.currentJob,
+            nil,
+            "durable forget does not rediscover server jobs that already existed"
+        )
+        assert(!relaunchedRetryManager.isBusy, "durable forget leaves the app ready for a new map")
+        assert(
+            !OfflineMapRecoveryHistory.shouldForgetNextDiscovery(
+                serverURLString: "https://retry.example",
+                defaults: retryDefaults
+            ),
+            "successful discovery consumes the forget marker"
+        )
+
+        let futureDiscoveryManager = OfflineMapManager(
+            defaults: retryDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: retryCache,
+            packDownload: { _, onProgress, _ in
+                onProgress(1)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension("zip")
+                try packData(mapId: "map-created-after-forget").write(to: url)
+                return url
+            }
+        )
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs" {
+                let futureJob = try! JSONSerialization.jsonObject(
+                    with: jobData(
+                        jobId: "job-created-after-forget",
+                        mapId: "map-created-after-forget",
+                        installationId: futureDiscoveryManager.clientInstallationId,
+                        createdAt: "2099-01-01T00:00:00Z"
+                    )
+                )
+                return (200, try! JSONSerialization.data(withJSONObject: ["jobs": [futureJob]]))
+            }
+            if request.url?.path == "/v1/map-jobs/job-created-after-forget" {
+                return (200, jobData(jobId: "job-created-after-forget", mapId: "map-created-after-forget"))
+            }
+            if request.url?.path == "/v1/map-packs/map-created-after-forget/download-url" {
+                return (200, downloadURLData(mapId: "map-created-after-forget"))
+            }
+            return (404, Data())
+        }
+        futureDiscoveryManager.resumePendingMapJobIfNeeded()
+        let futureDiscoveryCompleted = await waitForMapTaskCompletion(futureDiscoveryManager)
+        assert(futureDiscoveryCompleted, "later same-server discovery should complete")
+        assert(
+            futureDiscoveryManager.downloadedPackURL != nil,
+            "one-shot forget does not suppress a map created later"
+        )
+        if let url = futureDiscoveryManager.downloadedPackURL {
+            futureDiscoveryManager.deleteCachedPack(at: url)
+        }
+
+        let launch401Suite = "offline-map-launch-401-\(UUID().uuidString)"
+        let launch401Defaults = UserDefaults(suiteName: launch401Suite)!
+        defer { launch401Defaults.removePersistentDomain(forName: launch401Suite) }
+        launch401Defaults.set("https://launch-401.example", forKey: "offlineMap.serverURL")
+        let launch401Cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-launch-401-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: launch401Cache) }
+        let launch401Manager = OfflineMapManager(
+            defaults: launch401Defaults,
+            mapPlatformSession: session,
+            cacheDirectory: launch401Cache
+        )
+        OfflineMapTestURLProtocol.configure { _ in (401, Data("unauthorized".utf8)) }
+        launch401Manager.resumePendingMapJobIfNeeded()
+        let launch401Completed = await waitForMapTaskCompletion(launch401Manager)
+        assert(launch401Completed, "nonretryable launch discovery should stop")
+        assert(launch401Manager.errorMessage?.contains("401") == true, "launch 401 is visible")
+        assert(launch401Manager.hasPendingMapJob, "launch 401 remains explicitly dismissible")
+        launch401Manager.forgetPendingMapJob()
+        assert(!launch401Manager.hasPendingMapJob, "launch 401 escape hatch clears recovery state")
+
+        let persisted401Suite = "offline-map-persisted-401-\(UUID().uuidString)"
+        let persisted401Defaults = UserDefaults(suiteName: persisted401Suite)!
+        defer { persisted401Defaults.removePersistentDomain(forName: persisted401Suite) }
+        OfflineMapJobPersistence.save(
+            jobId: "job-persisted-401",
+            serverURLString: "https://persisted-401.example",
+            defaults: persisted401Defaults
+        )
+        let persisted401Cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-persisted-401-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: persisted401Cache) }
+        let persisted401Manager = OfflineMapManager(
+            defaults: persisted401Defaults,
+            mapPlatformSession: session,
+            cacheDirectory: persisted401Cache
+        )
+        OfflineMapTestURLProtocol.configure { _ in (401, Data("unauthorized".utf8)) }
+        persisted401Manager.resumePendingMapJobIfNeeded()
+        let persisted401Completed = await waitForMapTaskCompletion(persisted401Manager)
+        assert(persisted401Completed, "persisted 401 should stop without spinning")
+        assert(persisted401Manager.hasPendingMapJob, "persisted 401 retains the recoverable job ID")
+        persisted401Manager.forgetPendingMapJob()
+        assert(!persisted401Manager.hasPendingMapJob, "persisted 401 can be forgotten")
+
+        let persisted404Suite = "offline-map-persisted-404-\(UUID().uuidString)"
+        let persisted404Defaults = UserDefaults(suiteName: persisted404Suite)!
+        defer { persisted404Defaults.removePersistentDomain(forName: persisted404Suite) }
+        OfflineMapJobPersistence.save(
+            jobId: "job-persisted-404",
+            serverURLString: "https://persisted-404.example",
+            defaults: persisted404Defaults
+        )
+        let persisted404Cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-persisted-404-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: persisted404Cache) }
+        let persisted404Manager = OfflineMapManager(
+            defaults: persisted404Defaults,
+            mapPlatformSession: session,
+            cacheDirectory: persisted404Cache
+        )
+        OfflineMapTestURLProtocol.configure { _ in (404, Data("missing".utf8)) }
+        persisted404Manager.resumePendingMapJobIfNeeded()
+        let persisted404Completed = await waitForMapTaskCompletion(persisted404Manager)
+        assert(persisted404Completed, "persisted 404 should stop")
+        assert(!persisted404Manager.hasPendingMapJob, "persisted 404 clears stale durable state")
+        assert(persisted404Manager.errorMessage?.contains("404") == true, "persisted 404 is visible")
     }
 
     @MainActor
@@ -739,21 +1964,36 @@ struct NavigationProtocolTests {
     }
 
     static func offlineMapJob(
+        jobId: String? = nil,
         status: String,
         mapId: String? = nil,
-        error: String? = nil
+        error: String? = nil,
+        createdAt: String? = nil,
+        clientInstallationId: String? = nil,
+        clientRequestId: String? = nil,
+        installOnDevice: Bool? = nil
     ) -> OfflineMapJob? {
-        var payload: [String: Any] = ["jobId": "job-\(status)", "status": status]
+        var payload: [String: Any] = ["jobId": jobId ?? "job-\(status)", "status": status]
         if let mapId { payload["mapId"] = mapId }
         if let error { payload["error"] = error }
+        if let createdAt { payload["createdAt"] = createdAt }
+        if let clientInstallationId { payload["clientInstallationId"] = clientInstallationId }
+        if let clientRequestId { payload["clientRequestId"] = clientRequestId }
+        if let installOnDevice { payload["installOnDevice"] = installOnDevice }
         guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
         return try? JSONDecoder().decode(OfflineMapJob.self, from: data)
     }
 
     static func testOfflineMapCreateJobURLRequest() {
-        let request = OfflineMapJobRequest.customBBox(
-            OfflineMapBounds(minLon: 10, minLat: 20, maxLon: 11, maxLat: 21)
-        )
+        let request = OfflineMapJobRequest
+            .customBBox(
+                OfflineMapBounds(minLon: 10, minLat: 20, maxLon: 11, maxLat: 21)
+            )
+            .identified(
+                clientInstallationId: "installation-test",
+                clientRequestId: "request-test-123",
+                installOnDevice: false
+            )
         guard let url = URL(string: "https://maps.example.com/api") else {
             assert(false, "base URL should parse")
             return
@@ -771,6 +2011,66 @@ struct NavigationProtocolTests {
         let body = String(data: urlRequest.httpBody ?? Data(), encoding: .utf8) ?? ""
         assert(body.contains("\"mode\":\"custom_bbox\""), "create job body includes mode")
         assert(body.contains("\"bbox\":[10,20,11,21]"), "create job body includes bbox")
+        assert(body.contains("\"clientInstallationId\":\"installation-test\""), "create job body includes installation identity")
+        assert(body.contains("\"clientRequestId\":\"request-test-123\""), "create job body includes request identity")
+        assert(body.contains("\"installOnDevice\":false"), "create job body includes workflow intent")
+    }
+
+    static func testOfflineMapListJobsURLRequest() {
+        guard let baseURL = URL(string: "https://maps.example.com/api"),
+              let request = try? OfflineMapPlatformClient.makeListJobsURLRequest(
+                baseURL: baseURL,
+                apiToken: "secret",
+                clientInstallationId: "installation-test"
+              ) else {
+            assert(false, "list jobs URL request should build")
+            return
+        }
+
+        assertEqual(
+            request.url?.absoluteString,
+            "https://maps.example.com/api/v1/map-jobs?clientInstallationId=installation-test",
+            "list jobs request filters by installation identity"
+        )
+        assertEqual(
+            request.value(forHTTPHeaderField: "Authorization"),
+            "Bearer secret",
+            "list jobs request includes bearer token"
+        )
+        guard let jobRequest = try? OfflineMapPlatformClient.makeInstallationScopedURLRequest(
+            baseURL: baseURL,
+            apiToken: "secret",
+            path: "/v1/map-jobs/job-12345678",
+            method: "GET",
+            clientInstallationId: "installation-test"
+        ),
+        let downloadRequest = try? OfflineMapPlatformClient.makeInstallationScopedURLRequest(
+            baseURL: baseURL,
+            apiToken: "secret",
+            path: "/v1/map-packs/map-12345678/download-url",
+            method: "POST",
+            clientInstallationId: "installation-test",
+            additionalQueryItems: [
+                URLQueryItem(name: "jobId", value: "job-12345678")
+            ]
+        ) else {
+            assert(false, "installation-scoped requests should build")
+            return
+        }
+        assertEqual(
+            jobRequest.url?.absoluteString,
+            "https://maps.example.com/api/v1/map-jobs/job-12345678?clientInstallationId=installation-test",
+            "job polling is scoped to the installation"
+        )
+        assertEqual(downloadRequest.httpMethod, "POST", "download URL keeps its POST method")
+        assert(
+            downloadRequest.url?.query?.contains("clientInstallationId=installation-test") == true,
+            "download URL lookup is scoped to the installation"
+        )
+        assert(
+            downloadRequest.url?.query?.contains("jobId=job-12345678") == true,
+            "download URL lookup stays bound to the recovered job"
+        )
     }
 
     static func testOfflineMapManagerMigratesProductionConfig() {
@@ -782,7 +2082,7 @@ struct NavigationProtocolTests {
         defer { defaults.removePersistentDomain(forName: suite) }
 
         defaults.set("http://rhi0maej6bwo33hn0im6h4lf.178.18.245.246.sslip.io", forKey: "offlineMap.serverURL")
-        defaults.set("", forKey: "offlineMap.apiToken")
+        defaults.set("stale-bundled-token", forKey: "offlineMap.apiToken")
 
         assertEqual(
             OfflineMapManager.resolvedServerURL(defaults: defaults),
@@ -790,9 +2090,126 @@ struct NavigationProtocolTests {
             "legacy offline map server URL migrates to production domain"
         )
         assertEqual(
-            OfflineMapManager.resolvedAPIToken(defaults: defaults),
-            OfflineMapServiceConfig.apiToken,
-            "empty stored map API token falls back to bundled build token"
+            OfflineMapManager.resolvedAPIToken(
+                defaults: defaults,
+                bundledToken: "new-bundled-token"
+            ),
+            "new-bundled-token",
+            "new bundled map API token replaces a stale token after app update"
+        )
+
+        defaults.set("https://custom-map-server.example", forKey: "offlineMap.serverURL")
+        defaults.set("custom-server-token", forKey: "offlineMap.apiToken")
+        assertEqual(
+            OfflineMapManager.resolvedAPIToken(
+                defaults: defaults,
+                bundledToken: "new-bundled-token"
+            ),
+            "custom-server-token",
+            "custom server keeps its deliberate custom credential"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapManagerRenamesCachedPack() {
+        let suite = "offline-map-rename-test-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "rename test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let cacheDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-rename-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let packURL = cacheDirectory.appendingPathComponent("custom-map-shanghai.zip")
+
+        let manager = OfflineMapManager(defaults: defaults, cacheDirectory: cacheDirectory)
+        var renameInteraction = SavedMapRenameInteraction()
+        assertEqual(
+            renameInteraction.begin(
+                filename: packURL.lastPathComponent,
+                currentName: "Shanghai"
+            ),
+            nil,
+            "starting a rename has no previous draft to commit"
+        )
+        renameInteraction.updateDraft("  Shanghai Riverside  ")
+        assertEqual(
+            renameInteraction.finishIfFocusMoved(to: packURL.lastPathComponent),
+            nil,
+            "tapping within the active name field keeps editing"
+        )
+        guard let tapAwayCommit = renameInteraction.finishIfFocusMoved(to: nil) else {
+            assert(false, "tapping elsewhere should produce a rename commit")
+            return
+        }
+        assertEqual(
+            tapAwayCommit.filename,
+            packURL.lastPathComponent,
+            "tap-away commit retains the edited map identity"
+        )
+        assertEqual(
+            manager.renameCachedPack(at: packURL, to: tapAwayCommit.proposedName),
+            "Shanghai Riverside",
+            "tap-away commit trims surrounding whitespace"
+        )
+        assertEqual(
+            manager.displayName(forCachedPack: packURL),
+            "Shanghai Riverside",
+            "renamed map is shown immediately"
+        )
+
+        let restoredManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory
+        )
+        assertEqual(
+            restoredManager.displayName(forCachedPack: packURL),
+            "Shanghai Riverside",
+            "renamed map survives app restart"
+        )
+        assertEqual(
+            restoredManager.renameCachedPack(at: packURL, to: "   \n "),
+            "Shanghai Riverside",
+            "blank rename preserves the existing name"
+        )
+    }
+
+    static func testSavedMapRenameViewWiring() {
+        let sourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift"
+        )
+        guard let source = try? String(contentsOf: sourceURL, encoding: .utf8) else {
+            assert(false, "settings view source should be available to the integration test")
+            return
+        }
+        assert(
+            source.contains("focusedPackFilename: $focusedSavedMapFilename"),
+            "settings form passes its focus binding into Saved Maps"
+        )
+        assert(
+            source.contains(".onTapGesture {\n                focusedSavedMapFilename = nil\n            }"),
+            "tapping another Settings form area clears saved-map name focus"
+        )
+        assert(
+            source.contains(".onChange(of: focusedPackFilename) { newValue in\n            scheduleRenameCommitIfNeeded(focusedFilename: newValue)\n        }"),
+            "Saved Maps commits a rename when form focus moves away"
+        )
+        assert(
+            !source.contains("title: \"Installed on Device\"") &&
+                !source.contains("title: \"Last Transfer\""),
+            "Saved Maps omits redundant device and transfer summary rows"
+        )
+        assert(
+            source.contains("if isInstalled {") &&
+                source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
+                source.contains("Image(systemName: \"arrow.up.circle\")"),
+            "each saved map shows installed status or upload as mutually exclusive actions"
+        )
+        assert(
+            source.contains(".alert(\"Already on Device\""),
+            "tapping installed status explains that the map is already on the device"
         )
     }
 
@@ -807,6 +2224,7 @@ struct NavigationProtocolTests {
 
         defaults.set("custom-map-shanghai", forKey: "offlineMap.lastTransfer.mapId")
         defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+        defaults.set("shanghai-session", forKey: "offlineMap.lastTransfer.sessionId")
         defaults.set(
             ["custom-map-shanghai.zip": "Shanghai"],
             forKey: "offlineMap.packDisplayNames"
@@ -816,6 +2234,19 @@ struct NavigationProtocolTests {
         assertEqual(manager.lastTransferMapId, "custom-map-shanghai", "last transfer map id survives app restart")
         assertEqual(manager.lastTransferOutcome, "unconfirmed", "last transfer outcome survives app restart")
         assertEqual(manager.lastTransferDescription, "Shanghai — unconfirmed", "last transfer identifies the selected saved map")
+        assert(manager.hasPendingDeviceActivation,
+               "unconfirmed activation keeps its status visible after app restart")
+
+        let bleManager = BLEManager()
+        bleManager.mapTransferActiveMapId = "old-map"
+        bleManager.mapTransferActiveSessionId = "old-session"
+        bleManager.mapTransferActivationStatus = "idle"
+        manager.reconcileLastTransfer(bleManager: bleManager)
+        assertEqual(
+            manager.statusMessage,
+            "Activation paused. Tap Upload to resume.",
+            "an idle rebooted device does not claim activation is still running"
+        )
     }
 
     @MainActor
@@ -843,6 +2274,8 @@ struct NavigationProtocolTests {
         manager.reconcileLastTransfer(bleManager: bleManager)
 
         assertEqual(manager.lastTransferOutcome, "installed", "durable exact-session status reconciles after device restart")
+        assert(!manager.hasPendingDeviceActivation,
+               "installed reconciliation clears pending activation status")
     }
 
     @MainActor
@@ -908,6 +2341,74 @@ struct NavigationProtocolTests {
         assertEqual(archive.mapFileEntries.count, 1, "zip reader exposes VECTMAP file entries")
         assertEqual(archive.manifestEntry?.path, "manifest.json", "zip reader exposes manifest entry")
         assertEqual(try? archive.data(for: archive.mapFileEntries[0]), block, "zip reader reads entry data")
+
+        let duplicateURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("offline-map-duplicate-test-\(UUID().uuidString).zip")
+        defer { try? FileManager.default.removeItem(at: duplicateURL) }
+        let duplicatePath = "VECTMAP/map-1/+0032+0008/123_456.fmb"
+        let duplicateManifest = try! JSONSerialization.data(withJSONObject: [
+            "mapId": "map-1",
+            "files": [[
+                "path": duplicatePath,
+                "bytes": block.count,
+                "sha256": FirmwareUpdateManager.sha256Hex(block),
+            ]],
+        ])
+        let duplicateZip = makeStoredZip(entries: [
+            ("manifest.json", duplicateManifest),
+            (duplicatePath, block),
+            (duplicatePath, block),
+        ])
+        try? duplicateZip.write(to: duplicateURL)
+        do {
+            let duplicateArchive = try OfflineMapPackArchive(url: duplicateURL)
+            try duplicateArchive.validate(expectedMapId: "map-1")
+            assert(false, "duplicate map entries should be rejected")
+        } catch OfflineMapPlatformError.invalidPack {
+            // Expected.
+        } catch {
+            assert(false, "duplicate map entries should produce invalidPack")
+        }
+    }
+
+    static func testOfflineMapArchiveValidationCancellation() async {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("offline-map-cancel-test-\(UUID().uuidString).zip")
+        let path = "VECTMAP/map-1/+0032+0008/123_456.fmb"
+        let block = Data(repeating: 0x5a, count: 2 * 1_048_576)
+        let manifest = try! JSONSerialization.data(withJSONObject: [
+            "mapId": "map-1",
+            "files": [[
+                "path": path,
+                "bytes": block.count,
+                "sha256": FirmwareUpdateManager.sha256Hex(block),
+            ]],
+        ])
+        try? makeStoredZip(entries: [
+            ("manifest.json", manifest),
+            (path, block),
+        ]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        guard let archive = try? OfflineMapPackArchive(url: url) else {
+            assert(false, "cancellation test archive should parse")
+            return
+        }
+        let validation = Task.detached {
+            while !Task.isCancelled {
+                await Task.yield()
+            }
+            try archive.validate(expectedMapId: "map-1")
+        }
+        validation.cancel()
+        do {
+            try await validation.value
+            assert(false, "cancelled archive validation should not publish a result")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            assert(false, "cancelled archive validation should throw CancellationError")
+        }
     }
 
     @MainActor
@@ -953,12 +2454,12 @@ struct NavigationProtocolTests {
             "the exact cached manifest session is marked installed"
         )
         assert(
-            manager.isCachedPackInstalled(
+            !manager.isCachedPackInstalled(
                 url,
                 activeMapId: "map-1",
                 activeSessionId: ""
             ),
-            "legacy firmware without active-session status falls back to map ID"
+            "legacy firmware cannot hide upload for a regenerated same-area pack"
         )
     }
 
@@ -1006,10 +2507,96 @@ struct NavigationProtocolTests {
             "http://192.168.4.20:8080/map-transfer/sessions/session-1/VECTMAP/map-1/%2B0032%2B0008/123_456.fmb",
             "upload URL percent-encodes plus signs so firmware does not decode them as spaces"
         )
+        let archiveRequest = MapTransferDeviceClient.archiveUploadRequest(
+            baseURL: baseURL,
+            sessionId: "session-1",
+            sessionToken: "transfer-secret"
+        )
+        assertEqual(
+            archiveRequest.url?.absoluteString,
+            "http://192.168.4.20:8080/map-transfer/sessions/session-1/pack.zip",
+            "background map transfer uploads one archive to the session endpoint"
+        )
+        assertEqual(archiveRequest.httpMethod, "PUT", "archive transfer uses PUT")
+        assertEqual(
+            archiveRequest.value(forHTTPHeaderField: "X-BikeComputer-Transfer-Token"),
+            "transfer-secret",
+            "archive transfer carries the BLE-issued session token"
+        )
+        assert(
+            MapArchiveUploadFallback.shouldUseForeground(
+                for: OfflineMapPlatformError.serverStatus(400, "unknown path")
+            ),
+            "older firmware falls back to foreground per-file transfer"
+        )
+        assert(
+            MapArchiveUploadFallback.shouldUseForeground(
+                for: OfflineMapPlatformError.serverStatus(413, "archive too large")
+            ),
+            "oversized archives fall back to the supported per-file protocol"
+        )
+        assert(
+            !MapArchiveUploadFallback.shouldUseForeground(
+                for: OfflineMapPlatformError.serverStatus(500, "write failed")
+            ),
+            "device failures are not disguised as compatibility fallback"
+        )
+    }
+
+    static func testMapTransferOutcomePolicy() {
+        assertEqual(
+            MapTransferOutcomePolicy.outcome(
+                after: CancellationError(),
+                activationMayBeInFlight: true
+            ),
+            "unconfirmed",
+            "cancelling after activation starts remains reconcilable"
+        )
+        assertEqual(
+            MapTransferOutcomePolicy.outcome(
+                after: CancellationError(),
+                activationMayBeInFlight: false
+            ),
+            "failed",
+            "cancelling before activation does not claim a device-side attempt"
+        )
+    }
+
+    static func testCachedPackRecoveryDecision() {
+        assertEqual(
+            CachedPackRecoveryDecision.evaluate(
+                expectedSessionId: "session-new",
+                activeSessionId: "session-new",
+                activationStatus: "idle",
+                activationSessionId: ""
+            ),
+            .installed,
+            "exact active session completes recovered installation"
+        )
+        assertEqual(
+            CachedPackRecoveryDecision.evaluate(
+                expectedSessionId: "session-new",
+                activeSessionId: "session-old",
+                activationStatus: "activating",
+                activationSessionId: "session-new"
+            ),
+            .pending,
+            "matching device activation blocks a redundant archive upload"
+        )
+        assertEqual(
+            CachedPackRecoveryDecision.evaluate(
+                expectedSessionId: "session-new",
+                activeSessionId: "session-old",
+                activationStatus: "failed",
+                activationSessionId: "session-new"
+            ),
+            .absent,
+            "failed activation remains eligible for an explicit retry"
+        )
     }
 
     @MainActor
-    static func testMapTransferUploadResumeContract() {
+    static func testMapTransferUploadResumeContract() async {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("map-upload-resume-\(UUID().uuidString).zip")
         let manifest = Data("{\"schemaVersion\":1,\"mapId\":\"map-1\"}".utf8)
@@ -1083,7 +2670,7 @@ struct NavigationProtocolTests {
             session: session,
             recoveryRetryNanoseconds: 1_000_000
         )
-        runMainActorAsyncTest {
+        await runMainActorAsyncTest {
             try await client.upload(
                 archive: archive,
                 sessionId: "session-1"
@@ -1109,7 +2696,7 @@ struct NavigationProtocolTests {
             blindTimeoutAttempts += 1
             throw URLError(.timedOut)
         }
-        runMainActorAsyncTest {
+        await runMainActorAsyncTest {
             do {
                 try await client.upload(
                     archive: archive,
@@ -1126,7 +2713,7 @@ struct NavigationProtocolTests {
     }
 
     @MainActor
-    static func testMapTransferActivationAcknowledgementSequence() {
+    static func testMapTransferActivationAcknowledgementSequence() async {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
         let session = URLSession(configuration: configuration)
@@ -1149,7 +2736,7 @@ struct NavigationProtocolTests {
             session: session
         )
         var acceptedSequence: UInt32?
-        runMainActorAsyncTest {
+        await runMainActorAsyncTest {
             acceptedSequence = try await client.activate(sessionId: "session-1")
         }
         assertEqual(acceptedSequence, 9,
@@ -1327,13 +2914,17 @@ struct NavigationProtocolTests {
             "lost activation response enters reconciliation"
         )
         assert(
-            !MapActivationTransport.isAmbiguousResponseError(URLError(.cannotConnectToHost)),
-            "a connection failure before delivery remains a hard error"
+            MapActivationTransport.isAmbiguousResponseError(URLError(.cannotConnectToHost)),
+            "automatic activation may close device HTTP before the redundant POST connects"
+        )
+        assert(
+            MapActivationTransport.isAmbiguousResponseError(URLError(.notConnectedToInternet)),
+            "accessory AP shutdown proceeds to BLE activation reconciliation"
         )
     }
 
     @MainActor
-    static func testMapActivationConfirmationOrchestration() {
+    static func testMapActivationConfirmationOrchestration() async {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
         let session = URLSession(configuration: configuration)
@@ -1358,8 +2949,9 @@ struct NavigationProtocolTests {
         bleManager.mapTransferActivationStatus = "installed"
         bleManager.mapTransferActivationSequence = 8
         bleManager.mapTransferActivationSessionId = "session-1"
-        runMainActorAsyncTest {
-            try await manager.confirmActivatedMap(
+        var confirmation: MapActivationConfirmationResult?
+        await runMainActorAsyncTest {
+            confirmation = try await manager.confirmActivatedMap(
                 expectedMapId: "map-1",
                 sessionId: "session-1",
                 previousMapId: "map-1",
@@ -1372,6 +2964,7 @@ struct NavigationProtocolTests {
                 pollIntervalNanoseconds: 1_000_000
             )
         }
+        assertEqual(confirmation, .installed, "BLE fallback confirms installation")
         assertEqual(statusRequests, 1, "HTTP status failure falls back to BLE")
 
         statusRequests = 0
@@ -1387,8 +2980,9 @@ struct NavigationProtocolTests {
             )!
             return (response, body)
         }
-        runMainActorAsyncTest {
-            try await manager.confirmActivatedMap(
+        confirmation = nil
+        await runMainActorAsyncTest {
+            confirmation = try await manager.confirmActivatedMap(
                 expectedMapId: "map-1",
                 sessionId: "session-1",
                 previousMapId: "map-1",
@@ -1401,6 +2995,7 @@ struct NavigationProtocolTests {
                 pollIntervalNanoseconds: 1_000_000
             )
         }
+        assertEqual(confirmation, .installed, "HTTP polling confirms installation")
         assertEqual(statusRequests, 2,
                     "confirmation polls from activating through installed")
 
@@ -1416,26 +3011,29 @@ struct NavigationProtocolTests {
             )!
             return (response, body)
         }
-        runMainActorAsyncTest {
-            do {
-                try await manager.confirmActivatedMap(
-                    expectedMapId: "map-1",
-                    sessionId: "session-1",
-                    previousMapId: "map-1",
-                    previousSessionId: "session-1",
-                    previousSequence: 7,
-                    acceptedSequence: nil,
-                    client: client,
-                    bleManager: bleManager,
-                    timeout: 0.02,
-                    pollIntervalNanoseconds: 1_000_000
-                )
-                assert(false, "retained activation should time out")
-            } catch OfflineMapPlatformError.mapActivationTimedOut {
-                // Expected.
-            }
+        confirmation = nil
+        await runMainActorAsyncTest {
+            confirmation = try await manager.confirmActivatedMap(
+                expectedMapId: "map-1",
+                sessionId: "session-1",
+                previousMapId: "map-1",
+                previousSessionId: "session-1",
+                previousSequence: 7,
+                acceptedSequence: nil,
+                client: client,
+                bleManager: bleManager,
+                timeout: 0.02,
+                pollIntervalNanoseconds: 1_000_000
+            )
         }
-        assert(statusRequests > 1, "timeout covers repeated pending polls")
+        guard let confirmation,
+              case .continuesOnDevice = confirmation else {
+            assert(false, "retained activation should continue on device without an error")
+            return
+        }
+        assertEqual(manager.statusMessage.hasPrefix("activating map-1"), true,
+                    "pending confirmation retains activation status")
+        assert(statusRequests > 1, "confirmation limit covers repeated pending polls")
     }
 
     static func testMapTransferDeviceStatusDecodesActivationFailure() {
@@ -1720,21 +3318,11 @@ struct NavigationProtocolTests {
     @MainActor
     static func runMainActorAsyncTest(
         _ operation: @MainActor @escaping () async throws -> Void
-    ) {
-        var finished = false
-        var failure: Error?
-        Task { @MainActor in
-            do {
-                try await operation()
-            } catch {
-                failure = error
-            }
-            finished = true
-        }
-        assert(waitForMainLoop(timeout: 3) { finished },
-               "main-actor async test should finish")
-        if let failure {
-            assert(false, "main-actor async test failed: \(failure)")
+    ) async {
+        do {
+            try await operation()
+        } catch {
+            assert(false, "main-actor async test failed: \(error)")
         }
     }
 
@@ -2772,7 +4360,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2"},"lastError":{"code":"previous","message":"previous upload failed"}}
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
         """
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -2785,6 +4373,9 @@ struct NavigationProtocolTests {
         assertEqual(manager.mapTransferActivationSequence, 12, "status parser exposes activation sequence")
         assertEqual(manager.mapTransferActivationSessionId, "tokyo-v2", "status parser exposes activation session")
         assertEqual(manager.mapTransferActivationMapId, "tokyo-v2", "status parser exposes activating map id")
+        assertEqual(manager.mapTransferActivationStep, 1, "status parser exposes activation step")
+        assertEqual(manager.mapTransferActivationStepCount, 5, "status parser exposes activation step count")
+        assertEqual(manager.mapTransferActivationProgress, 6, "status parser exposes activation percentage")
         assertEqual(manager.deviceHasSDCard, true, "status parser exposes physical SD state")
         assertEqual(manager.deviceMapFoundForCurrentLocation, false, "status parser exposes current map coverage")
         assertEqual(manager.deviceMapBlockCount, 0, "status parser exposes current map block count")
@@ -3141,9 +4732,10 @@ struct NavigationProtocolTests {
         assertEqual(manager.sentPackets.count, 0, "navigation should not mark unsent packet while BLE is not ready")
 
         manager.isNavigationReady = true
-        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-
-        assertEqual(manager.sentPackets.count, 1, "navigation readiness should resend the current snapshot")
+        assert(
+            waitForMainLoop(timeout: 1) { manager.sentPackets.count == 1 },
+            "navigation readiness should resend the current snapshot"
+        )
         let fields = manager.sentPackets[0].split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
         assertEqual(fields.count, 3, "resent packet uses firmware fields")
         assertEqual(String(fields[0]), "\(NavigationIconID.left)", "resent packet keeps current icon")

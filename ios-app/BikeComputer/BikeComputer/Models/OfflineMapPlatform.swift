@@ -6,6 +6,7 @@
 //
 
 import CoreLocation
+import CryptoKit
 import Foundation
 
 struct OfflineMapBounds: Codable, Equatable {
@@ -45,6 +46,9 @@ struct OfflineMapJobRequest: Encodable, Equatable {
     let geometry: GeoJSONGeometry?
     let route: GeoJSONGeometry?
     let corridorWidthM: Double?
+    let clientInstallationId: String?
+    let clientRequestId: String?
+    let installOnDevice: Bool?
 
     static func customBBox(_ bounds: OfflineMapBounds) -> OfflineMapJobRequest {
         OfflineMapJobRequest(
@@ -52,7 +56,10 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             bbox: bounds.apiArray,
             geometry: nil,
             route: nil,
-            corridorWidthM: nil
+            corridorWidthM: nil,
+            clientInstallationId: nil,
+            clientRequestId: nil,
+            installOnDevice: nil
         )
     }
 
@@ -62,7 +69,10 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             bbox: nil,
             geometry: GeoJSONGeometry.polygon(ring: ring),
             route: nil,
-            corridorWidthM: nil
+            corridorWidthM: nil,
+            clientInstallationId: nil,
+            clientRequestId: nil,
+            installOnDevice: nil
         )
     }
 
@@ -72,7 +82,27 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             bbox: nil,
             geometry: nil,
             route: GeoJSONGeometry.lineString(route),
-            corridorWidthM: widthMeters
+            corridorWidthM: widthMeters,
+            clientInstallationId: nil,
+            clientRequestId: nil,
+            installOnDevice: nil
+        )
+    }
+
+    func identified(
+        clientInstallationId: String,
+        clientRequestId: String,
+        installOnDevice: Bool
+    ) -> OfflineMapJobRequest {
+        OfflineMapJobRequest(
+            mode: mode,
+            bbox: bbox,
+            geometry: geometry,
+            route: route,
+            corridorWidthM: corridorWidthM,
+            clientInstallationId: clientInstallationId,
+            clientRequestId: clientRequestId,
+            installOnDevice: installOnDevice
         )
     }
 }
@@ -128,15 +158,76 @@ enum GeoJSONCoordinates: Codable, Equatable {
 struct OfflineMapJob: Decodable, Equatable {
     let jobId: String
     let status: String
+    let createdAt: String?
     let error: String?
     let mapId: String?
     let packPath: String?
     let geometry: OfflineMapJobGeometry?
     let sourceRegion: OfflineMapSourceRegion?
     let progress: OfflineMapJobProgress?
+    let clientInstallationId: String?
+    let clientRequestId: String?
+    let installOnDevice: Bool?
 
     var isTerminal: Bool {
         ["ready", "failed", "expired", "cancelled"].contains(status)
+    }
+}
+
+struct OfflineMapJobsResponse: Decodable, Equatable {
+    let jobs: [OfflineMapJob]
+}
+
+enum OfflineMapJobRecoverySelector {
+    static func select(
+        jobs: [OfflineMapJob],
+        clientInstallationId: String,
+        excludedJobIds: Set<String> = []
+    ) -> OfflineMapJob? {
+        jobs
+            .filter { job in
+                guard job.clientInstallationId == clientInstallationId else { return false }
+                guard !excludedJobIds.contains(job.jobId) else { return false }
+                return job.status == "ready" ? job.mapId != nil : !job.isTerminal
+            }
+            .max { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
+    }
+}
+
+struct SavedMapRenameCommit: Equatable {
+    let filename: String
+    let proposedName: String
+}
+
+struct SavedMapRenameInteraction: Equatable {
+    private(set) var editingFilename: String?
+    private(set) var draftName = ""
+
+    mutating func begin(filename: String, currentName: String) -> SavedMapRenameCommit? {
+        let previous = finish()
+        editingFilename = filename
+        draftName = currentName
+        return previous
+    }
+
+    mutating func updateDraft(_ value: String) {
+        draftName = value
+    }
+
+    mutating func finishIfFocusMoved(to focusedFilename: String?) -> SavedMapRenameCommit? {
+        guard focusedFilename != editingFilename else { return nil }
+        return finish()
+    }
+
+    mutating func finish() -> SavedMapRenameCommit? {
+        guard let editingFilename else { return nil }
+        let commit = SavedMapRenameCommit(
+            filename: editingFilename,
+            proposedName: draftName
+        )
+        self.editingFilename = nil
+        draftName = ""
+        return commit
     }
 }
 
@@ -164,8 +255,59 @@ enum OfflineMapProgressPresentation {
 }
 
 enum OfflineMapDownloadingSectionPresentation {
-    static func isVisible(isBusy: Bool, hasPendingJob: Bool, errorMessage: String?) -> Bool {
-        isBusy || hasPendingJob || errorMessage != nil
+    static func isVisible(
+        isBusy: Bool,
+        hasPendingJob: Bool,
+        hasPendingActivation: Bool,
+        errorMessage: String?
+    ) -> Bool {
+        isBusy || hasPendingJob || hasPendingActivation || errorMessage != nil
+    }
+}
+
+struct MapActivationProgressPresentation: Equatable {
+    let step: Int
+    let stepCount: Int
+    let percentage: Int
+
+    var fraction: Double {
+        Double(percentage) / 100
+    }
+
+    var label: String {
+        "Step \(step)/\(stepCount) - \(percentage)%"
+    }
+
+    static func make(
+        status: String?,
+        step: Int?,
+        stepCount: Int?,
+        percentage: Int?
+    ) -> Self? {
+        guard status == "activating",
+              let step,
+              let stepCount,
+              let percentage,
+              step > 0,
+              stepCount >= step else {
+            return nil
+        }
+        return Self(
+            step: step,
+            stepCount: stepCount,
+            percentage: min(max(percentage, 0), 100)
+        )
+    }
+}
+
+enum OfflineMapAutomaticRecoveryTrigger {
+    static func shouldResume(
+        hasPendingInstall: Bool,
+        isBusy: Bool,
+        isConnected: Bool,
+        isNavigationReady: Bool
+    ) -> Bool {
+        hasPendingInstall && !isBusy && isConnected && isNavigationReady
     }
 }
 
@@ -212,7 +354,6 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
     case transferCommandNotSent
     case missingTransferBaseURL
     case deviceSDCardUnavailable
-    case mapActivationTimedOut(String)
     case mapActivationFailed(String)
     case transferWiFiJoinFailed(String, String)
     case invalidPack(String)
@@ -234,8 +375,6 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             return "Device map transfer mode is not ready"
         case .deviceSDCardUnavailable:
             return "Device SD card is not mounted"
-        case .mapActivationTimedOut(let message):
-            return "Map activation could not be confirmed: \(message)"
         case .mapActivationFailed(let message):
             return "Map activation failed: \(message)"
         case .transferWiFiJoinFailed(let ssid, let message):
@@ -258,7 +397,13 @@ struct OfflineMapPackEntry: Equatable {
     let byteCount: Int
 }
 
-struct OfflineMapPackManifest: Decodable, Equatable {
+nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
+    struct File: Decodable, Equatable {
+        let path: String
+        let bytes: Int
+        let sha256: String
+    }
+
     struct Source: Decodable, Equatable {
         let region: String?
         let url: String?
@@ -267,6 +412,7 @@ struct OfflineMapPackManifest: Decodable, Equatable {
     let mapId: String?
     let displayName: String?
     let source: Source?
+    let files: [File]?
 }
 
 nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
@@ -280,6 +426,9 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
         let sequence: UInt32?
         let sessionId: String?
         let mapId: String?
+        let step: Int?
+        let steps: Int?
+        let progress: Int?
         let error: TransferError?
     }
 
@@ -328,11 +477,62 @@ struct OfflineMapPackArchive {
         return data
     }
 
-    func manifest() throws -> OfflineMapPackManifest {
+    nonisolated func manifest() throws -> OfflineMapPackManifest {
         guard let manifestEntry else {
             throw OfflineMapPlatformError.invalidPack("manifest.json is missing")
         }
         return try JSONDecoder().decode(OfflineMapPackManifest.self, from: data(for: manifestEntry))
+    }
+
+    nonisolated func validate(expectedMapId: String) throws {
+        try Task.checkCancellation()
+        let manifest = try manifest()
+        guard manifest.mapId == expectedMapId else {
+            throw OfflineMapPlatformError.invalidPack(
+                "manifest mapId \(manifest.mapId ?? "missing") does not match \(expectedMapId)"
+            )
+        }
+        guard let files = manifest.files, !files.isEmpty else {
+            throw OfflineMapPlatformError.invalidPack("manifest contains no file hashes")
+        }
+        let declaredPaths = Set(files.map(\.path))
+        let archivePaths = Set(mapFileEntries.map(\.path))
+        guard declaredPaths.count == files.count,
+              archivePaths.count == mapFileEntries.count,
+              declaredPaths == archivePaths else {
+            throw OfflineMapPlatformError.invalidPack("manifest file list does not match the archive")
+        }
+        let entriesByPath = Dictionary(uniqueKeysWithValues: mapFileEntries.map { ($0.path, $0) })
+        for file in files {
+            try Task.checkCancellation()
+            guard let entry = entriesByPath[file.path], file.bytes == entry.byteCount else {
+                throw OfflineMapPlatformError.invalidPack("file size mismatch for \(file.path)")
+            }
+            let actualHash = try sha256Hex(for: entry)
+            guard file.sha256.count == 64,
+                  file.sha256.allSatisfy({ $0.isHexDigit }),
+                  actualHash == file.sha256.lowercased() else {
+                throw OfflineMapPlatformError.invalidPack("file hash mismatch for \(file.path)")
+            }
+        }
+    }
+
+    private nonisolated func sha256Hex(for entry: OfflineMapPackEntry) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: entry.offset)
+        var remaining = entry.byteCount
+        var hasher = SHA256()
+        while remaining > 0 {
+            try Task.checkCancellation()
+            let chunk = try handle.read(upToCount: min(remaining, 1_048_576)) ?? Data()
+            guard !chunk.isEmpty else {
+                throw OfflineMapPlatformError.invalidPack("truncated entry \(entry.path)")
+            }
+            hasher.update(data: chunk)
+            remaining -= chunk.count
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private nonisolated static func readEntries(url: URL) throws -> [OfflineMapPackEntry] {
@@ -434,6 +634,7 @@ struct OfflineMapPackArchive {
 
 struct MapTransferDeviceClient {
     let baseURL: URL
+    var sessionToken: String? = nil
     var session: URLSession = .shared
     var recoveryRetryNanoseconds: UInt64 = 2_000_000_000
 
@@ -458,6 +659,40 @@ struct MapTransferDeviceClient {
         }
     }
 
+    nonisolated func uploadArchiveInBackground(
+        archiveURL: URL,
+        sessionId: String,
+        progress: @escaping @MainActor (_ completedBytes: Int64, _ totalBytes: Int64) -> Void
+    ) async throws {
+        let values = try archiveURL.resourceValues(forKeys: [.fileSizeKey])
+        guard let fileSize = values.fileSize, fileSize > 0 else {
+            throw OfflineMapPlatformError.invalidPack("archive size is unavailable")
+        }
+        if try await stagedByteCount(sessionId: sessionId, path: "pack.zip") == fileSize {
+            await progress(Int64(fileSize), Int64(fileSize))
+            return
+        }
+
+        let request = Self.archiveUploadRequest(
+            baseURL: baseURL,
+            sessionId: sessionId,
+            sessionToken: sessionToken
+        )
+
+#if os(iOS)
+        try await BackgroundMapUploadCoordinator.shared.upload(
+            request: request,
+            fileURL: archiveURL,
+            expectedBytes: Int64(fileSize),
+            progress: progress
+        )
+#else
+        let response = try await session.upload(for: request, fromFile: archiveURL)
+        try Self.validate(response: response.1, body: response.0)
+        await progress(Int64(fileSize), Int64(fileSize))
+#endif
+    }
+
     nonisolated func activate(sessionId: String) async throws -> UInt32? {
         var request = URLRequest(url: Self.uploadURL(
             baseURL: baseURL,
@@ -466,6 +701,7 @@ struct MapTransferDeviceClient {
         ))
         request.httpMethod = "POST"
         request.timeoutInterval = 15
+        authorize(&request)
         let data = try await send(request: request, data: nil)
         let acknowledgement = try JSONDecoder().decode(
             MapTransferActivationAcknowledgement.self,
@@ -483,6 +719,7 @@ struct MapTransferDeviceClient {
         request.httpMethod = "GET"
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 2
+        authorize(&request)
         let data = try await send(request: request, data: nil)
         return try JSONDecoder().decode(MapTransferDeviceStatus.self, from: data)
     }
@@ -496,6 +733,7 @@ struct MapTransferDeviceClient {
         request.httpMethod = "PUT"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 30
+        authorize(&request)
         _ = try await send(request: request, data: data)
     }
 
@@ -513,6 +751,7 @@ struct MapTransferDeviceClient {
             request.httpMethod = "HEAD"
             request.cachePolicy = .reloadIgnoringLocalCacheData
             request.timeoutInterval = 3
+            authorize(&request)
 
             do {
                 let response = try await session.data(for: request)
@@ -562,14 +801,24 @@ struct MapTransferDeviceClient {
         } else {
             response = try await session.data(for: request)
         }
-        guard let http = response.1 as? HTTPURLResponse else {
+        try Self.validate(response: response.1, body: response.0)
+        return response.0
+    }
+
+    private nonisolated func authorize(_ request: inout URLRequest) {
+        if let sessionToken, !sessionToken.isEmpty {
+            request.setValue(sessionToken, forHTTPHeaderField: "X-BikeComputer-Transfer-Token")
+        }
+    }
+
+    fileprivate nonisolated static func validate(response: URLResponse, body: Data) throws {
+        guard let http = response as? HTTPURLResponse else {
             throw OfflineMapPlatformError.invalidResponse
         }
         guard 200..<300 ~= http.statusCode else {
-            let bodyText = String(data: response.0, encoding: .utf8) ?? ""
+            let bodyText = String(data: body, encoding: .utf8) ?? ""
             throw OfflineMapPlatformError.serverStatus(http.statusCode, bodyText)
         }
-        return response.0
     }
 
     nonisolated static func uploadURL(baseURL: URL, sessionId: String, relativePath: String) -> URL {
@@ -578,6 +827,25 @@ struct MapTransferDeviceClient {
             .map(percentEncodedPathComponent)
             .joined(separator: "/")
         return URL(string: "\(base)/\(encodedSegments)")!
+    }
+
+    nonisolated static func archiveUploadRequest(
+        baseURL: URL,
+        sessionId: String,
+        sessionToken: String?
+    ) -> URLRequest {
+        var request = URLRequest(url: uploadURL(
+            baseURL: baseURL,
+            sessionId: sessionId,
+            relativePath: "pack.zip"
+        ))
+        request.httpMethod = "PUT"
+        request.setValue("application/zip", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 120
+        if let sessionToken, !sessionToken.isEmpty {
+            request.setValue(sessionToken, forHTTPHeaderField: "X-BikeComputer-Transfer-Token")
+        }
+        return request
     }
 
     nonisolated static func statusURL(baseURL: URL) -> URL {
@@ -592,14 +860,208 @@ struct MapTransferDeviceClient {
     }
 }
 
+nonisolated struct BackgroundTransferCompletionGate {
+    private(set) var activeWorkflows = 0
+    private(set) var eventsFinished = false
+
+    mutating func beginWorkflow() {
+        activeWorkflows += 1
+    }
+
+    mutating func finishWorkflow() -> Bool {
+        precondition(activeWorkflows > 0, "background transfer workflow is unbalanced")
+        activeWorkflows -= 1
+        return takeCompletionReadiness()
+    }
+
+    mutating func didFinishEvents() -> Bool {
+        eventsFinished = true
+        return takeCompletionReadiness()
+    }
+
+    private mutating func takeCompletionReadiness() -> Bool {
+        guard activeWorkflows == 0, eventsFinished else { return false }
+        eventsFinished = false
+        return true
+    }
+}
+
+#if os(iOS)
+final class BackgroundMapUploadCoordinator: NSObject,
+                                            URLSessionDataDelegate,
+                                            URLSessionTaskDelegate {
+    static let shared = BackgroundMapUploadCoordinator()
+    static let sessionIdentifier = "LetItRide.BikeComputer.map-transfer.background"
+
+    private struct PendingUpload {
+        let continuation: CheckedContinuation<Void, Error>
+        let progress: @MainActor (Int64, Int64) -> Void
+        let expectedBytes: Int64
+        var responseData = Data()
+    }
+
+    private let lock = NSLock()
+    private var pendingUploads: [Int: PendingUpload] = [:]
+    private var backgroundCompletionHandler: (() -> Void)?
+    private var completionGate = BackgroundTransferCompletionGate()
+
+    private lazy var session: URLSession = {
+        let configuration = URLSessionConfiguration.background(
+            withIdentifier: Self.sessionIdentifier
+        )
+        configuration.isDiscretionary = false
+        configuration.sessionSendsLaunchEvents = true
+        configuration.waitsForConnectivity = true
+        configuration.allowsCellularAccess = false
+        configuration.allowsExpensiveNetworkAccess = true
+        configuration.allowsConstrainedNetworkAccess = true
+        configuration.httpMaximumConnectionsPerHost = 1
+        configuration.timeoutIntervalForRequest = 120
+        configuration.timeoutIntervalForResource = 6 * 60 * 60
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }()
+
+    func upload(
+        request: URLRequest,
+        fileURL: URL,
+        expectedBytes: Int64,
+        progress: @escaping @MainActor (Int64, Int64) -> Void
+    ) async throws {
+        let task = session.uploadTask(with: request, fromFile: fileURL)
+        task.countOfBytesClientExpectsToSend = expectedBytes
+        task.countOfBytesClientExpectsToReceive = 512
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                pendingUploads[task.taskIdentifier] = PendingUpload(
+                    continuation: continuation,
+                    progress: progress,
+                    expectedBytes: expectedBytes
+                )
+                lock.unlock()
+                task.resume()
+            }
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    func handleEvents(completionHandler: @escaping () -> Void) {
+        lock.lock()
+        backgroundCompletionHandler = completionHandler
+        lock.unlock()
+        _ = session
+    }
+
+    func beginTransferWorkflow() {
+        lock.lock()
+        completionGate.beginWorkflow()
+        lock.unlock()
+    }
+
+    func finishTransferWorkflow() {
+        lock.lock()
+        let shouldComplete = completionGate.finishWorkflow()
+        let completionHandler = shouldComplete ? backgroundCompletionHandler : nil
+        if shouldComplete {
+            backgroundCompletionHandler = nil
+        }
+        lock.unlock()
+        if let completionHandler {
+            DispatchQueue.main.async(execute: completionHandler)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        lock.lock()
+        let pending = pendingUploads[task.taskIdentifier]
+        lock.unlock()
+        guard let pending else { return }
+        let expectedBytes = totalBytesExpectedToSend > 0
+            ? totalBytesExpectedToSend
+            : pending.expectedBytes
+        Task { @MainActor in
+            pending.progress(totalBytesSent, expectedBytes)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive data: Data
+    ) {
+        lock.lock()
+        if var pending = pendingUploads[dataTask.taskIdentifier] {
+            pending.responseData.append(data)
+            pendingUploads[dataTask.taskIdentifier] = pending
+        }
+        lock.unlock()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        lock.lock()
+        let pending = pendingUploads.removeValue(forKey: task.taskIdentifier)
+        lock.unlock()
+        guard let pending else { return }
+        if let error {
+            pending.continuation.resume(throwing: error)
+            return
+        }
+        do {
+            guard let response = task.response else {
+                throw OfflineMapPlatformError.invalidResponse
+            }
+            try MapTransferDeviceClient.validate(
+                response: response,
+                body: pending.responseData
+            )
+            pending.continuation.resume()
+        } catch {
+            pending.continuation.resume(throwing: error)
+        }
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        lock.lock()
+        let shouldComplete = completionGate.didFinishEvents()
+        let completionHandler = shouldComplete ? backgroundCompletionHandler : nil
+        if shouldComplete {
+            backgroundCompletionHandler = nil
+        }
+        lock.unlock()
+        if let completionHandler {
+            DispatchQueue.main.async(execute: completionHandler)
+        }
+    }
+}
+#endif
+
 struct OfflineMapPlatformClient {
     let baseURL: URL
     let apiToken: String?
+    let clientInstallationId: String
     var session: URLSession = .shared
 
-    init(baseURL: URL, apiToken: String? = nil) {
+    init(
+        baseURL: URL,
+        apiToken: String? = nil,
+        clientInstallationId: String,
+        session: URLSession = .shared
+    ) {
         self.baseURL = baseURL
         self.apiToken = apiToken?.isEmpty == true ? nil : apiToken
+        self.clientInstallationId = clientInstallationId
+        self.session = session
     }
 
     func createJob(_ jobRequest: OfflineMapJobRequest) async throws -> OfflineMapJob {
@@ -607,15 +1069,43 @@ struct OfflineMapPlatformClient {
     }
 
     func job(id: String) async throws -> OfflineMapJob {
-        try await send(path: "/v1/map-jobs/\(id)", method: "GET", body: Optional<Data>.none)
+        let request = try Self.makeInstallationScopedURLRequest(
+            baseURL: baseURL,
+            apiToken: apiToken,
+            path: "/v1/map-jobs/\(id)",
+            method: "GET",
+            clientInstallationId: clientInstallationId
+        )
+        return try await send(request: request)
     }
 
-    func downloadURL(mapId: String) async throws -> URL {
-        let response: OfflineMapDownloadURL = try await send(
+    func jobs() async throws -> [OfflineMapJob] {
+        let request = try Self.makeListJobsURLRequest(
+            baseURL: baseURL,
+            apiToken: apiToken,
+            clientInstallationId: clientInstallationId
+        )
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        guard 200..<300 ~= http.statusCode else {
+            let bodyText = String(data: data, encoding: .utf8) ?? ""
+            throw OfflineMapPlatformError.serverStatus(http.statusCode, bodyText)
+        }
+        return try JSONDecoder().decode(OfflineMapJobsResponse.self, from: data).jobs
+    }
+
+    func downloadURL(mapId: String, jobId: String) async throws -> URL {
+        let request = try Self.makeInstallationScopedURLRequest(
+            baseURL: baseURL,
+            apiToken: apiToken,
             path: "/v1/map-packs/\(mapId)/download-url",
             method: "POST",
-            body: Optional<Data>.none
+            clientInstallationId: clientInstallationId,
+            additionalQueryItems: [URLQueryItem(name: "jobId", value: jobId)]
         )
+        let response: OfflineMapDownloadURL = try await send(request: request)
         return try absoluteURL(for: response.url, baseURL: baseURL)
     }
 
@@ -634,6 +1124,53 @@ struct OfflineMapPlatformClient {
         return request
     }
 
+    static func makeListJobsURLRequest(
+        baseURL: URL,
+        apiToken: String?,
+        clientInstallationId: String
+    ) throws -> URLRequest {
+        let endpoint = try endpointURL(baseURL: baseURL, path: "/v1/map-jobs")
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            throw OfflineMapPlatformError.invalidBaseURL
+        }
+        components.queryItems = [URLQueryItem(name: "clientInstallationId", value: clientInstallationId)]
+        guard let url = components.url else {
+            throw OfflineMapPlatformError.invalidBaseURL
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        if let apiToken, !apiToken.isEmpty {
+            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        }
+        return request
+    }
+
+    static func makeInstallationScopedURLRequest(
+        baseURL: URL,
+        apiToken: String?,
+        path: String,
+        method: String,
+        clientInstallationId: String,
+        additionalQueryItems: [URLQueryItem] = []
+    ) throws -> URLRequest {
+        let endpoint = try endpointURL(baseURL: baseURL, path: path)
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            throw OfflineMapPlatformError.invalidBaseURL
+        }
+        components.queryItems = [
+            URLQueryItem(name: "clientInstallationId", value: clientInstallationId)
+        ] + additionalQueryItems
+        guard let url = components.url else {
+            throw OfflineMapPlatformError.invalidBaseURL
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        if let apiToken, !apiToken.isEmpty {
+            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        }
+        return request
+    }
+
     private func send<Body: Encodable, Response: Decodable>(
         path: String,
         method: String,
@@ -649,6 +1186,10 @@ struct OfflineMapPlatformClient {
             request.httpBody = try JSONEncoder.offlineMap.encode(body)
         }
 
+        return try await send(request: request)
+    }
+
+    private func send<Response: Decodable>(request: URLRequest) async throws -> Response {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw OfflineMapPlatformError.invalidResponse

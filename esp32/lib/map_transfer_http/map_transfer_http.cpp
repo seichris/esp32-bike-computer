@@ -8,6 +8,7 @@
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <freertos/task.h>
 
 namespace map_transfer {
@@ -16,10 +17,12 @@ namespace {
 constexpr const char *kStatusPath = "/map-transfer/status";
 constexpr const char *kSessionPrefix = "/map-transfer/sessions/";
 constexpr uint64_t kMaxUploadBytes = 128ULL * 1024ULL * 1024ULL;
+constexpr uint64_t kMaxArchiveUploadBytes = 512ULL * 1024ULL * 1024ULL;
 
 struct ActivationTaskContext {
   MapTransferHttpServer *server = nullptr;
   std::string sessionId;
+  bool automaticExit = false;
 };
 
 static std::string joinPath(const std::string &a, const std::string &b) {
@@ -75,7 +78,7 @@ static bool safeRelativePath(const std::string &path) {
 }
 
 static bool safeUploadPath(const std::string &path) {
-  if (path == "manifest.json")
+  if (path == "manifest.json" || path == "pack.zip")
     return true;
   return startsWith(path, "VECTMAP/") && safeRelativePath(path);
 }
@@ -268,6 +271,16 @@ bool MapTransferHttpServer::handleHead(const std::string &path,
   recoveryBlocked_ = false;
   unlockState();
 
+  if (relativePath == "pack.zip") {
+    uint64_t archiveSize = 0;
+    if (!fileSize(installer_.stagedArchivePath(sessionId), archiveSize)) {
+      sendHead(client, 404);
+      return true;
+    }
+    sendHead(client, 200, archiveSize);
+    return true;
+  }
+
   const std::string stagedPath =
       joinPath(installer_.stagingRoot(sessionId), relativePath);
   uint64_t size = 0;
@@ -305,7 +318,10 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     sendError(client, 400, "path", "upload path is invalid");
     return true;
   }
-  if (contentLength == 0 || contentLength > kMaxUploadBytes) {
+  const bool isArchive = relativePath == "pack.zip";
+  const uint64_t maxUploadBytes =
+      isArchive ? kMaxArchiveUploadBytes : kMaxUploadBytes;
+  if (contentLength == 0 || contentLength > maxUploadBytes) {
     sendError(client, 413, "content_length", "upload size is invalid");
     return true;
   }
@@ -325,7 +341,7 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
 
   ManifestFile expectedFile;
   const bool isManifest = relativePath == "manifest.json";
-  if (!isManifest) {
+  if (!isManifest && !isArchive) {
     InstallStatus declared =
         installer_.expectedStagedFile(sessionId, relativePath, expectedFile);
     if (!declared.ok) {
@@ -339,8 +355,10 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     }
     installer_.clearStagedFileVerification(sessionId, expectedFile);
   }
-  const std::string destination =
-      joinPath(installer_.stagingRoot(sessionId), relativePath);
+  const std::string destination = isArchive
+                                      ? installer_.stagedArchivePath(sessionId)
+                                      : joinPath(installer_.stagingRoot(sessionId),
+                                                 relativePath);
   if (!mkdirs(dirnameOf(destination))) {
     sendError(client, 500, "mkdir", "could not create staging directory");
     return true;
@@ -372,7 +390,7 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     int read = client.read(buffer, toRead);
     if (read <= 0)
       continue;
-    if (!isManifest)
+    if (!isManifest && !isArchive)
       hasher.update(buffer, static_cast<size_t>(read));
     output.write(reinterpret_cast<const char *>(buffer), read);
     if (!output) {
@@ -387,7 +405,15 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     sendError(client, 500, "write", "could not finish staged file");
     return true;
   }
-  if (isManifest) {
+  if (isArchive) {
+    if (!installer_.pruneStagingSessions(sessionId) ||
+        !installer_.pruneObsoleteInstalledMaps()) {
+      ::unlink(destination.c_str());
+      sendError(client, 500, "staging_cleanup",
+                "could not prune obsolete map transfers");
+      return true;
+    }
+  } else if (isManifest) {
     MapManifest manifest;
     InstallStatus parsed = installer_.readStagedManifest(sessionId, manifest);
     if (!parsed.ok) {
@@ -421,6 +447,13 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     }
   }
 
+  if (isArchive && !installer_.markPendingArchiveActivation(sessionId)) {
+    installer_.discardStagedSession(sessionId);
+    sendError(client, 500, "activation_marker",
+              "could not persist pending archive activation");
+    return true;
+  }
+
   Serial.printf("MAP_TRANSFER_HTTP: staged session=%s path=%s bytes=%llu\n",
                 sessionId.c_str(), relativePath.c_str(),
                 static_cast<unsigned long long>(contentLength));
@@ -428,6 +461,24 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
            std::string("{\"ok\":true,\"sessionId\":\"") +
                jsonEscape(sessionId) + "\",\"path\":\"" +
                jsonEscape(relativePath) + "\"}");
+  if (isArchive) {
+    // A background URLSession upload can outlive the iOS process that started
+    // it. Once the complete archive is durably closed on SD, activation must
+    // therefore be device-owned instead of depending on a follow-up request.
+    lockState();
+    const ActivationBeginResult beginResult = activationState_.begin(sessionId);
+    unlockState();
+    if (beginResult == ActivationBeginResult::Started) {
+      startActivationTask(sessionId, true);
+    } else if (beginResult == ActivationBeginResult::AlreadyInstalled) {
+      if (!installer_.discardStagedSession(sessionId) ||
+          !installer_.clearPendingArchiveActivation()) {
+        setLastError("staging_cleanup",
+                     "could not remove redundant installed archive");
+      }
+      requestAutomaticExit();
+    }
+  }
   return true;
 }
 
@@ -453,26 +504,24 @@ bool MapTransferHttpServer::handleActivate(const std::string &path,
     sendJson(client, 202, activatingResponse());
     return true;
   }
+  if (beginResult == ActivationBeginResult::AlreadyInstalled) {
+    sendJson(client, 200,
+             std::string("{\"ok\":true,\"status\":\"installed\",\"sessionId\":\"") +
+                 jsonEscape(sessionId) + "\",\"sequence\":" +
+                 std::to_string(activationSequence) + "}");
+    return true;
+  }
   if (beginResult == ActivationBeginResult::Busy) {
     sendError(client, 409, "activation_busy",
               "another map activation is already running");
     return true;
   }
 
-  auto *context = new ActivationTaskContext{this, sessionId};
-  BaseType_t created = xTaskCreate(activationTaskThunk, "map_activate", 16384,
-                                   context, 1, nullptr);
-  if (created != pdPASS) {
-    delete context;
-    finishActivation("failed", "", "activation_task",
-                     "could not start activation task");
+  if (!startActivationTask(sessionId, false)) {
     sendError(client, 500, "activation_task",
               "could not start activation task");
     return true;
   }
-
-  Serial.printf("MAP_TRANSFER_HTTP: activation queued session=%s\n",
-                sessionId.c_str());
   sendJson(client, 202, activatingResponse());
   return true;
 }
@@ -547,6 +596,13 @@ std::string MapTransferHttpServer::activationStatusJson(bool compact) const {
   return body;
 }
 
+MapActivationSnapshot MapTransferHttpServer::activationSnapshot() const {
+  lockState();
+  MapActivationSnapshot snapshot = activationState_.snapshot();
+  unlockState();
+  return snapshot;
+}
+
 bool MapTransferHttpServer::activationHasError() const {
   lockState();
   const bool hasError = !activationState_.snapshot().errorCode.empty();
@@ -566,6 +622,45 @@ bool MapTransferHttpServer::takeActivatedMapRoot(std::string &root) {
   return true;
 }
 
+bool MapTransferHttpServer::takeAutomaticExitRequest() {
+  lockState();
+  const bool requested = pendingAutomaticExit_;
+  pendingAutomaticExit_ = false;
+  unlockState();
+  return requested;
+}
+
+void MapTransferHttpServer::resumePendingArchiveActivation() {
+  std::string sessionId;
+  if (!installer_.readPendingArchiveActivation(sessionId))
+    return;
+
+  ActiveMapSelection active;
+  if (installer_.readActiveMap(active).ok && active.sessionId == sessionId) {
+    if (!installer_.discardStagedSession(sessionId) ||
+        !installer_.clearPendingArchiveActivation()) {
+      setLastError("staging_cleanup",
+                   "could not clean completed pending archive");
+    }
+    return;
+  }
+
+  lockState();
+  const ActivationBeginResult beginResult = activationState_.begin(sessionId);
+  unlockState();
+  if (beginResult == ActivationBeginResult::Started) {
+    Serial.printf("MAP_TRANSFER_HTTP: resuming pending archive session=%s\n",
+                  sessionId.c_str());
+    startActivationTask(sessionId, true);
+  }
+}
+
+void MapTransferHttpServer::requestAutomaticExit() {
+  lockState();
+  pendingAutomaticExit_ = true;
+  unlockState();
+}
+
 void MapTransferHttpServer::finishActivation(const std::string &status,
                                              const std::string &mapId,
                                              const std::string &errorCode,
@@ -578,6 +673,32 @@ void MapTransferHttpServer::finishActivation(const std::string &status,
   }
 }
 
+void MapTransferHttpServer::updateActivationProgress(
+    const ActivationProgress &progress) {
+  lockState();
+  activationState_.updateProgress(progress);
+  unlockState();
+}
+
+bool MapTransferHttpServer::startActivationTask(const std::string &sessionId,
+                                                bool automaticExit) {
+  auto *context =
+      new ActivationTaskContext{this, sessionId, automaticExit};
+  BaseType_t created = xTaskCreate(activationTaskThunk, "map_activate", 16384,
+                                   context, 1, nullptr);
+  if (created != pdPASS) {
+    delete context;
+    finishActivation("failed", "", "activation_task",
+                     "could not start activation task");
+    if (automaticExit)
+      requestAutomaticExit();
+    return false;
+  }
+  Serial.printf("MAP_TRANSFER_HTTP: activation queued session=%s automatic=%d\n",
+                sessionId.c_str(), automaticExit);
+  return true;
+}
+
 void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
   Serial.printf("MAP_TRANSFER_HTTP: activate start session=%s\n",
                 sessionId.c_str());
@@ -588,16 +709,32 @@ void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
     finishActivation("failed", "", recovery.code, recovery.message);
     return;
   }
+  const auto onProgress = [this](const ActivationProgress &progress) {
+    updateActivationProgress(progress);
+  };
+  InstallStatus prepared =
+      installer_.prepareStagedArchive(sessionId, onProgress);
+  if (!prepared.ok) {
+    Serial.printf("MAP_TRANSFER_HTTP: archive preparation failed code=%s message=%s\n",
+                  prepared.code.c_str(), prepared.message.c_str());
+    finishActivation("failed", "", prepared.code, prepared.message);
+    ::unlink(installer_.stagedArchivePath(sessionId).c_str());
+    return;
+  }
+
   MapManifest manifest;
-  InstallStatus validated = installer_.validateStagedMap(sessionId, manifest);
+  InstallStatus validated =
+      installer_.validateStagedMap(sessionId, manifest, onProgress);
   if (!validated.ok) {
     Serial.printf("MAP_TRANSFER_HTTP: activate validation failed code=%s message=%s\n",
                   validated.code.c_str(), validated.message.c_str());
     finishActivation("failed", "", validated.code, validated.message);
+    ::unlink(installer_.stagedArchivePath(sessionId).c_str());
     return;
   }
 
-  InstallStatus activated = installer_.activateStagedMap(sessionId, manifest);
+  InstallStatus activated =
+      installer_.activateStagedMap(sessionId, manifest, onProgress);
   if (!activated.ok) {
     Serial.printf("MAP_TRANSFER_HTTP: activate failed code=%s message=%s\n",
                   activated.code.c_str(), activated.message.c_str());
@@ -625,8 +762,16 @@ void MapTransferHttpServer::activationTaskThunk(void *arg) {
   if (context != nullptr && context->server != nullptr) {
     MapTransferHttpServer *server = context->server;
     std::string sessionId = context->sessionId;
+    const bool automaticExit = context->automaticExit;
     delete context;
     server->runActivationTask(sessionId);
+    if (automaticExit) {
+      if (!server->installer_.clearPendingArchiveActivation()) {
+        server->setLastError("activation_marker",
+                             "could not clear pending archive activation");
+      }
+      server->requestAutomaticExit();
+    }
   } else {
     delete context;
   }

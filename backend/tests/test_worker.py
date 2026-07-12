@@ -1,3 +1,4 @@
+import json
 import tempfile
 import threading
 import time
@@ -322,14 +323,67 @@ class WorkerTests(unittest.TestCase):
             store.update_status(job.job_id, status=store.get(job.job_id).status)
             ready = MapWorker(store, FakePipeline(), worker_id="worker-test").run_next().job
             self.assertIsNotNone(ready)
-            expired = expire_ready_jobs(store, older_than_days=0)
+            ready_pack_path = Path(ready.pack_path)
+            self.assertTrue(ready_pack_path.exists())
+            job_path = root / "jobs" / f"{job.job_id}.json"
+            persisted = json.loads(job_path.read_text())
+            persisted["updatedAt"] = "2020-01-01T00:00:00Z"
+            job_path.write_text(json.dumps(persisted))
+            expired = expire_ready_jobs(store, older_than_days=1)
 
             stale_dir = root / "work" / job.job_id
             stale_dir.mkdir(parents=True)
             removed = cleanup_work_dirs(root / "work", store)
 
             self.assertEqual(expired, 1)
+            self.assertFalse(ready_pack_path.exists())
             self.assertEqual(removed, 1)
+            with self.assertRaisesRegex(ValueError, "between 1 and 3650"):
+                expire_ready_jobs(store, older_than_days=0)
+
+    def test_expiry_removes_only_unreferenced_pack_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            unique_path = root / "packs" / "map-unique" / "stale.zip"
+            shared_path = root / "packs" / "map-shared.zip"
+            unique_path.parent.mkdir(parents=True)
+            unique_path.write_bytes(b"unique")
+            shared_path.write_bytes(b"shared")
+
+            stale_unique = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+            stale_shared = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.76, 1.25, 103.94, 1.38]}
+            )
+            live_shared = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.77, 1.26, 103.95, 1.39]}
+            )
+            for job, path in [
+                (stale_unique, unique_path),
+                (stale_shared, shared_path),
+                (live_shared, shared_path),
+            ]:
+                store.update_status(
+                    job.job_id,
+                    JobStatus.READY,
+                    map_id="map-retention",
+                    pack_path=str(path),
+                    finished=True,
+                )
+            for stale in [stale_unique, stale_shared]:
+                persisted = store.get(stale.job_id)
+                persisted.updated_at = "2000-01-01T00:00:00Z"
+                store.save(persisted)
+
+            expired = expire_ready_jobs(store, older_than_days=30)
+
+            self.assertEqual(expired, 2)
+            self.assertFalse(unique_path.exists())
+            self.assertTrue(shared_path.exists())
+            self.assertEqual(store.get(live_shared.job_id).status, JobStatus.READY)
 
 
 if __name__ == "__main__":

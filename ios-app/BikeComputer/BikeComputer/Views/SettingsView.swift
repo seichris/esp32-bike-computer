@@ -16,6 +16,7 @@ struct SettingsView: View {
     @Environment(\.openURL) private var openURL
     @ObservedObject private var offlineMapManager: OfflineMapManager
     @ObservedObject private var firmwareUpdateManager: FirmwareUpdateManager
+    @FocusState private var focusedSavedMapFilename: String?
     let locationAuthorized: Bool
     let currentLocation: CLLocation?
     let onStartTestNavigation: (String) -> Void
@@ -53,10 +54,14 @@ struct SettingsView: View {
 
                 MainFirmwareUpdateSection(manager: firmwareUpdateManager)
                 DeviceScreensSettingsSection()
-                SavedMapsSettingsSection(manager: offlineMapManager)
+                SavedMapsSettingsSection(
+                    manager: offlineMapManager,
+                    focusedPackFilename: $focusedSavedMapFilename
+                )
                 if OfflineMapDownloadingSectionPresentation.isVisible(
                     isBusy: offlineMapManager.isBusy,
                     hasPendingJob: offlineMapManager.hasPendingMapJob,
+                    hasPendingActivation: offlineMapManager.hasPendingDeviceActivation,
                     errorMessage: offlineMapManager.errorMessage
                 ) {
                     DownloadingMapsSettingsSection(manager: offlineMapManager)
@@ -89,6 +94,9 @@ struct SettingsView: View {
                         Label("Developer Settings", systemImage: "wrench.and.screwdriver")
                     }
                 }
+            }
+            .onTapGesture {
+                focusedSavedMapFilename = nil
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -230,8 +238,17 @@ private struct DownloadingMapsSettingsSection: View {
                 )
             }
 
-            if !manager.statusMessage.isEmpty {
+            if let activationProgress = manager.activationProgress {
+                VStack(alignment: .leading, spacing: 6) {
+                    StatusValueRow(status: activationProgress.label, isBusy: false)
+                    ProgressView(value: activationProgress.fraction)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Map activation \(activationProgress.label)")
+            } else if !manager.statusMessage.isEmpty {
                 StatusValueRow(status: manager.statusMessage, isBusy: manager.isBusy)
+            } else if manager.hasPendingDeviceActivation {
+                StatusValueRow(status: "Checking device activation", isBusy: false)
             }
 
             if let generationProgress {
@@ -278,6 +295,11 @@ private struct DownloadingMapsSettingsSection: View {
                 } label: {
                     Label("Resume Map Preparation", systemImage: "play.circle")
                 }
+                Button(role: .destructive) {
+                    manager.forgetPendingMapJob()
+                } label: {
+                    Label("Forget Pending Map", systemImage: "trash")
+                }
             }
         }
     }
@@ -308,25 +330,23 @@ private struct DownloadingMapsSettingsSection: View {
 private struct SavedMapsSettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
+    @FocusState.Binding var focusedPackFilename: String?
+    @State private var renameInteraction = SavedMapRenameInteraction()
 
     var body: some View {
         Section(header: Text("Saved Maps")) {
-            if !bleManager.mapTransferActiveMapId.isEmpty {
-                SettingsValueRow(
-                    title: "Installed on Device",
-                    value: manager.displayName(forMapId: bleManager.mapTransferActiveMapId)
-                )
-            }
-            if let lastTransferDescription = manager.lastTransferDescription {
-                SettingsValueRow(title: "Last Transfer", value: lastTransferDescription)
-            }
-
             if manager.cachedPackURLs.isEmpty {
                 Text("0 maps downloaded yet")
                     .foregroundColor(.secondary)
             } else {
                 ForEach(manager.cachedPackURLs, id: \.self) { packURL in
-                    DownloadedMapRow(manager: manager, packURL: packURL)
+                    DownloadedMapRow(
+                        manager: manager,
+                        packURL: packURL,
+                        focusedPackFilename: $focusedPackFilename,
+                        renameInteraction: $renameInteraction,
+                        onCommitRename: commitRename
+                    )
                         .environmentObject(bleManager)
                 }
             }
@@ -335,6 +355,14 @@ private struct SavedMapsSettingsSection: View {
                 Label("Download a new Map", systemImage: "rectangle.dashed")
             }
             .disabled(manager.isBusy || manager.hasPendingMapJob)
+        }
+        .onChange(of: focusedPackFilename) { newValue in
+            scheduleRenameCommitIfNeeded(focusedFilename: newValue)
+        }
+        .onDisappear {
+            if let commit = renameInteraction.finish() {
+                commitRename(commit)
+            }
         }
         .onAppear {
             manager.reconcileLastTransfer(bleManager: bleManager)
@@ -351,6 +379,34 @@ private struct SavedMapsSettingsSection: View {
         .onChange(of: bleManager.mapTransferActivationSequence) { _ in
             manager.reconcileLastTransfer(bleManager: bleManager)
         }
+        .onChange(of: bleManager.mapTransferActivationStep) { _ in
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
+        .onChange(of: bleManager.mapTransferActivationProgress) { _ in
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
+    }
+
+    private func scheduleRenameCommitIfNeeded(focusedFilename: String?) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            guard focusedPackFilename == focusedFilename,
+                  let commit = renameInteraction.finishIfFocusMoved(
+                    to: focusedPackFilename
+                  ) else {
+                return
+            }
+            commitRename(commit)
+        }
+    }
+
+    private func commitRename(_ commit: SavedMapRenameCommit) {
+        guard let packURL = manager.cachedPackURLs.first(where: {
+            $0.lastPathComponent == commit.filename
+        }) else {
+            return
+        }
+        manager.renameCachedPack(at: packURL, to: commit.proposedName)
     }
 }
 
@@ -358,37 +414,97 @@ private struct DownloadedMapRow: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
     let packURL: URL
+    @FocusState.Binding var focusedPackFilename: String?
+    @Binding var renameInteraction: SavedMapRenameInteraction
+    let onCommitRename: (SavedMapRenameCommit) -> Void
+    @State private var isShowingInstalledConfirmation = false
 
     var body: some View {
         let displayName = manager.displayName(forCachedPack: packURL)
+        let isInstalled = manager.isCachedPackInstalled(
+            packURL,
+            activeMapId: bleManager.mapTransferActiveMapId,
+            activeSessionId: bleManager.mapTransferActiveSessionId
+        )
 
         HStack(spacing: 12) {
-            Text(displayName)
-                .lineLimit(2)
-
-            if manager.isCachedPackInstalled(
-                packURL,
-                activeMapId: bleManager.mapTransferActiveMapId,
-                activeSessionId: bleManager.mapTransferActiveSessionId
-            ) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-                    .accessibilityLabel("Installed on device")
+            if renameInteraction.editingFilename == packURL.lastPathComponent {
+                TextField(
+                    "Map name",
+                    text: Binding(
+                        get: { renameInteraction.draftName },
+                        set: { renameInteraction.updateDraft($0) }
+                    )
+                )
+                    .focused($focusedPackFilename, equals: packURL.lastPathComponent)
+                    .submitLabel(.done)
+                    .onSubmit {
+                        focusedPackFilename = nil
+                    }
+                    .simultaneousGesture(TapGesture().onEnded {
+                        DispatchQueue.main.async {
+                            focusedPackFilename = packURL.lastPathComponent
+                        }
+                    })
+                    .accessibilityLabel("Map name")
+            } else {
+                Button {
+                    if let commit = renameInteraction.begin(
+                        filename: packURL.lastPathComponent,
+                        currentName: displayName
+                    ) {
+                        onCommitRename(commit)
+                    }
+                    DispatchQueue.main.async {
+                        focusedPackFilename = packURL.lastPathComponent
+                    }
+                } label: {
+                    Text(displayName)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Rename \(displayName)")
+                .accessibilityHint("Edits this saved map name")
             }
 
             Spacer()
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    focusedPackFilename = nil
+                }
 
-            Button {
-                manager.transferCachedPack(at: packURL, bleManager: bleManager)
-            } label: {
-                Image(systemName: "arrow.up.circle")
-                    .frame(width: 32, height: 32)
+            if isInstalled {
+                Button {
+                    finishRenaming()
+                    focusedPackFilename = nil
+                    isShowingInstalledConfirmation = true
+                } label: {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("\(displayName) is installed on device")
+                .accessibilityHint("Shows the installed map status")
+            } else {
+                Button {
+                    finishRenaming()
+                    focusedPackFilename = nil
+                    manager.transferCachedPack(at: packURL, bleManager: bleManager)
+                } label: {
+                    Image(systemName: "arrow.up.circle")
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.borderless)
+                .disabled(manager.isBusy || !bleManager.isNavigationReady)
+                .accessibilityLabel("Transfer \(displayName) to device")
             }
-            .buttonStyle(.borderless)
-            .disabled(manager.isBusy || !bleManager.isNavigationReady)
-            .accessibilityLabel("Transfer \(displayName) to device")
 
             Button(role: .destructive) {
+                finishRenaming()
+                focusedPackFilename = nil
                 manager.deleteCachedPack(at: packURL)
             } label: {
                 Image(systemName: "trash")
@@ -397,6 +513,17 @@ private struct DownloadedMapRow: View {
             .buttonStyle(.borderless)
             .disabled(manager.isBusy)
             .accessibilityLabel("Delete \(displayName)")
+        }
+        .alert("Already on Device", isPresented: $isShowingInstalledConfirmation) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("This map is already installed on the device.")
+        }
+    }
+
+    private func finishRenaming() {
+        if let commit = renameInteraction.finish() {
+            onCommitRename(commit)
         }
     }
 }

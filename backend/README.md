@@ -7,7 +7,10 @@ sources. It implements the production contract described in
 ## What is implemented
 
 - `POST /v1/map-jobs` for curated, custom bbox, custom polygon, and route
-  corridor requests.
+  corridor requests, with installation-scoped idempotency metadata.
+- Installation-scoped job, list, map-pack, and download-URL reads. The client
+  installation ID is required for reads; legacy jobs without an owner remain
+  recoverable by ID.
 - Source-region resolution from `backend/config/source-regions.json`, with a
   cached Geofabrik catalog fallback for any requested area covered by
   Geofabrik.
@@ -36,6 +39,9 @@ curl -s http://localhost:8080/v1/map-jobs \
     "mode": "custom_bbox",
     "displayName": "Singapore central",
     "bbox": [103.75, 1.24, 103.93, 1.37],
+    "clientInstallationId": "installation-12345678",
+    "clientRequestId": "request-12345678",
+    "installOnDevice": false,
     "target": { "renderer": "esp32-fmb", "firmwareVersion": "0.0.0" }
   }'
 ```
@@ -67,15 +73,23 @@ enough CPU, RAM, and temporary disk for the largest allowed PBF cut-out.
 Required Coolify secrets:
 
 - `MAP_PLATFORM_API_TOKEN`: bearer token used by the iOS app for job creation,
-  job polling, maintenance, and signed download URL creation.
+  job polling, and signed download URL creation. Treat it as a client token,
+  because it is embedded in distributed app builds.
 - `MAP_PLATFORM_DOWNLOAD_SECRET`: HMAC secret for signed map-pack downloads.
   Use a separate long random value so signed URLs survive API restarts without
   reusing the API token as the signing key.
 
 Useful production environment variables:
 
+- `MAP_PLATFORM_ADMIN_TOKEN`: separate server-only bearer token for worker,
+  source-cache, and maintenance API routes. If unset, those routes are disabled;
+  the normal worker loop and CLI maintenance remain available.
 - `MAP_PLATFORM_MAX_ACTIVE_JOBS`: maximum queued/running jobs accepted by the
   API, default `25`.
+- `MAP_PLATFORM_JOB_RETENTION_DAYS`: days to retain ready job artifacts,
+  default `30`; must be between `1` and `3650`.
+- `MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS`: worker cleanup interval,
+  default `3600`.
 - `MAP_PLATFORM_DYNAMIC_SOURCE_DISCOVERY`: enable Geofabrik catalog fallback,
   default `1`.
 - `MAP_PLATFORM_GEOFABRIK_INDEX_URL`: provider catalog URL, default
