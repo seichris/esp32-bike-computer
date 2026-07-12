@@ -278,6 +278,11 @@ private struct DownloadingMapsSettingsSection: View {
                 } label: {
                     Label("Resume Map Preparation", systemImage: "play.circle")
                 }
+                Button(role: .destructive) {
+                    manager.forgetPendingMapJob()
+                } label: {
+                    Label("Forget Pending Map", systemImage: "trash")
+                }
             }
         }
     }

@@ -181,17 +181,13 @@ enum OfflineMapJobRecoverySelector {
     static func select(
         jobs: [OfflineMapJob],
         clientInstallationId: String,
-        cachedMapIds: Set<String>,
         excludedJobIds: Set<String> = []
     ) -> OfflineMapJob? {
         jobs
             .filter { job in
                 guard job.clientInstallationId == clientInstallationId else { return false }
                 guard !excludedJobIds.contains(job.jobId) else { return false }
-                if job.status == "ready", let mapId = job.mapId {
-                    return !cachedMapIds.contains(mapId)
-                }
-                return !job.isTerminal
+                return job.status == "ready" ? job.mapId != nil : !job.isTerminal
             }
             .max { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
     }
@@ -652,11 +648,19 @@ struct MapTransferDeviceClient {
 struct OfflineMapPlatformClient {
     let baseURL: URL
     let apiToken: String?
+    let clientInstallationId: String
     var session: URLSession = .shared
 
-    init(baseURL: URL, apiToken: String? = nil) {
+    init(
+        baseURL: URL,
+        apiToken: String? = nil,
+        clientInstallationId: String,
+        session: URLSession = .shared
+    ) {
         self.baseURL = baseURL
         self.apiToken = apiToken?.isEmpty == true ? nil : apiToken
+        self.clientInstallationId = clientInstallationId
+        self.session = session
     }
 
     func createJob(_ jobRequest: OfflineMapJobRequest) async throws -> OfflineMapJob {
@@ -664,10 +668,17 @@ struct OfflineMapPlatformClient {
     }
 
     func job(id: String) async throws -> OfflineMapJob {
-        try await send(path: "/v1/map-jobs/\(id)", method: "GET", body: Optional<Data>.none)
+        let request = try Self.makeInstallationScopedURLRequest(
+            baseURL: baseURL,
+            apiToken: apiToken,
+            path: "/v1/map-jobs/\(id)",
+            method: "GET",
+            clientInstallationId: clientInstallationId
+        )
+        return try await send(request: request)
     }
 
-    func jobs(clientInstallationId: String) async throws -> [OfflineMapJob] {
+    func jobs() async throws -> [OfflineMapJob] {
         let request = try Self.makeListJobsURLRequest(
             baseURL: baseURL,
             apiToken: apiToken,
@@ -685,11 +696,14 @@ struct OfflineMapPlatformClient {
     }
 
     func downloadURL(mapId: String) async throws -> URL {
-        let response: OfflineMapDownloadURL = try await send(
+        let request = try Self.makeInstallationScopedURLRequest(
+            baseURL: baseURL,
+            apiToken: apiToken,
             path: "/v1/map-packs/\(mapId)/download-url",
             method: "POST",
-            body: Optional<Data>.none
+            clientInstallationId: clientInstallationId
         )
+        let response: OfflineMapDownloadURL = try await send(request: request)
         return try absoluteURL(for: response.url, baseURL: baseURL)
     }
 
@@ -729,6 +743,31 @@ struct OfflineMapPlatformClient {
         return request
     }
 
+    static func makeInstallationScopedURLRequest(
+        baseURL: URL,
+        apiToken: String?,
+        path: String,
+        method: String,
+        clientInstallationId: String
+    ) throws -> URLRequest {
+        let endpoint = try endpointURL(baseURL: baseURL, path: path)
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            throw OfflineMapPlatformError.invalidBaseURL
+        }
+        components.queryItems = [
+            URLQueryItem(name: "clientInstallationId", value: clientInstallationId)
+        ]
+        guard let url = components.url else {
+            throw OfflineMapPlatformError.invalidBaseURL
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        if let apiToken, !apiToken.isEmpty {
+            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        }
+        return request
+    }
+
     private func send<Body: Encodable, Response: Decodable>(
         path: String,
         method: String,
@@ -744,6 +783,10 @@ struct OfflineMapPlatformClient {
             request.httpBody = try JSONEncoder.offlineMap.encode(body)
         }
 
+        return try await send(request: request)
+    }
+
+    private func send<Response: Decodable>(request: URLRequest) async throws -> Response {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw OfflineMapPlatformError.invalidResponse

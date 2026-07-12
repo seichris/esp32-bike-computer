@@ -432,6 +432,21 @@ class MapJobService:
     def get_job(self, job_id: str) -> MapJob:
         return self.store.get(job_id)
 
+    def get_job_for_installation(
+        self,
+        job_id: str,
+        client_installation_id: str | None,
+    ) -> MapJob:
+        job = self.get_job(job_id)
+        if job.client_installation_id is None:
+            return job
+        if client_installation_id is None:
+            raise KeyError(job_id)
+        normalized = _validate_identifier(client_installation_id, "clientInstallationId")
+        if job.client_installation_id != normalized:
+            raise KeyError(job_id)
+        return job
+
     def list_jobs(self, *, client_installation_id: str | None = None) -> list[MapJob]:
         jobs = self.store.list()
         if client_installation_id is None:
@@ -448,11 +463,27 @@ class MapJobService:
                 return job
         return None
 
-    def find_by_map_id(self, map_id: str) -> MapJob | None:
-        for job in self.store.list():
-            if job.map_id == map_id:
-                return job
-        return None
+    def find_by_map_id(
+        self,
+        map_id: str,
+        *,
+        client_installation_id: str | None = None,
+        allow_owned_without_installation: bool = False,
+    ) -> MapJob | None:
+        normalized = (
+            _validate_identifier(client_installation_id, "clientInstallationId")
+            if client_installation_id is not None
+            else None
+        )
+        candidates = [job for job in self.store.list() if job.map_id == map_id]
+        if normalized is not None:
+            owned = [job for job in candidates if job.client_installation_id == normalized]
+            candidates = owned or [job for job in candidates if job.client_installation_id is None]
+        elif not allow_owned_without_installation:
+            candidates = [job for job in candidates if job.client_installation_id is None]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda job: job.created_at)
 
     def cancel_job(self, job_id: str) -> MapJob:
         return self.store.cancel_if_active(job_id)

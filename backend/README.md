@@ -8,8 +8,9 @@ sources. It implements the production contract described in
 
 - `POST /v1/map-jobs` for curated, custom bbox, custom polygon, and route
   corridor requests, with installation-scoped idempotency metadata.
-- `GET /v1/map-jobs?clientInstallationId=<id>` for app-owned job recovery
-  without adopting another installation's maps.
+- Installation-scoped job, list, map-pack, and download-URL reads. The client
+  installation ID is required for reads; legacy jobs without an owner remain
+  recoverable by ID.
 - Source-region resolution from `backend/config/source-regions.json`, with a
   cached Geofabrik catalog fallback for any requested area covered by
   Geofabrik.

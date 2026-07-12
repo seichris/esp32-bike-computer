@@ -71,6 +71,8 @@ def create_app():
 
     @app.get("/v1/map-jobs", dependencies=[Depends(require_api_token)])
     def list_map_jobs(clientInstallationId: str | None = None) -> dict[str, Any]:
+        if clientInstallationId is None:
+            raise HTTPException(status_code=400, detail="clientInstallationId is required")
         try:
             jobs = service.list_jobs(client_installation_id=clientInstallationId)
         except ValueError as exc:
@@ -78,9 +80,11 @@ def create_app():
         return {"jobs": [job.to_dict() for job in jobs]}
 
     @app.get("/v1/map-jobs/{job_id}", dependencies=[Depends(require_api_token)])
-    def get_map_job(job_id: str) -> dict[str, Any]:
+    def get_map_job(job_id: str, clientInstallationId: str | None = None) -> dict[str, Any]:
         try:
-            return service.get_job(job_id).to_dict()
+            return service.get_job_for_installation(job_id, clientInstallationId).to_dict()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
 
@@ -138,15 +142,27 @@ def create_app():
         return {"removed": cleanup_work_dirs(data_root / "work", service.store)}
 
     @app.get("/v1/map-packs/{map_id}", dependencies=[Depends(require_api_token)])
-    def get_map_pack(map_id: str) -> dict[str, Any]:
-        job = service.find_by_map_id(map_id)
+    def get_map_pack(map_id: str, clientInstallationId: str | None = None) -> dict[str, Any]:
+        try:
+            job = service.find_by_map_id(
+                map_id,
+                client_installation_id=clientInstallationId,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not job:
             raise HTTPException(status_code=404, detail="map pack not found")
         return job.to_dict()
 
     @app.post("/v1/map-packs/{map_id}/download-url", dependencies=[Depends(require_api_token)])
-    def create_download_url(map_id: str) -> dict[str, Any]:
-        job = service.find_by_map_id(map_id)
+    def create_download_url(map_id: str, clientInstallationId: str | None = None) -> dict[str, Any]:
+        try:
+            job = service.find_by_map_id(
+                map_id,
+                client_installation_id=clientInstallationId,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not job or not job.pack_path:
             raise HTTPException(status_code=404, detail="map pack not ready")
         signed = download_signer.sign(map_id, job.pack_path, ttl_seconds=900)
@@ -159,7 +175,7 @@ def create_app():
 
     @app.get("/v1/map-packs/{map_id}/download")
     def download_map_pack(map_id: str, expires: int, signature: str):
-        job = service.find_by_map_id(map_id)
+        job = service.find_by_map_id(map_id, allow_owned_without_installation=True)
         if not job or not job.pack_path:
             raise HTTPException(status_code=404, detail="map pack not ready")
         try:

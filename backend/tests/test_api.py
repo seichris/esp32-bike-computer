@@ -110,6 +110,82 @@ class MapJobRunAPITests(unittest.TestCase):
         jobs = response.json()["jobs"]
         self.assertEqual([job["jobId"] for job in jobs], [first.json()["jobId"]])
 
+    def test_job_reads_require_matching_installation(self):
+        owned = self.client.post(
+            "/v1/map-jobs",
+            json={
+                "mode": "custom_bbox",
+                "bbox": [103.75, 1.24, 103.93, 1.37],
+                "clientInstallationId": "installation-owner",
+                "clientRequestId": "request-owner-123",
+            },
+        ).json()
+
+        missing_filter = self.client.get("/v1/map-jobs")
+        matching = self.client.get(
+            f"/v1/map-jobs/{owned['jobId']}",
+            params={"clientInstallationId": "installation-owner"},
+        )
+        other = self.client.get(
+            f"/v1/map-jobs/{owned['jobId']}",
+            params={"clientInstallationId": "installation-other"},
+        )
+        unscoped = self.client.get(f"/v1/map-jobs/{owned['jobId']}")
+
+        self.assertEqual(missing_filter.status_code, 400)
+        self.assertEqual(matching.status_code, 200)
+        self.assertEqual(other.status_code, 404)
+        self.assertEqual(unscoped.status_code, 404)
+
+    def test_legacy_job_remains_recoverable_by_an_installation(self):
+        legacy_job_id = self.create_job()
+
+        response = self.client.get(
+            f"/v1/map-jobs/{legacy_job_id}",
+            params={"clientInstallationId": "installation-owner"},
+        )
+        legacy_unscoped = self.client.get(f"/v1/map-jobs/{legacy_job_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(legacy_unscoped.status_code, 200)
+
+    def test_client_metadata_validation_returns_bad_request(self):
+        valid = {
+            "mode": "custom_bbox",
+            "bbox": [103.75, 1.24, 103.93, 1.37],
+        }
+        invalid_payloads = [
+            {**valid, "clientInstallationId": "installation-only"},
+            {
+                **valid,
+                "clientInstallationId": "installation-owner",
+                "clientRequestId": "request-owner-123",
+                "installOnDevice": "yes",
+            },
+            {
+                **valid,
+                "clientInstallationId": "bad",
+                "clientRequestId": "request-owner-123",
+            },
+            {
+                **valid,
+                "clientInstallationId": 123,
+                "clientRequestId": "request-owner-123",
+            },
+        ]
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                response = self.client.post("/v1/map-jobs", json=payload)
+                self.assertEqual(response.status_code, 400)
+                self.assertTrue(response.json()["detail"])
+
+        invalid_filter = self.client.get(
+            "/v1/map-jobs",
+            params={"clientInstallationId": "bad"},
+        )
+        self.assertEqual(invalid_filter.status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

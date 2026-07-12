@@ -195,6 +195,60 @@ class SourceAndJobTests(unittest.TestCase):
             self.assertEqual(len({job.job_id for job in jobs}), 1)
             self.assertEqual(len(service.list_jobs()), 1)
 
+    def test_concurrent_conflicting_idempotent_creates_persist_one_intact_job(self):
+        from threading import Barrier
+
+        class BarrierService(MapJobService):
+            def __init__(self, *args, barrier, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.barrier = barrier
+
+            def find_by_client_request(self, client_installation_id, client_request_id):
+                existing = super().find_by_client_request(client_installation_id, client_request_id)
+                self.barrier.wait(timeout=5)
+                return existing
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            barrier = Barrier(2)
+            services = [
+                BarrierService(
+                    SourceIndex([self.singapore]),
+                    JobStore(root),
+                    barrier=barrier,
+                )
+                for _ in range(2)
+            ]
+            base = {
+                "mode": "custom_bbox",
+                "clientInstallationId": "installation-12345678",
+                "clientRequestId": "request-12345678",
+            }
+            requests = [
+                {**base, "bbox": [103.75, 1.24, 103.93, 1.37]},
+                {**base, "bbox": [103.76, 1.25, 103.94, 1.38]},
+            ]
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(service.create_job, request)
+                    for service, request in zip(services, requests)
+                ]
+                outcomes = []
+                for future in futures:
+                    try:
+                        outcomes.append(future.result())
+                    except ValueError as exc:
+                        outcomes.append(exc)
+
+            self.assertEqual(sum(isinstance(value, MapJob) for value in outcomes), 1)
+            conflicts = [value for value in outcomes if isinstance(value, ValueError)]
+            self.assertEqual(len(conflicts), 1)
+            self.assertIn("different map request", str(conflicts[0]))
+            reopened = JobStore(root).list()
+            self.assertEqual(len(reopened), 1)
+            self.assertIn(reopened[0].request["bbox"], [request["bbox"] for request in requests])
+
     def test_job_store_persists_generation_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = JobStore(Path(tmp))

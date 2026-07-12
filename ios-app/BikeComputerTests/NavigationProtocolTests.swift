@@ -83,6 +83,81 @@ func makeStoredZip(entries: [(String, Data)]) -> Data {
     return zip
 }
 
+final class OfflineMapTestURLProtocol: URLProtocol {
+    typealias Handler = (URLRequest) throws -> (Int, Data)
+    nonisolated(unsafe) private static var handler: Handler?
+    nonisolated(unsafe) private static var recordedRequests: [URLRequest] = []
+    private static let lock = NSLock()
+
+    static func configure(handler: @escaping Handler) {
+        lock.lock()
+        self.handler = handler
+        recordedRequests = []
+        lock.unlock()
+    }
+
+    static func requests() -> [URLRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedRequests
+    }
+
+    static func reset() {
+        lock.lock()
+        handler = nil
+        recordedRequests = []
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.lock.lock()
+        Self.recordedRequests.append(request)
+        let handler = Self.handler
+        Self.lock.unlock()
+        guard let handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        do {
+            let (status, data) = try handler(request)
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: status,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+@MainActor
+func waitForMapTaskCompletion(
+    _ manager: OfflineMapManager,
+    timeout: TimeInterval = 3
+) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    var observedBusy = false
+    while Date() < deadline {
+        observedBusy = observedBusy || manager.isBusy
+        if !manager.isBusy &&
+            (observedBusy || manager.currentJob != nil || manager.errorMessage != nil) {
+            return true
+        }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    return false
+}
+
 func assertCoordinate(
     _ actual: CLLocationCoordinate2D,
     latitude expectedLatitude: CLLocationDegrees,
@@ -304,6 +379,7 @@ struct NavigationProtocolTests {
         testOfflineMapInstallationIdentity()
         testOfflineMapJobRecoverySelection()
         testPendingOfflineMapJobBlocksEveryCreationIngress()
+        await testOfflineMapJobCreatorReconcilesAmbiguousResponse()
         await testOfflineMapPollerOutlivesLegacyAttemptLimit()
         await testOfflineMapPollerRetriesTransientFailure()
         await testOfflineMapPollerStopsOnTerminalAndCancellation()
@@ -328,6 +404,7 @@ struct NavigationProtocolTests {
         testFirmwareUpdateManagerRestoresPendingStatus()
         testFirmwareUpdateAvailabilitySemantics()
         testFirmwareDeviceClientSendsSignedBeginRequest()
+        await testOfflineMapRecoveryRoutes()
         print("NavigationProtocolTests passed")
     }
 
@@ -553,6 +630,7 @@ struct NavigationProtocolTests {
             serverURLString: "https://maps.example.com",
             defaults: defaults
         )
+        OfflineMapJobPersistence.markPackDownloaded(jobId: "job-resume", defaults: defaults)
         assertEqual(
             OfflineMapJobPersistence.activeJobId(defaults: defaults),
             "job-resume",
@@ -566,6 +644,11 @@ struct NavigationProtocolTests {
             OfflineMapJobPersistence.serverURLString(defaults: defaults),
             "https://maps.example.com",
             "pending job preserves its originating server"
+        )
+        assertEqual(
+            OfflineMapJobPersistence.downloadedJobId(defaults: defaults),
+            "job-resume",
+            "downloaded pack state survives transfer interruption"
         )
         OfflineMapJobPersistence.clear(defaults: defaults)
         assertEqual(
@@ -581,6 +664,11 @@ struct NavigationProtocolTests {
             OfflineMapJobPersistence.serverURLString(defaults: defaults),
             nil,
             "completed map job clears its originating server"
+        )
+        assertEqual(
+            OfflineMapJobPersistence.downloadedJobId(defaults: defaults),
+            nil,
+            "completed map job clears downloaded recovery state"
         )
         OfflineMapRecoveryHistory.markHandled(jobId: "job-resume", defaults: defaults)
         OfflineMapRecoveryHistory.markHandled(jobId: "job-other", defaults: defaults)
@@ -610,50 +698,84 @@ struct NavigationProtocolTests {
     static func testOfflineMapJobRecoverySelection() {
         let jobs = [
             offlineMapJob(
+                jobId: "job-other",
                 status: "converting_features",
                 createdAt: "2026-07-12T01:00:00Z",
                 clientInstallationId: "installation-other"
             ),
             offlineMapJob(
+                jobId: "job-cached-old",
                 status: "ready",
                 mapId: "map-cached",
                 createdAt: "2026-07-12T02:00:00Z",
                 clientInstallationId: "installation-mine"
             ),
             offlineMapJob(
+                jobId: "job-running",
                 status: "converting_features",
                 createdAt: "2026-07-12T03:00:00Z",
                 clientInstallationId: "installation-mine"
             ),
             offlineMapJob(
+                jobId: "job-regenerated",
                 status: "ready",
                 mapId: "map-recover",
                 createdAt: "2026-07-12T04:00:00Z",
                 clientInstallationId: "installation-mine",
                 installOnDevice: true
             ),
+            offlineMapJob(
+                jobId: "job-failed",
+                status: "failed",
+                createdAt: "2026-07-12T05:00:00Z",
+                clientInstallationId: "installation-mine"
+            ),
+            offlineMapJob(
+                jobId: "job-expired",
+                status: "expired",
+                createdAt: "2026-07-12T06:00:00Z",
+                clientInstallationId: "installation-mine"
+            ),
+            offlineMapJob(
+                jobId: "job-cancelled",
+                status: "cancelled",
+                createdAt: "2026-07-12T07:00:00Z",
+                clientInstallationId: "installation-mine"
+            ),
+            offlineMapJob(
+                jobId: "job-ready-without-map",
+                status: "ready",
+                createdAt: "2026-07-12T08:00:00Z",
+                clientInstallationId: "installation-mine"
+            ),
         ].compactMap { $0 }
 
         let selected = OfflineMapJobRecoverySelector.select(
             jobs: jobs,
-            clientInstallationId: "installation-mine",
-            cachedMapIds: ["map-cached"]
+            clientInstallationId: "installation-mine"
         )
 
-        assertEqual(selected?.mapId, "map-recover", "recovery selects the newest uncached owned job")
+        assertEqual(selected?.mapId, "map-recover", "recovery selects the newest unhandled owned job")
         assertEqual(selected?.installOnDevice, true, "recovery restores install workflow intent")
 
         let afterHandling = OfflineMapJobRecoverySelector.select(
             jobs: jobs,
             clientInstallationId: "installation-mine",
-            cachedMapIds: ["map-cached"],
-            excludedJobIds: ["job-ready"]
+            excludedJobIds: ["job-regenerated"]
         )
         assertEqual(
             afterHandling?.status,
             "converting_features",
             "recovery does not redownload a handled ready job"
         )
+        assertEqual(afterHandling?.jobId, "job-running", "handled exclusion removes only that job")
+
+        let none = OfflineMapJobRecoverySelector.select(
+            jobs: jobs,
+            clientInstallationId: "installation-mine",
+            excludedJobIds: ["job-regenerated", "job-running", "job-cached-old"]
+        )
+        assertEqual(none, nil, "terminal and ready-without-map jobs are not recoverable")
     }
 
     static func testOfflineMapProgressPresentation() {
@@ -733,6 +855,288 @@ struct NavigationProtocolTests {
             "job-existing",
             "all creation ingresses preserve the paused job recovery ID"
         )
+
+        manager.forgetPendingMapJob()
+        manager.beginMapAreaSelection()
+        assertEqual(
+            OfflineMapJobPersistence.activeJobId(defaults: defaults),
+            nil,
+            "forgetting an unrecoverable job clears its durable lock"
+        )
+        assert(
+            manager.isMapAreaSelectionActive,
+            "forgetting an unrecoverable job restores new-map creation"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapJobCreatorReconcilesAmbiguousResponse() async {
+        let request = OfflineMapJobRequest
+            .customBBox(OfflineMapBounds(minLon: 10, minLat: 20, maxLon: 11, maxLat: 21))
+            .identified(
+                clientInstallationId: "installation-test",
+                clientRequestId: "request-test-123",
+                installOnDevice: false
+            )
+        guard let committed = offlineMapJob(
+            jobId: "job-committed",
+            status: "queued",
+            clientInstallationId: "installation-test",
+            clientRequestId: "request-test-123"
+        ) else {
+            assert(false, "committed job fixture should decode")
+            return
+        }
+        var createRequestIds: [String?] = []
+        var listCount = 0
+        let recovered = try? await OfflineMapJobCreator.create(
+            request: request,
+            create: { attempt in
+                createRequestIds.append(attempt.clientRequestId)
+                throw URLError(.networkConnectionLost)
+            },
+            list: {
+                listCount += 1
+                return [committed]
+            },
+            sleep: { _ in
+                assert(false, "committed ambiguous response should reconcile before retry sleep")
+            },
+            onRetry: {}
+        )
+
+        assertEqual(recovered?.jobId, "job-committed", "ambiguous POST response reconciles by request ID")
+        assertEqual(createRequestIds, ["request-test-123"], "reconciliation preserves the submitted request ID")
+        assertEqual(listCount, 1, "ambiguous create checks durable server jobs")
+
+        var retryRequestIds: [String?] = []
+        let retried = try? await OfflineMapJobCreator.create(
+            request: request,
+            create: { attempt in
+                retryRequestIds.append(attempt.clientRequestId)
+                if retryRequestIds.count == 1 {
+                    throw URLError(.timedOut)
+                }
+                return committed
+            },
+            list: { [] },
+            sleep: { _ in },
+            onRetry: {}
+        )
+        assertEqual(retried?.jobId, "job-committed", "ambiguous create retries when reconciliation is empty")
+        assertEqual(
+            retryRequestIds,
+            ["request-test-123", "request-test-123"],
+            "every transport retry reuses the idempotency token"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapRecoveryRoutes() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            OfflineMapTestURLProtocol.reset()
+        }
+
+        func jobData(
+            jobId: String,
+            mapId: String,
+            installationId: String? = nil,
+            installOnDevice: Bool? = nil
+        ) -> Data {
+            var payload: [String: Any] = [
+                "jobId": jobId,
+                "status": "ready",
+                "mapId": mapId,
+                "createdAt": "2026-07-12T04:00:00Z",
+            ]
+            if let installationId { payload["clientInstallationId"] = installationId }
+            if let installOnDevice { payload["installOnDevice"] = installOnDevice }
+            return try! JSONSerialization.data(withJSONObject: payload)
+        }
+
+        func downloadURLData(mapId: String) -> Data {
+            try! JSONSerialization.data(withJSONObject: [
+                "mapId": mapId,
+                "url": "/downloads/\(mapId).zip",
+                "expiresAt": 2_000_000_000,
+                "expiresInSeconds": 900,
+            ])
+        }
+
+        func packData(mapId: String) -> Data {
+            let manifest = Data("{\"mapId\":\"\(mapId)\",\"displayName\":\"Recovery Test\"}".utf8)
+            return makeStoredZip(entries: [
+                ("manifest.json", manifest),
+                ("VECTMAP/0/0/0.pbf", Data([0x01])),
+            ])
+        }
+
+        let persistedSuite = "offline-map-persisted-route-\(UUID().uuidString)"
+        let persistedDefaults = UserDefaults(suiteName: persistedSuite)!
+        defer { persistedDefaults.removePersistentDomain(forName: persistedSuite) }
+        persistedDefaults.set("https://persisted.example", forKey: "offlineMap.serverURL")
+        let persistedCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-persisted-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: persistedCache) }
+        OfflineMapJobPersistence.save(
+            jobId: "job-persisted",
+            installOnDevice: true,
+            serverURLString: "https://persisted.example",
+            defaults: persistedDefaults
+        )
+        var persistedDownloadCount = 0
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs/job-persisted" {
+                return (200, jobData(jobId: "job-persisted", mapId: "map-persisted"))
+            }
+            if request.url?.path == "/v1/map-packs/map-persisted/download-url" {
+                return (200, downloadURLData(mapId: "map-persisted"))
+            }
+            return (404, Data())
+        }
+        let persistedManager = OfflineMapManager(
+            defaults: persistedDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: persistedCache,
+            packDownload: { _, onProgress, _ in
+                persistedDownloadCount += 1
+                onProgress(1)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension("zip")
+                try packData(mapId: "map-persisted").write(to: url)
+                return url
+            }
+        )
+        let disconnectedBLE = BLEManager()
+        persistedManager.resumePendingMapJobIfNeeded(bleManager: disconnectedBLE)
+        let firstPersistedPassCompleted = await waitForMapTaskCompletion(persistedManager)
+        assert(firstPersistedPassCompleted, "persisted recovery should finish its first pass")
+        assert(persistedManager.hasPendingMapJob, "disconnected device preserves pending install intent")
+        assertEqual(
+            OfflineMapJobPersistence.downloadedJobId(defaults: persistedDefaults),
+            "job-persisted",
+            "downloaded persisted job is reusable for a later install"
+        )
+        assert(
+            OfflineMapTestURLProtocol.requests().contains { $0.url?.host == "persisted.example" },
+            "persisted recovery uses its originating server"
+        )
+        persistedManager.resumePendingMapJobIfNeeded(bleManager: disconnectedBLE)
+        let secondPersistedPassCompleted = await waitForMapTaskCompletion(persistedManager)
+        assert(secondPersistedPassCompleted, "persisted recovery should be resumable")
+        assertEqual(persistedDownloadCount, 1, "deferred device install reuses the downloaded pack")
+        if let url = persistedManager.downloadedPackURL {
+            persistedManager.deleteCachedPack(at: url)
+        }
+        persistedManager.forgetPendingMapJob()
+
+        let discoverySuite = "offline-map-discovery-route-\(UUID().uuidString)"
+        let discoveryDefaults = UserDefaults(suiteName: discoverySuite)!
+        defer { discoveryDefaults.removePersistentDomain(forName: discoverySuite) }
+        discoveryDefaults.set("https://discovery.example", forKey: "offlineMap.serverURL")
+        let discoveryCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-discovery-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: discoveryCache) }
+        let discoveryManager = OfflineMapManager(
+            defaults: discoveryDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: discoveryCache,
+            packDownload: { _, onProgress, _ in
+                onProgress(1)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension("zip")
+                try packData(mapId: "map-discovered").write(to: url)
+                return url
+            }
+        )
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs" {
+                let job = try! JSONSerialization.jsonObject(
+                    with: jobData(
+                        jobId: "job-discovered",
+                        mapId: "map-discovered",
+                        installationId: discoveryManager.clientInstallationId,
+                        installOnDevice: false
+                    )
+                )
+                return (200, try! JSONSerialization.data(withJSONObject: ["jobs": [job]]))
+            }
+            if request.url?.path == "/v1/map-jobs/job-discovered" {
+                return (
+                    200,
+                    jobData(
+                        jobId: "job-discovered",
+                        mapId: "map-discovered",
+                        installationId: discoveryManager.clientInstallationId,
+                        installOnDevice: false
+                    )
+                )
+            }
+            if request.url?.path == "/v1/map-packs/map-discovered/download-url" {
+                return (200, downloadURLData(mapId: "map-discovered"))
+            }
+            return (404, Data())
+        }
+        discoveryManager.resumePendingMapJobIfNeeded()
+        let discoveryCompleted = await waitForMapTaskCompletion(discoveryManager)
+        assert(discoveryCompleted, "launch discovery should complete")
+        assert(!discoveryManager.hasPendingMapJob, "download-only discovery clears durable pending state")
+        assert(
+            OfflineMapRecoveryHistory.handledJobIds(defaults: discoveryDefaults).contains("job-discovered"),
+            "launch discovery marks the exact recovered job handled"
+        )
+        if let url = discoveryManager.downloadedPackURL {
+            discoveryManager.deleteCachedPack(at: url)
+        }
+
+        let manualSuite = "offline-map-manual-route-\(UUID().uuidString)"
+        let manualDefaults = UserDefaults(suiteName: manualSuite)!
+        defer { manualDefaults.removePersistentDomain(forName: manualSuite) }
+        manualDefaults.set("https://manual.example", forKey: "offlineMap.serverURL")
+        let manualCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-manual-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: manualCache) }
+        let manualManager = OfflineMapManager(
+            defaults: manualDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: manualCache,
+            packDownload: { _, onProgress, _ in
+                onProgress(1)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension("zip")
+                try packData(mapId: "map-manual").write(to: url)
+                return url
+            }
+        )
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs/job-manual" {
+                return (200, jobData(jobId: "job-manual", mapId: "map-manual"))
+            }
+            if request.url?.path == "/v1/map-packs/map-manual/download-url" {
+                return (200, downloadURLData(mapId: "map-manual"))
+            }
+            return (404, Data())
+        }
+        manualManager.recoverServerMap(jobId: "job-manual")
+        let manualCompleted = await waitForMapTaskCompletion(manualManager)
+        assert(manualCompleted, "manual legacy recovery should complete")
+        assert(!manualManager.hasPendingMapJob, "manual recovery clears completed durable state")
+        assert(
+            OfflineMapTestURLProtocol.requests().contains {
+                $0.url?.query?.contains("clientInstallationId=") == true
+            },
+            "manual recovery scopes job and download reads to this installation"
+        )
+        if let url = manualManager.downloadedPackURL {
+            manualManager.deleteCachedPack(at: url)
+        }
     }
 
     @MainActor
@@ -834,18 +1238,21 @@ struct NavigationProtocolTests {
     }
 
     static func offlineMapJob(
+        jobId: String? = nil,
         status: String,
         mapId: String? = nil,
         error: String? = nil,
         createdAt: String? = nil,
         clientInstallationId: String? = nil,
+        clientRequestId: String? = nil,
         installOnDevice: Bool? = nil
     ) -> OfflineMapJob? {
-        var payload: [String: Any] = ["jobId": "job-\(status)", "status": status]
+        var payload: [String: Any] = ["jobId": jobId ?? "job-\(status)", "status": status]
         if let mapId { payload["mapId"] = mapId }
         if let error { payload["error"] = error }
         if let createdAt { payload["createdAt"] = createdAt }
         if let clientInstallationId { payload["clientInstallationId"] = clientInstallationId }
+        if let clientRequestId { payload["clientRequestId"] = clientRequestId }
         if let installOnDevice { payload["installOnDevice"] = installOnDevice }
         guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
         return try? JSONDecoder().decode(OfflineMapJob.self, from: data)
@@ -903,6 +1310,33 @@ struct NavigationProtocolTests {
             request.value(forHTTPHeaderField: "Authorization"),
             "Bearer secret",
             "list jobs request includes bearer token"
+        )
+        guard let jobRequest = try? OfflineMapPlatformClient.makeInstallationScopedURLRequest(
+            baseURL: baseURL,
+            apiToken: "secret",
+            path: "/v1/map-jobs/job-12345678",
+            method: "GET",
+            clientInstallationId: "installation-test"
+        ),
+        let downloadRequest = try? OfflineMapPlatformClient.makeInstallationScopedURLRequest(
+            baseURL: baseURL,
+            apiToken: "secret",
+            path: "/v1/map-packs/map-12345678/download-url",
+            method: "POST",
+            clientInstallationId: "installation-test"
+        ) else {
+            assert(false, "installation-scoped requests should build")
+            return
+        }
+        assertEqual(
+            jobRequest.url?.absoluteString,
+            "https://maps.example.com/api/v1/map-jobs/job-12345678?clientInstallationId=installation-test",
+            "job polling is scoped to the installation"
+        )
+        assertEqual(downloadRequest.httpMethod, "POST", "download URL keeps its POST method")
+        assert(
+            downloadRequest.url?.query?.contains("clientInstallationId=installation-test") == true,
+            "download URL lookup is scoped to the installation"
         )
     }
 
@@ -1864,7 +2298,7 @@ struct NavigationProtocolTests {
             }
             finished = true
         }
-        assert(waitForMainLoop(timeout: 3) { finished },
+        assert(waitForMainLoop(timeout: 10) { finished },
                "main-actor async test should finish")
         if let failure {
             assert(false, "main-actor async test failed: \(failure)")
