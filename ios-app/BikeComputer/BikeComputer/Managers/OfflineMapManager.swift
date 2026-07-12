@@ -616,7 +616,7 @@ final class OfflineMapManager: ObservableObject {
         mapJobTask?.cancel()
         mapJobTask = nil
         mapJobTaskID = nil
-        clearPersistedJob()
+        clearPersistedJob(markHandled: true)
         currentJob = nil
         downloadURL = nil
         downloadProgress = 0
@@ -955,10 +955,13 @@ final class OfflineMapManager: ObservableObject {
         return stored
     }
 
-    nonisolated static func resolvedAPIToken(defaults: UserDefaults) -> String {
-        let bundled = OfflineMapServiceConfig.apiToken
+    nonisolated static func resolvedAPIToken(
+        defaults: UserDefaults,
+        bundledToken: String = OfflineMapServiceConfig.apiToken
+    ) -> String {
+        let bundled = bundledToken
         let stored = defaults.string(forKey: OfflineMapDefaults.apiTokenKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if stored.isEmpty, !bundled.isEmpty {
+        if !bundled.isEmpty {
             return bundled
         }
         return stored

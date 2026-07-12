@@ -89,9 +89,11 @@ def create_app():
             raise HTTPException(status_code=404, detail="job not found") from exc
 
     @app.post("/v1/map-jobs/{job_id}/run", dependencies=[Depends(require_api_token)])
-    def run_map_job(job_id: str) -> dict[str, Any]:
+    def run_map_job(job_id: str, clientInstallationId: str | None = None) -> dict[str, Any]:
         try:
-            service.get_job(job_id)
+            service.get_job_for_installation(job_id, clientInstallationId)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
         try:
@@ -100,9 +102,12 @@ def create_app():
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/v1/map-jobs/{job_id}/cancel", dependencies=[Depends(require_api_token)])
-    def cancel_map_job(job_id: str) -> dict[str, Any]:
+    def cancel_map_job(job_id: str, clientInstallationId: str | None = None) -> dict[str, Any]:
         try:
+            service.get_job_for_installation(job_id, clientInstallationId)
             return service.cancel_job(job_id).to_dict()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
 

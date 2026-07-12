@@ -222,6 +222,17 @@ enum OfflineMapDownloadingSectionPresentation {
     }
 }
 
+enum OfflineMapAutomaticRecoveryTrigger {
+    static func shouldResume(
+        hasPendingJob: Bool,
+        isBusy: Bool,
+        isConnected: Bool,
+        isNavigationReady: Bool
+    ) -> Bool {
+        hasPendingJob && !isBusy && isConnected && isNavigationReady
+    }
+}
+
 struct OfflineMapJobGeometry: Decodable, Equatable {
     let mode: String
     let bounds: [Double]

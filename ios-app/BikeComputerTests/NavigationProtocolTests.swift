@@ -720,7 +720,7 @@ struct NavigationProtocolTests {
             offlineMapJob(
                 jobId: "job-cached-old",
                 status: "ready",
-                mapId: "map-cached",
+                mapId: "map-same-area",
                 createdAt: "2026-07-12T02:00:00Z",
                 clientInstallationId: "installation-mine"
             ),
@@ -733,7 +733,7 @@ struct NavigationProtocolTests {
             offlineMapJob(
                 jobId: "job-regenerated",
                 status: "ready",
-                mapId: "map-recover",
+                mapId: "map-same-area",
                 createdAt: "2026-07-12T04:00:00Z",
                 clientInstallationId: "installation-mine",
                 installOnDevice: true
@@ -769,7 +769,8 @@ struct NavigationProtocolTests {
             clientInstallationId: "installation-mine"
         )
 
-        assertEqual(selected?.mapId, "map-recover", "recovery selects the newest unhandled owned job")
+        assertEqual(selected?.jobId, "job-regenerated", "recovery selects the regenerated same-area job")
+        assertEqual(selected?.mapId, "map-same-area", "same stable map ID does not suppress a new job")
         assertEqual(selected?.installOnDevice, true, "recovery restores install workflow intent")
 
         let afterHandling = OfflineMapJobRecoverySelector.select(
@@ -835,6 +836,24 @@ struct NavigationProtocolTests {
             ),
             "idle map settings omit an empty downloading section"
         )
+        assert(
+            OfflineMapAutomaticRecoveryTrigger.shouldResume(
+                hasPendingJob: true,
+                isBusy: false,
+                isConnected: true,
+                isNavigationReady: true
+            ),
+            "pending device install resumes when BLE becomes ready"
+        )
+        assert(
+            !OfflineMapAutomaticRecoveryTrigger.shouldResume(
+                hasPendingJob: true,
+                isBusy: false,
+                isConnected: true,
+                isNavigationReady: false
+            ),
+            "pending device install waits for navigation readiness"
+        )
     }
 
     @MainActor
@@ -880,6 +899,10 @@ struct NavigationProtocolTests {
         assert(
             manager.isMapAreaSelectionActive,
             "forgetting an unrecoverable job restores new-map creation"
+        )
+        assert(
+            OfflineMapRecoveryHistory.handledJobIds(defaults: defaults).contains("job-existing"),
+            "forgotten server job stays excluded from future discovery"
         )
     }
 
@@ -1002,6 +1025,7 @@ struct NavigationProtocolTests {
             serverURLString: "https://persisted.example",
             defaults: persistedDefaults
         )
+        persistedDefaults.set("https://current-setting.example", forKey: "offlineMap.serverURL")
         var persistedDownloadCount = 0
         OfflineMapTestURLProtocol.configure { request in
             if request.url?.path == "/v1/map-jobs/job-persisted" {
@@ -1177,6 +1201,74 @@ struct NavigationProtocolTests {
         assert(retryManager.hasPendingMapJob, "paused discovery remains resumable")
         retryManager.forgetPendingMapJob()
         assert(!retryManager.hasPendingMapJob, "paused discovery can be explicitly forgotten")
+
+        let launch401Suite = "offline-map-launch-401-\(UUID().uuidString)"
+        let launch401Defaults = UserDefaults(suiteName: launch401Suite)!
+        defer { launch401Defaults.removePersistentDomain(forName: launch401Suite) }
+        launch401Defaults.set("https://launch-401.example", forKey: "offlineMap.serverURL")
+        let launch401Cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-launch-401-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: launch401Cache) }
+        let launch401Manager = OfflineMapManager(
+            defaults: launch401Defaults,
+            mapPlatformSession: session,
+            cacheDirectory: launch401Cache
+        )
+        OfflineMapTestURLProtocol.configure { _ in (401, Data("unauthorized".utf8)) }
+        launch401Manager.resumePendingMapJobIfNeeded()
+        let launch401Completed = await waitForMapTaskCompletion(launch401Manager)
+        assert(launch401Completed, "nonretryable launch discovery should stop")
+        assert(launch401Manager.errorMessage?.contains("401") == true, "launch 401 is visible")
+        assert(launch401Manager.hasPendingMapJob, "launch 401 remains explicitly dismissible")
+        launch401Manager.forgetPendingMapJob()
+        assert(!launch401Manager.hasPendingMapJob, "launch 401 escape hatch clears recovery state")
+
+        let persisted401Suite = "offline-map-persisted-401-\(UUID().uuidString)"
+        let persisted401Defaults = UserDefaults(suiteName: persisted401Suite)!
+        defer { persisted401Defaults.removePersistentDomain(forName: persisted401Suite) }
+        OfflineMapJobPersistence.save(
+            jobId: "job-persisted-401",
+            serverURLString: "https://persisted-401.example",
+            defaults: persisted401Defaults
+        )
+        let persisted401Cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-persisted-401-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: persisted401Cache) }
+        let persisted401Manager = OfflineMapManager(
+            defaults: persisted401Defaults,
+            mapPlatformSession: session,
+            cacheDirectory: persisted401Cache
+        )
+        OfflineMapTestURLProtocol.configure { _ in (401, Data("unauthorized".utf8)) }
+        persisted401Manager.resumePendingMapJobIfNeeded()
+        let persisted401Completed = await waitForMapTaskCompletion(persisted401Manager)
+        assert(persisted401Completed, "persisted 401 should stop without spinning")
+        assert(persisted401Manager.hasPendingMapJob, "persisted 401 retains the recoverable job ID")
+        persisted401Manager.forgetPendingMapJob()
+        assert(!persisted401Manager.hasPendingMapJob, "persisted 401 can be forgotten")
+
+        let persisted404Suite = "offline-map-persisted-404-\(UUID().uuidString)"
+        let persisted404Defaults = UserDefaults(suiteName: persisted404Suite)!
+        defer { persisted404Defaults.removePersistentDomain(forName: persisted404Suite) }
+        OfflineMapJobPersistence.save(
+            jobId: "job-persisted-404",
+            serverURLString: "https://persisted-404.example",
+            defaults: persisted404Defaults
+        )
+        let persisted404Cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-persisted-404-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: persisted404Cache) }
+        let persisted404Manager = OfflineMapManager(
+            defaults: persisted404Defaults,
+            mapPlatformSession: session,
+            cacheDirectory: persisted404Cache
+        )
+        OfflineMapTestURLProtocol.configure { _ in (404, Data("missing".utf8)) }
+        persisted404Manager.resumePendingMapJobIfNeeded()
+        let persisted404Completed = await waitForMapTaskCompletion(persisted404Manager)
+        assert(persisted404Completed, "persisted 404 should stop")
+        assert(!persisted404Manager.hasPendingMapJob, "persisted 404 clears stale durable state")
+        assert(persisted404Manager.errorMessage?.contains("404") == true, "persisted 404 is visible")
     }
 
     @MainActor
@@ -1389,7 +1481,7 @@ struct NavigationProtocolTests {
         defer { defaults.removePersistentDomain(forName: suite) }
 
         defaults.set("http://rhi0maej6bwo33hn0im6h4lf.178.18.245.246.sslip.io", forKey: "offlineMap.serverURL")
-        defaults.set("", forKey: "offlineMap.apiToken")
+        defaults.set("stale-bundled-token", forKey: "offlineMap.apiToken")
 
         assertEqual(
             OfflineMapManager.resolvedServerURL(defaults: defaults),
@@ -1397,9 +1489,12 @@ struct NavigationProtocolTests {
             "legacy offline map server URL migrates to production domain"
         )
         assertEqual(
-            OfflineMapManager.resolvedAPIToken(defaults: defaults),
-            OfflineMapServiceConfig.apiToken,
-            "empty stored map API token falls back to bundled build token"
+            OfflineMapManager.resolvedAPIToken(
+                defaults: defaults,
+                bundledToken: "new-bundled-token"
+            ),
+            "new-bundled-token",
+            "new bundled map API token replaces a stale token after app update"
         )
     }
 

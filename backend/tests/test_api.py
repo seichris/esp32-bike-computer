@@ -41,6 +41,12 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         return response.json()["jobId"]
 
+    def update_job(self, job_id: str, **values) -> None:
+        job_path = Path(self.tmp.name) / "jobs" / f"{job_id}.json"
+        job = json.loads(job_path.read_text())
+        job.update(values)
+        job_path.write_text(json.dumps(job))
+
     def test_run_route_returns_queued_job_result(self):
         job_id = self.create_job()
         result = Mock()
@@ -185,6 +191,114 @@ class MapJobRunAPITests(unittest.TestCase):
             params={"clientInstallationId": "bad"},
         )
         self.assertEqual(invalid_filter.status_code, 400)
+
+    def test_map_pack_reads_are_scoped_and_choose_newest_owned_job(self):
+        def create_owned(installation_id: str, request_id: str, bbox: list[float]) -> str:
+            response = self.client.post(
+                "/v1/map-jobs",
+                json={
+                    "mode": "custom_bbox",
+                    "bbox": bbox,
+                    "clientInstallationId": installation_id,
+                    "clientRequestId": request_id,
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            return response.json()["jobId"]
+
+        older = create_owned(
+            "installation-owner",
+            "request-owner-old",
+            [103.75, 1.24, 103.93, 1.37],
+        )
+        newer = create_owned(
+            "installation-owner",
+            "request-owner-new",
+            [103.76, 1.25, 103.94, 1.38],
+        )
+        other = create_owned(
+            "installation-other",
+            "request-other-new",
+            [103.77, 1.26, 103.95, 1.39],
+        )
+        self.update_job(
+            older,
+            mapId="map-shared",
+            packPath=str(Path(self.tmp.name) / "older.zip"),
+            createdAt="2026-07-12T01:00:00Z",
+        )
+        self.update_job(
+            newer,
+            mapId="map-shared",
+            packPath=str(Path(self.tmp.name) / "newer.zip"),
+            createdAt="2026-07-12T03:00:00Z",
+        )
+        self.update_job(
+            other,
+            mapId="map-shared",
+            packPath=str(Path(self.tmp.name) / "other.zip"),
+            createdAt="2026-07-12T04:00:00Z",
+        )
+
+        matching = self.client.get(
+            "/v1/map-packs/map-shared",
+            params={"clientInstallationId": "installation-owner"},
+        )
+        unknown = self.client.get(
+            "/v1/map-packs/map-shared",
+            params={"clientInstallationId": "installation-unknown"},
+        )
+        unscoped = self.client.get("/v1/map-packs/map-shared")
+        download = self.client.post(
+            "/v1/map-packs/map-shared/download-url",
+            params={"clientInstallationId": "installation-owner"},
+        )
+
+        self.assertEqual(matching.status_code, 200)
+        self.assertEqual(matching.json()["jobId"], newer)
+        self.assertEqual(unknown.status_code, 404)
+        self.assertEqual(unscoped.status_code, 404)
+        self.assertEqual(download.status_code, 200)
+
+        legacy = self.create_job()
+        self.update_job(
+            legacy,
+            mapId="map-legacy",
+            packPath=str(Path(self.tmp.name) / "legacy.zip"),
+        )
+        self.assertEqual(self.client.get("/v1/map-packs/map-legacy").status_code, 200)
+        self.assertEqual(
+            self.client.post("/v1/map-packs/map-legacy/download-url").status_code,
+            200,
+        )
+
+    def test_modern_job_mutations_require_matching_installation(self):
+        response = self.client.post(
+            "/v1/map-jobs",
+            json={
+                "mode": "custom_bbox",
+                "bbox": [103.75, 1.24, 103.93, 1.37],
+                "clientInstallationId": "installation-owner",
+                "clientRequestId": "request-owner-123",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        job_id = response.json()["jobId"]
+
+        self.assertEqual(self.client.post(f"/v1/map-jobs/{job_id}/run").status_code, 404)
+        self.assertEqual(
+            self.client.post(
+                f"/v1/map-jobs/{job_id}/cancel",
+                params={"clientInstallationId": "installation-other"},
+            ).status_code,
+            404,
+        )
+        cancelled = self.client.post(
+            f"/v1/map-jobs/{job_id}/cancel",
+            params={"clientInstallationId": "installation-owner"},
+        )
+        self.assertEqual(cancelled.status_code, 200)
+        self.assertEqual(cancelled.json()["status"], "cancelled")
 
 
 if __name__ == "__main__":
