@@ -247,7 +247,7 @@ final class TestRoute: MKRoute {
 @main
 struct NavigationProtocolTests {
     @MainActor
-    static func main() {
+    static func main() async {
         testIconMapping()
         testRouteEndpointExtraction()
         testRouteRemainingDistance()
@@ -295,6 +295,16 @@ struct NavigationProtocolTests {
         testNavigationEngineOmitsRideTelemetryWhenIdle()
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         testOfflineMapCustomBBoxRequest()
+        testOfflineMapPreparationTimeEstimate()
+        testOfflineMapJobProgressDecoding()
+        testOfflineMapJobProgressAbsentFallback()
+        testOfflineMapProgressPresentation()
+        testOfflineMapDownloadingSectionPresentation()
+        testOfflineMapJobPersistence()
+        testPendingOfflineMapJobBlocksEveryCreationIngress()
+        await testOfflineMapPollerOutlivesLegacyAttemptLimit()
+        await testOfflineMapPollerRetriesTransientFailure()
+        await testOfflineMapPollerStopsOnTerminalAndCancellation()
         testOfflineMapCreateJobURLRequest()
         testOfflineMapManagerMigratesProductionConfig()
         testOfflineMapManagerRestoresLastTransferIdentity()
@@ -457,6 +467,287 @@ struct NavigationProtocolTests {
         assert(request.bbox != nil, "custom cut-out includes bbox")
         assert(abs((request.bbox?[1] ?? 0) - 34.9) < 0.001, "bbox min latitude uses requested size")
         assert(abs((request.bbox?[3] ?? 0) - 35.1) < 0.001, "bbox max latitude uses requested size")
+    }
+
+    static func testOfflineMapPreparationTimeEstimate() {
+        assertEqual(
+            OfflineMapPreparationTimeEstimate.description(for: 1),
+            "Usually under a minute",
+            "small map preparation estimate"
+        )
+        assertEqual(
+            OfflineMapPreparationTimeEstimate.description(for: 785),
+            "Usually a few minutes",
+            "city map preparation estimate"
+        )
+        assertEqual(
+            OfflineMapPreparationTimeEstimate.description(for: 14_252),
+            "May take 15–90 minutes",
+            "large map preparation estimate"
+        )
+        assertEqual(
+            OfflineMapPreparationTimeEstimate.description(for: 37_019),
+            "May take several hours",
+            "very large map preparation estimate"
+        )
+    }
+
+    static func testOfflineMapJobProgressDecoding() {
+        let payload = Data(
+            """
+            {
+              "jobId": "job-progress",
+              "status": "converting_features",
+              "progress": {
+                "completedBlocks": 79,
+                "totalBlocks": 100,
+                "fraction": 0.79
+              }
+            }
+            """.utf8
+        )
+        guard let job = try? JSONDecoder().decode(OfflineMapJob.self, from: payload),
+              let progress = job.progress else {
+            assert(false, "map job progress should decode")
+            return
+        }
+
+        assertEqual(progress.completedBlocks, 79, "map progress decodes completed blocks")
+        assertEqual(progress.totalBlocks, 100, "map progress decodes total blocks")
+        assertEqual(progress.percentage, 79, "map progress calculates percentage")
+        assert(abs(progress.fraction - 0.79) < 0.000001, "map progress calculates fraction")
+    }
+
+    static func testOfflineMapJobProgressAbsentFallback() {
+        let payload = Data("{\"jobId\":\"legacy-job\",\"status\":\"converting_features\"}".utf8)
+        guard let job = try? JSONDecoder().decode(OfflineMapJob.self, from: payload) else {
+            assert(false, "legacy map job should decode without progress")
+            return
+        }
+        assertEqual(job.progress, nil, "legacy server response keeps indeterminate progress fallback")
+    }
+
+    static func testOfflineMapJobPersistence() {
+        let suite = "offline-map-job-persistence-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "job persistence test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        OfflineMapJobPersistence.save(
+            jobId: "job-resume",
+            installOnDevice: true,
+            defaults: defaults
+        )
+        assertEqual(
+            OfflineMapJobPersistence.activeJobId(defaults: defaults),
+            "job-resume",
+            "active map job survives app relaunch"
+        )
+        assert(
+            OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults),
+            "onboarding map job preserves install intent"
+        )
+        OfflineMapJobPersistence.clear(defaults: defaults)
+        assertEqual(
+            OfflineMapJobPersistence.activeJobId(defaults: defaults),
+            nil,
+            "completed map job clears persisted recovery state"
+        )
+        assert(
+            !OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults),
+            "completed map job clears install intent"
+        )
+    }
+
+    static func testOfflineMapProgressPresentation() {
+        let legacy = offlineMapJob(status: "converting_features")
+        let progressPayload = Data(
+            """
+            {"jobId":"progress-job","status":"converting_features","progress":{"completedBlocks":4,"totalBlocks":10}}
+            """.utf8
+        )
+        let progressJob = try? JSONDecoder().decode(OfflineMapJob.self, from: progressPayload)
+
+        assertEqual(
+            OfflineMapProgressPresentation.value(job: legacy, downloadProgress: 0),
+            nil,
+            "older servers keep the indeterminate progress view"
+        )
+        assertEqual(
+            OfflineMapProgressPresentation.value(job: progressJob, downloadProgress: 0),
+            0.4,
+            "generation block progress drives the determinate progress view"
+        )
+        assertEqual(
+            OfflineMapProgressPresentation.value(job: progressJob, downloadProgress: 0.75),
+            0.4,
+            "generation progress takes precedence while conversion is active"
+        )
+    }
+
+    static func testOfflineMapDownloadingSectionPresentation() {
+        assert(
+            OfflineMapDownloadingSectionPresentation.isVisible(
+                isBusy: false,
+                hasPendingJob: true,
+                errorMessage: nil
+            ),
+            "paused persisted jobs keep the resume section reachable"
+        )
+        assert(
+            !OfflineMapDownloadingSectionPresentation.isVisible(
+                isBusy: false,
+                hasPendingJob: false,
+                errorMessage: nil
+            ),
+            "idle map settings omit an empty downloading section"
+        )
+    }
+
+    @MainActor
+    static func testPendingOfflineMapJobBlocksEveryCreationIngress() {
+        let suite = "offline-map-pending-ingress-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "pending job ingress test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        OfflineMapJobPersistence.save(jobId: "job-existing", defaults: defaults)
+        let manager = OfflineMapManager(defaults: defaults)
+
+        manager.beginMapAreaSelection()
+        manager.createCustomCutoutJob()
+        manager.createJobFromSelectedMapArea()
+        manager.installCurrentLocationMap(
+            location: CLLocation(latitude: 31.2304, longitude: 121.4737),
+            bleManager: BLEManager()
+        )
+
+        assert(
+            !manager.isMapAreaSelectionActive,
+            "pending job blocks the area-selection creation ingress"
+        )
+        assert(
+            !manager.isBusy,
+            "pending job blocks all creation tasks before network work starts"
+        )
+        assertEqual(
+            OfflineMapJobPersistence.activeJobId(defaults: defaults),
+            "job-existing",
+            "all creation ingresses preserve the paused job recovery ID"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapPollerOutlivesLegacyAttemptLimit() async {
+        guard let running = offlineMapJob(status: "converting_features"),
+              let ready = offlineMapJob(status: "ready", mapId: "map-ready") else {
+            assert(false, "poller test jobs should decode")
+            return
+        }
+        var fetchCount = 0
+        let result = try? await OfflineMapJobPoller.waitForReady(
+            jobId: "long-job",
+            pollIntervalNanoseconds: 0,
+            fetch: { _ in
+                fetchCount += 1
+                return fetchCount <= 1_801 ? running : ready
+            },
+            sleep: { _ in },
+            onUpdate: { _ in },
+            onRetry: {}
+        )
+
+        assertEqual(fetchCount, 1_802, "poller continues beyond the former 1,800-attempt limit")
+        assertEqual(result?.mapId, "map-ready", "poller returns the eventual ready map")
+    }
+
+    @MainActor
+    static func testOfflineMapPollerRetriesTransientFailure() async {
+        guard let ready = offlineMapJob(status: "ready", mapId: "map-ready") else {
+            assert(false, "retry test job should decode")
+            return
+        }
+        var fetchCount = 0
+        var retryCount = 0
+        var delays: [UInt64] = []
+        let result = try? await OfflineMapJobPoller.waitForReady(
+            jobId: "retry-job",
+            pollIntervalNanoseconds: 0,
+            fetch: { _ in
+                fetchCount += 1
+                if fetchCount == 1 {
+                    throw URLError(.timedOut)
+                }
+                return ready
+            },
+            sleep: { delays.append($0) },
+            onUpdate: { _ in },
+            onRetry: { retryCount += 1 }
+        )
+
+        assertEqual(result?.mapId, "map-ready", "transient polling failure recovers")
+        assertEqual(retryCount, 1, "transient polling failure reports reconnecting state")
+        assertEqual(delays, [2_000_000_000], "first retry uses bounded backoff")
+        assert(!OfflineMapPollingRetryPolicy.shouldRetry(
+            OfflineMapPlatformError.serverStatus(401, "unauthorized")
+        ), "authentication failures remain terminal")
+    }
+
+    @MainActor
+    static func testOfflineMapPollerStopsOnTerminalAndCancellation() async {
+        guard let failed = offlineMapJob(status: "failed", error: "conversion failed"),
+              let running = offlineMapJob(status: "converting_features") else {
+            assert(false, "terminal poller test jobs should decode")
+            return
+        }
+
+        do {
+            _ = try await OfflineMapJobPoller.waitForReady(
+                jobId: "failed-job",
+                pollIntervalNanoseconds: 0,
+                fetch: { _ in failed },
+                sleep: { _ in },
+                onUpdate: { _ in },
+                onRetry: {}
+            )
+            assert(false, "terminal map job should throw")
+        } catch OfflineMapPlatformError.serverStatus(let status, let body) {
+            assertEqual(status, 409, "terminal map job uses conflict status")
+            assert(body.contains("conversion failed"), "terminal map job preserves server error")
+        } catch {
+            assert(false, "terminal map job should use platform error")
+        }
+
+        do {
+            _ = try await OfflineMapJobPoller.waitForReady(
+                jobId: "cancel-job",
+                pollIntervalNanoseconds: 0,
+                fetch: { _ in running },
+                sleep: { _ in throw CancellationError() },
+                onUpdate: { _ in },
+                onRetry: {}
+            )
+            assert(false, "cancelled polling should throw")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            assert(false, "cancelled polling should preserve CancellationError")
+        }
+    }
+
+    static func offlineMapJob(
+        status: String,
+        mapId: String? = nil,
+        error: String? = nil
+    ) -> OfflineMapJob? {
+        var payload: [String: Any] = ["jobId": "job-\(status)", "status": status]
+        if let mapId { payload["mapId"] = mapId }
+        if let error { payload["error"] = error }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
+        return try? JSONDecoder().decode(OfflineMapJob.self, from: data)
     }
 
     static func testOfflineMapCreateJobURLRequest() {

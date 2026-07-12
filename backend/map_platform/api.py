@@ -7,7 +7,7 @@ from typing import Any
 
 from .downloads import DownloadSigner, DownloadTokenError
 from .geofabrik_sources import GeofabrikSourceProvider
-from .jobs import JobStore, MapJobService
+from .jobs import JobClaimError, JobStore, MapJobService
 from .limits import JobLimits
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
 from .source_cache import SourceCache, SourceCacheError
@@ -86,7 +86,10 @@ def create_app():
             service.get_job(job_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
-        return run_job(service.store, pipeline, job_id).to_dict()
+        try:
+            return run_job(service.store, pipeline, job_id).to_dict()
+        except JobClaimError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/v1/map-jobs/{job_id}/cancel", dependencies=[Depends(require_api_token)])
     def cancel_map_job(job_id: str) -> dict[str, Any]:

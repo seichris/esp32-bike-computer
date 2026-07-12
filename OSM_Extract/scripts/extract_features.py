@@ -2,6 +2,8 @@
 from funcs import process_features, clip_lines, clip_polygons, style_features, render_map, lat2y, lon2x
 from feature_types import get_type_id
 from map_format import write_fmb
+from block_progress import BlockProgressReporter
+from itertools import product
 from shapely import box
 import json, yaml
 import os, sys
@@ -46,10 +48,12 @@ lines = style_features( lines, styles) # styled_lines
 polygons = style_features( polygons, styles) # styled_polygons
 # polygons = make_all_convex( polygons)
 
-total = ((area_max_x - area_min_x)/4096) * ((area_max_y - area_min_y)/4096)
-done = 0
-for init_x in range(area_min_x, area_max_x, 4096):
-    for init_y in range(area_min_y, area_max_y, 4096):
+x_positions = range(area_min_x, area_max_x, 4096)
+y_positions = range(area_min_y, area_max_y, 4096)
+total = len(x_positions) * len(y_positions)
+progress = BlockProgressReporter(total)
+
+for init_x, init_y in progress.track(product(x_positions, y_positions)):
         # print("--------------------")
         # print("init_x, init_y", init_x, init_y)
         min_x = init_x & (~mapblock_mask)
@@ -60,7 +64,6 @@ for init_x in range(area_min_x, area_max_x, 4096):
         clipped_lines = clip_lines( lines, mapblock_bbox)
         clipped_polygons = clip_polygons( polygons, mapblock_bbox)
         if len(clipped_lines) == 0 and len( clipped_polygons) == 0:
-            done += 1
             continue
 
         # export map files
@@ -76,7 +79,6 @@ for init_x in range(area_min_x, area_max_x, 4096):
         
         # SKIP if file already exists (RESUME feature)
         if os.path.exists(f"{file_name}.fmb"):
-            done += 1
             print(f"  Step 5/5 Skipping existing block {block_x}_{block_y}      ", end='\r')
             continue
 
@@ -126,7 +128,3 @@ for init_x in range(area_min_x, area_max_x, 4096):
             min_x,
             min_y,
         )
-
-        done += 1
-        print("  Step 5/5 Building map. {:.0%}  ".format(done/total), end='\r')
-

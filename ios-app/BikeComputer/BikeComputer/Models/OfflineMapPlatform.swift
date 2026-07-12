@@ -133,9 +133,39 @@ struct OfflineMapJob: Decodable, Equatable {
     let packPath: String?
     let geometry: OfflineMapJobGeometry?
     let sourceRegion: OfflineMapSourceRegion?
+    let progress: OfflineMapJobProgress?
 
     var isTerminal: Bool {
         ["ready", "failed", "expired", "cancelled"].contains(status)
+    }
+}
+
+struct OfflineMapJobProgress: Decodable, Equatable {
+    let completedBlocks: Int
+    let totalBlocks: Int
+
+    var fraction: Double {
+        guard totalBlocks > 0 else { return 0 }
+        return min(max(Double(completedBlocks) / Double(totalBlocks), 0), 1)
+    }
+
+    var percentage: Int {
+        Int((fraction * 100).rounded())
+    }
+}
+
+enum OfflineMapProgressPresentation {
+    static func value(job: OfflineMapJob?, downloadProgress: Double) -> Double? {
+        if job?.status == "converting_features", let progress = job?.progress {
+            return progress.fraction
+        }
+        return downloadProgress > 0 ? downloadProgress : nil
+    }
+}
+
+enum OfflineMapDownloadingSectionPresentation {
+    static func isVisible(isBusy: Bool, hasPendingJob: Bool, errorMessage: String?) -> Bool {
+        isBusy || hasPendingJob || errorMessage != nil
     }
 }
 
@@ -145,6 +175,21 @@ struct OfflineMapJobGeometry: Decodable, Equatable {
     let areaKm2: Double
     let vertexCount: Int
     let routePointCount: Int
+}
+
+enum OfflineMapPreparationTimeEstimate {
+    static func description(for areaKm2: Double) -> String {
+        switch max(areaKm2, 0) {
+        case ..<10:
+            return "Usually under a minute"
+        case ..<1_000:
+            return "Usually a few minutes"
+        case ..<15_000:
+            return "May take 15–90 minutes"
+        default:
+            return "May take several hours"
+        }
+    }
 }
 
 struct OfflineMapSourceRegion: Decodable, Equatable {
@@ -160,7 +205,7 @@ struct OfflineMapDownloadURL: Decodable, Equatable {
     let expiresInSeconds: Int
 }
 
-enum OfflineMapPlatformError: LocalizedError {
+nonisolated enum OfflineMapPlatformError: LocalizedError {
     case invalidBaseURL
     case missingMapId
     case missingDownloadURL

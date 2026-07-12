@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from map_platform.jobs import JobStore, MapJobService
 from map_platform.limits import JobLimits
@@ -120,6 +121,28 @@ class SourceAndJobTests(unittest.TestCase):
             self.assertEqual(loaded.status.value, "queued")
             self.assertEqual(loaded.source_region.id, "sg")
             self.assertEqual(loaded.request["displayName"], "Singapore central")
+            self.assertIsNone(loaded.to_dict()["progress"])
+
+    def test_job_store_persists_generation_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            service = MapJobService(SourceIndex([self.singapore]), store)
+            job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+            )
+
+            with patch("map_platform.jobs.utc_now_iso", return_value="2026-07-12T00:00:00.000001Z"):
+                updated = store.update_progress_unless_cancelled(job.job_id, 7, 10, worker_id="worker-test")
+            response = service.get_job(job.job_id).to_dict()
+
+            self.assertEqual(updated.worker_id, "worker-test")
+            self.assertEqual(response["updatedAt"], "2026-07-12T00:00:00.000001Z")
+            self.assertEqual(response["progress"]["completedBlocks"], 7)
+            self.assertEqual(response["progress"]["totalBlocks"], 10)
+            self.assertEqual(response["progress"]["fraction"], 0.7)
 
     def test_create_job_enforces_active_job_limit(self):
         with tempfile.TemporaryDirectory() as tmp:

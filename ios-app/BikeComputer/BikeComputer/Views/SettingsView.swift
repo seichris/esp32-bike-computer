@@ -54,7 +54,11 @@ struct SettingsView: View {
                 MainFirmwareUpdateSection(manager: firmwareUpdateManager)
                 DeviceScreensSettingsSection()
                 SavedMapsSettingsSection(manager: offlineMapManager)
-                if offlineMapManager.isBusy || offlineMapManager.errorMessage != nil {
+                if OfflineMapDownloadingSectionPresentation.isVisible(
+                    isBusy: offlineMapManager.isBusy,
+                    hasPendingJob: offlineMapManager.hasPendingMapJob,
+                    errorMessage: offlineMapManager.errorMessage
+                ) {
                     DownloadingMapsSettingsSection(manager: offlineMapManager)
                 }
 
@@ -208,6 +212,7 @@ private struct MainFirmwareUpdateSection: View {
 }
 
 private struct DownloadingMapsSettingsSection: View {
+    @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
 
     var body: some View {
@@ -229,14 +234,50 @@ private struct DownloadingMapsSettingsSection: View {
                 StatusValueRow(status: manager.statusMessage, isBusy: manager.isBusy)
             }
 
+            if let generationProgress {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Generation Progress")
+                        Spacer()
+                        Text("\(generationProgress.percentage)%")
+                            .foregroundColor(.secondary)
+                    }
+                    ProgressView(value: generationProgress.fraction)
+                    Text("\(generationProgress.completedBlocks) of \(generationProgress.totalBlocks) map blocks")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
             if let sourceSummary {
                 SettingsValueRow(title: "Source", value: sourceSummary)
+            }
+
+            if let preparationTimeEstimate {
+                SettingsValueRow(title: "Estimated Preparation", value: preparationTimeEstimate)
+                Text("Feature density and water coverage can affect preparation time.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
 
             if let error = manager.errorMessage {
                 Text(error)
                     .font(.caption)
                     .foregroundColor(.red)
+            }
+
+            if manager.isBusy, manager.hasPendingMapJob {
+                Button(role: .destructive) {
+                    manager.pausePendingMapJob()
+                } label: {
+                    Label("Pause Map Preparation", systemImage: "pause.circle")
+                }
+            } else if manager.hasPendingMapJob {
+                Button {
+                    manager.resumePendingMapJobIfNeeded(bleManager: bleManager)
+                } label: {
+                    Label("Resume Map Preparation", systemImage: "play.circle")
+                }
             }
         }
     }
@@ -247,6 +288,20 @@ private struct DownloadingMapsSettingsSection: View {
             return "\(regionName) \(Int(area.rounded())) km²"
         }
         return regionName
+    }
+
+    private var preparationTimeEstimate: String? {
+        guard let job = manager.currentJob,
+              !job.isTerminal,
+              let areaKm2 = job.geometry?.areaKm2 else {
+            return nil
+        }
+        return OfflineMapPreparationTimeEstimate.description(for: areaKm2)
+    }
+
+    private var generationProgress: OfflineMapJobProgress? {
+        guard manager.currentJob?.status == "converting_features" else { return nil }
+        return manager.currentJob?.progress
     }
 }
 
@@ -279,7 +334,7 @@ private struct SavedMapsSettingsSection: View {
             Button(action: manager.beginMapAreaSelection) {
                 Label("Download a new Map", systemImage: "rectangle.dashed")
             }
-            .disabled(manager.isBusy)
+            .disabled(manager.isBusy || manager.hasPendingMapJob)
         }
         .onAppear {
             manager.reconcileLastTransfer(bleManager: bleManager)

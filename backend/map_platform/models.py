@@ -27,7 +27,7 @@ class JobStatus(str, Enum):
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 @dataclass(frozen=True)
@@ -130,6 +130,8 @@ class MapJob:
     worker_id: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    progress_completed: int | None = None
+    progress_total: int | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -150,6 +152,7 @@ class MapJob:
             "workerId": self.worker_id,
             "startedAt": self.started_at,
             "finishedAt": self.finished_at,
+            "progress": self.progress(),
             "events": self.events,
             "phaseTimings": self.phase_timings(),
         }
@@ -183,8 +186,20 @@ class MapJob:
             worker_id=data.get("workerId"),
             started_at=data.get("startedAt"),
             finished_at=data.get("finishedAt"),
+            progress_completed=_progress_value(data.get("progress"), "completedBlocks"),
+            progress_total=_progress_value(data.get("progress"), "totalBlocks"),
             events=list(data.get("events", [])),
         )
+
+    def progress(self) -> dict[str, Any] | None:
+        if self.progress_completed is None or self.progress_total is None or self.progress_total <= 0:
+            return None
+        completed = max(0, min(self.progress_completed, self.progress_total))
+        return {
+            "completedBlocks": completed,
+            "totalBlocks": self.progress_total,
+            "fraction": completed / self.progress_total,
+        }
 
     def phase_timings(self) -> list[dict[str, Any]]:
         transitions: list[tuple[str, str]] = []
@@ -219,6 +234,15 @@ def _parse_utc(value: str) -> datetime | None:
             value = value[:-1] + "+00:00"
         return datetime.fromisoformat(value)
     except ValueError:
+        return None
+
+
+def _progress_value(progress: Any, key: str) -> int | None:
+    if not isinstance(progress, dict) or progress.get(key) is None:
+        return None
+    try:
+        return int(progress[key])
+    except (TypeError, ValueError):
         return None
 
 

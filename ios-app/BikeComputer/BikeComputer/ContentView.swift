@@ -104,6 +104,9 @@ struct ContentView: View {
         .onChange(of: coordinator.selectedView) { newValue in
             coordinator.updateSelectedView(newValue)
         }
+        .onAppear {
+            offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
+        }
         .onChange(of: offlineMapManager.isMapAreaSelectionActive) { isActive in
             if isActive {
                 showingSettings = false
@@ -120,6 +123,7 @@ struct ContentView: View {
         guard !dismissedOfflineMapOnboarding else { return false }
         guard !offlineMapManager.isMapAreaSelectionActive else { return false }
         guard !offlineMapManager.isBusy,
+              !offlineMapManager.hasPendingMapJob,
               offlineMapManager.currentJob == nil,
               offlineMapManager.downloadedPackURL == nil,
               offlineMapManager.errorMessage == nil else { return false }
@@ -208,6 +212,7 @@ struct ContentView: View {
 
     private var shouldShowOfflineMapStatusChip: Bool {
         offlineMapManager.isBusy ||
+            offlineMapManager.hasPendingMapJob ||
             offlineMapManager.currentJob != nil ||
             offlineMapManager.downloadedPackURL != nil ||
             offlineMapManager.errorMessage != nil
@@ -219,7 +224,7 @@ struct ContentView: View {
         } label: {
             HStack(spacing: 10) {
                 if offlineMapManager.isBusy {
-                    ProgressView(value: offlineMapManager.downloadProgress > 0 ? offlineMapManager.downloadProgress : nil)
+                    ProgressView(value: offlineMapManager.activityProgress)
                         .frame(width: 22, height: 22)
                 } else {
                     Image(systemName: offlineMapManager.downloadedPackURL == nil ? "map" : "checkmark.circle.fill")

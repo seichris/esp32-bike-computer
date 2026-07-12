@@ -19,38 +19,70 @@ class WorkerResult:
 
 
 class MapWorker:
-    def __init__(self, store: JobStore, pipeline: MapBuildPipeline, *, worker_id: str | None = None):
+    def __init__(
+        self,
+        store: JobStore,
+        pipeline: MapBuildPipeline,
+        *,
+        worker_id: str | None = None,
+        interrupted_job_stale_seconds: float = 15 * 60,
+        heartbeat_interval_seconds: float = 30.0,
+    ):
         self.store = store
         self.pipeline = pipeline
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
+        self.interrupted_job_stale_seconds = interrupted_job_stale_seconds
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
 
     def run_next(self) -> WorkerResult:
         self.store.requeue_retryable_failures()
-        job = self.store.claim_next(self.worker_id)
+        job = self.store.claim_next(
+            self.worker_id,
+            interrupted_job_stale_seconds=self.interrupted_job_stale_seconds,
+        )
         if job is None:
             return WorkerResult(worker_id=self.worker_id, job=None, processed=False)
 
         def update(status: JobStatus) -> None:
             self.store.update_status_unless_cancelled(job.job_id, status, worker_id=self.worker_id)
 
-        try:
-            map_id, archive_path = self.pipeline.build(job, on_status=update)
-            finished = self.store.update_status_unless_cancelled(
+        def update_progress(completed: int, total: int) -> None:
+            self.store.update_progress_unless_cancelled(
                 job.job_id,
-                JobStatus.READY,
-                map_id=map_id,
-                pack_path=str(archive_path),
-                pack_bytes=archive_path.stat().st_size if archive_path.exists() else None,
+                completed,
+                total,
                 worker_id=self.worker_id,
-                event="map pack ready",
-                finished=True,
+            )
+
+        try:
+            with self.store.keep_worker_lease_alive(
+                job.job_id,
+                worker_id=self.worker_id,
+                interval_seconds=self.heartbeat_interval_seconds,
+            ):
+                map_id, archive_path = self.pipeline.build(
+                    job,
+                    on_status=update,
+                    on_progress=update_progress,
+                )
+            published_archive = (
+                self.pipeline.published_archive_path(map_id)
+                if hasattr(self.pipeline, "published_archive_path")
+                else archive_path
+            )
+            finished = self.store.complete_job(
+                job.job_id,
+                worker_id=self.worker_id,
+                map_id=map_id,
+                built_archive=archive_path,
+                published_archive=published_archive,
             )
             return WorkerResult(worker_id=self.worker_id, job=finished, processed=True)
         except Exception as exc:
             current = self.store.get(job.job_id)
-            if current.status == JobStatus.CANCELLED:
+            if current.status == JobStatus.CANCELLED or current.worker_id != self.worker_id:
                 return WorkerResult(worker_id=self.worker_id, job=current, processed=True)
-            failed = self.store.update_status(
+            failed = self.store.update_status_unless_cancelled(
                 job.job_id,
                 JobStatus.FAILED,
                 error=str(exc),
@@ -59,7 +91,7 @@ class MapWorker:
                 finished=True,
             )
             if failed.attempts < failed.max_attempts:
-                failed = self.store.update_status(
+                failed = self.store.update_status_unless_cancelled(
                     job.job_id,
                     JobStatus.QUEUED,
                     error=str(exc),
