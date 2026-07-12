@@ -360,7 +360,7 @@ struct OfflineMapPackEntry: Equatable {
     let byteCount: Int
 }
 
-struct OfflineMapPackManifest: Decodable, Equatable {
+nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
     struct File: Decodable, Equatable {
         let path: String
         let bytes: Int
@@ -820,6 +820,32 @@ struct MapTransferDeviceClient {
     }
 }
 
+nonisolated struct BackgroundTransferCompletionGate {
+    private(set) var activeWorkflows = 0
+    private(set) var eventsFinished = false
+
+    mutating func beginWorkflow() {
+        activeWorkflows += 1
+    }
+
+    mutating func finishWorkflow() -> Bool {
+        precondition(activeWorkflows > 0, "background transfer workflow is unbalanced")
+        activeWorkflows -= 1
+        return takeCompletionReadiness()
+    }
+
+    mutating func didFinishEvents() -> Bool {
+        eventsFinished = true
+        return takeCompletionReadiness()
+    }
+
+    private mutating func takeCompletionReadiness() -> Bool {
+        guard activeWorkflows == 0, eventsFinished else { return false }
+        eventsFinished = false
+        return true
+    }
+}
+
 #if os(iOS)
 final class BackgroundMapUploadCoordinator: NSObject,
                                             URLSessionDataDelegate,
@@ -837,6 +863,7 @@ final class BackgroundMapUploadCoordinator: NSObject,
     private let lock = NSLock()
     private var pendingUploads: [Int: PendingUpload] = [:]
     private var backgroundCompletionHandler: (() -> Void)?
+    private var completionGate = BackgroundTransferCompletionGate()
 
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.background(
@@ -884,6 +911,25 @@ final class BackgroundMapUploadCoordinator: NSObject,
         backgroundCompletionHandler = completionHandler
         lock.unlock()
         _ = session
+    }
+
+    func beginTransferWorkflow() {
+        lock.lock()
+        completionGate.beginWorkflow()
+        lock.unlock()
+    }
+
+    func finishTransferWorkflow() {
+        lock.lock()
+        let shouldComplete = completionGate.finishWorkflow()
+        let completionHandler = shouldComplete ? backgroundCompletionHandler : nil
+        if shouldComplete {
+            backgroundCompletionHandler = nil
+        }
+        lock.unlock()
+        if let completionHandler {
+            DispatchQueue.main.async(execute: completionHandler)
+        }
     }
 
     func urlSession(
@@ -947,11 +993,14 @@ final class BackgroundMapUploadCoordinator: NSObject,
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         lock.lock()
-        let completionHandler = backgroundCompletionHandler
-        backgroundCompletionHandler = nil
+        let shouldComplete = completionGate.didFinishEvents()
+        let completionHandler = shouldComplete ? backgroundCompletionHandler : nil
+        if shouldComplete {
+            backgroundCompletionHandler = nil
+        }
         lock.unlock()
-        DispatchQueue.main.async {
-            completionHandler?()
+        if let completionHandler {
+            DispatchQueue.main.async(execute: completionHandler)
         }
     }
 }

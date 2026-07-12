@@ -1406,14 +1406,20 @@ final class OfflineMapManager: ObservableObject {
     private func transferPack(at packURL: URL, bleManager: BLEManager) async throws {
         statusMessage = "preparing transfer"
         transferProgress = 0
-        let archive = try await Task.detached(priority: .userInitiated) {
+        let validationTask = Task.detached(priority: .userInitiated) {
             let archive = try OfflineMapPackArchive(url: packURL)
             guard let mapId = try archive.manifest().mapId, !mapId.isEmpty else {
                 throw OfflineMapPlatformError.invalidPack("manifest.json has no mapId")
             }
             try archive.validate(expectedMapId: mapId)
             return archive
-        }.value
+        }
+        let archive = try await withTaskCancellationHandler {
+            try await validationTask.value
+        } onCancel: {
+            validationTask.cancel()
+        }
+        try Task.checkCancellation()
         guard let expectedMapId = try archive.manifest().mapId,
               !expectedMapId.isEmpty else {
             throw OfflineMapPlatformError.invalidPack("manifest.json has no mapId")
@@ -1441,6 +1447,12 @@ final class OfflineMapManager: ObservableObject {
             ) { message in
                 self.statusMessage = message
             }
+#if os(iOS)
+            BackgroundMapUploadCoordinator.shared.beginTransferWorkflow()
+            defer {
+                BackgroundMapUploadCoordinator.shared.finishTransferWorkflow()
+            }
+#endif
             defer {
                 deviceTransferManager.exitMapTransfer(bleManager: bleManager)
             }

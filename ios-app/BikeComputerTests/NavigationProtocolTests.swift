@@ -390,6 +390,7 @@ struct NavigationProtocolTests {
         testOfflineMapProgressPresentation()
         testOfflineMapDownloadingSectionPresentation()
         testOfflineMapActivityCounterOverlappingOperations()
+        testBackgroundTransferCompletionGate()
         testOfflineMapJobPersistence()
         testOfflineMapInstallationIdentity()
         testOfflineMapJobRecoverySelection()
@@ -1024,6 +1025,32 @@ struct NavigationProtocolTests {
         )
         counter.end()
         assert(!counter.isBusy, "busy state clears after the final operation finishes")
+    }
+
+    static func testBackgroundTransferCompletionGate() {
+        var gate = BackgroundTransferCompletionGate()
+        gate.beginWorkflow()
+        assert(
+            !gate.didFinishEvents(),
+            "background session completion waits for activation and cleanup"
+        )
+        assert(
+            gate.finishWorkflow(),
+            "completion is released after the transfer workflow finishes"
+        )
+
+        gate.beginWorkflow()
+        gate.beginWorkflow()
+        assert(!gate.didFinishEvents(), "multiple workflows hold completion")
+        assert(!gate.finishWorkflow(), "one remaining workflow still holds completion")
+        assert(gate.finishWorkflow(), "the final workflow releases completion")
+
+        gate.beginWorkflow()
+        assert(!gate.finishWorkflow(), "workflow completion waits for URL session events")
+        assert(
+            gate.didFinishEvents(),
+            "URL session events release completion after the workflow already finished"
+        )
     }
 
     @MainActor
