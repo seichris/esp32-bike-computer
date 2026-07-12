@@ -95,24 +95,23 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(second_worker_run.status_code, 200)
         first_result = first_worker_run.json()["job"]
         second_result = second_worker_run.json()["job"]
-        self.assertEqual(first_result["jobId"], first_job_id)
-        self.assertEqual(second_result["jobId"], second_job_id)
-        first_pack_path = Path(first_result["packPath"])
-        second_pack_path = Path(second_result["packPath"])
         self.assertEqual(
-            first_pack_path,
-            Path(self.tmp.name) / "packs" / "map-shared" / f"{first_job_id}.zip",
+            {first_result["jobId"], second_result["jobId"]},
+            {first_job_id, second_job_id},
         )
-        self.assertEqual(
-            second_pack_path,
-            Path(self.tmp.name) / "packs" / "map-shared" / f"{second_job_id}.zip",
-        )
-        self.assertNotEqual(first_pack_path, second_pack_path)
-
-        for job_id, expected in [
-            (first_job_id, b"first-job-exact-bytes"),
-            (second_job_id, b"second-job-exact-bytes"),
-        ]:
+        results_with_expected_bytes = [
+            (first_result, b"first-job-exact-bytes"),
+            (second_result, b"second-job-exact-bytes"),
+        ]
+        pack_paths = []
+        for result, expected in results_with_expected_bytes:
+            job_id = result["jobId"]
+            pack_path = Path(result["packPath"])
+            pack_paths.append(pack_path)
+            self.assertEqual(
+                pack_path,
+                Path(self.tmp.name) / "packs" / "map-shared" / f"{job_id}.zip",
+            )
             signed = self.client.post(
                 "/v1/map-packs/map-shared/download-url",
                 params={
@@ -124,6 +123,7 @@ class MapJobRunAPITests(unittest.TestCase):
             downloaded = self.client.get(signed.json()["url"])
             self.assertEqual(downloaded.status_code, 200)
             self.assertEqual(downloaded.content, expected)
+        self.assertNotEqual(pack_paths[0], pack_paths[1])
 
     def test_pre_deploy_signed_url_can_download_legacy_shared_artifact(self):
         legacy_job_id = self.create_job()
@@ -132,6 +132,7 @@ class MapJobRunAPITests(unittest.TestCase):
         legacy_pack_path.write_bytes(b"legacy-shared-bytes")
         self.update_job(
             legacy_job_id,
+            status="ready",
             mapId="map-legacy",
             packPath=str(legacy_pack_path),
             createdAt="2026-07-12T01:00:00Z",
@@ -143,6 +144,7 @@ class MapJobRunAPITests(unittest.TestCase):
         newer_pack_path.write_bytes(b"new-job-bytes")
         self.update_job(
             newer_job_id,
+            status="ready",
             mapId="map-legacy",
             packPath=str(newer_pack_path),
             createdAt="2026-07-12T02:00:00Z",
@@ -159,6 +161,35 @@ class MapJobRunAPITests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, b"legacy-shared-bytes")
+
+    def test_expired_job_cannot_issue_a_new_download_url(self):
+        job_id = self.create_job()
+        pack_path = Path(self.tmp.name) / "packs" / "map-expired" / f"{job_id}.zip"
+        pack_path.parent.mkdir(parents=True)
+        pack_path.write_bytes(b"expired")
+        self.update_job(
+            job_id,
+            status="ready",
+            mapId="map-expired",
+            packPath=str(pack_path),
+        )
+
+        expired = self.client.post(
+            "/v1/maintenance/expire",
+            json={"olderThanDays": 0},
+        )
+        download = self.client.post(
+            "/v1/map-packs/map-expired/download-url",
+            params={
+                "clientInstallationId": "installation-owner",
+                "jobId": job_id,
+            },
+        )
+
+        self.assertEqual(expired.status_code, 200)
+        self.assertEqual(expired.json()["expired"], 1)
+        self.assertEqual(download.status_code, 404)
+        self.assertFalse(pack_path.exists())
 
     def test_run_route_rejects_active_job(self):
         job_id = self.create_job()
@@ -331,18 +362,21 @@ class MapJobRunAPITests(unittest.TestCase):
         other_path.write_bytes(b"other")
         self.update_job(
             older,
+            status="ready",
             mapId="map-shared",
             packPath=str(older_path),
             createdAt="2026-07-12T01:00:00Z",
         )
         self.update_job(
             newer,
+            status="ready",
             mapId="map-shared",
             packPath=str(newer_path),
             createdAt="2026-07-12T03:00:00Z",
         )
         self.update_job(
             other,
+            status="ready",
             mapId="map-shared",
             packPath=str(other_path),
             createdAt="2026-07-12T04:00:00Z",
@@ -398,6 +432,7 @@ class MapJobRunAPITests(unittest.TestCase):
         legacy_path.write_bytes(b"legacy")
         self.update_job(
             legacy,
+            status="ready",
             mapId="map-legacy",
             packPath=str(legacy_path),
         )

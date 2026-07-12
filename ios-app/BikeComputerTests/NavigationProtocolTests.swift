@@ -393,6 +393,7 @@ struct NavigationProtocolTests {
         testOfflineMapInstallationIdentity()
         testOfflineMapJobRecoverySelection()
         testOfflineMapDownloadResponseValidation()
+        await testOfflineMapPackDownloaderRejectsHTTPError()
         testPendingOfflineMapJobBlocksEveryCreationIngress()
         await testOfflineMapJobCreatorReconcilesAmbiguousResponse()
         await testOfflineMapPollerOutlivesLegacyAttemptLimit()
@@ -647,7 +648,11 @@ struct NavigationProtocolTests {
             apiTokenString: "job-token",
             defaults: defaults
         )
-        OfflineMapJobPersistence.markPackDownloaded(jobId: "job-resume", defaults: defaults)
+        OfflineMapJobPersistence.markPackDownloaded(
+            jobId: "job-resume",
+            mapId: "map-resume",
+            defaults: defaults
+        )
         assertEqual(
             OfflineMapJobPersistence.activeJobId(defaults: defaults),
             "job-resume",
@@ -666,6 +671,11 @@ struct NavigationProtocolTests {
             OfflineMapJobPersistence.downloadedJobId(defaults: defaults),
             "job-resume",
             "downloaded pack state survives transfer interruption"
+        )
+        assertEqual(
+            OfflineMapJobPersistence.downloadedMapId(defaults: defaults),
+            "map-resume",
+            "downloaded pack identity survives app relaunch without server access"
         )
         assertEqual(
             OfflineMapJobPersistence.apiTokenString(defaults: defaults),
@@ -693,6 +703,11 @@ struct NavigationProtocolTests {
             "completed map job clears downloaded recovery state"
         )
         assertEqual(
+            OfflineMapJobPersistence.downloadedMapId(defaults: defaults),
+            nil,
+            "completed map job clears downloaded map identity"
+        )
+        assertEqual(
             OfflineMapJobPersistence.apiTokenString(defaults: defaults),
             nil,
             "completed map job clears its originating credential"
@@ -704,15 +719,36 @@ struct NavigationProtocolTests {
             ["job-resume", "job-other"],
             "handled server jobs remain excluded from automatic redownload"
         )
-        let ignoredBefore = Date(timeIntervalSince1970: 1_750_000_000)
-        OfflineMapRecoveryHistory.ignoreExistingServerJobs(
-            defaults: defaults,
-            now: ignoredBefore
+        OfflineMapRecoveryHistory.forgetNextDiscovery(
+            serverURLString: "https://maps-a.example/",
+            defaults: defaults
         )
-        assertEqual(
-            OfflineMapRecoveryHistory.ignoredBefore(defaults: defaults),
-            ignoredBefore,
-            "forgetting discovery persists a durable server-job cutoff"
+        assert(
+            OfflineMapRecoveryHistory.shouldForgetNextDiscovery(
+                serverURLString: "https://maps-a.example",
+                defaults: defaults
+            ),
+            "forgetting discovery survives relaunch for the normalized server"
+        )
+        assert(
+            !OfflineMapRecoveryHistory.shouldForgetNextDiscovery(
+                serverURLString: "https://maps-b.example",
+                defaults: defaults
+            ),
+            "forgetting one server does not suppress another server"
+        )
+        assert(
+            OfflineMapRecoveryHistory.consumeForgottenDiscovery(
+                serverURLString: "https://maps-a.example",
+                jobIds: ["job-existing-at-forget"],
+                defaults: defaults
+            ),
+            "next successful discovery consumes the durable forget marker"
+        )
+        assert(
+            OfflineMapRecoveryHistory.handledJobIds(defaults: defaults)
+                .contains("job-existing-at-forget"),
+            "forget snapshot durably excludes the server jobs it observed"
         )
     }
 
@@ -815,33 +851,6 @@ struct NavigationProtocolTests {
         )
         assertEqual(none, nil, "terminal and ready-without-map jobs are not recoverable")
 
-        let ignoredExisting = OfflineMapJobRecoverySelector.select(
-            jobs: jobs,
-            clientInstallationId: "installation-mine",
-            ignoredBefore: ISO8601DateFormatter().date(from: "2026-07-12T04:30:00Z")
-        )
-        assertEqual(
-            ignoredExisting,
-            nil,
-            "durable forget excludes every recoverable job that already existed"
-        )
-        let futureFractionalJob = offlineMapJob(
-            jobId: "job-created-after-forget",
-            status: "ready",
-            mapId: "map-created-after-forget",
-            createdAt: "2026-07-12T04:30:00.123456Z",
-            clientInstallationId: "installation-mine"
-        )
-        let selectedAfterForget = OfflineMapJobRecoverySelector.select(
-            jobs: [futureFractionalJob].compactMap { $0 },
-            clientInstallationId: "installation-mine",
-            ignoredBefore: ISO8601DateFormatter().date(from: "2026-07-12T04:00:00Z")
-        )
-        assertEqual(
-            selectedAfterForget?.jobId,
-            "job-created-after-forget",
-            "durable forget still permits later server jobs with production timestamps"
-        )
     }
 
     static func testOfflineMapDownloadResponseValidation() {
@@ -881,6 +890,38 @@ struct NavigationProtocolTests {
             assertEqual(body, "download URL expired", "download validation preserves error body")
         } catch {
             assert(false, "HTTP error should use OfflineMapPlatformError")
+        }
+    }
+
+    @MainActor
+    static func testOfflineMapPackDownloaderRejectsHTTPError() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        OfflineMapTestURLProtocol.configure { _ in
+            (403, Data("download URL expired".utf8))
+        }
+        defer { OfflineMapTestURLProtocol.reset() }
+
+        do {
+            _ = try await OfflineMapPackDownloader.download(
+                from: URL(string: "https://maps.example/expired.zip")!,
+                onProgress: { _ in },
+                onByteProgress: { _ in },
+                configuration: configuration
+            )
+            assert(false, "real downloader must reject an HTTP error body")
+        } catch let error as OfflineMapPlatformError {
+            guard case .serverStatus(let status, let body) = error else {
+                assert(false, "real downloader should surface the HTTP status")
+                return
+            }
+            assertEqual(status, 403, "real downloader preserves HTTP failure status")
+            assert(
+                body.contains("download URL expired"),
+                "real downloader preserves the server error body"
+            )
+        } catch {
+            assert(false, "real downloader should use OfflineMapPlatformError")
         }
     }
 
@@ -1168,14 +1209,38 @@ struct NavigationProtocolTests {
             },
             "persisted recovery uses its originating server credential"
         )
-        persistedManager.resumePendingMapJobIfNeeded(bleManager: disconnectedBLE)
-        let secondPersistedPassCompleted = await waitForMapTaskCompletion(persistedManager)
-        assert(secondPersistedPassCompleted, "persisted recovery should be resumable")
-        assertEqual(persistedDownloadCount, 1, "deferred device install reuses the downloaded pack")
-        if let url = persistedManager.downloadedPackURL {
-            persistedManager.deleteCachedPack(at: url)
+        let relaunchedPersistedManager = OfflineMapManager(
+            defaults: persistedDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: persistedCache,
+            packDownload: { _, _, _ in
+                persistedDownloadCount += 1
+                throw URLError(.cannotConnectToHost)
+            }
+        )
+        OfflineMapTestURLProtocol.configure { _ in
+            throw URLError(.cannotConnectToHost)
         }
-        persistedManager.forgetPendingMapJob()
+        relaunchedPersistedManager.resumePendingMapJobIfNeeded(bleManager: disconnectedBLE)
+        let localRestoreDeadline = Date().addingTimeInterval(3)
+        while relaunchedPersistedManager.downloadedPackURL == nil &&
+                Date() < localRestoreDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        assert(
+            relaunchedPersistedManager.downloadedPackURL != nil,
+            "app relaunch restores the deferred local pack without the map server"
+        )
+        assertEqual(
+            OfflineMapTestURLProtocol.requests().count,
+            0,
+            "deferred local install does not poll the map server"
+        )
+        assertEqual(persistedDownloadCount, 1, "deferred device install reuses the downloaded pack")
+        if let url = relaunchedPersistedManager.downloadedPackURL {
+            relaunchedPersistedManager.deleteCachedPack(at: url)
+        }
+        relaunchedPersistedManager.forgetPendingMapJob()
 
         let managedSuite = "offline-map-managed-token-route-\(UUID().uuidString)"
         let managedDefaults = UserDefaults(suiteName: managedSuite)!
@@ -1309,8 +1374,16 @@ struct NavigationProtocolTests {
         let downloadRetryCache = FileManager.default.temporaryDirectory
             .appendingPathComponent("offline-map-download-retry-cache-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: downloadRetryCache) }
+        try! FileManager.default.createDirectory(
+            at: downloadRetryCache,
+            withIntermediateDirectories: true
+        )
+        let downloadRetryPack = downloadRetryCache.appendingPathComponent("map-download-retry.zip")
+        let originalDownloadRetryPackData = packData(mapId: "map-download-retry")
+        try! originalDownloadRetryPackData.write(to: downloadRetryPack)
         var downloadURLIssueCount = 0
         var packDownloadAttemptCount = 0
+        var rejectedTemporaryURL: URL?
         OfflineMapTestURLProtocol.configure { request in
             if request.url?.path == "/v1/map-jobs/job-download-retry" {
                 return (200, jobData(jobId: "job-download-retry", mapId: "map-download-retry"))
@@ -1336,7 +1409,12 @@ struct NavigationProtocolTests {
             packDownload: { _, onProgress, _ in
                 packDownloadAttemptCount += 1
                 if packDownloadAttemptCount == 1 {
-                    throw URLError(.networkConnectionLost)
+                    let url = FileManager.default.temporaryDirectory
+                        .appendingPathComponent(UUID().uuidString)
+                        .appendingPathExtension("zip")
+                    try Data("not a map pack".utf8).write(to: url)
+                    rejectedTemporaryURL = url
+                    return url
                 }
                 onProgress(1)
                 let url = FileManager.default.temporaryDirectory
@@ -1351,6 +1429,15 @@ struct NavigationProtocolTests {
         assert(firstDownloadAttemptCompleted, "failed download attempt should stop cleanly")
         assert(downloadRetryManager.hasPendingMapJob, "failed download remains recoverable")
         assertEqual(downloadRetryManager.downloadURL, nil, "failed signed URL is discarded")
+        assert(
+            rejectedTemporaryURL.map { !FileManager.default.fileExists(atPath: $0.path) } == true,
+            "invalid downloaded archive is removed"
+        )
+        assertEqual(
+            try? Data(contentsOf: downloadRetryPack),
+            originalDownloadRetryPackData,
+            "invalid replacement preserves the existing cached map"
+        )
 
         downloadRetryManager.resumePendingMapJobIfNeeded()
         let retryDeadline = Date().addingTimeInterval(3)
@@ -1362,7 +1449,6 @@ struct NavigationProtocolTests {
         assertEqual(downloadURLIssueCount, 2, "download retry obtains a fresh exact-job URL")
         assertEqual(packDownloadAttemptCount, 2, "download retry performs a second transfer")
         assert(!downloadRetryManager.hasPendingMapJob, "successful download retry clears recovery state")
-        let downloadRetryPack = downloadRetryCache.appendingPathComponent("map-download-retry.zip")
         assertEqual(
             downloadRetryManager.displayName(forCachedPack: downloadRetryPack),
             "Shanghai Riverside",
@@ -1759,24 +1845,34 @@ struct NavigationProtocolTests {
         let packURL = cacheDirectory.appendingPathComponent("custom-map-shanghai.zip")
 
         let manager = OfflineMapManager(defaults: defaults, cacheDirectory: cacheDirectory)
-        assert(
-            !SavedMapRenameFocusPolicy.shouldCommit(
-                editingFilename: packURL.lastPathComponent,
-                focusedFilename: packURL.lastPathComponent
+        var renameInteraction = SavedMapRenameInteraction()
+        assertEqual(
+            renameInteraction.begin(
+                filename: packURL.lastPathComponent,
+                currentName: "Shanghai"
             ),
+            nil,
+            "starting a rename has no previous draft to commit"
+        )
+        renameInteraction.updateDraft("  Shanghai Riverside  ")
+        assertEqual(
+            renameInteraction.finishIfFocusMoved(to: packURL.lastPathComponent),
+            nil,
             "tapping within the active name field keeps editing"
         )
-        assert(
-            SavedMapRenameFocusPolicy.shouldCommit(
-                editingFilename: packURL.lastPathComponent,
-                focusedFilename: nil
-            ),
-            "tapping outside the active name field commits editing"
+        guard let tapAwayCommit = renameInteraction.finishIfFocusMoved(to: nil) else {
+            assert(false, "tapping elsewhere should produce a rename commit")
+            return
+        }
+        assertEqual(
+            tapAwayCommit.filename,
+            packURL.lastPathComponent,
+            "tap-away commit retains the edited map identity"
         )
         assertEqual(
-            manager.renameCachedPack(at: packURL, to: "  Shanghai Riverside  "),
+            manager.renameCachedPack(at: packURL, to: tapAwayCommit.proposedName),
             "Shanghai Riverside",
-            "renaming trims surrounding whitespace"
+            "tap-away commit trims surrounding whitespace"
         )
         assertEqual(
             manager.displayName(forCachedPack: packURL),

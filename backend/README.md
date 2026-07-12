@@ -82,6 +82,10 @@ Useful production environment variables:
 
 - `MAP_PLATFORM_MAX_ACTIVE_JOBS`: maximum queued/running jobs accepted by the
   API, default `25`.
+- `MAP_PLATFORM_JOB_RETENTION_DAYS`: days to retain ready job artifacts,
+  default `30`.
+- `MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS`: worker cleanup interval,
+  default `3600`.
 - `MAP_PLATFORM_DYNAMIC_SOURCE_DISCOVERY`: enable Geofabrik catalog fallback,
   default `1`.
 - `MAP_PLATFORM_GEOFABRIK_INDEX_URL`: provider catalog URL, default

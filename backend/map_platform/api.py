@@ -9,6 +9,7 @@ from .downloads import DownloadSigner, DownloadTokenError
 from .geofabrik_sources import GeofabrikSourceProvider
 from .jobs import JobClaimError, JobStore, MapJobService
 from .limits import JobLimits
+from .models import JobStatus
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
 from .source_cache import SourceCache, SourceCacheError
 from .sources import SourceIndex
@@ -155,7 +156,7 @@ def create_app():
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if not job:
+        if not job or job.status != JobStatus.READY:
             raise HTTPException(status_code=404, detail="map pack not found")
         return job.to_dict()
 
@@ -180,7 +181,7 @@ def create_app():
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="map pack not ready") from exc
-        if not job or not job.pack_path:
+        if not job or job.status != JobStatus.READY or not job.pack_path:
             raise HTTPException(status_code=404, detail="map pack not ready")
         signed = download_signer.sign(map_id, job.pack_path, ttl_seconds=900)
         return {
@@ -207,7 +208,7 @@ def create_app():
         else:
             # Preserve already-issued pre-deploy URLs for their short TTL.
             job = service.find_by_map_id(map_id, allow_owned_without_installation=True)
-        if not job or not job.pack_path:
+        if not job or job.status != JobStatus.READY or not job.pack_path:
             raise HTTPException(status_code=404, detail="map pack not ready")
         pack_path = Path(job.pack_path)
         try:

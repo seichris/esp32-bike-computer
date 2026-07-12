@@ -181,38 +181,52 @@ enum OfflineMapJobRecoverySelector {
     static func select(
         jobs: [OfflineMapJob],
         clientInstallationId: String,
-        excludedJobIds: Set<String> = [],
-        ignoredBefore: Date? = nil
+        excludedJobIds: Set<String> = []
     ) -> OfflineMapJob? {
         jobs
             .filter { job in
                 guard job.clientInstallationId == clientInstallationId else { return false }
                 guard !excludedJobIds.contains(job.jobId) else { return false }
-                if let ignoredBefore {
-                    guard let createdAt = job.createdAt,
-                          let createdDate = serverDate(from: createdAt),
-                          createdDate > ignoredBefore else {
-                        return false
-                    }
-                }
                 return job.status == "ready" ? job.mapId != nil : !job.isTerminal
             }
             .max { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
     }
-
-    private static func serverDate(from value: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: value) {
-            return date
-        }
-        return ISO8601DateFormatter().date(from: value)
-    }
 }
 
-enum SavedMapRenameFocusPolicy {
-    static func shouldCommit(editingFilename: String, focusedFilename: String?) -> Bool {
-        focusedFilename != editingFilename
+struct SavedMapRenameCommit: Equatable {
+    let filename: String
+    let proposedName: String
+}
+
+struct SavedMapRenameInteraction: Equatable {
+    private(set) var editingFilename: String?
+    private(set) var draftName = ""
+
+    mutating func begin(filename: String, currentName: String) -> SavedMapRenameCommit? {
+        let previous = finish()
+        editingFilename = filename
+        draftName = currentName
+        return previous
+    }
+
+    mutating func updateDraft(_ value: String) {
+        draftName = value
+    }
+
+    mutating func finishIfFocusMoved(to focusedFilename: String?) -> SavedMapRenameCommit? {
+        guard focusedFilename != editingFilename else { return nil }
+        return finish()
+    }
+
+    mutating func finish() -> SavedMapRenameCommit? {
+        guard let editingFilename else { return nil }
+        let commit = SavedMapRenameCommit(
+            filename: editingFilename,
+            proposedName: draftName
+        )
+        self.editingFilename = nil
+        draftName = ""
+        return commit
     }
 }
 

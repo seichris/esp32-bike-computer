@@ -16,6 +16,7 @@ struct SettingsView: View {
     @Environment(\.openURL) private var openURL
     @ObservedObject private var offlineMapManager: OfflineMapManager
     @ObservedObject private var firmwareUpdateManager: FirmwareUpdateManager
+    @FocusState private var focusedSavedMapFilename: String?
     let locationAuthorized: Bool
     let currentLocation: CLLocation?
     let onStartTestNavigation: (String) -> Void
@@ -53,7 +54,10 @@ struct SettingsView: View {
 
                 MainFirmwareUpdateSection(manager: firmwareUpdateManager)
                 DeviceScreensSettingsSection()
-                SavedMapsSettingsSection(manager: offlineMapManager)
+                SavedMapsSettingsSection(
+                    manager: offlineMapManager,
+                    focusedPackFilename: $focusedSavedMapFilename
+                )
                 if OfflineMapDownloadingSectionPresentation.isVisible(
                     isBusy: offlineMapManager.isBusy,
                     hasPendingJob: offlineMapManager.hasPendingMapJob,
@@ -89,6 +93,9 @@ struct SettingsView: View {
                         Label("Developer Settings", systemImage: "wrench.and.screwdriver")
                     }
                 }
+            }
+            .onTapGesture {
+                focusedSavedMapFilename = nil
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -313,7 +320,8 @@ private struct DownloadingMapsSettingsSection: View {
 private struct SavedMapsSettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
-    @FocusState private var focusedPackFilename: String?
+    @FocusState.Binding var focusedPackFilename: String?
+    @State private var renameInteraction = SavedMapRenameInteraction()
 
     var body: some View {
         Section(header: Text("Saved Maps")) {
@@ -335,7 +343,9 @@ private struct SavedMapsSettingsSection: View {
                     DownloadedMapRow(
                         manager: manager,
                         packURL: packURL,
-                        focusedPackFilename: $focusedPackFilename
+                        focusedPackFilename: $focusedPackFilename,
+                        renameInteraction: $renameInteraction,
+                        onCommitRename: commitRename
                     )
                         .environmentObject(bleManager)
                 }
@@ -345,10 +355,14 @@ private struct SavedMapsSettingsSection: View {
                 Label("Download a new Map", systemImage: "rectangle.dashed")
             }
             .disabled(manager.isBusy || manager.hasPendingMapJob)
-
         }
-        .onTapGesture {
-            focusedPackFilename = nil
+        .onChange(of: focusedPackFilename) { newValue in
+            scheduleRenameCommitIfNeeded(focusedFilename: newValue)
+        }
+        .onDisappear {
+            if let commit = renameInteraction.finish() {
+                commitRename(commit)
+            }
         }
         .onAppear {
             manager.reconcileLastTransfer(bleManager: bleManager)
@@ -366,6 +380,28 @@ private struct SavedMapsSettingsSection: View {
             manager.reconcileLastTransfer(bleManager: bleManager)
         }
     }
+
+    private func scheduleRenameCommitIfNeeded(focusedFilename: String?) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            guard focusedPackFilename == focusedFilename,
+                  let commit = renameInteraction.finishIfFocusMoved(
+                    to: focusedPackFilename
+                  ) else {
+                return
+            }
+            commitRename(commit)
+        }
+    }
+
+    private func commitRename(_ commit: SavedMapRenameCommit) {
+        guard let packURL = manager.cachedPackURLs.first(where: {
+            $0.lastPathComponent == commit.filename
+        }) else {
+            return
+        }
+        manager.renameCachedPack(at: packURL, to: commit.proposedName)
+    }
 }
 
 private struct DownloadedMapRow: View {
@@ -373,27 +409,25 @@ private struct DownloadedMapRow: View {
     @ObservedObject var manager: OfflineMapManager
     let packURL: URL
     @FocusState.Binding var focusedPackFilename: String?
-    @State private var draftName = ""
-    @State private var isEditingName = false
+    @Binding var renameInteraction: SavedMapRenameInteraction
+    let onCommitRename: (SavedMapRenameCommit) -> Void
 
     var body: some View {
         let displayName = manager.displayName(forCachedPack: packURL)
 
         HStack(spacing: 12) {
-            if isEditingName {
-                TextField("Map name", text: $draftName)
+            if renameInteraction.editingFilename == packURL.lastPathComponent {
+                TextField(
+                    "Map name",
+                    text: Binding(
+                        get: { renameInteraction.draftName },
+                        set: { renameInteraction.updateDraft($0) }
+                    )
+                )
                     .focused($focusedPackFilename, equals: packURL.lastPathComponent)
                     .submitLabel(.done)
                     .onSubmit {
                         focusedPackFilename = nil
-                    }
-                    .onChange(of: focusedPackFilename) { newValue in
-                        if SavedMapRenameFocusPolicy.shouldCommit(
-                            editingFilename: packURL.lastPathComponent,
-                            focusedFilename: newValue
-                        ) {
-                            scheduleFinishRenamingIfNeeded()
-                        }
                     }
                     .simultaneousGesture(TapGesture().onEnded {
                         DispatchQueue.main.async {
@@ -403,8 +437,12 @@ private struct DownloadedMapRow: View {
                     .accessibilityLabel("Map name")
             } else {
                 Button {
-                    draftName = displayName
-                    isEditingName = true
+                    if let commit = renameInteraction.begin(
+                        filename: packURL.lastPathComponent,
+                        currentName: displayName
+                    ) {
+                        onCommitRename(commit)
+                    }
                     DispatchQueue.main.async {
                         focusedPackFilename = packURL.lastPathComponent
                     }
@@ -436,6 +474,7 @@ private struct DownloadedMapRow: View {
                 }
 
             Button {
+                finishRenaming()
                 focusedPackFilename = nil
                 manager.transferCachedPack(at: packURL, bleManager: bleManager)
             } label: {
@@ -447,6 +486,7 @@ private struct DownloadedMapRow: View {
             .accessibilityLabel("Transfer \(displayName) to device")
 
             Button(role: .destructive) {
+                finishRenaming()
                 focusedPackFilename = nil
                 manager.deleteCachedPack(at: packURL)
             } label: {
@@ -460,21 +500,8 @@ private struct DownloadedMapRow: View {
     }
 
     private func finishRenaming() {
-        guard isEditingName else { return }
-        draftName = manager.renameCachedPack(at: packURL, to: draftName)
-        isEditingName = false
-    }
-
-    private func scheduleFinishRenamingIfNeeded() {
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 50_000_000)
-            guard SavedMapRenameFocusPolicy.shouldCommit(
-                editingFilename: packURL.lastPathComponent,
-                focusedFilename: focusedPackFilename
-            ) else {
-                return
-            }
-            finishRenaming()
+        if let commit = renameInteraction.finish() {
+            onCommitRename(commit)
         }
     }
 }
