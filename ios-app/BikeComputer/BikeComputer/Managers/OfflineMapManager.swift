@@ -402,6 +402,7 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var downloadByteProgress: OfflineMapByteProgress?
     @Published private(set) var transferProgress: Double = 0
     @Published private(set) var isBusy = false
+    @Published private(set) var isServerRecoveryCheckPending = false
     @Published private(set) var isMapAreaSelectionActive = false
     @Published private(set) var selectedMapBounds: OfflineMapBounds?
     @Published private(set) var statusMessage = ""
@@ -417,7 +418,8 @@ final class OfflineMapManager: ObservableObject {
     }
 
     var hasPendingMapJob: Bool {
-        OfflineMapJobPersistence.activeJobId(defaults: defaults) != nil
+        OfflineMapJobPersistence.activeJobId(defaults: defaults) != nil ||
+            isServerRecoveryCheckPending
     }
 
     private let defaults: UserDefaults
@@ -428,6 +430,7 @@ final class OfflineMapManager: ObservableObject {
     private let deviceTransferManager = DeviceTransferManager()
     private var packDisplayNames: [String: String]
     private var mapJobTask: Task<Void, Never>?
+    private var mapJobTaskID: UUID?
 
     init(
         defaults: UserDefaults = .standard,
@@ -546,6 +549,9 @@ final class OfflineMapManager: ObservableObject {
         let persistedJobId = OfflineMapJobPersistence.activeJobId(defaults: defaults)
         let persistedInstallIntent = OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults)
         let persistedServerURL = OfflineMapJobPersistence.serverURLString(defaults: defaults)
+        if persistedJobId == nil {
+            isServerRecoveryCheckPending = true
+        }
 
         startMapJobTask { manager in
             let recoveryServerURL = persistedServerURL ?? manager.serverURLString
@@ -557,6 +563,7 @@ final class OfflineMapManager: ObservableObject {
                 manager.statusMessage = "checking for server maps"
                 let jobs = try await manager.listJobsWithRetry(client: client)
                 guard let recovered = manager.selectOwnedRecoverableJob(from: jobs) else {
+                    manager.isServerRecoveryCheckPending = false
                     manager.statusMessage = ""
                     return
                 }
@@ -564,6 +571,7 @@ final class OfflineMapManager: ObservableObject {
                 jobId = recovered.jobId
                 shouldInstallOnDevice = recovered.installOnDevice == true
                 manager.persistCurrentJob(installOnDevice: shouldInstallOnDevice)
+                manager.isServerRecoveryCheckPending = false
             }
 
             guard let jobId else { return }
@@ -604,7 +612,10 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func forgetPendingMapJob() {
-        guard mapJobTask == nil, hasPendingMapJob else { return }
+        guard hasPendingMapJob else { return }
+        mapJobTask?.cancel()
+        mapJobTask = nil
+        mapJobTaskID = nil
         clearPersistedJob()
         currentJob = nil
         downloadURL = nil
@@ -840,12 +851,17 @@ final class OfflineMapManager: ObservableObject {
         _ operation: @MainActor @escaping (OfflineMapManager) async throws -> Void
     ) {
         guard mapJobTask == nil else { return }
+        let taskID = UUID()
+        mapJobTaskID = taskID
         mapJobTask = Task { [weak self] in
             guard let self else { return }
             await runBusy {
                 try await operation(self)
             }
-            mapJobTask = nil
+            if mapJobTaskID == taskID {
+                mapJobTask = nil
+                mapJobTaskID = nil
+            }
         }
     }
 
@@ -1074,6 +1090,7 @@ final class OfflineMapManager: ObservableObject {
             OfflineMapRecoveryHistory.markHandled(jobId: jobId, defaults: defaults)
         }
         OfflineMapJobPersistence.clear(defaults: defaults)
+        isServerRecoveryCheckPending = false
     }
 
     private func canStartNewMapJob() -> Bool {

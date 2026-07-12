@@ -158,6 +158,20 @@ func waitForMapTaskCompletion(
     return false
 }
 
+@MainActor
+func waitForMapBusyState(
+    _ manager: OfflineMapManager,
+    expected: Bool,
+    timeout: TimeInterval = 2
+) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if manager.isBusy == expected { return true }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    return manager.isBusy == expected
+}
+
 func assertCoordinate(
     _ actual: CLLocationCoordinate2D,
     latitude expectedLatitude: CLLocationDegrees,
@@ -1137,6 +1151,32 @@ struct NavigationProtocolTests {
         if let url = manualManager.downloadedPackURL {
             manualManager.deleteCachedPack(at: url)
         }
+
+        let retrySuite = "offline-map-discovery-retry-\(UUID().uuidString)"
+        let retryDefaults = UserDefaults(suiteName: retrySuite)!
+        defer { retryDefaults.removePersistentDomain(forName: retrySuite) }
+        retryDefaults.set("https://retry.example", forKey: "offlineMap.serverURL")
+        let retryCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-retry-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: retryCache) }
+        let retryManager = OfflineMapManager(
+            defaults: retryDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: retryCache
+        )
+        OfflineMapTestURLProtocol.configure { _ in
+            throw URLError(.notConnectedToInternet)
+        }
+        retryManager.resumePendingMapJobIfNeeded()
+        let retryStarted = await waitForMapBusyState(retryManager, expected: true)
+        assert(retryStarted, "transient launch discovery enters a retryable busy state")
+        assert(retryManager.hasPendingMapJob, "transient launch discovery exposes pause and resume")
+        retryManager.pausePendingMapJob()
+        let retryPaused = await waitForMapBusyState(retryManager, expected: false)
+        assert(retryPaused, "server recovery retry can be paused")
+        assert(retryManager.hasPendingMapJob, "paused discovery remains resumable")
+        retryManager.forgetPendingMapJob()
+        assert(!retryManager.hasPendingMapJob, "paused discovery can be explicitly forgotten")
     }
 
     @MainActor
