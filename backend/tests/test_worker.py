@@ -3,7 +3,8 @@ import unittest
 from pathlib import Path
 
 from map_platform.jobs import JobStore, MapJobService
-from map_platform.models import Bounds, SourceRegion
+from map_platform.models import Bounds, JobStatus, SourceRegion
+from map_platform.pipeline import run_job
 from map_platform.sources import SourceIndex
 from map_platform.worker import MapWorker, cleanup_work_dirs, expire_ready_jobs
 
@@ -15,10 +16,10 @@ class FakePipeline:
 
     def build(self, job, on_status=None, on_progress=None):
         self.calls += 1
-        if self.calls <= self.failures:
-            raise RuntimeError("temporary worker failure")
         if on_progress:
             on_progress(8, 10)
+        if self.calls <= self.failures:
+            raise RuntimeError("temporary worker failure")
         pack_path = Path(tempfile.gettempdir()) / f"map-123-{job.job_id}.zip"
         pack_path.write_bytes(b"zip-data")
         return "map-123", pack_path
@@ -30,6 +31,8 @@ class CancellingPipeline:
 
     def build(self, job, on_status=None, on_progress=None):
         self.service.cancel_job(job.job_id)
+        if on_progress:
+            on_progress(1, 10)
         return "map-123", Path("/tmp/map-123.zip")
 
 
@@ -98,6 +101,7 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNotNone(loaded.finished_at)
             first_queued_event = next(event for event in first.job.events if event["status"] == "queued")
             self.assertIsNone(first.job.finished_at)
+            self.assertIsNone(first.job.to_dict()["progress"])
             self.assertEqual(first_queued_event["message"], "queued for retry")
 
     def test_worker_ignores_cancelled_job(self):
@@ -124,6 +128,71 @@ class WorkerTests(unittest.TestCase):
             self.assertTrue(result.processed)
             self.assertEqual(loaded.status.value, "cancelled")
             self.assertIsNone(loaded.map_id)
+
+    def test_new_worker_requeues_job_interrupted_by_previous_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(tmp)
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job({"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]})
+            self.assertIsNotNone(store.claim_next("worker-old"))
+            store.update_status(job.job_id, JobStatus.CONVERTING_FEATURES, worker_id="worker-old")
+            store.update_progress_unless_cancelled(job.job_id, 6, 10, worker_id="worker-old")
+
+            result = MapWorker(
+                store,
+                FakePipeline(),
+                worker_id="worker-new",
+                interrupted_job_stale_seconds=0,
+            ).run_next()
+            loaded = store.get(job.job_id)
+
+            self.assertTrue(result.processed)
+            self.assertEqual(loaded.status, JobStatus.READY)
+            self.assertEqual(loaded.attempts, 2)
+            self.assertTrue(any(event["message"] == "requeued after worker restart" for event in loaded.events))
+
+    def test_new_worker_leaves_fresh_foreign_job_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(tmp)
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job({"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]})
+            self.assertIsNotNone(store.claim_next("worker-old"))
+            store.update_status(job.job_id, JobStatus.CONVERTING_FEATURES, worker_id="worker-old")
+
+            requeued = store.requeue_interrupted_jobs("worker-new", stale_after_seconds=60)
+            loaded = store.get(job.job_id)
+
+            self.assertEqual(requeued, 0)
+            self.assertEqual(loaded.status, JobStatus.CONVERTING_FEATURES)
+            self.assertEqual(loaded.worker_id, "worker-old")
+
+    def test_previous_worker_cannot_write_after_job_is_reclaimed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(tmp)
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job({"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]})
+            self.assertIsNotNone(store.claim_next("worker-old"))
+            store.update_status(job.job_id, JobStatus.CONVERTING_FEATURES, worker_id="worker-old")
+            self.assertEqual(store.requeue_interrupted_jobs("worker-new", stale_after_seconds=0), 1)
+            self.assertIsNotNone(store.claim_next("worker-new"))
+
+            with self.assertRaisesRegex(RuntimeError, "owned by another worker"):
+                store.update_progress_unless_cancelled(job.job_id, 7, 10, worker_id="worker-old")
+
+            loaded = store.get(job.job_id)
+            self.assertEqual(loaded.worker_id, "worker-new")
+            self.assertIsNone(loaded.progress_completed)
+
+    def test_synchronous_run_preserves_cancellation_from_progress_callback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(tmp)
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job({"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]})
+
+            result = run_job(store, CancellingPipeline(service), job.job_id)
+
+            self.assertEqual(result.status, JobStatus.CANCELLED)
+            self.assertEqual(store.get(job.job_id).status, JobStatus.CANCELLED)
 
     def test_expire_ready_jobs_and_cleanup_work_dirs(self):
         with tempfile.TemporaryDirectory() as tmp:

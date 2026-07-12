@@ -19,12 +19,26 @@ class WorkerResult:
 
 
 class MapWorker:
-    def __init__(self, store: JobStore, pipeline: MapBuildPipeline, *, worker_id: str | None = None):
+    def __init__(
+        self,
+        store: JobStore,
+        pipeline: MapBuildPipeline,
+        *,
+        worker_id: str | None = None,
+        interrupted_job_stale_seconds: float = 15 * 60,
+    ):
         self.store = store
         self.pipeline = pipeline
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
+        self.interrupted_job_stale_seconds = interrupted_job_stale_seconds
 
     def run_next(self) -> WorkerResult:
+        # Production runs a single worker. A stale job owned by a different
+        # process was interrupted and must be claimed again from scratch.
+        self.store.requeue_interrupted_jobs(
+            self.worker_id,
+            stale_after_seconds=self.interrupted_job_stale_seconds,
+        )
         self.store.requeue_retryable_failures()
         job = self.store.claim_next(self.worker_id)
         if job is None:
@@ -60,9 +74,9 @@ class MapWorker:
             return WorkerResult(worker_id=self.worker_id, job=finished, processed=True)
         except Exception as exc:
             current = self.store.get(job.job_id)
-            if current.status == JobStatus.CANCELLED:
+            if current.status == JobStatus.CANCELLED or current.worker_id != self.worker_id:
                 return WorkerResult(worker_id=self.worker_id, job=current, processed=True)
-            failed = self.store.update_status(
+            failed = self.store.update_status_unless_cancelled(
                 job.job_id,
                 JobStatus.FAILED,
                 error=str(exc),
@@ -71,7 +85,7 @@ class MapWorker:
                 finished=True,
             )
             if failed.attempts < failed.max_attempts:
-                failed = self.store.update_status(
+                failed = self.store.update_status_unless_cancelled(
                     job.job_id,
                     JobStatus.QUEUED,
                     error=str(exc),

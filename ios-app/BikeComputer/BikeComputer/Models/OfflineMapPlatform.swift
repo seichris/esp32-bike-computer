@@ -190,7 +190,7 @@ struct OfflineMapDownloadURL: Decodable, Equatable {
     let expiresInSeconds: Int
 }
 
-enum OfflineMapPlatformError: LocalizedError {
+nonisolated enum OfflineMapPlatformError: LocalizedError {
     case invalidBaseURL
     case missingMapId
     case missingDownloadURL

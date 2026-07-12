@@ -2,6 +2,7 @@
 from funcs import process_features, clip_lines, clip_polygons, style_features, render_map, lat2y, lon2x
 from feature_types import get_type_id
 from map_format import write_fmb
+from block_progress import BlockProgressReporter
 from shapely import box
 import json, yaml
 import os, sys
@@ -49,11 +50,7 @@ polygons = style_features( polygons, styles) # styled_polygons
 x_positions = range(area_min_x, area_max_x, 4096)
 y_positions = range(area_min_y, area_max_y, 4096)
 total = len(x_positions) * len(y_positions)
-done = 0
-
-def report_progress():
-    print("  Step 5/5 Building map. {:.0%}  ".format(done/total), end='\r', flush=True)
-    print(f"\nMAP_PROGRESS:{done}:{total}", flush=True)
+progress = BlockProgressReporter(total)
 
 for init_x in x_positions:
     for init_y in y_positions:
@@ -67,8 +64,7 @@ for init_x in x_positions:
         clipped_lines = clip_lines( lines, mapblock_bbox)
         clipped_polygons = clip_polygons( polygons, mapblock_bbox)
         if len(clipped_lines) == 0 and len( clipped_polygons) == 0:
-            done += 1
-            report_progress()
+            progress.advance()
             continue
 
         # export map files
@@ -84,9 +80,8 @@ for init_x in x_positions:
         
         # SKIP if file already exists (RESUME feature)
         if os.path.exists(f"{file_name}.fmb"):
-            done += 1
             print(f"  Step 5/5 Skipping existing block {block_x}_{block_y}      ", end='\r')
-            report_progress()
+            progress.advance()
             continue
 
         os.makedirs( folder_name, exist_ok=True)
@@ -136,5 +131,4 @@ for init_x in x_positions:
             min_y,
         )
 
-        done += 1
-        report_progress()
+        progress.advance()

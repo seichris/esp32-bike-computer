@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +81,8 @@ class JobStore:
             current = self.get(job_id)
             if current.status == JobStatus.CANCELLED:
                 raise RuntimeError("job was cancelled")
+            if worker_id is not None and current.worker_id not in {None, worker_id}:
+                raise RuntimeError("job is owned by another worker")
             return self._update_status_unlocked(
                 job_id,
                 status,
@@ -110,6 +113,9 @@ class JobStore:
         job.status = status
         job.updated_at = utc_now_iso()
         job.error = error
+        if previous_status != status and status in {JobStatus.QUEUED, JobStatus.VALIDATING}:
+            job.progress_completed = None
+            job.progress_total = None
         if status in {JobStatus.VALIDATING, JobStatus.RESOLVING_SOURCE, JobStatus.EXTRACTING_PBF} and job.started_at is None:
             job.started_at = job.updated_at
         if finished or status in {JobStatus.READY, JobStatus.FAILED, JobStatus.EXPIRED, JobStatus.CANCELLED}:
@@ -149,6 +155,8 @@ class JobStore:
             job = self.get(job_id)
             if job.status == JobStatus.CANCELLED:
                 raise RuntimeError("job was cancelled")
+            if worker_id is not None and job.worker_id not in {None, worker_id}:
+                raise RuntimeError("job is owned by another worker")
             job.progress_completed = max(0, min(int(completed), int(total)))
             job.progress_total = int(total)
             job.updated_at = utc_now_iso()
@@ -202,6 +210,40 @@ class JobStore:
                     job.events.append({"at": job.updated_at, "status": job.status.value, "message": "requeued for retry"})
                     self.save(job)
                     count += 1
+        return count
+
+    def requeue_interrupted_jobs(self, worker_id: str, *, stale_after_seconds: float) -> int:
+        active_statuses = {
+            JobStatus.VALIDATING,
+            JobStatus.RESOLVING_SOURCE,
+            JobStatus.EXTRACTING_PBF,
+            JobStatus.CONVERTING_FEATURES,
+            JobStatus.PACKAGING,
+        }
+        count = 0
+        with self._queue_lock():
+            for job in self.list():
+                if job.status not in active_statuses:
+                    continue
+                if not job.worker_id or job.worker_id == worker_id:
+                    continue
+                if _age_seconds(job.updated_at) < stale_after_seconds:
+                    continue
+                job.status = JobStatus.QUEUED
+                job.updated_at = utc_now_iso()
+                job.finished_at = None
+                job.worker_id = None
+                job.progress_completed = None
+                job.progress_total = None
+                job.events.append(
+                    {
+                        "at": job.updated_at,
+                        "status": JobStatus.QUEUED.value,
+                        "message": "requeued after worker restart",
+                    }
+                )
+                self.save(job)
+                count += 1
         return count
 
     def _path(self, job_id: str) -> Path:
@@ -282,3 +324,13 @@ class MapJobService:
 
     def _new_job_id(self) -> str:
         return uuid.uuid4().hex[:20]
+
+
+def _age_seconds(value: str) -> float:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return float("inf")
+    return max((datetime.now(timezone.utc) - parsed).total_seconds(), 0)

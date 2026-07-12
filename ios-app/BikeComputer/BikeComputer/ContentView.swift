@@ -104,6 +104,9 @@ struct ContentView: View {
         .onChange(of: coordinator.selectedView) { newValue in
             coordinator.updateSelectedView(newValue)
         }
+        .onAppear {
+            offlineMapManager.resumePendingMapJobIfNeeded()
+        }
         .onChange(of: offlineMapManager.isMapAreaSelectionActive) { isActive in
             if isActive {
                 showingSettings = false

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -73,6 +76,30 @@ def parse_map_progress(line: str) -> tuple[int, int] | None:
     if total <= 0 or completed < 0 or completed > total:
         return None
     return completed, total
+
+
+class ProgressCoalescer:
+    def __init__(self, *, min_interval_seconds: float = 2.0, min_fraction_delta: float = 0.01, clock=None):
+        self.min_interval_seconds = min_interval_seconds
+        self.min_fraction_delta = min_fraction_delta
+        self.clock = clock or time.monotonic
+        self.last_completed: int | None = None
+        self.last_emitted_at: float | None = None
+
+    def should_emit(self, completed: int, total: int) -> bool:
+        now = self.clock()
+        block_delta = max(1, math.ceil(total * self.min_fraction_delta))
+        should_emit = (
+            self.last_completed is None
+            or completed >= total
+            or completed - self.last_completed >= block_delta
+            or self.last_emitted_at is None
+            or now - self.last_emitted_at >= self.min_interval_seconds
+        )
+        if should_emit:
+            self.last_completed = completed
+            self.last_emitted_at = now
+        return should_emit
 
 
 class MapBuildPipeline:
@@ -177,10 +204,11 @@ class MapBuildPipeline:
             str(geojson_prefix),
             str(raw_output_dir),
         ]
+        progress_coalescer = ProgressCoalescer()
 
         def handle_output(line: str) -> None:
             progress = parse_map_progress(line)
-            if progress is not None and on_progress:
+            if progress is not None and on_progress and progress_coalescer.should_emit(*progress):
                 on_progress(*progress)
 
         if on_progress and hasattr(self.runner, "run_streaming"):
@@ -217,23 +245,33 @@ class MapBuildPipeline:
 
 
 def run_job(store, pipeline: MapBuildPipeline, job_id: str) -> MapJob:
-    job = store.update_status(job_id, JobStatus.VALIDATING)
+    worker_id = f"api-{uuid.uuid4().hex[:8]}"
+    job = store.update_status(job_id, JobStatus.VALIDATING, worker_id=worker_id)
 
     def update(status: JobStatus) -> None:
-        store.update_status(job_id, status)
+        store.update_status_unless_cancelled(job_id, status, worker_id=worker_id)
 
     def update_progress(completed: int, total: int) -> None:
-        store.update_progress_unless_cancelled(job_id, completed, total)
+        store.update_progress_unless_cancelled(job_id, completed, total, worker_id=worker_id)
 
     try:
         map_id, archive_path = pipeline.build(job, on_status=update, on_progress=update_progress)
-        return store.update_status(
+        return store.update_status_unless_cancelled(
             job_id,
             JobStatus.READY,
             map_id=map_id,
             pack_path=str(archive_path),
             pack_bytes=archive_path.stat().st_size if archive_path.exists() else None,
+            worker_id=worker_id,
             finished=True,
         )
     except Exception as exc:
-        return store.update_status(job_id, JobStatus.FAILED, error=str(exc))
+        current = store.get(job_id)
+        if current.status == JobStatus.CANCELLED or current.worker_id != worker_id:
+            return current
+        return store.update_status_unless_cancelled(
+            job_id,
+            JobStatus.FAILED,
+            error=str(exc),
+            worker_id=worker_id,
+        )

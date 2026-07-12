@@ -247,7 +247,7 @@ final class TestRoute: MKRoute {
 @main
 struct NavigationProtocolTests {
     @MainActor
-    static func main() {
+    static func main() async {
         testIconMapping()
         testRouteEndpointExtraction()
         testRouteRemainingDistance()
@@ -297,6 +297,11 @@ struct NavigationProtocolTests {
         testOfflineMapCustomBBoxRequest()
         testOfflineMapPreparationTimeEstimate()
         testOfflineMapJobProgressDecoding()
+        testOfflineMapJobProgressAbsentFallback()
+        testOfflineMapJobPersistence()
+        await testOfflineMapPollerOutlivesLegacyAttemptLimit()
+        await testOfflineMapPollerRetriesTransientFailure()
+        await testOfflineMapPollerStopsOnTerminalAndCancellation()
         testOfflineMapCreateJobURLRequest()
         testOfflineMapManagerMigratesProductionConfig()
         testOfflineMapManagerRestoresLastTransferIdentity()
@@ -508,6 +513,147 @@ struct NavigationProtocolTests {
         assertEqual(progress.totalBlocks, 100, "map progress decodes total blocks")
         assertEqual(progress.percentage, 79, "map progress calculates percentage")
         assert(abs(progress.fraction - 0.79) < 0.000001, "map progress calculates fraction")
+    }
+
+    static func testOfflineMapJobProgressAbsentFallback() {
+        let payload = Data("{\"jobId\":\"legacy-job\",\"status\":\"converting_features\"}".utf8)
+        guard let job = try? JSONDecoder().decode(OfflineMapJob.self, from: payload) else {
+            assert(false, "legacy map job should decode without progress")
+            return
+        }
+        assertEqual(job.progress, nil, "legacy server response keeps indeterminate progress fallback")
+    }
+
+    static func testOfflineMapJobPersistence() {
+        let suite = "offline-map-job-persistence-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "job persistence test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        OfflineMapJobPersistence.save(jobId: "job-resume", defaults: defaults)
+        assertEqual(
+            OfflineMapJobPersistence.activeJobId(defaults: defaults),
+            "job-resume",
+            "active map job survives app relaunch"
+        )
+        OfflineMapJobPersistence.clear(defaults: defaults)
+        assertEqual(
+            OfflineMapJobPersistence.activeJobId(defaults: defaults),
+            nil,
+            "completed map job clears persisted recovery state"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapPollerOutlivesLegacyAttemptLimit() async {
+        guard let running = offlineMapJob(status: "converting_features"),
+              let ready = offlineMapJob(status: "ready", mapId: "map-ready") else {
+            assert(false, "poller test jobs should decode")
+            return
+        }
+        var fetchCount = 0
+        let result = try? await OfflineMapJobPoller.waitForReady(
+            jobId: "long-job",
+            pollIntervalNanoseconds: 0,
+            fetch: { _ in
+                fetchCount += 1
+                return fetchCount <= 1_801 ? running : ready
+            },
+            sleep: { _ in },
+            onUpdate: { _ in },
+            onRetry: {}
+        )
+
+        assertEqual(fetchCount, 1_802, "poller continues beyond the former 1,800-attempt limit")
+        assertEqual(result?.mapId, "map-ready", "poller returns the eventual ready map")
+    }
+
+    @MainActor
+    static func testOfflineMapPollerRetriesTransientFailure() async {
+        guard let ready = offlineMapJob(status: "ready", mapId: "map-ready") else {
+            assert(false, "retry test job should decode")
+            return
+        }
+        var fetchCount = 0
+        var retryCount = 0
+        var delays: [UInt64] = []
+        let result = try? await OfflineMapJobPoller.waitForReady(
+            jobId: "retry-job",
+            pollIntervalNanoseconds: 0,
+            fetch: { _ in
+                fetchCount += 1
+                if fetchCount == 1 {
+                    throw URLError(.timedOut)
+                }
+                return ready
+            },
+            sleep: { delays.append($0) },
+            onUpdate: { _ in },
+            onRetry: { retryCount += 1 }
+        )
+
+        assertEqual(result?.mapId, "map-ready", "transient polling failure recovers")
+        assertEqual(retryCount, 1, "transient polling failure reports reconnecting state")
+        assertEqual(delays, [2_000_000_000], "first retry uses bounded backoff")
+        assert(!OfflineMapPollingRetryPolicy.shouldRetry(
+            OfflineMapPlatformError.serverStatus(401, "unauthorized")
+        ), "authentication failures remain terminal")
+    }
+
+    @MainActor
+    static func testOfflineMapPollerStopsOnTerminalAndCancellation() async {
+        guard let failed = offlineMapJob(status: "failed", error: "conversion failed"),
+              let running = offlineMapJob(status: "converting_features") else {
+            assert(false, "terminal poller test jobs should decode")
+            return
+        }
+
+        do {
+            _ = try await OfflineMapJobPoller.waitForReady(
+                jobId: "failed-job",
+                pollIntervalNanoseconds: 0,
+                fetch: { _ in failed },
+                sleep: { _ in },
+                onUpdate: { _ in },
+                onRetry: {}
+            )
+            assert(false, "terminal map job should throw")
+        } catch OfflineMapPlatformError.serverStatus(let status, let body) {
+            assertEqual(status, 409, "terminal map job uses conflict status")
+            assert(body.contains("conversion failed"), "terminal map job preserves server error")
+        } catch {
+            assert(false, "terminal map job should use platform error")
+        }
+
+        do {
+            _ = try await OfflineMapJobPoller.waitForReady(
+                jobId: "cancel-job",
+                pollIntervalNanoseconds: 0,
+                fetch: { _ in running },
+                sleep: { _ in throw CancellationError() },
+                onUpdate: { _ in },
+                onRetry: {}
+            )
+            assert(false, "cancelled polling should throw")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            assert(false, "cancelled polling should preserve CancellationError")
+        }
+    }
+
+    static func offlineMapJob(
+        status: String,
+        mapId: String? = nil,
+        error: String? = nil
+    ) -> OfflineMapJob? {
+        var payload: [String: Any] = ["jobId": "job-\(status)", "status": status]
+        if let mapId { payload["mapId"] = mapId }
+        if let error { payload["error"] = error }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
+        return try? JSONDecoder().decode(OfflineMapJob.self, from: data)
     }
 
     static func testOfflineMapCreateJobURLRequest() {

@@ -63,6 +63,7 @@ jobs:
         run: |
           python -m py_compile \
             scripts/extract_features.py \
+            scripts/block_progress.py \
             scripts/feature_types.py \
             scripts/funcs.py \
             scripts/map_format.py \

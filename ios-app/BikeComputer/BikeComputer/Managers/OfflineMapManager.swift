@@ -165,6 +165,98 @@ nonisolated enum MapTransferSessionIdentity {
     }
 }
 
+nonisolated enum OfflineMapPollingRetryPolicy {
+    static func shouldRetry(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return false
+        }
+        if let platformError = error as? OfflineMapPlatformError,
+           case .serverStatus(let status, _) = platformError {
+            return status == 408 || status == 425 || status == 429 || (500...599).contains(status)
+        }
+        guard let urlError = error as? URLError else { return false }
+        return [
+            .timedOut,
+            .cannotFindHost,
+            .cannotConnectToHost,
+            .networkConnectionLost,
+            .dnsLookupFailed,
+            .notConnectedToInternet,
+            .resourceUnavailable,
+            .dataNotAllowed,
+        ].contains(urlError.code)
+    }
+
+    static func delayNanoseconds(failureCount: Int) -> UInt64 {
+        let exponent = min(max(failureCount - 1, 0), 4)
+        let seconds = min(2 * (1 << exponent), 30)
+        return UInt64(seconds) * 1_000_000_000
+    }
+}
+
+@MainActor
+enum OfflineMapJobPoller {
+    static func waitForReady(
+        jobId: String,
+        pollIntervalNanoseconds: UInt64,
+        fetch: @escaping (String) async throws -> OfflineMapJob,
+        sleep: @escaping (UInt64) async throws -> Void,
+        onUpdate: @escaping (OfflineMapJob) -> Void,
+        onRetry: @escaping () -> Void
+    ) async throws -> OfflineMapJob {
+        var consecutiveFailures = 0
+        while !Task.isCancelled {
+            let job: OfflineMapJob
+            do {
+                job = try await fetch(jobId)
+                consecutiveFailures = 0
+            } catch {
+                guard OfflineMapPollingRetryPolicy.shouldRetry(error) else { throw error }
+                consecutiveFailures += 1
+                onRetry()
+                try await sleep(
+                    OfflineMapPollingRetryPolicy.delayNanoseconds(
+                        failureCount: consecutiveFailures
+                    )
+                )
+                continue
+            }
+
+            onUpdate(job)
+            if job.status == "ready", job.mapId != nil {
+                return job
+            }
+            if job.isTerminal {
+                throw OfflineMapPlatformError.serverStatus(
+                    409,
+                    job.error ?? "Map job ended with status \(job.status)"
+                )
+            }
+            try await sleep(pollIntervalNanoseconds)
+        }
+        throw CancellationError()
+    }
+}
+
+nonisolated enum OfflineMapJobPersistence {
+    private static let activeJobIdKey = "offlineMap.activeJobId"
+
+    static func activeJobId(defaults: UserDefaults) -> String? {
+        guard let value = defaults.string(forKey: activeJobIdKey), !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    static func save(jobId: String, defaults: UserDefaults) {
+        defaults.set(jobId, forKey: activeJobIdKey)
+    }
+
+    static func clear(defaults: UserDefaults) {
+        defaults.removeObject(forKey: activeJobIdKey)
+    }
+}
+
 @MainActor
 final class OfflineMapManager: ObservableObject {
     @Published var serverURLString: String {
@@ -205,6 +297,7 @@ final class OfflineMapManager: ObservableObject {
     private let defaults: UserDefaults
     private let deviceTransferManager = DeviceTransferManager()
     private var packDisplayNames: [String: String]
+    private var mapJobTask: Task<Void, Never>?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -264,24 +357,49 @@ final class OfflineMapManager: ObservableObject {
         centerLatitude = String(format: "%.6f", location.coordinate.latitude)
         centerLongitude = String(format: "%.6f", location.coordinate.longitude)
 
-        Task {
-            await runBusy {
-                let client = try self.makeClient()
-                let request = OfflineMapJobRequest.customBBox(OfflineMapBounds(
-                    center: location.coordinate,
-                    sideLengthKm: Double(self.sideLengthKm) ?? 25
-                ))
-                self.currentJob = try await client.createJob(request)
-                self.downloadURL = nil
-                self.downloadedPackURL = nil
-                self.downloadProgress = 0
-                self.downloadByteProgress = nil
-                self.transferProgress = 0
-                self.statusMessage = "creating map"
+        startMapJobTask { manager in
+            let client = try manager.makeClient()
+            let request = OfflineMapJobRequest.customBBox(OfflineMapBounds(
+                center: location.coordinate,
+                sideLengthKm: Double(manager.sideLengthKm) ?? 25
+            ))
+            manager.currentJob = try await client.createJob(request)
+            manager.persistCurrentJob()
+            manager.downloadURL = nil
+            manager.downloadedPackURL = nil
+            manager.downloadProgress = 0
+            manager.downloadByteProgress = nil
+            manager.transferProgress = 0
+            manager.statusMessage = "creating map"
 
-                try await self.waitForReadyMap(client: client)
-                try await self.downloadReadyPack(client: client)
-                try await self.transferReadyPack(bleManager: bleManager)
+            try await manager.waitForReadyMap(client: client)
+            try await manager.downloadReadyPack(client: client)
+            try await manager.transferReadyPack(bleManager: bleManager)
+        }
+    }
+
+    func resumePendingMapJobIfNeeded() {
+        guard mapJobTask == nil,
+              !isBusy,
+              let jobId = OfflineMapJobPersistence.activeJobId(defaults: defaults) else {
+            return
+        }
+
+        startMapJobTask { manager in
+            do {
+                let client = try manager.makeClient()
+                let job = try await client.job(id: jobId)
+                manager.currentJob = job
+                manager.statusMessage = job.status
+                if job.status != "ready" || job.mapId == nil {
+                    try await manager.waitForReadyMap(client: client)
+                }
+                try await manager.downloadReadyPack(client: client)
+            } catch {
+                if manager.shouldForgetPersistedJob(after: error) {
+                    manager.clearPersistedJob()
+                }
+                throw error
             }
         }
     }
@@ -476,22 +594,34 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func createJobAndDownload(request: OfflineMapJobRequest) {
-        Task {
-            await runBusy {
-                let client = try self.makeClient()
-                self.currentJob = nil
-                self.downloadURL = nil
-                self.downloadedPackURL = nil
-                self.downloadProgress = 0
-                self.downloadByteProgress = nil
-                self.transferProgress = 0
-                self.statusMessage = "creating map job"
+        startMapJobTask { manager in
+            let client = try manager.makeClient()
+            manager.currentJob = nil
+            manager.downloadURL = nil
+            manager.downloadedPackURL = nil
+            manager.downloadProgress = 0
+            manager.downloadByteProgress = nil
+            manager.transferProgress = 0
+            manager.statusMessage = "creating map job"
 
-                self.currentJob = try await client.createJob(request)
-                self.statusMessage = self.currentJob?.status ?? ""
-                try await self.waitForReadyMap(client: client)
-                try await self.downloadReadyPack(client: client)
+            manager.currentJob = try await client.createJob(request)
+            manager.persistCurrentJob()
+            manager.statusMessage = manager.currentJob?.status ?? ""
+            try await manager.waitForReadyMap(client: client)
+            try await manager.downloadReadyPack(client: client)
+        }
+    }
+
+    private func startMapJobTask(
+        _ operation: @MainActor @escaping (OfflineMapManager) async throws -> Void
+    ) {
+        guard mapJobTask == nil else { return }
+        mapJobTask = Task { [weak self] in
+            guard let self else { return }
+            await runBusy {
+                try await operation(self)
             }
+            mapJobTask = nil
         }
     }
 
@@ -531,20 +661,26 @@ final class OfflineMapManager: ObservableObject {
             throw OfflineMapPlatformError.invalidResponse
         }
 
-        while !Task.isCancelled {
-            let job = try await client.job(id: jobId)
-            currentJob = job
-            statusMessage = job.status
-            if job.status == "ready", job.mapId != nil {
-                return
+        do {
+            currentJob = try await OfflineMapJobPoller.waitForReady(
+                jobId: jobId,
+                pollIntervalNanoseconds: OfflineMapDefaults.mapJobPollIntervalNanoseconds,
+                fetch: { id in try await client.job(id: id) },
+                sleep: { nanoseconds in try await Task.sleep(nanoseconds: nanoseconds) },
+                onUpdate: { [weak self] job in
+                    self?.currentJob = job
+                    self?.statusMessage = job.status
+                },
+                onRetry: { [weak self] in
+                    self?.statusMessage = "reconnecting to map server"
+                }
+            )
+        } catch {
+            if currentJob?.isTerminal == true || shouldForgetPersistedJob(after: error) {
+                clearPersistedJob()
             }
-            if job.isTerminal {
-                throw OfflineMapPlatformError.serverStatus(409, job.error ?? "Map job ended with status \(job.status)")
-            }
-            try await Task.sleep(nanoseconds: OfflineMapDefaults.mapJobPollIntervalNanoseconds)
+            throw error
         }
-
-        throw CancellationError()
     }
 
     private func downloadReadyPack(client: OfflineMapPlatformClient) async throws {
@@ -580,6 +716,24 @@ final class OfflineMapManager: ObservableObject {
         downloadByteProgress = nil
         transferProgress = 0
         statusMessage = "pack downloaded"
+        clearPersistedJob()
+    }
+
+    private func persistCurrentJob() {
+        guard let jobId = currentJob?.jobId else { return }
+        OfflineMapJobPersistence.save(jobId: jobId, defaults: defaults)
+    }
+
+    private func clearPersistedJob() {
+        OfflineMapJobPersistence.clear(defaults: defaults)
+    }
+
+    private func shouldForgetPersistedJob(after error: Error) -> Bool {
+        guard let platformError = error as? OfflineMapPlatformError,
+              case .serverStatus(let status, _) = platformError else {
+            return false
+        }
+        return status == 404 || status == 409
     }
 
     private func transferReadyPack(bleManager: BLEManager) async throws {
@@ -919,6 +1073,8 @@ final class OfflineMapManager: ObservableObject {
         defer { isBusy = false }
         do {
             try await operation()
+        } catch is CancellationError {
+            return
         } catch {
             errorMessage = diagnosticMessage(for: error)
         }

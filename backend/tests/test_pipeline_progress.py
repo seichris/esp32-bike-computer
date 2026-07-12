@@ -1,7 +1,7 @@
 import sys
 import unittest
 
-from map_platform.pipeline import CommandRunner, parse_map_progress
+from map_platform.pipeline import CommandRunner, ProgressCoalescer, parse_map_progress
 
 
 class PipelineProgressTests(unittest.TestCase):
@@ -23,6 +23,17 @@ class PipelineProgressTests(unittest.TestCase):
             [(1, 2), (2, 2)],
         )
         self.assertIn("MAP_PROGRESS:2:2", output)
+
+    def test_progress_coalescer_throttles_fast_updates_and_forces_final(self):
+        now = [0.0]
+        coalescer = ProgressCoalescer(clock=lambda: now[0])
+
+        self.assertTrue(coalescer.should_emit(1, 1_000))
+        self.assertFalse(coalescer.should_emit(2, 1_000))
+        self.assertTrue(coalescer.should_emit(11, 1_000))
+        now[0] = 2.0
+        self.assertTrue(coalescer.should_emit(12, 1_000))
+        self.assertTrue(coalescer.should_emit(1_000, 1_000))
 
 
 if __name__ == "__main__":
