@@ -7,7 +7,9 @@ sources. It implements the production contract described in
 ## What is implemented
 
 - `POST /v1/map-jobs` for curated, custom bbox, custom polygon, and route
-  corridor requests.
+  corridor requests, with installation-scoped idempotency metadata.
+- `GET /v1/map-jobs?clientInstallationId=<id>` for app-owned job recovery
+  without adopting another installation's maps.
 - Source-region resolution from `backend/config/source-regions.json`, with a
   cached Geofabrik catalog fallback for any requested area covered by
   Geofabrik.
@@ -36,6 +38,9 @@ curl -s http://localhost:8080/v1/map-jobs \
     "mode": "custom_bbox",
     "displayName": "Singapore central",
     "bbox": [103.75, 1.24, 103.93, 1.37],
+    "clientInstallationId": "installation-12345678",
+    "clientRequestId": "request-12345678",
+    "installOnDevice": false,
     "target": { "renderer": "esp32-fmb", "firmwareVersion": "0.0.0" }
   }'
 ```

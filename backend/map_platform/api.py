@@ -70,8 +70,12 @@ def create_app():
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/v1/map-jobs", dependencies=[Depends(require_api_token)])
-    def list_map_jobs() -> dict[str, Any]:
-        return {"jobs": [job.to_dict() for job in service.list_jobs()]}
+    def list_map_jobs(clientInstallationId: str | None = None) -> dict[str, Any]:
+        try:
+            jobs = service.list_jobs(client_installation_id=clientInstallationId)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"jobs": [job.to_dict() for job in jobs]}
 
     @app.get("/v1/map-jobs/{job_id}", dependencies=[Depends(require_api_token)])
     def get_map_job(job_id: str) -> dict[str, Any]:

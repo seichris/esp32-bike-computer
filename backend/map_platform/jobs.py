@@ -39,6 +39,21 @@ class JobStore:
     def list(self) -> list[MapJob]:
         return [MapJob.from_dict(json.loads(path.read_text())) for path in sorted(self.root.glob("*.json"))]
 
+    def save_if_client_request_absent(self, job: MapJob) -> MapJob:
+        if not job.client_installation_id or not job.client_request_id:
+            raise ValueError("job is missing client idempotency metadata")
+        with self._queue_lock():
+            for existing in self.list():
+                if (
+                    existing.client_installation_id == job.client_installation_id
+                    and existing.client_request_id == job.client_request_id
+                ):
+                    if existing.request != job.request:
+                        raise ValueError("clientRequestId was already used for a different map request")
+                    return existing
+            self.save(job)
+            return job
+
     def update_status(
         self,
         job_id: str,
@@ -379,6 +394,19 @@ class MapJobService:
         self.limits = limits or JobLimits()
 
     def create_job(self, request: dict[str, Any]) -> MapJob:
+        client_installation_id = _client_identifier(request, "clientInstallationId")
+        client_request_id = _client_identifier(request, "clientRequestId")
+        if bool(client_installation_id) != bool(client_request_id):
+            raise ValueError("clientInstallationId and clientRequestId must be provided together")
+        install_on_device = request.get("installOnDevice", False)
+        if not isinstance(install_on_device, bool):
+            raise ValueError("installOnDevice must be a boolean")
+        if client_installation_id and client_request_id:
+            existing = self.find_by_client_request(client_installation_id, client_request_id)
+            if existing is not None:
+                if existing.request != request:
+                    raise ValueError("clientRequestId was already used for a different map request")
+                return existing
         try:
             geometry = normalize_geometry(request)
             self.limits.validate_geometry(geometry)
@@ -392,15 +420,33 @@ class MapJobService:
             request=dict(request),
             geometry=geometry,
             source_region=source,
+            client_installation_id=client_installation_id,
+            client_request_id=client_request_id,
+            install_on_device=install_on_device,
         )
+        if client_installation_id and client_request_id:
+            return self.store.save_if_client_request_absent(job)
         self.store.save(job)
         return job
 
     def get_job(self, job_id: str) -> MapJob:
         return self.store.get(job_id)
 
-    def list_jobs(self) -> list[MapJob]:
-        return self.store.list()
+    def list_jobs(self, *, client_installation_id: str | None = None) -> list[MapJob]:
+        jobs = self.store.list()
+        if client_installation_id is None:
+            return jobs
+        normalized = _validate_identifier(client_installation_id, "clientInstallationId")
+        return [job for job in jobs if job.client_installation_id == normalized]
+
+    def find_by_client_request(self, client_installation_id: str, client_request_id: str) -> MapJob | None:
+        for job in self.store.list():
+            if (
+                job.client_installation_id == client_installation_id
+                and job.client_request_id == client_request_id
+            ):
+                return job
+        return None
 
     def find_by_map_id(self, map_id: str) -> MapJob | None:
         for job in self.store.list():
@@ -417,6 +463,24 @@ class MapJobService:
 
 class JobClaimError(RuntimeError):
     pass
+
+
+_CLIENT_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+
+
+def _client_identifier(request: dict[str, Any], key: str) -> str | None:
+    value = request.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a string")
+    return _validate_identifier(value, key)
+
+
+def _validate_identifier(value: str, key: str) -> str:
+    if not _CLIENT_IDENTIFIER_RE.fullmatch(value):
+        raise ValueError(f"{key} must contain 8-128 letters, numbers, hyphens, or underscores")
+    return value
 
 
 def _age_seconds(value: str) -> float:

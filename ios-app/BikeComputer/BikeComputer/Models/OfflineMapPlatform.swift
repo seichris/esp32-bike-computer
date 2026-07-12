@@ -45,6 +45,9 @@ struct OfflineMapJobRequest: Encodable, Equatable {
     let geometry: GeoJSONGeometry?
     let route: GeoJSONGeometry?
     let corridorWidthM: Double?
+    let clientInstallationId: String?
+    let clientRequestId: String?
+    let installOnDevice: Bool?
 
     static func customBBox(_ bounds: OfflineMapBounds) -> OfflineMapJobRequest {
         OfflineMapJobRequest(
@@ -52,7 +55,10 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             bbox: bounds.apiArray,
             geometry: nil,
             route: nil,
-            corridorWidthM: nil
+            corridorWidthM: nil,
+            clientInstallationId: nil,
+            clientRequestId: nil,
+            installOnDevice: nil
         )
     }
 
@@ -62,7 +68,10 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             bbox: nil,
             geometry: GeoJSONGeometry.polygon(ring: ring),
             route: nil,
-            corridorWidthM: nil
+            corridorWidthM: nil,
+            clientInstallationId: nil,
+            clientRequestId: nil,
+            installOnDevice: nil
         )
     }
 
@@ -72,7 +81,27 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             bbox: nil,
             geometry: nil,
             route: GeoJSONGeometry.lineString(route),
-            corridorWidthM: widthMeters
+            corridorWidthM: widthMeters,
+            clientInstallationId: nil,
+            clientRequestId: nil,
+            installOnDevice: nil
+        )
+    }
+
+    func identified(
+        clientInstallationId: String,
+        clientRequestId: String,
+        installOnDevice: Bool
+    ) -> OfflineMapJobRequest {
+        OfflineMapJobRequest(
+            mode: mode,
+            bbox: bbox,
+            geometry: geometry,
+            route: route,
+            corridorWidthM: corridorWidthM,
+            clientInstallationId: clientInstallationId,
+            clientRequestId: clientRequestId,
+            installOnDevice: installOnDevice
         )
     }
 }
@@ -128,15 +157,43 @@ enum GeoJSONCoordinates: Codable, Equatable {
 struct OfflineMapJob: Decodable, Equatable {
     let jobId: String
     let status: String
+    let createdAt: String?
     let error: String?
     let mapId: String?
     let packPath: String?
     let geometry: OfflineMapJobGeometry?
     let sourceRegion: OfflineMapSourceRegion?
     let progress: OfflineMapJobProgress?
+    let clientInstallationId: String?
+    let clientRequestId: String?
+    let installOnDevice: Bool?
 
     var isTerminal: Bool {
         ["ready", "failed", "expired", "cancelled"].contains(status)
+    }
+}
+
+struct OfflineMapJobsResponse: Decodable, Equatable {
+    let jobs: [OfflineMapJob]
+}
+
+enum OfflineMapJobRecoverySelector {
+    static func select(
+        jobs: [OfflineMapJob],
+        clientInstallationId: String,
+        cachedMapIds: Set<String>,
+        excludedJobIds: Set<String> = []
+    ) -> OfflineMapJob? {
+        jobs
+            .filter { job in
+                guard job.clientInstallationId == clientInstallationId else { return false }
+                guard !excludedJobIds.contains(job.jobId) else { return false }
+                if job.status == "ready", let mapId = job.mapId {
+                    return !cachedMapIds.contains(mapId)
+                }
+                return !job.isTerminal
+            }
+            .max { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
     }
 }
 
@@ -610,6 +667,23 @@ struct OfflineMapPlatformClient {
         try await send(path: "/v1/map-jobs/\(id)", method: "GET", body: Optional<Data>.none)
     }
 
+    func jobs(clientInstallationId: String) async throws -> [OfflineMapJob] {
+        let request = try Self.makeListJobsURLRequest(
+            baseURL: baseURL,
+            apiToken: apiToken,
+            clientInstallationId: clientInstallationId
+        )
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        guard 200..<300 ~= http.statusCode else {
+            let bodyText = String(data: data, encoding: .utf8) ?? ""
+            throw OfflineMapPlatformError.serverStatus(http.statusCode, bodyText)
+        }
+        return try JSONDecoder().decode(OfflineMapJobsResponse.self, from: data).jobs
+    }
+
     func downloadURL(mapId: String) async throws -> URL {
         let response: OfflineMapDownloadURL = try await send(
             path: "/v1/map-packs/\(mapId)/download-url",
@@ -631,6 +705,27 @@ struct OfflineMapPlatformClient {
             request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
         }
         request.httpBody = try JSONEncoder.offlineMap.encode(jobRequest)
+        return request
+    }
+
+    static func makeListJobsURLRequest(
+        baseURL: URL,
+        apiToken: String?,
+        clientInstallationId: String
+    ) throws -> URLRequest {
+        let endpoint = try endpointURL(baseURL: baseURL, path: "/v1/map-jobs")
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            throw OfflineMapPlatformError.invalidBaseURL
+        }
+        components.queryItems = [URLQueryItem(name: "clientInstallationId", value: clientInstallationId)]
+        guard let url = components.url else {
+            throw OfflineMapPlatformError.invalidBaseURL
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        if let apiToken, !apiToken.isEmpty {
+            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        }
         return request
     }
 

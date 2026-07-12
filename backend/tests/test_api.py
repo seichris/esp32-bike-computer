@@ -79,6 +79,37 @@ class MapJobRunAPITests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
 
+    def test_list_jobs_filters_by_client_installation(self):
+        first = self.client.post(
+            "/v1/map-jobs",
+            json={
+                "mode": "custom_bbox",
+                "bbox": [103.75, 1.24, 103.93, 1.37],
+                "clientInstallationId": "installation-first",
+                "clientRequestId": "request-first-123",
+            },
+        )
+        self.assertEqual(first.status_code, 200)
+        second = self.client.post(
+            "/v1/map-jobs",
+            json={
+                "mode": "custom_bbox",
+                "bbox": [103.76, 1.25, 103.94, 1.38],
+                "clientInstallationId": "installation-second",
+                "clientRequestId": "request-second-123",
+            },
+        )
+        self.assertEqual(second.status_code, 200)
+
+        response = self.client.get(
+            "/v1/map-jobs",
+            params={"clientInstallationId": "installation-first"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        jobs = response.json()["jobs"]
+        self.assertEqual([job["jobId"] for job in jobs], [first.json()["jobId"]])
+
 
 if __name__ == "__main__":
     unittest.main()

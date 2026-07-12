@@ -301,11 +301,14 @@ struct NavigationProtocolTests {
         testOfflineMapProgressPresentation()
         testOfflineMapDownloadingSectionPresentation()
         testOfflineMapJobPersistence()
+        testOfflineMapInstallationIdentity()
+        testOfflineMapJobRecoverySelection()
         testPendingOfflineMapJobBlocksEveryCreationIngress()
         await testOfflineMapPollerOutlivesLegacyAttemptLimit()
         await testOfflineMapPollerRetriesTransientFailure()
         await testOfflineMapPollerStopsOnTerminalAndCancellation()
         testOfflineMapCreateJobURLRequest()
+        testOfflineMapListJobsURLRequest()
         testOfflineMapManagerMigratesProductionConfig()
         testOfflineMapManagerRestoresLastTransferIdentity()
         testOfflineMapManagerReconcilesInterruptedActivation()
@@ -467,6 +470,15 @@ struct NavigationProtocolTests {
         assert(request.bbox != nil, "custom cut-out includes bbox")
         assert(abs((request.bbox?[1] ?? 0) - 34.9) < 0.001, "bbox min latitude uses requested size")
         assert(abs((request.bbox?[3] ?? 0) - 35.1) < 0.001, "bbox max latitude uses requested size")
+
+        let identified = request.identified(
+            clientInstallationId: "installation-test",
+            clientRequestId: "request-test-123",
+            installOnDevice: true
+        )
+        assertEqual(identified.clientInstallationId, "installation-test", "request includes installation identity")
+        assertEqual(identified.clientRequestId, "request-test-123", "request includes idempotency identity")
+        assertEqual(identified.installOnDevice, true, "request preserves install workflow intent")
     }
 
     static func testOfflineMapPreparationTimeEstimate() {
@@ -538,6 +550,7 @@ struct NavigationProtocolTests {
         OfflineMapJobPersistence.save(
             jobId: "job-resume",
             installOnDevice: true,
+            serverURLString: "https://maps.example.com",
             defaults: defaults
         )
         assertEqual(
@@ -549,6 +562,11 @@ struct NavigationProtocolTests {
             OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults),
             "onboarding map job preserves install intent"
         )
+        assertEqual(
+            OfflineMapJobPersistence.serverURLString(defaults: defaults),
+            "https://maps.example.com",
+            "pending job preserves its originating server"
+        )
         OfflineMapJobPersistence.clear(defaults: defaults)
         assertEqual(
             OfflineMapJobPersistence.activeJobId(defaults: defaults),
@@ -558,6 +576,83 @@ struct NavigationProtocolTests {
         assert(
             !OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults),
             "completed map job clears install intent"
+        )
+        assertEqual(
+            OfflineMapJobPersistence.serverURLString(defaults: defaults),
+            nil,
+            "completed map job clears its originating server"
+        )
+        OfflineMapRecoveryHistory.markHandled(jobId: "job-resume", defaults: defaults)
+        OfflineMapRecoveryHistory.markHandled(jobId: "job-other", defaults: defaults)
+        assertEqual(
+            OfflineMapRecoveryHistory.handledJobIds(defaults: defaults),
+            ["job-resume", "job-other"],
+            "handled server jobs remain excluded from automatic redownload"
+        )
+    }
+
+    static func testOfflineMapInstallationIdentity() {
+        let suite = "offline-map-installation-identity-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "installation identity test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("bad", forKey: "offlineMap.clientInstallationId")
+
+        let first = OfflineMapInstallationIdentity.resolve(defaults: defaults)
+        let second = OfflineMapInstallationIdentity.resolve(defaults: defaults)
+
+        assert(first != "bad", "invalid installation identity is replaced")
+        assertEqual(second, first, "installation identity survives app relaunch")
+    }
+
+    static func testOfflineMapJobRecoverySelection() {
+        let jobs = [
+            offlineMapJob(
+                status: "converting_features",
+                createdAt: "2026-07-12T01:00:00Z",
+                clientInstallationId: "installation-other"
+            ),
+            offlineMapJob(
+                status: "ready",
+                mapId: "map-cached",
+                createdAt: "2026-07-12T02:00:00Z",
+                clientInstallationId: "installation-mine"
+            ),
+            offlineMapJob(
+                status: "converting_features",
+                createdAt: "2026-07-12T03:00:00Z",
+                clientInstallationId: "installation-mine"
+            ),
+            offlineMapJob(
+                status: "ready",
+                mapId: "map-recover",
+                createdAt: "2026-07-12T04:00:00Z",
+                clientInstallationId: "installation-mine",
+                installOnDevice: true
+            ),
+        ].compactMap { $0 }
+
+        let selected = OfflineMapJobRecoverySelector.select(
+            jobs: jobs,
+            clientInstallationId: "installation-mine",
+            cachedMapIds: ["map-cached"]
+        )
+
+        assertEqual(selected?.mapId, "map-recover", "recovery selects the newest uncached owned job")
+        assertEqual(selected?.installOnDevice, true, "recovery restores install workflow intent")
+
+        let afterHandling = OfflineMapJobRecoverySelector.select(
+            jobs: jobs,
+            clientInstallationId: "installation-mine",
+            cachedMapIds: ["map-cached"],
+            excludedJobIds: ["job-ready"]
+        )
+        assertEqual(
+            afterHandling?.status,
+            "converting_features",
+            "recovery does not redownload a handled ready job"
         )
     }
 
@@ -741,19 +836,31 @@ struct NavigationProtocolTests {
     static func offlineMapJob(
         status: String,
         mapId: String? = nil,
-        error: String? = nil
+        error: String? = nil,
+        createdAt: String? = nil,
+        clientInstallationId: String? = nil,
+        installOnDevice: Bool? = nil
     ) -> OfflineMapJob? {
         var payload: [String: Any] = ["jobId": "job-\(status)", "status": status]
         if let mapId { payload["mapId"] = mapId }
         if let error { payload["error"] = error }
+        if let createdAt { payload["createdAt"] = createdAt }
+        if let clientInstallationId { payload["clientInstallationId"] = clientInstallationId }
+        if let installOnDevice { payload["installOnDevice"] = installOnDevice }
         guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
         return try? JSONDecoder().decode(OfflineMapJob.self, from: data)
     }
 
     static func testOfflineMapCreateJobURLRequest() {
-        let request = OfflineMapJobRequest.customBBox(
-            OfflineMapBounds(minLon: 10, minLat: 20, maxLon: 11, maxLat: 21)
-        )
+        let request = OfflineMapJobRequest
+            .customBBox(
+                OfflineMapBounds(minLon: 10, minLat: 20, maxLon: 11, maxLat: 21)
+            )
+            .identified(
+                clientInstallationId: "installation-test",
+                clientRequestId: "request-test-123",
+                installOnDevice: false
+            )
         guard let url = URL(string: "https://maps.example.com/api") else {
             assert(false, "base URL should parse")
             return
@@ -771,6 +878,32 @@ struct NavigationProtocolTests {
         let body = String(data: urlRequest.httpBody ?? Data(), encoding: .utf8) ?? ""
         assert(body.contains("\"mode\":\"custom_bbox\""), "create job body includes mode")
         assert(body.contains("\"bbox\":[10,20,11,21]"), "create job body includes bbox")
+        assert(body.contains("\"clientInstallationId\":\"installation-test\""), "create job body includes installation identity")
+        assert(body.contains("\"clientRequestId\":\"request-test-123\""), "create job body includes request identity")
+        assert(body.contains("\"installOnDevice\":false"), "create job body includes workflow intent")
+    }
+
+    static func testOfflineMapListJobsURLRequest() {
+        guard let baseURL = URL(string: "https://maps.example.com/api"),
+              let request = try? OfflineMapPlatformClient.makeListJobsURLRequest(
+                baseURL: baseURL,
+                apiToken: "secret",
+                clientInstallationId: "installation-test"
+              ) else {
+            assert(false, "list jobs URL request should build")
+            return
+        }
+
+        assertEqual(
+            request.url?.absoluteString,
+            "https://maps.example.com/api/v1/map-jobs?clientInstallationId=installation-test",
+            "list jobs request filters by installation identity"
+        )
+        assertEqual(
+            request.value(forHTTPHeaderField: "Authorization"),
+            "Bearer secret",
+            "list jobs request includes bearer token"
+        )
     }
 
     static func testOfflineMapManagerMigratesProductionConfig() {

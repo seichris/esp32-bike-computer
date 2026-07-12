@@ -308,6 +308,7 @@ private struct DownloadingMapsSettingsSection: View {
 private struct SavedMapsSettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
+    @State private var recoveryJobId = ""
 
     var body: some View {
         Section(header: Text("Saved Maps")) {
@@ -335,6 +336,25 @@ private struct SavedMapsSettingsSection: View {
                 Label("Download a new Map", systemImage: "rectangle.dashed")
             }
             .disabled(manager.isBusy || manager.hasPendingMapJob)
+
+            DisclosureGroup("Recover a Server Map") {
+                TextField("Server job ID", text: $recoveryJobId)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button {
+                    manager.recoverServerMap(jobId: recoveryJobId)
+                } label: {
+                    Label("Download Recovered Map", systemImage: "arrow.clockwise.icloud")
+                }
+                .disabled(
+                    manager.isBusy ||
+                        manager.hasPendingMapJob ||
+                        recoveryJobId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+                Text("Use this for a map created before automatic recovery was available.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
         .onAppear {
             manager.reconcileLastTransfer(bleManager: bleManager)

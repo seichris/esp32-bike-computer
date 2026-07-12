@@ -1,12 +1,13 @@
 import json
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
 from map_platform.jobs import JobStore, MapJobService
 from map_platform.limits import JobLimits
-from map_platform.models import Bounds, SourceRegion
+from map_platform.models import Bounds, MapJob, SourceRegion
 from map_platform.sources import SourceIndex, SourceResolutionError
 
 
@@ -122,6 +123,77 @@ class SourceAndJobTests(unittest.TestCase):
             self.assertEqual(loaded.source_region.id, "sg")
             self.assertEqual(loaded.request["displayName"], "Singapore central")
             self.assertIsNone(loaded.to_dict()["progress"])
+
+    def test_client_metadata_supports_filtered_recovery_and_idempotent_create(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MapJobService(SourceIndex([self.singapore]), JobStore(Path(tmp)))
+            request = {
+                "mode": "custom_bbox",
+                "bbox": [103.75, 1.24, 103.93, 1.37],
+                "clientInstallationId": "installation-12345678",
+                "clientRequestId": "request-12345678",
+                "installOnDevice": True,
+            }
+
+            created = service.create_job(request)
+            retried = service.create_job(dict(request))
+            service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.76, 1.25, 103.94, 1.38],
+                    "clientInstallationId": "installation-other",
+                    "clientRequestId": "request-other-123",
+                }
+            )
+
+            recovered = service.list_jobs(client_installation_id="installation-12345678")
+            self.assertEqual(retried.job_id, created.job_id)
+            self.assertEqual(len(service.list_jobs()), 2)
+            self.assertEqual([job.job_id for job in recovered], [created.job_id])
+            self.assertEqual(recovered[0].client_request_id, "request-12345678")
+            self.assertTrue(recovered[0].install_on_device)
+            self.assertEqual(recovered[0].to_dict()["clientInstallationId"], "installation-12345678")
+
+            legacy_shape = created.to_dict()
+            legacy_shape.pop("clientInstallationId")
+            legacy_shape.pop("clientRequestId")
+            legacy_shape.pop("installOnDevice")
+            migrated = MapJob.from_dict(legacy_shape)
+            self.assertEqual(migrated.client_installation_id, "installation-12345678")
+            self.assertEqual(migrated.client_request_id, "request-12345678")
+            self.assertTrue(migrated.install_on_device)
+
+    def test_client_request_id_rejects_different_retry_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MapJobService(SourceIndex([self.singapore]), JobStore(Path(tmp)))
+            request = {
+                "mode": "custom_bbox",
+                "bbox": [103.75, 1.24, 103.93, 1.37],
+                "clientInstallationId": "installation-12345678",
+                "clientRequestId": "request-12345678",
+            }
+            service.create_job(request)
+
+            changed = dict(request)
+            changed["bbox"] = [103.76, 1.25, 103.94, 1.38]
+            with self.assertRaisesRegex(ValueError, "different map request"):
+                service.create_job(changed)
+
+    def test_concurrent_idempotent_creates_persist_one_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MapJobService(SourceIndex([self.singapore]), JobStore(Path(tmp)))
+            request = {
+                "mode": "custom_bbox",
+                "bbox": [103.75, 1.24, 103.93, 1.37],
+                "clientInstallationId": "installation-12345678",
+                "clientRequestId": "request-12345678",
+            }
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                jobs = list(executor.map(lambda _: service.create_job(dict(request)), range(8)))
+
+            self.assertEqual(len({job.job_id for job in jobs}), 1)
+            self.assertEqual(len(service.list_jobs()), 1)
 
     def test_job_store_persists_generation_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
