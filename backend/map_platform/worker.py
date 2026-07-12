@@ -65,15 +65,17 @@ class MapWorker:
                     on_status=update,
                     on_progress=update_progress,
                 )
-            finished = self.store.update_status_unless_cancelled(
+            published_archive = (
+                self.pipeline.published_archive_path(map_id)
+                if hasattr(self.pipeline, "published_archive_path")
+                else archive_path
+            )
+            finished = self.store.complete_job(
                 job.job_id,
-                JobStatus.READY,
-                map_id=map_id,
-                pack_path=str(archive_path),
-                pack_bytes=archive_path.stat().st_size if archive_path.exists() else None,
                 worker_id=self.worker_id,
-                event="map pack ready",
-                finished=True,
+                map_id=map_id,
+                built_archive=archive_path,
+                published_archive=published_archive,
             )
             return WorkerResult(worker_id=self.worker_id, job=finished, processed=True)
         except Exception as exc:

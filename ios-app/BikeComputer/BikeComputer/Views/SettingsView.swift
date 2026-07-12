@@ -54,7 +54,11 @@ struct SettingsView: View {
                 MainFirmwareUpdateSection(manager: firmwareUpdateManager)
                 DeviceScreensSettingsSection()
                 SavedMapsSettingsSection(manager: offlineMapManager)
-                if offlineMapManager.isBusy || offlineMapManager.errorMessage != nil {
+                if OfflineMapDownloadingSectionPresentation.isVisible(
+                    isBusy: offlineMapManager.isBusy,
+                    hasPendingJob: offlineMapManager.hasPendingMapJob,
+                    errorMessage: offlineMapManager.errorMessage
+                ) {
                     DownloadingMapsSettingsSection(manager: offlineMapManager)
                 }
 

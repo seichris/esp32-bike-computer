@@ -299,6 +299,7 @@ struct NavigationProtocolTests {
         testOfflineMapJobProgressDecoding()
         testOfflineMapJobProgressAbsentFallback()
         testOfflineMapProgressPresentation()
+        testOfflineMapDownloadingSectionPresentation()
         testOfflineMapJobPersistence()
         await testOfflineMapPollerOutlivesLegacyAttemptLimit()
         await testOfflineMapPollerRetriesTransientFailure()
@@ -582,6 +583,25 @@ struct NavigationProtocolTests {
             OfflineMapProgressPresentation.value(job: progressJob, downloadProgress: 0.75),
             0.4,
             "generation progress takes precedence while conversion is active"
+        )
+    }
+
+    static func testOfflineMapDownloadingSectionPresentation() {
+        assert(
+            OfflineMapDownloadingSectionPresentation.isVisible(
+                isBusy: false,
+                hasPendingJob: true,
+                errorMessage: nil
+            ),
+            "paused persisted jobs keep the resume section reachable"
+        )
+        assert(
+            !OfflineMapDownloadingSectionPresentation.isVisible(
+                isBusy: false,
+                hasPendingJob: false,
+                errorMessage: nil
+            ),
+            "idle map settings omit an empty downloading section"
         )
     }
 

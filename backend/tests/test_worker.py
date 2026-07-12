@@ -201,6 +201,42 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(loaded.worker_id, "worker-new")
             self.assertIsNone(loaded.progress_completed)
 
+    def test_previous_worker_cannot_publish_after_job_is_reclaimed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job({"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]})
+            self.assertIsNotNone(store.claim_next("worker-old"))
+            store.update_status(job.job_id, JobStatus.PACKAGING, worker_id="worker-old")
+            old_archive = root / "old-attempt.zip"
+            old_archive.write_bytes(b"old")
+
+            reclaimed = store.claim_next("worker-new", interrupted_job_stale_seconds=0)
+            self.assertIsNotNone(reclaimed)
+            new_archive = root / "new-attempt.zip"
+            new_archive.write_bytes(b"new")
+            published = root / "packs" / "map.zip"
+            store.complete_job(
+                job.job_id,
+                worker_id="worker-new",
+                map_id="map-new",
+                built_archive=new_archive,
+                published_archive=published,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "owned by another worker"):
+                store.complete_job(
+                    job.job_id,
+                    worker_id="worker-old",
+                    map_id="map-old",
+                    built_archive=old_archive,
+                    published_archive=published,
+                )
+
+            self.assertEqual(published.read_bytes(), b"new")
+            self.assertEqual(store.get(job.job_id).map_id, "map-new")
+
     def test_live_worker_heartbeat_prevents_reclaim_during_long_phase(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = JobStore(tmp)
@@ -262,6 +298,19 @@ class WorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(JobClaimError, "validating, not queued"):
                 run_job(store, FakePipeline(), active.job_id)
             self.assertEqual(store.get(active.job_id).worker_id, "worker-active")
+
+    def test_cancel_does_not_overwrite_completed_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(tmp)
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job({"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]})
+            ready = MapWorker(store, FakePipeline(), worker_id="worker-test").run_next().job
+
+            cancelled = service.cancel_job(job.job_id)
+
+            self.assertEqual(ready.status, JobStatus.READY)
+            self.assertEqual(cancelled.status, JobStatus.READY)
+            self.assertEqual(cancelled.map_id, "map-123")
 
     def test_expire_ready_jobs_and_cleanup_work_dirs(self):
         with tempfile.TemporaryDirectory() as tmp:

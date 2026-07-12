@@ -166,6 +166,53 @@ class JobStore:
             self.save(job)
             return job
 
+    def complete_job(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        map_id: str,
+        built_archive: Path,
+        published_archive: Path,
+    ) -> MapJob:
+        with self._queue_lock():
+            job = self.get(job_id)
+            if job.status == JobStatus.CANCELLED:
+                raise RuntimeError("job was cancelled")
+            if job.worker_id != worker_id:
+                raise RuntimeError("job is owned by another worker")
+            published_archive.parent.mkdir(parents=True, exist_ok=True)
+            if built_archive != published_archive:
+                built_archive.replace(published_archive)
+            return self._update_status_unlocked(
+                job_id,
+                JobStatus.READY,
+                map_id=map_id,
+                pack_path=str(published_archive),
+                pack_bytes=published_archive.stat().st_size,
+                worker_id=worker_id,
+                event="map pack ready",
+                finished=True,
+            )
+
+    def cancel_if_active(self, job_id: str) -> MapJob:
+        terminal_statuses = {
+            JobStatus.READY,
+            JobStatus.FAILED,
+            JobStatus.EXPIRED,
+            JobStatus.CANCELLED,
+        }
+        with self._queue_lock():
+            job = self.get(job_id)
+            if job.status in terminal_statuses:
+                return job
+            return self._update_status_unlocked(
+                job_id,
+                JobStatus.CANCELLED,
+                event="cancelled by request",
+                finished=True,
+            )
+
     def heartbeat_unless_cancelled(self, job_id: str, *, worker_id: str) -> MapJob:
         with self._queue_lock():
             job = self.get(job_id)
@@ -362,10 +409,7 @@ class MapJobService:
         return None
 
     def cancel_job(self, job_id: str) -> MapJob:
-        job = self.store.get(job_id)
-        if job.status in {JobStatus.READY, JobStatus.FAILED, JobStatus.EXPIRED, JobStatus.CANCELLED}:
-            return job
-        return self.store.update_status(job_id, JobStatus.CANCELLED, event="cancelled by request", finished=True)
+        return self.store.cancel_if_active(job_id)
 
     def _new_job_id(self) -> str:
         return uuid.uuid4().hex[:20]

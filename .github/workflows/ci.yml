@@ -96,6 +96,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install backend test dependencies
+        run: python -m pip install -e '.[test]'
       - name: Python syntax
         run: python -m py_compile map_platform/*.py tests/*.py
       - name: Unit tests

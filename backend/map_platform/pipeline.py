@@ -111,18 +111,18 @@ class MapBuildPipeline:
     def build(self, job: MapJob, on_status=None, on_progress=None) -> tuple[str, Path]:
         map_id = stable_map_id(job)
         job.map_id = map_id
-        job_dir = self.paths.work_root / job.job_id
+        attempt_id = re.sub(r"[^a-zA-Z0-9_-]", "-", job.worker_id or f"attempt-{job.attempts}")
+        job_dir = self.paths.work_root / job.job_id / attempt_id
         clipped_pbf = job_dir / "clipped.osm.pbf"
         geojson_prefix = job_dir / "features"
         raw_output_dir = job_dir / "raw-map"
         pack_root = job_dir / "pack"
         vectmap_output = pack_root / "VECTMAP" / map_id
-        archive_path = self.paths.pack_root / f"{map_id}.zip"
+        archive_path = job_dir / f"{map_id}.zip"
 
         if job_dir.exists():
             shutil.rmtree(job_dir)
         job_dir.mkdir(parents=True)
-        self.paths.pack_root.mkdir(parents=True, exist_ok=True)
 
         if on_status:
             on_status(JobStatus.RESOLVING_SOURCE)
@@ -141,6 +141,9 @@ class MapBuildPipeline:
         manifest = build_manifest(job, pack_root, self._pipeline_metadata())
         write_pack_archive(pack_root, manifest, archive_path)
         return map_id, archive_path
+
+    def published_archive_path(self, map_id: str) -> Path:
+        return self.paths.pack_root / f"{map_id}.zip"
 
     def _source_pbf_path(self, job: MapJob) -> Path:
         return self.source_cache.ensure(job.source_region).path
@@ -261,14 +264,17 @@ def run_job(store, pipeline: MapBuildPipeline, job_id: str, *, heartbeat_interva
             interval_seconds=heartbeat_interval_seconds,
         ):
             map_id, archive_path = pipeline.build(job, on_status=update, on_progress=update_progress)
-        return store.update_status_unless_cancelled(
+        published_archive = (
+            pipeline.published_archive_path(map_id)
+            if hasattr(pipeline, "published_archive_path")
+            else archive_path
+        )
+        return store.complete_job(
             job_id,
-            JobStatus.READY,
-            map_id=map_id,
-            pack_path=str(archive_path),
-            pack_bytes=archive_path.stat().st_size if archive_path.exists() else None,
             worker_id=worker_id,
-            finished=True,
+            map_id=map_id,
+            built_archive=archive_path,
+            published_archive=published_archive,
         )
     except Exception as exc:
         current = store.get(job_id)

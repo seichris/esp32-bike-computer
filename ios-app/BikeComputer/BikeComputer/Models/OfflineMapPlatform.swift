@@ -163,6 +163,12 @@ enum OfflineMapProgressPresentation {
     }
 }
 
+enum OfflineMapDownloadingSectionPresentation {
+    static func isVisible(isBusy: Bool, hasPendingJob: Bool, errorMessage: String?) -> Bool {
+        isBusy || hasPendingJob || errorMessage != nil
+    }
+}
+
 struct OfflineMapJobGeometry: Decodable, Equatable {
     let mode: String
     let bounds: [Double]

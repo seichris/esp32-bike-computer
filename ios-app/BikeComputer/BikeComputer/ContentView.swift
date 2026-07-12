@@ -211,6 +211,7 @@ struct ContentView: View {
 
     private var shouldShowOfflineMapStatusChip: Bool {
         offlineMapManager.isBusy ||
+            offlineMapManager.hasPendingMapJob ||
             offlineMapManager.currentJob != nil ||
             offlineMapManager.downloadedPackURL != nil ||
             offlineMapManager.errorMessage != nil
