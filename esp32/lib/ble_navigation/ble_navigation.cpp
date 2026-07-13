@@ -586,12 +586,19 @@ static std::string mapTransferStatusJson() {
   map_transfer::MapTransferInstaller installer("/sdcard");
   map_transfer::InstallStatus activeStatus =
       installer.readActiveMap(activeMap);
+  const bool streamSupported = mapTransferHttp.streamInstallSupported();
 
   std::string body = std::string("{\"configured\":") +
                      (transferStatus.configured ? "true" : "false") +
                      ",\"enabled\":" +
                      (transferStatus.enabled ? "true" : "false") +
                      ",\"port\":" + std::to_string(transferStatus.port) +
+                     ",\"protocols\":[1" +
+                     (streamSupported ? ",2" : "") +
+                     "]" +
+                     (streamSupported
+                          ? ",\"streamFormatVersions\":[1]"
+                          : "") +
                      ",\"sdPresent\":" +
                      (storage.getSdLoaded() ? "true" : "false") +
                      ",\"mapFound\":" +
@@ -766,11 +773,29 @@ static void processPendingTransferControl() {
       mapTransferHttp.setLastError("transfer_busy",
                                    "another transfer mode is active");
       Serial.println("BLE Map Transfer: enter rejected, transfer is busy");
-    } else if (!storage.getSdLoaded()) {
+    } else if (transferStatus.enabled && transferStatus.mode == "map") {
+      Serial.println("BLE Map Transfer: enter already applied");
+    } else if (mapTransferHttp.activationSnapshot().running) {
+      mapTransferHttp.setLastError(
+          "activation_busy", "map activation is still using map storage");
+      Serial.println(
+          "BLE Map Transfer: enter rejected, activation is still running");
+    } else if (!deviceTransferHttp.waitUntilStopped(2000)) {
+      mapTransferHttp.setLastError(
+          "transfer_stopping", "previous transfer work is still stopping");
+      Serial.println(
+          "BLE Map Transfer: enter rejected, transfer worker is stopping");
+    } else if (!storage.ensureSdMounted()) {
       mapTransferHttp.setLastError("sd_unavailable",
                                    "SD card is not mounted");
       Serial.println(
           "BLE Map Transfer: enter rejected, SD card is not mounted");
+    } else if (!mapTransferHttp.refreshStreamStorageCapability(true)) {
+      storage.markSdUnavailable();
+      mapTransferHttp.setLastError(
+          "sd_unwritable", "SD card map storage is not writable");
+      Serial.println(
+          "BLE Map Transfer: enter rejected, SD card is not writable");
     } else {
       const bool enabled = mapTransferHttp.setEnabled(true);
       Serial.printf("BLE Map Transfer: enter applied, enabled=%d\n", enabled);

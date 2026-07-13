@@ -1,8 +1,8 @@
 #include "device_transfer_http.hpp"
+#include "device_transfer_http_limits.hpp"
 
 #include <algorithm>
 #include <cctype>
-#include <cstdlib>
 #include <esp_system.h>
 #include <sstream>
 
@@ -30,23 +30,68 @@ static std::string lower(std::string value) {
   return value;
 }
 
-static bool readLine(WiFiClient &client, std::string &line,
-                     uint32_t timeoutMs = 2000) {
+static const char *httpReason(int status) {
+  switch (status) {
+  case 200:
+    return "OK";
+  case 202:
+    return "Accepted";
+  case 400:
+    return "Bad Request";
+  case 401:
+    return "Unauthorized";
+  case 403:
+    return "Forbidden";
+  case 404:
+    return "Not Found";
+  case 408:
+    return "Request Timeout";
+  case 409:
+    return "Conflict";
+  case 413:
+    return "Payload Too Large";
+  case 415:
+    return "Unsupported Media Type";
+  case 431:
+    return "Request Header Fields Too Large";
+  case 503:
+    return "Service Unavailable";
+  default:
+    return "Internal Server Error";
+  }
+}
+
+enum class ReadLineResult { Complete, Timeout, TooLarge, Disconnected };
+
+static ReadLineResult readLine(WiFiClient &client, std::string &line,
+                               HttpHeaderBudget &budget,
+                               uint32_t requestStartedMs) {
   line.clear();
-  uint32_t started = millis();
-  while (millis() - started < timeoutMs) {
+  while (!HttpHeaderBudget::timedOut(millis() - requestStartedMs)) {
     while (client.available()) {
-      char c = static_cast<char>(client.read());
-      if (c == '\r')
+      const int raw = client.read();
+      if (raw < 0)
+        break;
+      const char c = static_cast<char>(raw);
+      if (c == '\r') {
+        if (!budget.acceptDelimiterByte())
+          return ReadLineResult::TooLarge;
         continue;
-      if (c == '\n')
-        return true;
-      if (line.size() < 512)
-        line.push_back(c);
+      }
+      if (c == '\n') {
+        if (!budget.acceptDelimiterByte() || !budget.finishLine())
+          return ReadLineResult::TooLarge;
+        return ReadLineResult::Complete;
+      }
+      if (!budget.acceptDataByte())
+        return ReadLineResult::TooLarge;
+      line.push_back(c);
     }
+    if (!client.connected() && client.available() <= 0)
+      return ReadLineResult::Disconnected;
     delay(1);
   }
-  return false;
+  return ReadLineResult::Timeout;
 }
 
 static std::string jsonEscape(const std::string &value) {
@@ -122,6 +167,18 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     return false;
   }
 
+  // A prior mode can revoke the service while its worker is still unwinding
+  // an HTTP request. Do not publish a new enabled session until that task has
+  // cleared its handle; otherwise a stale handle snapshot can suppress the
+  // replacement worker and leave an advertised service with no listener.
+  if (enabled && !wasEnabled && !waitUntilStopped(2000)) {
+    lockState();
+    rememberError("http_worker_stopping",
+                  "previous transfer HTTP worker is still stopping");
+    unlockState();
+    return false;
+  }
+
   if (enabled && !wasEnabled) {
     if (WiFi.status() != WL_CONNECTED) {
       WiFi.mode(WIFI_AP);
@@ -141,6 +198,15 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     server_.setNoDelay(true);
   }
   if (!enabled && wasEnabled) {
+    // Revoke the request generation before stopping the listener/AP. Network
+    // teardown can take long enough for a nearly complete handler to advance;
+    // it must observe cancellation before it can publish or activate anything.
+    lockState();
+    enabled_ = false;
+    mode_.clear();
+    sessionToken_.clear();
+    transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
+    unlockState();
     server_.stop();
     if (wasStartedAp) {
       WiFi.softAPdisconnect(true);
@@ -150,17 +216,48 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
       unlockState();
     }
   }
-  lockState();
-  enabled_ = enabled;
-  mode_ = enabled ? std::move(mode) : "";
-  if (enabled) {
-    if (!wasEnabled || previousMode != mode_ || previousSessionToken.empty()) {
-      sessionToken_ = generateSessionToken();
+  if (enabled || !wasEnabled) {
+    lockState();
+    const bool transferBoundary = enabled_ != enabled ||
+                                  (enabled && mode_ != mode);
+    enabled_ = enabled;
+    mode_ = enabled ? std::move(mode) : "";
+    if (enabled) {
+      if (!wasEnabled || previousMode != mode_ || previousSessionToken.empty()) {
+        sessionToken_ = generateSessionToken();
+      }
+    } else {
+      sessionToken_.clear();
     }
-  } else {
-    sessionToken_.clear();
+    if (transferBoundary) {
+      transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
+    }
+    unlockState();
   }
-  unlockState();
+
+  if (enabled && !wasEnabled) {
+    TaskHandle_t worker = nullptr;
+    const BaseType_t created =
+        xTaskCreate(workerTaskThunk, "device_http", 16384, this, 1, &worker);
+    if (created != pdPASS) {
+      server_.stop();
+      if (startedAp_) {
+        WiFi.softAPdisconnect(true);
+        WiFi.mode(WIFI_OFF);
+      }
+      lockState();
+      enabled_ = false;
+      startedAp_ = false;
+      mode_.clear();
+      sessionToken_.clear();
+      rememberError("http_worker", "could not start transfer HTTP worker");
+      unlockState();
+      return false;
+    }
+    lockState();
+    workerTask_ = worker;
+    unlockState();
+  }
   return true;
 }
 
@@ -171,14 +268,38 @@ void HttpTransferServer::setLastError(const std::string &code,
   unlockState();
 }
 
-void HttpTransferServer::process() {
-  if (!enabled_)
-    return;
-  WiFiClient client = server_.accept();
-  if (!client)
-    return;
-  handleClient(client);
-  client.stop();
+void HttpTransferServer::process() {}
+
+void HttpTransferServer::runWorker() {
+  while (true) {
+    lockState();
+    const bool enabled = enabled_;
+    unlockState();
+    if (!enabled) {
+      lockState();
+      if (enabled_) {
+        unlockState();
+        continue;
+      }
+      workerTask_ = nullptr;
+      unlockState();
+      return;
+    }
+    WiFiClient client = server_.accept();
+    if (client) {
+      handleClient(client);
+      client.stop();
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(2));
+    }
+  }
+}
+
+void HttpTransferServer::workerTaskThunk(void *arg) {
+  auto *server = static_cast<HttpTransferServer *>(arg);
+  if (server != nullptr)
+    server->runWorker();
+  vTaskDelete(nullptr);
 }
 
 HttpTransferStatus HttpTransferServer::status() const {
@@ -214,15 +335,47 @@ HttpTransferStatus HttpTransferServer::status() const {
 bool HttpTransferServer::isRequestAuthorized(
     const HttpRequest &request) const {
   lockState();
+  const bool enabled = enabled_;
   const std::string sessionToken = sessionToken_;
+  const uint32_t transferGeneration = transferGeneration_;
   unlockState();
-  return !sessionToken.empty() && request.transferToken == sessionToken;
+  return isHttpTransferGenerationCurrent(enabled, transferGeneration,
+                                         request.transferGeneration) &&
+         !sessionToken.empty() &&
+         request.transferToken == sessionToken;
+}
+
+bool HttpTransferServer::waitUntilStopped(uint32_t timeoutMs) {
+  const uint32_t started = millis();
+  while (true) {
+    lockState();
+    const bool stopped = workerTask_ == nullptr;
+    unlockState();
+    if (stopped)
+      return true;
+    if (millis() - started >= timeoutMs)
+      return false;
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
 }
 
 void HttpTransferServer::handleClient(WiFiClient &client) {
+  const uint32_t requestStartedMs = millis();
+  HttpHeaderBudget headerBudget;
   std::string requestLine;
-  if (!readLine(client, requestLine)) {
+  const ReadLineResult requestLineResult =
+      readLine(client, requestLine, headerBudget, requestStartedMs);
+  if (requestLineResult == ReadLineResult::Timeout) {
     sendError(client, 408, "timeout", "request timed out");
+    return;
+  }
+  if (requestLineResult == ReadLineResult::TooLarge) {
+    sendError(client, 431, "headers_too_large",
+              "request headers exceed device limits");
+    return;
+  }
+  if (requestLineResult != ReadLineResult::Complete) {
+    sendError(client, 400, "bad_request", "request line is incomplete");
     return;
   }
 
@@ -230,25 +383,60 @@ void HttpTransferServer::handleClient(WiFiClient &client) {
   std::stringstream requestStream(requestLine);
   std::string version;
   requestStream >> request.method >> request.path >> version;
-  if (request.method.empty() || request.path.empty()) {
+  std::string requestLineTrailing;
+  requestStream >> requestLineTrailing;
+  if (request.method.empty() || request.path.empty() ||
+      version != "HTTP/1.1" || !requestLineTrailing.empty()) {
     sendError(client, 400, "bad_request", "invalid request line");
     return;
   }
 
   std::string line;
-  while (readLine(client, line)) {
+  HttpSecurityHeaders securityHeaders;
+  while (true) {
+    const ReadLineResult headerResult =
+        readLine(client, line, headerBudget, requestStartedMs);
+    if (headerResult == ReadLineResult::Timeout) {
+      sendError(client, 408, "timeout", "request headers timed out");
+      return;
+    }
+    if (headerResult == ReadLineResult::TooLarge) {
+      sendError(client, 431, "headers_too_large",
+                "request headers exceed device limits");
+      return;
+    }
+    if (headerResult != ReadLineResult::Complete) {
+      sendError(client, 400, "bad_request", "request headers are incomplete");
+      return;
+    }
     if (line.empty())
       break;
-    size_t colon = line.find(':');
-    if (colon == std::string::npos)
-      continue;
-    std::string name = lower(trim(line.substr(0, colon)));
+    const size_t colon = line.find(':');
+    if (colon == std::string::npos || colon == 0) {
+      sendError(client, 400, "bad_header", "request header is invalid");
+      return;
+    }
+    const std::string rawName = line.substr(0, colon);
+    std::string name = lower(rawName);
     std::string value = trim(line.substr(colon + 1));
-    if (name == "content-length")
-      request.contentLength = strtoull(value.c_str(), nullptr, 10);
-    if (name == "x-bikecomputer-transfer-token")
-      request.transferToken = value;
+    if (rawName != trim(rawName) || !validHttpHeaderName(name)) {
+      sendError(client, 400, "bad_header", "request header name is invalid");
+      return;
+    }
+    securityHeaders.accept(name, name == "content-type" ? lower(value) : value);
   }
+  if (securityHeaders.hasAmbiguousFraming()) {
+    sendError(client, 400, "ambiguous_framing",
+              "transfer encoding is not supported");
+    return;
+  }
+  request.transferToken = std::move(securityHeaders.transferToken);
+  request.contentType = std::move(securityHeaders.contentType);
+  request.contentLength = securityHeaders.contentLength;
+  request.hasContentLength = securityHeaders.hasContentLength;
+  lockState();
+  request.transferGeneration = transferGeneration_;
+  unlockState();
 
   HttpRequestHandler *handler = handlerForPath(request.path);
   if (handler != nullptr && handler->handleRequest(request, client))
@@ -312,29 +500,14 @@ void HttpTransferServer::unlockState() const {
 }
 
 void sendHttpHead(WiFiClient &client, int status, uint64_t contentLength) {
-  const char *reason = status == 200   ? "OK"
-                       : status == 400 ? "Bad Request"
-                       : status == 403 ? "Forbidden"
-                       : status == 404 ? "Not Found"
-                                       : "Internal Server Error";
-  client.printf("HTTP/1.1 %d %s\r\n", status, reason);
+  client.printf("HTTP/1.1 %d %s\r\n", status, httpReason(status));
   client.print("Connection: close\r\n");
   client.printf("Content-Length: %llu\r\n\r\n",
                 static_cast<unsigned long long>(contentLength));
 }
 
 void sendHttpJson(WiFiClient &client, int status, const std::string &body) {
-  const char *reason = status == 200   ? "OK"
-                       : status == 202 ? "Accepted"
-                       : status == 400 ? "Bad Request"
-                       : status == 401 ? "Unauthorized"
-                       : status == 403 ? "Forbidden"
-                       : status == 404 ? "Not Found"
-                       : status == 409 ? "Conflict"
-                       : status == 408 ? "Request Timeout"
-                       : status == 413 ? "Payload Too Large"
-                                       : "Internal Server Error";
-  client.printf("HTTP/1.1 %d %s\r\n", status, reason);
+  client.printf("HTTP/1.1 %d %s\r\n", status, httpReason(status));
   client.print("Content-Type: application/json\r\n");
   client.print("Connection: close\r\n");
   client.printf("Content-Length: %u\r\n\r\n",

@@ -20,7 +20,7 @@ from map_platform.map_stream import (
 
 
 TEST_KEY_ID = "map-test-2026-01"
-TEST_PAYLOAD = b"map-block"
+TEST_PAYLOAD = b"FMB\x01\x00\x00\x00\x00"
 TEST_PRIVATE_VALUE = 1
 
 

@@ -163,10 +163,18 @@ jobs:
             tools/tests/test_map_profile_persistence.cpp \
             -o /tmp/test_map_profile_persistence
           /tmp/test_map_profile_persistence
+      - name: Binary map block format host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            lib/maps/src/mapBlockFormat.cpp \
+            tools/tests/test_map_block_format.cpp \
+            -o /tmp/test_map_block_format
+          /tmp/test_map_block_format
       - name: Map transfer host tests
         run: |
           g++ -std=c++17 \
             lib/map_transfer/map_transfer.cpp \
+            lib/maps/src/mapBlockFormat.cpp \
             tools/tests/test_map_transfer.cpp \
             -o /tmp/test_map_transfer
           /tmp/test_map_transfer
@@ -174,6 +182,7 @@ jobs:
         run: |
           g++ -std=c++17 \
             lib/map_transfer/map_transfer.cpp \
+            lib/maps/src/mapBlockFormat.cpp \
             lib/map_transfer/map_stream_format.cpp \
             lib/map_transfer/map_stream_crypto.cpp \
             lib/map_transfer/map_stream_sha.cpp \
@@ -191,6 +200,9 @@ jobs:
             lib/map_transfer/map_stream_trust.cpp \
             lib/map_transfer/map_stream_parser.cpp \
             lib/map_transfer/map_stream_install.cpp \
+            lib/map_transfer/map_stream_receiver.cpp \
+            lib/map_transfer/map_stream_compiled_trust.cpp \
+            lib/maps/src/mapBlockFormat.cpp \
             tools/tests/test_map_stream_install.cpp \
             $(pkg-config --cflags --libs mbedcrypto) \
             -o /tmp/test_map_stream_install
@@ -201,6 +213,12 @@ jobs:
             tools/tests/test_transfer_control_dispatch.cpp \
             -o /tmp/test_transfer_control_dispatch
           /tmp/test_transfer_control_dispatch
+      - name: Device transfer HTTP limit host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_device_transfer_http_limits.cpp \
+            -o /tmp/test_device_transfer_http_limits
+          /tmp/test_device_transfer_http_limits
       - name: Sound protocol host tests
         run: |
           g++ -std=c++17 \

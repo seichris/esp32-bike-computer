@@ -1,4 +1,5 @@
 #include "map_stream_install.hpp"
+#include "../maps/src/mapBlockFormat.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -8,6 +9,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <fstream>
+#include <new>
 #include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -417,13 +419,15 @@ uint8_t MapStreamInstallSnapshot::progress() const {
   }
   if (totalPayloadBytes == 0)
     return 0;
+  const uint64_t visiblePayloadBytes =
+      std::max(receivedPayloadBytes, completedPayloadBytes);
   return static_cast<uint8_t>(std::min<uint64_t>(
-      100, (receivedPayloadBytes * 100) / totalPayloadBytes));
+      100, (visiblePayloadBytes * 100) / totalPayloadBytes));
 }
 
 std::string MapStreamInstallSnapshot::json(bool compact) const {
   std::string value =
-      std::string("{\"protocolVersion\":2,\"state\":\"") +
+      std::string("{\"protocolVersion\":2,\"status\":\"") +
       mapStreamInstallStateCode(state) +
       "\",\"sequence\":" + std::to_string(sequence) +
       ",\"step\":" + std::to_string(step()) +
@@ -508,8 +512,12 @@ readRecoverableMapStreamInstall(const std::string &storageRoot,
       parsed.mapId = jsonString(value, "mapId");
       parsed.manifestReceipt = jsonString(value, "manifestReceipt");
       parsed.signedManifestReceipt = jsonString(value, "signedManifestReceipt");
+      bool haveValidation = false;
+      const uint64_t validation =
+          jsonUnsigned(value, "validationVersion", haveValidation);
       if (parsed.sessionId == sessionId && safeMapIdentifier(parsed.mapId) &&
-          parsed.signedManifestReceipt.size() == 64) {
+          parsed.signedManifestReceipt.size() == 64 &&
+          (!ready || (haveValidation && validation == 1))) {
         candidate = std::move(parsed);
         marker = std::move(value);
         markerValid = true;
@@ -600,10 +608,11 @@ readRecoverableMapStreamInstall(const std::string &storageRoot,
 MapStreamInstallSession::MapStreamInstallSession(
     std::string storageRoot, std::string sessionId,
     MapStreamCheckpointPolicy checkpointPolicy, MapStreamNowCallback now,
-    std::shared_ptr<MapStreamStorage> storage)
+    std::shared_ptr<MapStreamStorage> storage,
+    MapStreamStatusCallback onStatus)
     : storageRoot_(std::move(storageRoot)), sessionId_(std::move(sessionId)),
       checkpointPolicy_(checkpointPolicy), now_(std::move(now)),
-      storage_(std::move(storage)) {
+      storage_(std::move(storage)), onStatus_(std::move(onStatus)) {
   if (!storageRoot_.empty() && storageRoot_.back() == '/')
     storageRoot_.pop_back();
   if (!now_)
@@ -633,7 +642,9 @@ bool MapStreamInstallSession::onManifest(
   status_.totalFiles = static_cast<uint32_t>(manifest.manifest.files.size());
   canonicalManifest_ = canonicalManifest;
   checkpointAtMilliseconds_ = now_();
-  return prepareRoot(manifest, canonicalManifest);
+  const bool prepared = prepareRoot(manifest, canonicalManifest);
+  publishStatus();
+  return prepared;
 }
 
 MapStreamFileAction
@@ -648,6 +659,14 @@ MapStreamInstallSession::onFileBegin(const MapStreamFileView &file,
   currentSkipped_ = index < status_.durableFilePrefix;
   if (currentSkipped_)
     return MapStreamFileAction::ConsumeCheckpointed;
+  currentMapValidator_.reset(
+      new (std::nothrow) map_block_format::StreamValidator(
+          std::string(file.path)));
+  if (!currentMapValidator_ || currentMapValidator_->failed()) {
+    fail("stream_renderer_validator",
+         "could not initialize map block format validator");
+    return MapStreamFileAction::Reject;
+  }
   const std::string destination = filePath(inactiveRoot(), file);
   currentPartPath_ = destination + ".part";
   if (!storage_->createDirectories(dirnameOf(destination)) ||
@@ -670,6 +689,9 @@ bool MapStreamInstallSession::onFileData(const MapStreamFileView &,
     status_.bytesSkipped += size;
     return true;
   }
+  if (!currentMapValidator_ || !currentMapValidator_->feed(data, size))
+    return fail("stream_renderer_format",
+                "map block is not structurally valid for the renderer");
   const uint64_t writeStarted = now_();
   if (currentFd_ < 0 || !storage_->write(currentFd_, data, size))
     return fail("stream_file_write", "could not write map payload to SD");
@@ -688,11 +710,19 @@ bool MapStreamInstallSession::onFileEnd(const MapStreamFileView &file,
   if (currentSkipped_) {
     currentFile_ = -1;
     currentSkipped_ = false;
+    currentMapValidator_.reset();
     status_.completedFiles = std::max<uint32_t>(
         status_.completedFiles, static_cast<uint32_t>(index + 1));
     nextFileIndex_++;
     return true;
   }
+  if (!currentMapValidator_ || !currentMapValidator_->finish()) {
+    closeCurrentFile(true);
+    currentMapValidator_.reset();
+    return fail("stream_renderer_format",
+                "map block is not structurally valid for the renderer");
+  }
+  currentMapValidator_.reset();
   if (currentFd_ < 0)
     return fail("stream_file_sync", "map file descriptor is unavailable");
   const uint64_t commitStarted = now_();
@@ -730,6 +760,7 @@ bool MapStreamInstallSession::onComplete(
   status_.state = MapStreamInstallState::Finalizing;
   status_.currentStep = 2;
   status_.finalizationCompleted = 0;
+  publishStatus();
   const uint64_t finalizationStarted = now_();
   bool completed = writeCheckpoint(true);
   if (completed) {
@@ -758,6 +789,7 @@ void MapStreamInstallSession::onAbort(MapStreamParserError error) {
     status_.errorCode = mapStreamParserErrorCode(error);
     status_.errorMessage = "map stream validation failed";
   }
+  publishStatus();
 }
 
 const MapStreamInstallSnapshot &MapStreamInstallSession::snapshot() const {
@@ -777,6 +809,7 @@ bool MapStreamInstallSession::fail(const std::string &code,
   status_.state = MapStreamInstallState::Failed;
   status_.errorCode = code;
   status_.errorMessage = message;
+  publishStatus();
   return false;
 }
 
@@ -785,6 +818,12 @@ void MapStreamInstallSession::advanceFinalization() {
     status_.finalizationCompleted++;
   if (status_.sequence < UINT32_MAX)
     status_.sequence++;
+  publishStatus();
+}
+
+void MapStreamInstallSession::publishStatus() const {
+  if (onStatus_)
+    onStatus_(status_);
 }
 
 bool MapStreamInstallSession::safeId(const std::string &value) const {
@@ -847,11 +886,15 @@ bool MapStreamInstallSession::loadMatchingCheckpoint(
     checkpointSequence_ = 0;
   };
   const auto tryReady = [&](const std::string &ready) {
+    bool haveValidation = false;
+    const uint64_t validation =
+        jsonUnsigned(ready, "validationVersion", haveValidation);
     if (jsonString(ready, "sessionId") != sessionId_ ||
         jsonString(ready, "mapId") != status_.mapId ||
         jsonString(ready, "manifestReceipt") != manifest.manifestReceipt ||
         jsonString(ready, "signedManifestReceipt") !=
-            manifest.signedManifestReceipt) {
+            manifest.signedManifestReceipt ||
+        !haveValidation || validation != 1) {
       return false;
     }
     bool haveFiles = false;
@@ -898,7 +941,7 @@ bool MapStreamInstallSession::loadMatchingCheckpoint(
         jsonUnsigned(checkpoint, "sequence", haveSequence);
     if (!haveSchema || !haveProtocol || !haveFormat || !havePrefix ||
         !havePayload || !haveTotalFiles || !haveTotalPayload || !haveSequence ||
-        schema != 1 || protocol != 2 || format != 1 ||
+        schema != 2 || protocol != 2 || format != 1 ||
         jsonString(checkpoint, "sessionId") != sessionId_ ||
         jsonString(checkpoint, "mapId") != status_.mapId ||
         jsonString(checkpoint, "manifestReceipt") != manifest.manifestReceipt ||
@@ -978,7 +1021,7 @@ bool MapStreamInstallSession::writeCheckpoint(bool force) {
       std::to_string(status_.completedPayloadBytes) +
       ",\"manifestReceipt\":\"" + status_.manifestReceipt + "\",\"mapId\":\"" +
       jsonEscape(status_.mapId) +
-      "\",\"protocolVersion\":2,\"schemaVersion\":1,\"sequence\":" +
+      "\",\"protocolVersion\":2,\"schemaVersion\":2,\"sequence\":" +
       std::to_string(checkpointSequence_) + ",\"sessionId\":\"" +
       jsonEscape(sessionId_) + "\",\"signedManifestReceipt\":\"" +
       status_.signedManifestReceipt +
@@ -1024,7 +1067,7 @@ bool MapStreamInstallSession::writeFinalMetadata(
       "\",\"payloadBytes\":" + std::to_string(status_.totalPayloadBytes) +
       ",\"protocolVersion\":2,\"sessionId\":\"" + jsonEscape(sessionId_) +
       "\",\"signedManifestReceipt\":\"" + status_.signedManifestReceipt +
-      "\",\"streamFormatVersion\":1}\n";
+      "\",\"streamFormatVersion\":1,\"validationVersion\":1}\n";
   if (!writeFileAtomic(*storage_, joinPath(inactiveRoot(), kReadyFile), ready))
     return fail("stream_ready_write", "could not publish map ready marker");
   advanceFinalization();
@@ -1049,6 +1092,7 @@ bool MapStreamInstallSession::writeFinalMetadata(
   status_.durableFilePrefix = status_.totalFiles;
   status_.errorCode.clear();
   status_.errorMessage.clear();
+  publishStatus();
   (void)manifest;
   return true;
 }
@@ -1080,6 +1124,7 @@ void MapStreamInstallSession::closeCurrentFile(bool removePart) {
   if (removePart && !currentPartPath_.empty())
     storage_->removeTree(currentPartPath_);
   currentPartPath_.clear();
+  currentMapValidator_.reset();
   currentFile_ = -1;
   currentSkipped_ = false;
 }

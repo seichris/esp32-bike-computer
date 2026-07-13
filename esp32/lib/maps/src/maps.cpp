@@ -8,6 +8,7 @@
  */
 
 #include "maps.hpp"
+#include "mapBlockFormat.hpp"
 #include "../../ble_navigation/ble_navigation.hpp"
 #include "../../gui/src/guiLayout.hpp"
 // #include "../../compass/compass.hpp"
@@ -29,6 +30,55 @@ const char *TAG PROGMEM = "Maps";
 #include "../../gui/src/mainScr.hpp"
 #include "../../route_overlay/route_overlay.hpp"
 #include <esp_heap_caps.h>
+#include <cstdlib>
+#include <dirent.h>
+#include <limits>
+#include <new>
+#include <sys/stat.h>
+
+namespace {
+
+bool findMapBlock(const std::string &directory, std::string &basePath,
+                  size_t &visited, size_t depth) {
+  if (depth > 6 || visited >= 65536)
+    return false;
+  DIR *handle = ::opendir(directory.c_str());
+  if (handle == nullptr)
+    return false;
+  bool found = false;
+  while (!found) {
+    struct dirent *entry = ::readdir(handle);
+    if (entry == nullptr)
+      break;
+    const std::string name = entry->d_name;
+    if (name == "." || name == ".." || (!name.empty() && name[0] == '.'))
+      continue;
+    if (++visited > 65536)
+      break;
+    const std::string path = directory + "/" + name;
+    struct stat metadata = {};
+    if (::stat(path.c_str(), &metadata) != 0)
+      continue;
+    if (S_ISDIR(metadata.st_mode)) {
+      found = findMapBlock(path, basePath, visited, depth + 1);
+    } else if (S_ISREG(metadata.st_mode) && name.size() > 4 &&
+               name.compare(name.size() - 4, 4, ".fmb") == 0) {
+      basePath = path.substr(0, path.size() - 4);
+      found = true;
+    } else if (S_ISREG(metadata.st_mode) && basePath.empty() &&
+               name.size() > 4 &&
+               name.compare(name.size() - 4, 4, ".fmp") == 0) {
+      // Keep searching for the binary form, which is what production packs
+      // render when both companions exist. This remains a bounded fallback for
+      // legacy ASCII-only packs.
+      basePath = path.substr(0, path.size() - 4);
+    }
+  }
+  ::closedir(handle);
+  return found || (depth == 0 && !basePath.empty());
+}
+
+} // namespace
 
 enum class VisibilityClass : uint8_t {
   Always,
@@ -670,39 +720,22 @@ int16_t Maps::toScreenCoord(const int32_t pxy, const int32_t screenCenterxy) {
  * @return int16_t
  */
 int16_t Maps::parseInt16(char *file) {
-  char num[16];
-  uint8_t i;
-  char c;
-  i = 0;
-  c = file[Maps::idx];
-  if (c == '\n')
+  char *start = file + Maps::idx;
+  char *end = nullptr;
+  const long parsed = std::strtol(start, &end, 10);
+  if (end == start || parsed < std::numeric_limits<int16_t>::min() ||
+      parsed > std::numeric_limits<int16_t>::max()) {
+    ESP_LOGE(TAG, "parseInt16 invalid value at offset %u", Maps::idx);
     return 0;
-  while (c >= '0' && c <= '9') {
-    assert(i < 15);
-    c = file[Maps::idx];
-    num[i] = c;
-    Maps::idx++;
-    i++;
-
-    c = file[Maps::idx];
   }
-  num[i] = '\0';
-
-  if (c != ';' && c != ',' && c != '\n') {
-    ESP_LOGE(TAG, "parseInt16 error: %c %i", c, c);
-    ESP_LOGE(TAG, "Num: [%s]", num);
-    while (1)
-      ;
+  const char delimiter = *end;
+  if (delimiter != ';' && delimiter != ',' && delimiter != '\n') {
+    ESP_LOGE(TAG, "parseInt16 invalid delimiter: %c %i", delimiter,
+             delimiter);
+    return 0;
   }
-  try {
-    Maps::idx++;
-    return std::stoi(num);
-  } catch (std::invalid_argument) {
-    ESP_LOGE(TAG, "parseInt16 invalid_argument: [%c] [%s]", c, num);
-  } catch (std::out_of_range) {
-    ESP_LOGE(TAG, "parseInt16 out_of_range: [%c] [%s]", c, num);
-  }
-  return -1;
+  Maps::idx = static_cast<uint32_t>(end - file + 1);
+  return static_cast<int16_t>(parsed);
 }
 
 /**
@@ -824,6 +857,14 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
     }
     const uint32_t statMs = MAPIO_TIME_MS() - statStartMs;
     size_t fileSize = st.st_size;
+    if (fileSize == 0 || fileSize > map_block_format::kMaximumBlockBytes) {
+      ESP_LOGE(TAG, "Map block size is outside renderer limits: %u bytes",
+               (unsigned)fileSize);
+      ::close(fd);
+      Maps::isMapFound = false;
+      mblock->inView = false;
+      return mblock;
+    }
 
 #ifdef BOARD_HAS_PSRAM
     char *file = (char *)heap_caps_malloc(fileSize + 1, MALLOC_CAP_SPIRAM);
@@ -875,12 +916,28 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
       return mblock;
     }
 
-    file[fileSize] = '\0'; // Null terminate
-    Maps::isMapFound = true;
+    size_t normalizedSize = 0;
+    for (size_t index = 0; index < fileSize; ++index) {
+      if (file[index] != '\r')
+        file[normalizedSize++] = file[index];
+    }
+    fileSize = normalizedSize;
+    file[fileSize] = '\0';
+    map_block_format::StreamValidator asciiValidator(filePath);
+    if (!asciiValidator.feed(reinterpret_cast<const uint8_t *>(file),
+                             fileSize) ||
+        !asciiValidator.finish()) {
+      ESP_LOGE(TAG, "Invalid or unsupported ASCII map block");
+      free(file);
+      Maps::isMapFound = false;
+      mblock->inView = false;
+      return mblock;
+    }
 
-    uint32_t line = 0;
-    Maps::idx = 0;
-    const uint32_t parseStartMs = MAPIO_TIME_MS();
+    try {
+      uint32_t line = 0;
+      Maps::idx = 0;
+      const uint32_t parseStartMs = MAPIO_TIME_MS();
 
     // read polygons
     Maps::parseStrUntil(file, ':', str);
@@ -921,6 +978,12 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
       line++;
 
       Maps::parseStrUntil(file, ':', str);
+      polygon.typeId = 0;
+      if (strcmp(str, "bbox") != 0) {
+        polygon.typeId = (uint8_t)std::stoul(str, nullptr, 10);
+        Maps::parseStrUntil(file, ':', str);
+        line++;
+      }
       if (strcmp(str, "bbox") != 0) {
         ESP_LOGE(TAG, "bbox error tag. Line %i : %s", line, str);
         break;
@@ -968,6 +1031,12 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
         line++;
 
         Maps::parseStrUntil(file, ':', str);
+        polyline.typeId = 0;
+        if (strcmp(str, "bbox") != 0) {
+          polyline.typeId = (uint8_t)std::stoul(str, nullptr, 10);
+          Maps::parseStrUntil(file, ':', str);
+          line++;
+        }
         if (strcmp(str, "bbox") != 0)
           break;
 
@@ -989,11 +1058,13 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
         count--;
       }
     }
-    // File descriptor was already closed via ::close(fd) after reading
-    free(file);
     // Build spatial grid for polygon culling optimization
     const uint32_t gridStartMs = MAPIO_TIME_MS();
-    buildPolygonGrid(mblock);
+    if (!buildPolygonGrid(mblock)) {
+      ESP_LOGE(TAG, "Could not allocate bounded polygon grid");
+      throw std::bad_alloc();
+    }
+    Maps::isMapFound = true;
     const uint32_t gridMs = MAPIO_TIME_MS() - gridStartMs;
     MAPIO_LOG("MAPIO: block ok=1 file=%s format=ascii size=%u openMs=%lu "
               "statMs=%lu readMs=%lu parseMs=%lu gridMs=%lu totalMs=%lu "
@@ -1005,7 +1076,16 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
               (unsigned long)(MAPIO_TIME_MS() - blockStartMs),
               (unsigned)mblock->polygons.size(),
               (unsigned)mblock->polylines.size());
-    return mblock;
+      // File descriptor was already closed via ::close(fd) after reading.
+      free(file);
+      return mblock;
+    } catch (const std::bad_alloc &) {
+      ESP_LOGE(TAG, "PSRAM exhausted while decoding ASCII map block");
+      free(file);
+      Maps::isMapFound = false;
+      delete mblock;
+      return new MapBlock();
+    }
   }
 }
 
@@ -1015,24 +1095,25 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
  */
 Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   const uint32_t parseStartMs = MAPIO_TIME_MS();
-  MapBlock *mblock = new MapBlock();
-  size_t offset = 0;
-
-  // Check Magic (first 3 bytes must be "FMB")
-  if (fileSize < 4 || memcmp(file, "FMB", 3) != 0) {
-    ESP_LOGE(TAG, "Invalid Binary Map Header");
-    delete mblock;
+  if (!map_block_format::validate(reinterpret_cast<const uint8_t *>(file),
+                                  fileSize)) {
+    ESP_LOGE(TAG, "Invalid or unsupported binary map block");
     Maps::isMapFound = false;
     return new MapBlock();
   }
 
-  // Get version from 4th byte
-  uint8_t version = (uint8_t)file[3];
-  bool hasTypeId = (version >= 2);
-  mblock->formatVersion = version;
-  ESP_LOGI(TAG, "Map file version: %d (typeId: %s)", version,
-           hasTypeId ? "yes" : "no");
-  offset += 4;
+  MapBlock *mblock = nullptr;
+  try {
+    mblock = new MapBlock();
+    size_t offset = 0;
+
+    // Get version from 4th byte
+    uint8_t version = (uint8_t)file[3];
+    bool hasTypeId = (version >= 2);
+    mblock->formatVersion = version;
+    ESP_LOGI(TAG, "Map file version: %d (typeId: %s)", version,
+             hasTypeId ? "yes" : "no");
+    offset += 4;
 
   // Polygons
   uint16_t polyCount = *(uint16_t *)(file + offset);
@@ -1110,10 +1191,13 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
     mblock->polylines.push_back(line);
   }
 
-  Maps::isMapFound = true;
   // Build spatial grid for polygon culling optimization
   const uint32_t gridStartMs = MAPIO_TIME_MS();
-  buildPolygonGrid(mblock);
+  if (!buildPolygonGrid(mblock)) {
+    ESP_LOGE(TAG, "Could not allocate bounded polygon grid");
+    throw std::bad_alloc();
+  }
+  Maps::isMapFound = true;
   const uint32_t gridMs = MAPIO_TIME_MS() - gridStartMs;
   MAPIO_LOG("MAPIO: vector-parse format=binary size=%u version=%u "
             "polygons=%u lines=%u parseMs=%lu gridMs=%lu totalMs=%lu\n",
@@ -1122,7 +1206,13 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
             (unsigned long)(gridStartMs - parseStartMs),
             (unsigned long)gridMs,
             (unsigned long)(MAPIO_TIME_MS() - parseStartMs));
-  return mblock;
+    return mblock;
+  } catch (const std::bad_alloc &) {
+    ESP_LOGE(TAG, "PSRAM exhausted while decoding binary map block");
+    Maps::isMapFound = false;
+    delete mblock;
+    return new MapBlock();
+  }
 }
 
 /**
@@ -1133,39 +1223,55 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
  *
  * @param mblock The map block to build the grid for
  */
-void Maps::buildPolygonGrid(MapBlock *mblock) {
+bool Maps::buildPolygonGrid(MapBlock *mblock) {
   // Initialize grid with GRID_SIZE * GRID_SIZE cells (16x16 = 256 cells)
-  mblock->polygonGrid.clear();
-  mblock->polygonGrid.resize(GRID_SIZE * GRID_SIZE);
+  try {
+    mblock->polygonGrid.clear();
+    mblock->polygonGrid.resize(GRID_SIZE * GRID_SIZE);
 
-  for (uint16_t i = 0; i < mblock->polygons.size(); i++) {
-    const auto &poly = mblock->polygons[i];
+    size_t totalEntries = 0;
+    for (uint16_t i = 0; i < mblock->polygons.size(); i++) {
+      const auto &poly = mblock->polygons[i];
 
-    // Calculate which grid cells this polygon's bounding box overlaps
-    // CELL_SHIFT converts from block coords (0-4095) to cell index (0-15)
-    int minCX = std::max(0, (int)(poly.bbox.min.x >> CELL_SHIFT));
-    int maxCX = std::min(GRID_SIZE - 1, (int)(poly.bbox.max.x >> CELL_SHIFT));
-    int minCY = std::max(0, (int)(poly.bbox.min.y >> CELL_SHIFT));
-    int maxCY = std::min(GRID_SIZE - 1, (int)(poly.bbox.max.y >> CELL_SHIFT));
+      // Calculate which grid cells this polygon's bounding box overlaps.
+      // CELL_SHIFT converts block coords (0-4095) to a cell index (0-15).
+      int minCX = std::max(0, (int)(poly.bbox.min.x >> CELL_SHIFT));
+      int maxCX =
+          std::min(GRID_SIZE - 1, (int)(poly.bbox.max.x >> CELL_SHIFT));
+      int minCY = std::max(0, (int)(poly.bbox.min.y >> CELL_SHIFT));
+      int maxCY =
+          std::min(GRID_SIZE - 1, (int)(poly.bbox.max.y >> CELL_SHIFT));
 
-    // Add polygon index to all overlapping cells
-    for (int cy = minCY; cy <= maxCY; cy++) {
-      for (int cx = minCX; cx <= maxCX; cx++) {
-        mblock->polygonGrid[cy * GRID_SIZE + cx].push_back(i);
+      const size_t entries = minCX <= maxCX && minCY <= maxCY
+                                 ? static_cast<size_t>(maxCX - minCX + 1) *
+                                       static_cast<size_t>(maxCY - minCY + 1)
+                                 : 0;
+      if (entries > map_block_format::kMaximumPolygonGridEntries -
+                        totalEntries) {
+        mblock->polygonGrid.clear();
+        return false;
+      }
+      totalEntries += entries;
+
+      // Add polygon index to all overlapping cells.
+      for (int cy = minCY; cy <= maxCY; cy++) {
+        for (int cx = minCX; cx <= maxCX; cx++) {
+          mblock->polygonGrid[cy * GRID_SIZE + cx].push_back(i);
+        }
       }
     }
-  }
 
-  // Log grid stats for debugging
-  size_t totalEntries = 0;
-  for (const auto &cell : mblock->polygonGrid) {
-    totalEntries += cell.size();
-  }
-  log_d("Built polygon grid: %d polygons -> %d cell entries (%.1fx expansion)",
+    log_d(
+        "Built polygon grid: %d polygons -> %d cell entries (%.1fx expansion)",
         mblock->polygons.size(), totalEntries,
         mblock->polygons.size() > 0
             ? (float)totalEntries / mblock->polygons.size()
             : 0.0f);
+    return true;
+  } catch (const std::bad_alloc &) {
+    mblock->polygonGrid.clear();
+    return false;
+  }
 }
 
 /**
@@ -2108,12 +2214,18 @@ void Maps::initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull) {
   Maps::totalBounds = {90.0, -90.0, 180.0, -180.0};
 }
 
-void Maps::setVectorMapFolder(const std::string &folder) {
+bool Maps::setVectorMapFolder(const std::string &folder) {
   String normalized(folder.c_str());
   if (!normalized.endsWith("/"))
     normalized += "/";
   if (normalized == vectorMapFolder)
-    return;
+    return true;
+
+  struct stat storage = {};
+  if (::stat(normalized.c_str(), &storage) != 0 || !S_ISDIR(storage.st_mode)) {
+    ESP_LOGE(TAG, "Vector map root is unavailable: %s", normalized.c_str());
+    return false;
+  }
 
   for (MapBlock *block : memCache.blocks)
     delete block;
@@ -2125,6 +2237,32 @@ void Maps::setVectorMapFolder(const std::string &folder) {
   oldMapTile = {};
   currentMapTile = {};
   ESP_LOGI(TAG, "Vector map root switched to %s", vectorMapFolder.c_str());
+  return true;
+}
+
+bool Maps::probeVectorMapFolder(const std::string &folder) {
+  std::string normalized = folder;
+  while (normalized.size() > 1 && normalized.back() == '/')
+    normalized.pop_back();
+  struct stat storage = {};
+  if (::stat(normalized.c_str(), &storage) != 0 || !S_ISDIR(storage.st_mode))
+    return false;
+
+  size_t visited = 0;
+  std::string blockBase;
+  if (!findMapBlock(normalized, blockBase, visited, 0)) {
+    ESP_LOGE(TAG, "No map block found under %s", normalized.c_str());
+    return false;
+  }
+  const bool previousMapFound = isMapFound;
+  isMapFound = false;
+  MapBlock *block = readMapBlock(String(blockBase.c_str()));
+  const bool loaded = isMapFound;
+  delete block;
+  isMapFound = previousMapFound;
+  ESP_LOGI(TAG, "Vector map probe root=%s block=%s loaded=%d",
+           normalized.c_str(), blockBase.c_str(), loaded);
+  return loaded;
 }
 
 /**

@@ -102,7 +102,8 @@ struct MapActivationSnapshot {
 class MapActivationState {
 public:
   ActivationBeginResult begin(const std::string &sessionId,
-                              uint8_t totalSteps = 5);
+                              uint8_t totalSteps = 5,
+                              uint32_t minimumSequence = 0);
   void updateProgress(const ActivationProgress &progress);
   void finish(const std::string &status, const std::string &mapId,
               const std::string &errorCode, const std::string &errorMessage);
@@ -150,8 +151,15 @@ public:
   bool hasInterruptedActivation() const;
   InstallStatus readActiveMap(ActiveMapSelection &selection) const;
   InstallStatus readActiveMapId(std::string &mapId) const;
+  InstallStatus rollbackActiveMap(const std::string &sessionId) const;
+  InstallStatus discardIncompleteStreamMap(
+      const std::string &sessionId) const;
+  InstallStatus discardUnselectedStreamMap(
+      const std::string &sessionId) const;
+  InstallStatus discardAllUnselectedStreamMaps() const;
   bool pruneStagingSessions(const std::string &keepSessionId) const;
-  bool pruneObsoleteInstalledMaps() const;
+  bool pruneObsoleteInstalledMaps(
+      const std::string &keepInstallingSessionId = "") const;
   bool markPendingArchiveActivation(const std::string &sessionId) const;
   bool readPendingArchiveActivation(std::string &sessionId) const;
   bool clearPendingArchiveActivation() const;

@@ -3,6 +3,7 @@
 #include "../../lib/map_transfer/map_stream_parser.hpp"
 #include "../../lib/map_transfer/map_stream_sha.hpp"
 #include "../../lib/map_transfer/map_stream_trust.hpp"
+#include "../../lib/maps/src/mapBlockFormat.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -191,7 +192,7 @@ int main() {
          MapStreamFormatError::Ok);
   assert(header.formatVersion == 1);
   assert(header.fileCount == 1);
-  assert(header.payloadBytes == 9);
+  assert(header.payloadBytes == 8);
   assert(header.totalBytes() == stream.size());
   assert(headerBytes.size() == MAP_STREAM_FIXED_HEADER_BYTES);
   MapStreamLayout layout;
@@ -325,11 +326,11 @@ int main() {
     auto trust = trustStore(publicKey);
     assert(!trust.add("map-test-2026-01", publicKey.data(), publicKey.size()));
     const auto rotationPublicKey = decodeHex(
-        "046229ee84fc6154252c6c1723953528f0e4c7b1fad8a5544bf13815ce49dfb2"
-        "34432265188333eecbbb641878ff7b9c12ba3939dddeecc65e48ac62ae016478b7");
+        "047cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc476699"
+        "7807775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1");
     const auto rotationSignature = decodeHex(
-        "7682b15d405ce4c2a0f625c067b6fbad72bc841685ab3b69828db74dd30c1294"
-        "6e8b37ccaedc6f517debb6d62c4d1641466f6541d29b567495b76d97f1a5385d");
+        "542a60eb88e9d7c32ad733aace31f2da7cd6e6d37ac47a47de1cefa9994f2397"
+        "1882298838d069981066510816edf01bafde3037dd82fe3ba68b2ae275a31bd1");
     assert(trust.add("map-test-2026-02", rotationPublicKey.data(),
                      rotationPublicKey.size()));
     assert(trust.size() == 2);
@@ -737,6 +738,14 @@ int main() {
     assert(bytesPosition != std::string::npos);
     zeroBytes[bytesPosition + 8] = '0';
     assert(!parseMapStreamManifest(zeroBytes, manifestHeader, parsed));
+    auto oversizedBlock = validManifest;
+    oversizedBlock.replace(bytesPosition + 8, 1,
+                            std::to_string(
+                                map_block_format::kMaximumBlockBytes + 1));
+    manifestHeader.payloadBytes =
+        map_block_format::kMaximumBlockBytes + 3;
+    assert(!parseMapStreamManifest(oversizedBlock, manifestHeader, parsed));
+    manifestHeader.payloadBytes = 3;
     auto wrongRenderer = validManifest;
     const size_t rendererPosition = wrongRenderer.find("esp32-fmb");
     assert(rendererPosition != std::string::npos);

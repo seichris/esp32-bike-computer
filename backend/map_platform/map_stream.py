@@ -35,6 +35,7 @@ MAX_PATH_COMPONENT_BYTES = MAX_PACK_PATH_COMPONENT_BYTES
 MAX_RELATIVE_PATH_BYTES = MAX_PACK_RELATIVE_PATH_BYTES
 MAX_FILE_COUNT = 100_000
 MAX_PAYLOAD_BYTES = 512 * 1024 * 1024
+MAX_BLOCK_BYTES = 2 * 1024 * 1024
 
 _HEADER = struct.Struct("<8sHHIHHIQ")
 _SIGNATURE_PREFIX = struct.Struct("<BBH")
@@ -227,7 +228,11 @@ def canonical_manifest_bytes(manifest: dict[str, Any]) -> bytes:
         if PurePosixPath(path).as_posix() != path or not path.startswith(f"VECTMAP/{map_id}/"):
             raise MapStreamFormatError("map stream manifest file path is not canonical")
         byte_count = file.get("bytes")
-        if isinstance(byte_count, bool) or not isinstance(byte_count, int) or byte_count <= 0:
+        if (
+            isinstance(byte_count, bool)
+            or not isinstance(byte_count, int)
+            or not 0 < byte_count <= MAX_BLOCK_BYTES
+        ):
             raise MapStreamFormatError("map stream manifest file size is invalid")
         payload_bytes += byte_count
         if payload_bytes > MAX_PAYLOAD_BYTES:

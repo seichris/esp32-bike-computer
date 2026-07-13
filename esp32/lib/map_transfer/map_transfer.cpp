@@ -1,4 +1,5 @@
 #include "map_transfer.hpp"
+#include "../maps/src/mapBlockFormat.hpp"
 
 #include <algorithm>
 #include <array>
@@ -31,6 +32,7 @@ constexpr const char *kStreamReadyFile = ".ready";
 constexpr const char *kStreamConsumedFile = ".activation-consumed";
 constexpr const char *kStreamCheckpointFile = ".stream-checkpoint";
 constexpr const char *kStreamInstallingFile = ".installing";
+constexpr const char *kRendererValidationReceiptPrefix = "renderer-v1:";
 // Large city packs can contain several thousand map files; their hash manifest
 // is currently about 1 MB for 5,500 entries. Keep a firm upper bound while
 // allowing those production packs to validate in PSRAM-backed builds.
@@ -336,7 +338,8 @@ std::string sha256Hex(const uint8_t *data, size_t len) {
 }
 
 ActivationBeginResult MapActivationState::begin(const std::string &sessionId,
-                                                uint8_t totalSteps) {
+                                                uint8_t totalSteps,
+                                                uint32_t minimumSequence) {
   if (state_.running) {
     return state_.sessionId == sessionId ? ActivationBeginResult::AlreadyRunning
                                          : ActivationBeginResult::Busy;
@@ -345,7 +348,9 @@ ActivationBeginResult MapActivationState::begin(const std::string &sessionId,
     return ActivationBeginResult::AlreadyInstalled;
   }
   state_.running = true;
-  state_.sequence++;
+  const uint32_t nextSequence =
+      state_.sequence == UINT32_MAX ? UINT32_MAX : state_.sequence + 1;
+  state_.sequence = std::max<uint32_t>(nextSequence, minimumSequence);
   if (state_.sequence == 0)
     state_.sequence = 1;
   state_.status = "activating";
@@ -455,6 +460,9 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
           (file.path.rfind(".fmb") == file.path.size() - 4 ||
            file.path.rfind(".fmp") == file.path.size() - 4)))
       return fail("manifest_path", "map files must be .fmb or .fmp");
+    if (file.bytes == 0 ||
+        file.bytes > map_block_format::kMaximumBlockBytes)
+      return fail("manifest_bytes", "map file byte count is invalid");
     if (!isHexSha256(file.sha256))
       return fail("manifest_sha256", "map file sha256 is invalid");
     manifest.files.push_back(file);
@@ -500,10 +508,31 @@ InstallStatus MapTransferInstaller::validateStagedMap(
       // uploads are hashed while streaming and only reach activation with a
       // verification receipt, so the normal activation path performs no
       // full-file reads.
-      std::string sha;
-      if (!fileSha256Hex(stagedPath, sha))
-        return fail("file_sha256",
-                    "could not hash staged map file: " + file.path);
+      std::ifstream input(stagedPath, std::ios::binary);
+      if (!input)
+        return fail("file_sha256", "could not read staged map file: " +
+                                       file.path);
+      Sha256Hasher hasher;
+      map_block_format::StreamValidator rendererValidator(file.path);
+      std::array<uint8_t, 4096> buffer = {};
+      while (input) {
+        input.read(reinterpret_cast<char *>(buffer.data()), buffer.size());
+        const std::streamsize count = input.gcount();
+        if (count <= 0)
+          break;
+        hasher.update(buffer.data(), static_cast<size_t>(count));
+        if (!rendererValidator.feed(buffer.data(),
+                                    static_cast<size_t>(count))) {
+          return fail("file_renderer_format",
+                      "staged map file is not renderer-compatible: " +
+                          file.path);
+        }
+      }
+      if (!input.eof() || !rendererValidator.finish())
+        return fail("file_renderer_format",
+                    "staged map file is not renderer-compatible: " +
+                        file.path);
+      std::string sha = hasher.finalHex();
       std::transform(sha.begin(), sha.end(), sha.begin(), ::tolower);
       std::string expected = file.sha256;
       std::transform(expected.begin(), expected.end(), expected.begin(),
@@ -763,6 +792,7 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
         return fail("archive_write", "could not create extracted map file");
       input.seekg(static_cast<std::streamoff>(dataOffset), std::ios::beg);
       Sha256Hasher hasher;
+      map_block_format::StreamValidator rendererValidator(path);
       remaining = compressedSize;
       while (remaining > 0) {
         const size_t count =
@@ -775,6 +805,13 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
           return fail("archive_truncated", "map archive data is truncated");
         }
         hasher.update(buffer.data(), count);
+        if (!rendererValidator.feed(buffer.data(), count)) {
+          output.close();
+          removeTree(tempDestination);
+          return fail("file_renderer_format",
+                      "archive map file is not renderer-compatible: " +
+                          path);
+        }
         output.write(reinterpret_cast<const char *>(buffer.data()),
                      static_cast<std::streamsize>(count));
         if (!output) {
@@ -790,6 +827,11 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
       if (!output.good()) {
         removeTree(tempDestination);
         return fail("archive_write", "could not finish extracted map file");
+      }
+      if (!rendererValidator.finish()) {
+        removeTree(tempDestination);
+        return fail("file_renderer_format",
+                    "archive map file is not renderer-compatible: " + path);
       }
       std::string actualSha = hasher.finalHex();
       std::string expectedSha = expected.sha256;
@@ -845,12 +887,12 @@ bool MapTransferInstaller::stagedFileVerified(const std::string &sessionId,
     return false;
   }
   std::string receipt;
-  if (!readTextFile(verificationPath(sessionId, file), receipt, 64))
+  if (!readTextFile(verificationPath(sessionId, file), receipt, 96))
     return false;
   std::transform(receipt.begin(), receipt.end(), receipt.begin(), ::tolower);
   std::string expected = file.sha256;
   std::transform(expected.begin(), expected.end(), expected.begin(), ::tolower);
-  return receipt == expected;
+  return receipt == std::string(kRendererValidationReceiptPrefix) + expected;
 }
 
 bool MapTransferInstaller::markStagedFileVerified(
@@ -861,7 +903,9 @@ bool MapTransferInstaller::markStagedFileVerified(
   }
   std::string sha = file.sha256;
   std::transform(sha.begin(), sha.end(), sha.begin(), ::tolower);
-  return writeTextFileAtomic(verificationPath(sessionId, file), sha);
+  return writeTextFileAtomic(verificationPath(sessionId, file),
+                             std::string(kRendererValidationReceiptPrefix) +
+                                 sha);
 }
 
 void MapTransferInstaller::clearStagedFileVerification(
@@ -1005,10 +1049,12 @@ MapTransferInstaller::readReadyStreamMap(const std::string &sessionId,
         jsonStringValue(marker, "signedManifestReceipt");
     const uint64_t protocolVersion = jsonUintValue(marker, "protocolVersion");
     const uint64_t formatVersion = jsonUintValue(marker, "streamFormatVersion");
+    const uint64_t validationVersion =
+        jsonUintValue(marker, "validationVersion");
     const uint64_t fileCount = jsonUintValue(marker, "fileCount");
     candidate.payloadBytes = jsonUintValue(marker, "payloadBytes");
     if (jsonStringValue(marker, "sessionId") != sessionId ||
-        protocolVersion != 2 || formatVersion != 1 ||
+        protocolVersion != 2 || formatVersion != 1 || validationVersion != 1 ||
         !safeMapId(candidate.mapId) ||
         !isHexSha256(candidate.manifestReceipt) ||
         !isHexSha256(candidate.signedManifestReceipt) || fileCount == 0 ||
@@ -1632,6 +1678,163 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
   return {true, "recovered_rollback", "rolled back interrupted map activation"};
 }
 
+InstallStatus
+MapTransferInstaller::rollbackActiveMap(const std::string &sessionId) const {
+  if (!safeId(sessionId))
+    return fail("active_rollback_session", "rollback session is invalid");
+  ActiveMapSelection selected;
+  const InstallStatus active = readActiveMap(selected);
+  if (!active.ok)
+    return active;
+  if (selected.sessionId != sessionId)
+    return fail("active_rollback_conflict",
+                "active map no longer matches renderer rollback session");
+  if (selected.previousRoot.empty()) {
+    const std::string activePath =
+        joinPath(storageRoot_, kActiveMapFile);
+    if (!removeTree(activePath) || !removeTree(activePath + ".bak") ||
+        !removeTree(activePath + ".tmp")) {
+      return fail("active_rollback_clear",
+                  "could not clear rejected first map selection");
+    }
+    return {true, "active_cleared",
+            "cleared rejected first map selection"};
+  }
+  if (!rollbackRootMatches(selected.previousRoot, selected.previousMapId,
+                           selected.previousManifestReceipt,
+                           selected.previousSignedManifestReceipt)) {
+    return fail("active_rollback_unavailable",
+                "previous map is unavailable for renderer rollback");
+  }
+  ActiveMapSelection rollback;
+  rollback.mapId = selected.previousMapId;
+  rollback.sessionId = selected.previousSessionId;
+  rollback.root = selected.previousRoot;
+  rollback.manifestReceipt = selected.previousManifestReceipt;
+  rollback.signedManifestReceipt = selected.previousSignedManifestReceipt;
+  if (!writeActiveMap(rollback))
+    return fail("active_rollback_write",
+                "could not restore previous active map selection");
+  return {true, "active_rolled_back",
+          "restored previous map after renderer reload failure"};
+}
+
+InstallStatus MapTransferInstaller::discardIncompleteStreamMap(
+    const std::string &sessionId) const {
+  if (!safeId(sessionId))
+    return fail("stream_discard_session", "stream session is invalid");
+  const std::string relativeRoot =
+      std::string("/VECTMAP/.maps/") + sessionId;
+  ActiveMapSelection selected;
+  const InstallStatus active = readActiveMap(selected);
+  if (active.ok &&
+      (selected.root == relativeRoot || selected.previousRoot == relativeRoot)) {
+    return fail("stream_discard_active",
+                "cannot discard an active or rollback map root");
+  }
+  if (!active.ok && active.code != "active_missing")
+    return active;
+  const std::string root = joinPath(storageRoot_, relativeRoot);
+  if (fileExists(joinPath(root, kStreamReadyFile)) ||
+      fileExists(joinPath(root, kStreamReadyFile) + ".bak")) {
+    return fail("stream_discard_ready",
+                "cannot discard a ready stream map as incomplete");
+  }
+  if (!removeTree(root))
+    return fail("stream_discard_cleanup",
+                "could not remove incomplete stream map root");
+  return {true, "stream_discarded", "removed incomplete stream map root"};
+}
+
+InstallStatus MapTransferInstaller::discardUnselectedStreamMap(
+    const std::string &sessionId) const {
+  if (!safeId(sessionId))
+    return fail("stream_discard_session", "stream session is invalid");
+  const std::string relativeRoot =
+      std::string("/VECTMAP/.maps/") + sessionId;
+  ActiveMapSelection selected;
+  const InstallStatus active = readActiveMap(selected);
+  if (active.ok &&
+      (selected.root == relativeRoot || selected.previousRoot == relativeRoot)) {
+    return fail("stream_discard_active",
+                "cannot discard an active or rollback map root");
+  }
+  if (!active.ok && active.code != "active_missing")
+    return active;
+
+  std::string pending;
+  const std::string pendingPath =
+      joinPath(storageRoot_, kPendingStreamActivationFile);
+  for (const std::string &candidate : {pendingPath, pendingPath + ".bak"}) {
+    if (readTextFile(candidate, pending, 2048) &&
+        jsonStringValue(pending, "sessionId") != sessionId) {
+      return fail("stream_discard_pending_conflict",
+                  "another streamed map owns the pending activation marker");
+    }
+  }
+  if (!removeTree(joinPath(storageRoot_, relativeRoot)) ||
+      !removeTree(pendingPath) || !removeTree(pendingPath + ".bak") ||
+      !removeTree(pendingPath + ".tmp")) {
+    return fail("stream_discard_cleanup",
+                "could not remove superseded stream map state");
+  }
+  return {true, "stream_superseded",
+          "removed streamed map superseded by archive transfer"};
+}
+
+InstallStatus MapTransferInstaller::discardAllUnselectedStreamMaps() const {
+  ActiveMapSelection selected;
+  const InstallStatus active = readActiveMap(selected);
+  if (!active.ok && active.code != "active_missing")
+    return active;
+
+  const std::string mapsRoot = joinPath(storageRoot_, "/VECTMAP/.maps");
+  DIR *directory = ::opendir(mapsRoot.c_str());
+  if (directory == nullptr && errno != ENOENT) {
+    return fail("stream_discard_scan",
+                "could not scan unselected streamed maps");
+  }
+  bool cleaned = true;
+  if (directory != nullptr) {
+    while (struct dirent *entry = ::readdir(directory)) {
+      const std::string sessionId = entry->d_name;
+      if (sessionId == "." || sessionId == "..")
+        continue;
+      if (!safeId(sessionId)) {
+        cleaned = false;
+        continue;
+      }
+      const std::string relativeRoot =
+          std::string("/VECTMAP/.maps/") + sessionId;
+      if (relativeRoot == selected.root ||
+          relativeRoot == selected.previousRoot) {
+        continue;
+      }
+      const std::string root = joinPath(mapsRoot, sessionId);
+      const bool streamState =
+          fileExists(joinPath(root, kStreamReadyFile)) ||
+          fileExists(joinPath(root, kStreamReadyFile) + ".bak") ||
+          fileExists(joinPath(root, kStreamInstallingFile)) ||
+          fileExists(joinPath(root, kStreamInstallingFile) + ".bak");
+      if (streamState && !removeTree(root))
+        cleaned = false;
+    }
+    ::closedir(directory);
+  }
+
+  const std::string pendingPath =
+      joinPath(storageRoot_, kPendingStreamActivationFile);
+  cleaned = removeTree(pendingPath) &&
+            removeTree(pendingPath + ".bak") &&
+            removeTree(pendingPath + ".tmp") && cleaned;
+  if (!cleaned) {
+    return fail("stream_discard_cleanup",
+                "could not remove invalid unselected stream state");
+  }
+  return {true, "stream_superseded_all",
+          "removed unselected streamed map state"};
+}
+
 bool MapTransferInstaller::hasInterruptedActivation() const {
   const std::string transactionPath =
       joinPath(storageRoot_, kActivationTransactionFile);
@@ -1716,7 +1919,10 @@ bool MapTransferInstaller::pruneStagingSessions(
   return ok;
 }
 
-bool MapTransferInstaller::pruneObsoleteInstalledMaps() const {
+bool MapTransferInstaller::pruneObsoleteInstalledMaps(
+    const std::string &keepInstallingSessionId) const {
+  if (!keepInstallingSessionId.empty() && !safeId(keepInstallingSessionId))
+    return false;
   ActiveMapSelection selected;
   InstallStatus status = readActiveMap(selected);
   if (!status.ok && status.code != "active_missing")
@@ -1769,8 +1975,11 @@ bool MapTransferInstaller::pruneObsoleteInstalledMaps() const {
         candidate == pendingRoot || candidate == transactionRoot ||
         candidate == transactionPreviousRoot ||
         freshReady ||
-        fileExists(joinPath(candidatePath, kStreamInstallingFile)) ||
-        fileExists(joinPath(candidatePath, kStreamInstallingFile) + ".bak")) {
+        ((keepInstallingSessionId.empty() ||
+          name == keepInstallingSessionId) &&
+         (fileExists(joinPath(candidatePath, kStreamInstallingFile)) ||
+          fileExists(joinPath(candidatePath, kStreamInstallingFile) +
+                     ".bak")))) {
       continue;
     }
     if (!safeId(name) || !removeTree(candidatePath))

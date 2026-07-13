@@ -2,7 +2,9 @@
 
 #include <Arduino.h>
 #include <esp_heap_caps.h>
+#include <limits>
 #include <memory>
+#include <new>
 
 /**
  * @brief Custom C++ allocator that forces allocations into PSRAM (SPIRAM)
@@ -30,6 +32,8 @@ template <typename T> struct PsramAllocator {
   T *allocate(std::size_t n) {
     if (n == 0)
       return nullptr;
+    if (n > std::numeric_limits<std::size_t>::max() / sizeof(T))
+      throw std::bad_array_new_length();
 
     // Use MALLOC_CAP_SPIRAM to force allocation to PSRAM.
     // Also use MALLOC_CAP_8BIT to ensure it can be used for general purposes.
@@ -39,6 +43,7 @@ template <typename T> struct PsramAllocator {
     if (!p) {
       Serial.printf("PSRAM Allocator: Failed to allocate %u bytes\n",
                     (uint32_t)(n * sizeof(T)));
+      throw std::bad_alloc();
     }
     return p;
   }

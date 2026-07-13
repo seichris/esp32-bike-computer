@@ -14,6 +14,9 @@
 #include "esp_err.h"
 #include "esp_spiffs.h"
 #include "sdmmc_cmd.h"
+#include <atomic>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <stdio.h>
 #include <string>
 #include <sys/stat.h>
@@ -106,13 +109,16 @@ private:
 
 class Storage {
 private:
-  bool isSdLoaded;
+  std::atomic<bool> isSdLoaded;
   sdmmc_card_t *card;
+  SemaphoreHandle_t mountMutex = nullptr;
 
 public:
   Storage();
 
   esp_err_t initSD();
+  bool ensureSdMounted();
+  void markSdUnavailable();
   esp_err_t initSPIFFS();
   SDCardInfo getSDCardInfo();
   bool getSdLoaded() const;

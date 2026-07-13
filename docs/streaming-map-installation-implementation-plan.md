@@ -23,7 +23,7 @@ The new path is **map install protocol v2**. The merged retained-ZIP path remain
 
 ## Implementation Status
 
-Status as of 2026-07-12:
+Status as of 2026-07-13:
 
 - Protocol v1 recovery, background archive upload, five-step progress, durable
   activation state, and atomic active-map selection are merged on `main` through
@@ -46,6 +46,14 @@ Status as of 2026-07-12:
   The host suite, ASan/UBSan, and both Waveshare firmware builds pass. Protocol
   v2 remains unadvertised until the Phase 5 HTTP and Phase 6 iOS paths are
   complete.
+- Phase 5 adds the authenticated exact-length stream endpoint, a dedicated
+  bounded HTTP worker that leaves the UI/BLE main loop responsive, hard
+  request-wide header limits, one-pass receiver ownership, throttled Step 1
+  publication, monotonic handoff into device-owned activation, reboot recovery,
+  live mounted/writable SD probing and remount, and main-loop renderer parsing
+  with rollback before `installed` is reported. The compiled production trust
+  list intentionally remains empty until rollout, so released firmware cannot
+  advertise protocol v2 prematurely.
 - No production capability should advertise v2 until the signed stream parser,
   one-pass writer, checkpoint recovery, and pointer transaction all exist and
   pass the acceptance gate below.
@@ -806,6 +814,44 @@ throwaway MVP parser or unsigned interim protocol.
 - Feed network chunks into the parser/writer without transport assumptions.
 - Restore device-owned finalization after request completion or reboot.
 - Advertise v2 only after initialization and SD capability checks.
+
+Implementation detail: the firmware receiver is transport-independent and owns
+the parser, hardware SHA context, and inactive-root session for exactly one HTTP
+body. The HTTP layer authenticates the short-lived transfer token, enforces the
+media type and exact length, feeds bounded chunks, exposes Step 1/2 snapshots to
+BLE/display consumers, and queues device-owned Step 3 only after the ready and
+pending markers are durable. Reboot restores paused reception or resumes ready
+activation. Capability reporting remains fail-closed while the compiled public
+verification-key list is empty.
+
+The HTTP listener owns one FreeRTOS worker with one request at a time. Upload
+body reads and SD writes therefore never occupy the Arduino loop that services
+LVGL, BLE, buttons, sensors, and the progress overlay. Request lines and headers
+have explicit per-line, aggregate-byte, count, and request-wide time limits;
+duplicate security/framing headers and transfer encoding fail closed. Revoking
+or changing the BLE transfer session invalidates the worker's generation token,
+pauses an incomplete map stream, and prevents it from activating. Step 1
+snapshots are copied only at bounded byte/time/percentage intervals or on a
+state transition. Enabling a new transfer session waits for the previous HTTP
+worker to finish exiting before publishing the new token and listener.
+
+Every `.fmb` and supported legacy `.fmp` block is structurally validated during
+the same streaming pass that writes and hashes it. The durable checkpoint and
+ready marker carry a validation schema version, so older unvalidated payloads
+cannot be skipped after an upgrade. Per-block encoded bytes, feature records,
+decoded point counts, and polygon-grid expansion are bounded to the renderer's
+memory budget; the same limits are applied when a block is loaded from
+removable storage. Legacy ASCII blocks must end in a physical newline and use
+the renderer's exact color grammar. PSRAM allocation failure anywhere in block
+decoding is a renderer rejection, so activation rolls back instead of resetting
+the device. Step 3 remains in progress after the active
+pointer commit until the main loop finds and parses one renderer block from the
+new root; it does not scan the payload again. Rejection restores the previous
+active-map metadata without switching the renderer. A completed v1 archive is
+treated as an explicit fallback choice and supersedes any unselected ready,
+paused, invalid, or ambiguous v2 state, both at runtime and during boot
+recovery. A new v2 upload can discard invalid unselected v2 state while active
+and rollback roots remain protected.
 
 ### Phase 6: iOS artifact and transfer path
 

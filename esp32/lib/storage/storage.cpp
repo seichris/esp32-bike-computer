@@ -13,6 +13,7 @@
 #include "esp_vfs_fat.h"
 #include "freertos/task.h"
 #include <SD.h>
+#include <FFat.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <cmath>
@@ -54,6 +55,45 @@ std::string formatSize(uint64_t size) {
  * @brief Storage Class constructor
  */
 Storage::Storage() : isSdLoaded(false), card(nullptr) {}
+
+bool Storage::ensureSdMounted() {
+  if (mountMutex == nullptr)
+    mountMutex = xSemaphoreCreateMutex();
+  if (mountMutex == nullptr)
+    return false;
+  xSemaphoreTake(mountMutex, portMAX_DELAY);
+
+  struct stat mounted = {};
+  bool ready = isSdLoaded.load() && ::stat("/sdcard", &mounted) == 0 &&
+               S_ISDIR(mounted.st_mode);
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
+    defined(SPI_SHARED)
+  ready = ready && SD.cardType() != CARD_NONE;
+  if (ready) {
+    File root = SD.open("/");
+    ready = static_cast<bool>(root);
+    root.close();
+  }
+#endif
+  if (!ready) {
+    isSdLoaded = false;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
+    defined(SPI_SHARED)
+    FFat.end();
+    SD.end();
+    delay(25);
+#endif
+    ready = initSD() == ESP_OK;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+    if (!ready)
+      initSPIFFS();
+#endif
+  }
+  xSemaphoreGive(mountMutex);
+  return ready;
+}
+
+void Storage::markSdUnavailable() { isSdLoaded = false; }
 
 /**
  * @brief SD Card init with DMA using ESP-IDF
@@ -229,8 +269,6 @@ esp_err_t Storage::initSD() {
  *
  * @return esp_err_t Error code for SPIFFS setup
  */
-#include <FFat.h>
-
 /**
  * @brief Initialize FFat (used as fallback or primary storage)
  *
@@ -335,7 +373,7 @@ SDCardInfo Storage::getSDCardInfo() {
  *
  * @return true if SD card is loaded, false otherwise
  */
-bool Storage::getSdLoaded() const { return isSdLoaded; }
+bool Storage::getSdLoaded() const { return isSdLoaded.load(); }
 
 /**
  * @brief Open a file on the SD card

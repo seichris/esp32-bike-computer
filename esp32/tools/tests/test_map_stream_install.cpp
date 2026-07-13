@@ -1,5 +1,6 @@
 #include "../../lib/map_transfer/map_stream_format.hpp"
 #include "../../lib/map_transfer/map_stream_install.hpp"
+#include "../../lib/map_transfer/map_stream_receiver.hpp"
 #include "../../lib/map_transfer/map_transfer.hpp"
 
 #include <array>
@@ -7,6 +8,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
@@ -23,6 +25,7 @@ using map_transfer::MapStreamInstallSession;
 using map_transfer::MapStreamInstallSnapshot;
 using map_transfer::MapStreamInstallState;
 using map_transfer::MapStreamRecoveryResult;
+using map_transfer::MapStreamReceiver;
 using map_transfer::MapStreamStorage;
 using map_transfer::MapTransferInstaller;
 using map_transfer::ParsedMapStreamManifest;
@@ -164,6 +167,30 @@ std::string readFile(const std::string &path) {
   return value.str();
 }
 
+std::map<std::string, std::string> readGoldenFixture() {
+  std::ifstream input("../backend/tests/fixtures/map_stream_v1_golden.txt");
+  assert(input.good());
+  std::map<std::string, std::string> values;
+  std::string line;
+  while (std::getline(input, line)) {
+    const size_t separator = line.find('=');
+    assert(separator != std::string::npos);
+    values[line.substr(0, separator)] = line.substr(separator + 1);
+  }
+  return values;
+}
+
+std::vector<uint8_t> decodeHex(const std::string &hex) {
+  assert(hex.size() % 2 == 0);
+  std::vector<uint8_t> bytes;
+  bytes.reserve(hex.size() / 2);
+  for (size_t index = 0; index < hex.size(); index += 2) {
+    bytes.push_back(
+        static_cast<uint8_t>(std::stoul(hex.substr(index, 2), nullptr, 16)));
+  }
+  return bytes;
+}
+
 void writeFile(const std::string &path, const std::string &value) {
   std::ofstream output(path, std::ios::binary | std::ios::trunc);
   assert(output.good());
@@ -172,16 +199,23 @@ void writeFile(const std::string &path, const std::string &value) {
   assert(output.good());
 }
 
+const std::string kPayload0("FMB\x01\0\0\0\0", 8);
+const std::string kPayload1("FMB\x02\0\0\0\0", 8);
+const std::string kPayload2 = "Polygons:0\nPolylines:0\n";
+const std::array<std::string, 3> kPayloads = {kPayload0, kPayload1,
+                                             kPayload2};
+constexpr uint64_t kPayloadBytes = 39;
+
 const std::string kManifest =
-    "{\"files\":[{\"bytes\":1,\"path\":\"VECTMAP/multi/+0000+0000/0.fmb\","
+    "{\"files\":[{\"bytes\":8,\"path\":\"VECTMAP/multi/+0000+0000/0.fmb\","
     "\"sha256\":"
-    "\"ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb\"},"
-    "{\"bytes\":2,\"path\":\"VECTMAP/multi/+0000+0000/1.fmb\","
+    "\"8b359fbdc6bda4e7f061783a8ed844e7733d6573881cf302b7d2833981848f7b\"},"
+    "{\"bytes\":8,\"path\":\"VECTMAP/multi/+0000+0000/1.fmb\","
     "\"sha256\":"
-    "\"1e0bbd6c686ba050b8eb03ffeedc64fdc9d80947fce821abbe5d6dc8d252c5ac\"},"
-    "{\"bytes\":3,\"path\":\"VECTMAP/multi/+0000+0000/2.fmp\","
+    "\"08f7a315f83149b4d977fcdada8b882ae60d0b5b9ef1fafa05e0f5431154f387\"},"
+    "{\"bytes\":23,\"path\":\"VECTMAP/multi/+0000+0000/2.fmp\","
     "\"sha256\":"
-    "\"cb8379ac2098aa165029e3938a51da0bcecfc008fd6795f401178647f96c5b34\"}],"
+    "\"a993c29312adc226b606450ebe82b5108a2302e80c8753648208c2f09231c364\"}],"
     "\"mapId\":\"multi\",\"schemaVersion\":1,\"target\":{\"formatVersion\":1,"
     "\"minFirmwareVersion\":\"0.0.0\",\"renderer\":\"esp32-fmb\"}}";
 
@@ -190,14 +224,14 @@ verified(const std::string &signedReceipt = std::string(64, '2')) {
   VerifiedMapStreamManifest value;
   MapStreamHeader header;
   header.fileCount = 3;
-  header.payloadBytes = 6;
+  header.payloadBytes = kPayloadBytes;
   assert(
       map_transfer::parseMapStreamManifest(kManifest, header, value.manifest));
   value.manifestReceipt = map_transfer::mapStreamManifestReceipt(
       reinterpret_cast<const uint8_t *>(kManifest.data()), kManifest.size());
   value.signedManifestReceipt = signedReceipt;
   value.signatureKeyId = "test-key";
-  value.payloadBytes = 6;
+  value.payloadBytes = kPayloadBytes;
   return value;
 }
 
@@ -222,14 +256,13 @@ void consumeFile(MapStreamInstallSession &session,
 
 bool consumeAll(MapStreamInstallSession &session,
                 const VerifiedMapStreamManifest &manifest) {
-  const std::array<std::string, 3> payloads = {"a", "bc", "def"};
-  for (size_t index = 0; index < payloads.size(); index++) {
+  for (size_t index = 0; index < kPayloads.size(); index++) {
     const MapStreamFileView file = fileView(manifest, index);
     const MapStreamFileAction action = session.onFileBegin(file, index);
     if (action == MapStreamFileAction::Reject ||
         !session.onFileData(
-            file, reinterpret_cast<const uint8_t *>(payloads[index].data()),
-            payloads[index].size()) ||
+            file, reinterpret_cast<const uint8_t *>(kPayloads[index].data()),
+            kPayloads[index].size()) ||
         !session.onFileEnd(file, index)) {
       return false;
     }
@@ -242,10 +275,11 @@ VerifiedMapStreamManifest prepareReadyRoot(const std::string &root,
   auto manifest = verified();
   MapStreamInstallSession session(root, sessionId, {1, 10000});
   assert(session.onManifest(manifest, kManifest));
-  consumeFile(session, manifest, 0, "a", MapStreamFileAction::VerifyAndConsume);
-  consumeFile(session, manifest, 1, "bc",
+  consumeFile(session, manifest, 0, kPayload0,
               MapStreamFileAction::VerifyAndConsume);
-  consumeFile(session, manifest, 2, "def",
+  consumeFile(session, manifest, 1, kPayload1,
+              MapStreamFileAction::VerifyAndConsume);
+  consumeFile(session, manifest, 2, kPayload2,
               MapStreamFileAction::VerifyAndConsume);
   assert(session.onComplete(manifest));
   return manifest;
@@ -255,28 +289,32 @@ void testDirectWriteCheckpointAndReady() {
   const std::string root = tempRoot();
   uint64_t now = 100;
   const auto manifest = verified();
-  MapStreamInstallSession session(root, "session-1", {2, 10000},
+  MapStreamInstallSession session(root, "session-1", {9, 10000},
                                   [&now] { return now; });
   assert(session.onManifest(manifest, kManifest));
   assert(session.snapshot().state == MapStreamInstallState::Receiving);
   assert(!exists(root + "/VECTMAP/active-map.json"));
-  consumeFile(session, manifest, 0, "a", MapStreamFileAction::VerifyAndConsume);
+  consumeFile(session, manifest, 0, kPayload0,
+              MapStreamFileAction::VerifyAndConsume);
   assert(!exists(session.inactiveRoot() + "/.stream-checkpoint"));
-  consumeFile(session, manifest, 1, "bc",
+  consumeFile(session, manifest, 1, kPayload1,
               MapStreamFileAction::VerifyAndConsume);
   assert(exists(session.inactiveRoot() + "/.stream-checkpoint"));
   assert(session.snapshot().durableFilePrefix == 2);
   now += 10001;
-  consumeFile(session, manifest, 2, "def",
+  consumeFile(session, manifest, 2, kPayload2,
               MapStreamFileAction::VerifyAndConsume);
   assert(session.onComplete(manifest));
   assert(session.snapshot().state == MapStreamInstallState::Ready);
   assert(session.snapshot().step() == 2);
   assert(session.snapshot().totalSteps() == 3);
   assert(session.snapshot().progress() == 100);
-  assert(readFile(session.inactiveRoot() + "/+0000+0000/0.fmb") == "a");
-  assert(readFile(session.inactiveRoot() + "/+0000+0000/1.fmb") == "bc");
-  assert(readFile(session.inactiveRoot() + "/+0000+0000/2.fmp") == "def");
+  assert(readFile(session.inactiveRoot() + "/+0000+0000/0.fmb") ==
+         kPayload0);
+  assert(readFile(session.inactiveRoot() + "/+0000+0000/1.fmb") ==
+         kPayload1);
+  assert(readFile(session.inactiveRoot() + "/+0000+0000/2.fmp") ==
+         kPayload2);
   assert(readFile(session.inactiveRoot() + "/.manifest.json") == kManifest);
   assert(readFile(session.inactiveRoot() + "/.verified.sha256") ==
          manifest.manifestReceipt);
@@ -285,6 +323,8 @@ void testDirectWriteCheckpointAndReady() {
   assert(exists(root + "/VECTMAP/.pending-stream-activation.json"));
   assert(!exists(root + "/VECTMAP/active-map.json"));
   assert(session.snapshot().json(true).size() < 512);
+  assert(session.snapshot().json(true).find("\"status\":\"ready\"") !=
+         std::string::npos);
   MapStreamInstallSnapshot recoverable;
   assert(map_transfer::readRecoverableMapStreamInstall(root, recoverable) ==
          MapStreamRecoveryResult::Found);
@@ -318,15 +358,15 @@ void testDirectWriteCheckpointAndReady() {
 
   MapStreamInstallSession duplicate(root, "session-1", {1, 10000});
   assert(duplicate.onManifest(manifest, kManifest));
-  consumeFile(duplicate, manifest, 0, "a",
+  consumeFile(duplicate, manifest, 0, kPayload0,
               MapStreamFileAction::ConsumeCheckpointed);
-  consumeFile(duplicate, manifest, 1, "bc",
+  consumeFile(duplicate, manifest, 1, kPayload1,
               MapStreamFileAction::ConsumeCheckpointed);
-  consumeFile(duplicate, manifest, 2, "def",
+  consumeFile(duplicate, manifest, 2, kPayload2,
               MapStreamFileAction::ConsumeCheckpointed);
   assert(duplicate.onComplete(manifest));
   assert(duplicate.snapshot().bytesWritten == 0);
-  assert(duplicate.snapshot().bytesSkipped == 6);
+  assert(duplicate.snapshot().bytesSkipped == kPayloadBytes);
   assert(installer.activateReadyStreamMap("session-1").ok);
 }
 
@@ -338,7 +378,8 @@ void testResumeSkipsDurablePrefixWithoutRewriting() {
     MapStreamInstallSession first(root, "resume", {1, 10000},
                                   [&now] { return now; });
     assert(first.onManifest(manifest, kManifest));
-    consumeFile(first, manifest, 0, "a", MapStreamFileAction::VerifyAndConsume);
+    consumeFile(first, manifest, 0, kPayload0,
+                MapStreamFileAction::VerifyAndConsume);
     assert(first.snapshot().durableFilePrefix == 1);
     first.onAbort(map_transfer::MapStreamParserError::Truncated);
     assert(first.snapshot().state == MapStreamInstallState::Paused);
@@ -347,6 +388,9 @@ void testResumeSkipsDurablePrefixWithoutRewriting() {
            MapStreamRecoveryResult::Found);
     assert(recoverable.state == MapStreamInstallState::Paused);
     assert(recoverable.durableFilePrefix == 1);
+    assert(recoverable.receivedPayloadBytes == 0);
+    assert(recoverable.completedPayloadBytes == kPayload0.size());
+    assert(recoverable.progress() == 20);
   }
   const std::string firstPath = root + "/VECTMAP/.maps/resume/+0000+0000/0.fmb";
   const std::string checkpointPath =
@@ -360,17 +404,81 @@ void testResumeSkipsDurablePrefixWithoutRewriting() {
                                 [&now] { return now; });
   assert(retry.onManifest(manifest, kManifest));
   assert(retry.snapshot().durableFilePrefix == 1);
-  consumeFile(retry, manifest, 0, "a",
+  consumeFile(retry, manifest, 0, kPayload0,
               MapStreamFileAction::ConsumeCheckpointed);
   struct stat after;
   assert(::stat(firstPath.c_str(), &after) == 0);
   assert(before.st_ino == after.st_ino);
-  consumeFile(retry, manifest, 1, "bc", MapStreamFileAction::VerifyAndConsume);
-  consumeFile(retry, manifest, 2, "def", MapStreamFileAction::VerifyAndConsume);
+  consumeFile(retry, manifest, 1, kPayload1,
+              MapStreamFileAction::VerifyAndConsume);
+  consumeFile(retry, manifest, 2, kPayload2,
+              MapStreamFileAction::VerifyAndConsume);
   assert(retry.onComplete(manifest));
-  assert(retry.snapshot().bytesSkipped == 1);
-  assert(retry.snapshot().bytesWritten == 5);
-  assert(retry.snapshot().completedPayloadBytes == 6);
+  assert(retry.snapshot().bytesSkipped == kPayload0.size());
+  assert(retry.snapshot().bytesWritten == kPayloadBytes - kPayload0.size());
+  assert(retry.snapshot().completedPayloadBytes == kPayloadBytes);
+}
+
+void testIncompleteStreamCanBeDiscardedForProtocolArbitration() {
+  const std::string root = tempRoot();
+  const auto manifest = verified();
+  MapStreamInstallSession session(root, "cross-protocol", {1, 10000});
+  assert(session.onManifest(manifest, kManifest));
+  consumeFile(session, manifest, 0, kPayload0,
+              MapStreamFileAction::VerifyAndConsume);
+  session.onAbort(map_transfer::MapStreamParserError::Truncated);
+  assert(session.snapshot().state == MapStreamInstallState::Paused);
+
+  MapTransferInstaller installer(root);
+  const auto discarded =
+      installer.discardIncompleteStreamMap("cross-protocol");
+  assert(discarded.ok);
+  assert(!exists(root + "/VECTMAP/.maps/cross-protocol"));
+}
+
+void testUnselectedReadyStreamCanBeSupersededByArchive() {
+  const std::string root = tempRoot();
+  prepareReadyRoot(root, "stream-fallback");
+  assert(exists(root +
+                "/VECTMAP/.maps/stream-fallback/.ready"));
+  assert(exists(root + "/VECTMAP/.pending-stream-activation.json"));
+
+  MapTransferInstaller installer(root);
+  const auto discarded =
+      installer.discardUnselectedStreamMap("stream-fallback");
+  assert(discarded.ok);
+  assert(discarded.code == "stream_superseded");
+  assert(!exists(root + "/VECTMAP/.maps/stream-fallback"));
+  assert(!exists(root + "/VECTMAP/.pending-stream-activation.json"));
+}
+
+void testInvalidUnselectedStreamCanBeSupersededWithoutRemovingActiveMap() {
+  const std::string root = tempRoot();
+  prepareReadyRoot(root, "active-stream");
+  MapTransferInstaller installer(root);
+  assert(installer.activateReadyStreamMap("active-stream").ok);
+
+  prepareReadyRoot(root, "invalid-stream");
+  const std::string ready =
+      root + "/VECTMAP/.maps/invalid-stream/.ready";
+  std::string marker = readFile(ready);
+  const std::string validation = ",\"validationVersion\":1";
+  const size_t validationOffset = marker.find(validation);
+  assert(validationOffset != std::string::npos);
+  marker.erase(validationOffset, validation.size());
+  writeFile(ready, marker);
+  MapStreamInstallSnapshot recoverable;
+  assert(map_transfer::readRecoverableMapStreamInstall(root, recoverable) ==
+         MapStreamRecoveryResult::Invalid);
+
+  const auto discarded = installer.discardAllUnselectedStreamMaps();
+  assert(discarded.ok);
+  assert(!exists(root + "/VECTMAP/.maps/invalid-stream"));
+  assert(!exists(root + "/VECTMAP/.pending-stream-activation.json"));
+  assert(exists(root + "/VECTMAP/.maps/active-stream"));
+  ActiveMapSelection selected;
+  assert(installer.readActiveMap(selected).ok);
+  assert(selected.sessionId == "active-stream");
 }
 
 void testMismatchedIdentityCannotReuseCheckpoint() {
@@ -381,7 +489,7 @@ void testMismatchedIdentityCannotReuseCheckpoint() {
     MapStreamInstallSession first(root, "same-session", {1, 10000},
                                   [&now] { return now; });
     assert(first.onManifest(firstManifest, kManifest));
-    consumeFile(first, firstManifest, 0, "a",
+    consumeFile(first, firstManifest, 0, kPayload0,
                 MapStreamFileAction::VerifyAndConsume);
   }
   const auto secondManifest = verified(std::string(64, '3'));
@@ -398,7 +506,8 @@ void testCorruptCheckpointAndPartAreDiscarded() {
   const auto manifest = verified();
   MapStreamInstallSession first(root, "corrupt", {1, 10000});
   assert(first.onManifest(manifest, kManifest));
-  consumeFile(first, manifest, 0, "a", MapStreamFileAction::VerifyAndConsume);
+  consumeFile(first, manifest, 0, kPayload0,
+              MapStreamFileAction::VerifyAndConsume);
   writeFile(first.inactiveRoot() + "/.stream-checkpoint", "{bad}");
   writeFile(first.inactiveRoot() + "/orphan.part", "partial");
   MapStreamInstallSession retry(root, "corrupt", {1, 10000});
@@ -538,6 +647,27 @@ void testBootDoesNotGuessBetweenMultipleReadyRoots() {
   assert(exists(root + "/VECTMAP/.maps/ready-two/.ready"));
 }
 
+void testReadyMarkerRequiresStructuralValidationVersion() {
+  const std::string root = tempRoot();
+  prepareReadyRoot(root, "old-ready-schema");
+  const std::string ready =
+      root + "/VECTMAP/.maps/old-ready-schema/.ready";
+  std::string marker = readFile(ready);
+  const std::string field = ",\"validationVersion\":1";
+  const size_t fieldOffset = marker.find(field);
+  assert(fieldOffset != std::string::npos);
+  marker.erase(fieldOffset, field.size());
+  writeFile(ready, marker);
+
+  MapStreamInstallSnapshot recoverable;
+  assert(map_transfer::readRecoverableMapStreamInstall(root, recoverable) ==
+         MapStreamRecoveryResult::Invalid);
+  MapTransferInstaller installer(root);
+  const auto activation = installer.recoverPendingStreamActivation();
+  assert(!activation.ok);
+  assert(activation.code == "stream_ready_invalid");
+}
+
 void testActivePointerWriteFailureRemainsRecoverable() {
   const std::string root = tempRoot();
   prepareReadyRoot(root, "recover-write");
@@ -575,7 +705,7 @@ void testReadyPayloadDamageCannotBeSkippedOrActivated() {
   assert(retry.snapshot().durableFilePrefix == 0);
   assert(consumeAll(retry, manifest));
   assert(retry.onComplete(manifest));
-  assert(retry.snapshot().bytesWritten == 6);
+  assert(retry.snapshot().bytesWritten == kPayloadBytes);
   MapTransferInstaller installer(root);
   assert(installer.activateReadyStreamMap("damaged-ready").ok);
 }
@@ -586,7 +716,8 @@ void testSemanticBackupRecovery() {
   {
     MapStreamInstallSession first(root, "backup-checkpoint", {1, 10000});
     assert(first.onManifest(manifest, kManifest));
-    consumeFile(first, manifest, 0, "a", MapStreamFileAction::VerifyAndConsume);
+    consumeFile(first, manifest, 0, kPayload0,
+                MapStreamFileAction::VerifyAndConsume);
   }
   const std::string checkpoint =
       root + "/VECTMAP/.maps/backup-checkpoint/.stream-checkpoint";
@@ -619,13 +750,13 @@ void testPreviousRootIdentityIsProtected() {
   assert(installer.activateReadyStreamMap("current-b").ok);
   const std::string previousFile =
       root + "/VECTMAP/.maps/previous-a/+0000+0000/0.fmb";
-  assert(readFile(previousFile) == "a");
+  assert(readFile(previousFile) == kPayload0);
 
   const auto replacement = verified(std::string(64, '9'));
   MapStreamInstallSession conflicting(root, "previous-a", {1, 10000});
   assert(!conflicting.onManifest(replacement, kManifest));
   assert(conflicting.snapshot().errorCode == "stream_session_conflict");
-  assert(readFile(previousFile) == "a");
+  assert(readFile(previousFile) == kPayload0);
   ActiveMapSelection selected;
   assert(installer.readActiveMap(selected).ok);
   assert(selected.previousSignedManifestReceipt ==
@@ -698,31 +829,32 @@ void testConsumedReadyRootsAreNotReactivatedAndArePruned() {
 void testFrozenMapIdEdgesInstallAndActivate() {
   const std::string root = tempRoot();
   const std::string manifestText =
-      "{\"files\":[{\"bytes\":1,\"path\":\"VECTMAP/.shanghai/"
+      "{\"files\":[{\"bytes\":8,\"path\":\"VECTMAP/.shanghai/"
       "+0000+0000/0.fmb\",\"sha256\":\""
-      "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
+      "8b359fbdc6bda4e7f061783a8ed844e7733d6573881cf302b7d2833981848f7b"
       "\"}],\"mapId\":\".shanghai\",\"schemaVersion\":1,\"target\":{"
       "\"formatVersion\":1,\"minFirmwareVersion\":\"0.0.0\","
       "\"renderer\":\"esp32-fmb\"}}";
   VerifiedMapStreamManifest manifest;
   MapStreamHeader header;
   header.fileCount = 1;
-  header.payloadBytes = 1;
+  header.payloadBytes = kPayload0.size();
   assert(map_transfer::parseMapStreamManifest(manifestText, header,
                                               manifest.manifest));
   manifest.manifestReceipt = map_transfer::mapStreamManifestReceipt(
       reinterpret_cast<const uint8_t *>(manifestText.data()),
       manifestText.size());
   manifest.signedManifestReceipt = std::string(64, '7');
-  manifest.payloadBytes = 1;
+  manifest.payloadBytes = kPayload0.size();
   MapStreamInstallSession session(root, "edge-map-id", {1, 10000});
   assert(session.onManifest(manifest, manifestText));
   MapStreamFileView file;
   assert(map_transfer::mapStreamFileView(manifest.manifest, manifestText, 0,
                                          file));
   assert(session.onFileBegin(file, 0) == MapStreamFileAction::VerifyAndConsume);
-  const uint8_t payload = 'a';
-  assert(session.onFileData(file, &payload, 1));
+  assert(session.onFileData(
+      file, reinterpret_cast<const uint8_t *>(kPayload0.data()),
+      kPayload0.size()));
   assert(session.onFileEnd(file, 0));
   assert(session.onComplete(manifest));
   MapTransferInstaller installer(root);
@@ -798,8 +930,9 @@ void testCrashBoundariesRemainRetryableWithMonotonicFinalization() {
     const MapStreamFileView file = fileView(manifest, 0);
     assert(failing.onFileBegin(file, 0) ==
            MapStreamFileAction::VerifyAndConsume);
-    const uint8_t payload = 'a';
-    const bool wrote = failing.onFileData(file, &payload, 1);
+    const bool wrote = failing.onFileData(
+        file, reinterpret_cast<const uint8_t *>(kPayload0.data()),
+        kPayload0.size());
     if (operation == FaultOperation::Write) {
       assert(!wrote);
     } else {
@@ -831,11 +964,85 @@ void testLargeDirectoryCleanupStreamsEntries() {
   assert(exists(tile + "/resource-1.aux"));
 }
 
+void testTransportIndependentReceiverOwnsExactBodyLifecycle() {
+  const auto fixture = readGoldenFixture();
+  const std::vector<uint8_t> stream = decodeHex(fixture.at("stream_hex"));
+  const std::vector<uint8_t> publicKey =
+      decodeHex(fixture.at("public_key_x963_hex"));
+  map_transfer::MapStreamTrustStore trust;
+  assert(trust.add("map-test-2026-01", publicKey.data(), publicKey.size()));
+
+  const std::string root = tempRoot();
+  std::vector<MapStreamInstallSnapshot> progressSnapshots;
+  MapStreamReceiver receiver(trust, root, "http-golden", stream.size(),
+                             "9.0.0", 1024 * 1024, {}, {}, {},
+                             [&](const MapStreamInstallSnapshot &snapshot) {
+                               progressSnapshots.push_back(snapshot);
+                             });
+  for (size_t index = 0; index < stream.size(); index++)
+    assert(receiver.feed(&stream[index], 1));
+  const auto result = receiver.finish();
+  assert(result.ok);
+  assert(result.code == "stream_ready");
+  assert(receiver.snapshot().state == MapStreamInstallState::Ready);
+  assert(readFile(root +
+                  "/VECTMAP/.maps/http-golden/+0000+0000/0_0.fmb") ==
+         std::string("FMB\x01\0\0\0\0", 8));
+  assert(exists(root + "/VECTMAP/.pending-stream-activation.json"));
+  uint8_t previousFinalization = 0;
+  bool sawFinalizing = false;
+  for (const MapStreamInstallSnapshot &snapshot : progressSnapshots) {
+    if (snapshot.step() != 2)
+      continue;
+    sawFinalizing = true;
+    assert(snapshot.finalizationCompleted >= previousFinalization);
+    previousFinalization = snapshot.finalizationCompleted;
+  }
+  assert(sawFinalizing);
+  assert(previousFinalization == 6);
+
+  MapStreamReceiver truncated(trust, root, "http-truncated", stream.size(),
+                              "9.0.0", 1024 * 1024);
+  assert(truncated.feed(stream.data(), stream.size() - 1));
+  const auto paused = truncated.finish();
+  assert(!paused.ok);
+  assert(paused.httpStatus == 408);
+  assert(truncated.snapshot().state == MapStreamInstallState::Paused);
+
+  map_transfer::MapStreamTrustStore emptyTrust;
+  MapStreamReceiver untrusted(emptyTrust, root, "http-untrusted",
+                              stream.size(), "9.0.0", 1024 * 1024);
+  assert(!untrusted.feed(stream.data(), stream.size()));
+  const auto rejected = untrusted.finish();
+  assert(!rejected.ok);
+  assert(rejected.httpStatus == 400);
+  assert(rejected.code == "stream_signing_key_unknown");
+}
+
+void testStartingNewStreamPrunesAbandonedPausedSessions() {
+  const std::string root = tempRoot();
+  const auto manifest = verified();
+  {
+    MapStreamInstallSession abandoned(root, "abandoned-stream", {1, 10000});
+    assert(abandoned.onManifest(manifest, kManifest));
+    consumeFile(abandoned, manifest, 0, kPayload0,
+                MapStreamFileAction::VerifyAndConsume);
+    abandoned.onAbort(map_transfer::MapStreamParserError::Truncated);
+  }
+  assert(exists(root + "/VECTMAP/.maps/abandoned-stream/.installing"));
+  MapTransferInstaller installer(root);
+  assert(installer.pruneObsoleteInstalledMaps("new-stream"));
+  assert(!exists(root + "/VECTMAP/.maps/abandoned-stream"));
+}
+
 } // namespace
 
 int main() {
   testDirectWriteCheckpointAndReady();
   testResumeSkipsDurablePrefixWithoutRewriting();
+  testIncompleteStreamCanBeDiscardedForProtocolArbitration();
+  testUnselectedReadyStreamCanBeSupersededByArchive();
+  testInvalidUnselectedStreamCanBeSupersededWithoutRemovingActiveMap();
   testMismatchedIdentityCannotReuseCheckpoint();
   testCorruptCheckpointAndPartAreDiscarded();
   testActiveRootConflictFailsClosed();
@@ -844,6 +1051,7 @@ int main() {
   testRecoveryRollsBackCorruptReadySelection();
   testBootReconstructsMissingPendingMarker();
   testBootDoesNotGuessBetweenMultipleReadyRoots();
+  testReadyMarkerRequiresStructuralValidationVersion();
   testActivePointerWriteFailureRemainsRecoverable();
   testReadyPayloadDamageCannotBeSkippedOrActivated();
   testSemanticBackupRecovery();
@@ -853,6 +1061,8 @@ int main() {
   testFrozenMapIdEdgesInstallAndActivate();
   testCrashBoundariesRemainRetryableWithMonotonicFinalization();
   testLargeDirectoryCleanupStreamsEntries();
+  testTransportIndependentReceiverOwnsExactBodyLifecycle();
+  testStartingNewStreamPrunesAbandonedPausedSessions();
   std::cout << "map_stream_install tests passed\n";
   return 0;
 }

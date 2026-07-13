@@ -1,4 +1,5 @@
 #include "map_stream_parser.hpp"
+#include "../maps/src/mapBlockFormat.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -819,7 +820,8 @@ bool parseMapStreamManifest(std::string_view manifestText,
     size_t filenameBytes = 0;
     if (!safeMapPath(path, parsed.metadata.mapId, tileOffset, tileBytes,
                      filenameOffset, filenameBytes) ||
-        file.bytes == 0 || file.bytes > MAP_STREAM_MAX_PAYLOAD_BYTES ||
+        file.bytes == 0 ||
+        file.bytes > map_block_format::kMaximumBlockBytes ||
         (!previousPath.empty() && path <= previousPath) ||
         payloadBytes > MAP_STREAM_MAX_PAYLOAD_BYTES - file.bytes) {
       return false;

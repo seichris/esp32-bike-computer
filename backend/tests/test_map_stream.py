@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, utils
 
 from map_platform.map_stream import (
     FIXED_HEADER_BYTES,
+    MAX_BLOCK_BYTES,
     MAX_RELATIVE_PATH_BYTES,
     P256_ORDER,
     SIGNATURE_DOMAIN,
@@ -47,7 +48,7 @@ class MapStreamFormatTests(unittest.TestCase):
         envelope = MapStreamSignatureEnvelope.decode(envelope_bytes)
 
         self.assertEqual(header.file_count, 1)
-        self.assertEqual(header.payload_bytes, len(b"map-block"))
+        self.assertEqual(header.payload_bytes, len(b"FMB\x01\x00\x00\x00\x00"))
         self.assertEqual(header.total_bytes, len(stream))
         self.assertEqual(envelope.key_id, "map-test-2026-01")
         self.assertEqual(payload, bytes.fromhex(fixture["payload_hex"]))
@@ -170,6 +171,32 @@ class MapStreamFormatTests(unittest.TestCase):
                         "files": [{"path": path, "bytes": 1, "sha256": "0" * 64}],
                     }
                 )
+
+    def test_canonical_manifest_enforces_renderer_block_budget(self):
+        path = "VECTMAP/map/+0000+0000/1.fmb"
+        canonical_manifest_bytes(
+            {
+                "schemaVersion": 1,
+                "mapId": "map",
+                "files": [
+                    {"path": path, "bytes": MAX_BLOCK_BYTES, "sha256": "0" * 64}
+                ],
+            }
+        )
+        with self.assertRaises(MapStreamFormatError):
+            canonical_manifest_bytes(
+                {
+                    "schemaVersion": 1,
+                    "mapId": "map",
+                    "files": [
+                        {
+                            "path": path,
+                            "bytes": MAX_BLOCK_BYTES + 1,
+                            "sha256": "0" * 64,
+                        }
+                    ],
+                }
+            )
 
     def test_signature_envelope_rejects_malleable_high_s_twin(self):
         fixture = read_fixture()
