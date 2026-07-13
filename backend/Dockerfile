@@ -22,11 +22,17 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 COPY backend /app/backend
+COPY config /app/config
 COPY OSM_Extract /app/OSM_Extract
 
 RUN python -m pip install '/app/backend[api,object-storage]' \
   && python -m pip install pillow shapely "matplotlib<3.6" pyyaml
 
+RUN python /app/backend/tools/generate_map_stream_build_identity.py \
+    --repo-root /app \
+    --output /app/config/map-stream-build-identity.json
+
+ENV PYTHONPATH=/app/backend
 ENV MAP_PLATFORM_REPO_ROOT=/app
 ENV MAP_PLATFORM_DATA_ROOT=/data
 ENV MAP_PLATFORM_SOURCE_INDEX=/app/backend/config/source-regions.json

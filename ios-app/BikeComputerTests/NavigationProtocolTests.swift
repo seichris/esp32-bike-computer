@@ -645,18 +645,35 @@ struct NavigationProtocolTests {
         func sha256(_ data: Data) -> String {
             SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         }
-        func artifact(bytes: Data, sha: String? = nil) -> OfflineMapArtifact {
+        func artifact(
+            bytes: Data,
+            sha: String? = nil,
+            objectKey: String? = nil
+        ) -> OfflineMapArtifact {
             OfflineMapArtifact(
                 format: OfflineMapArtifact.bikeMapStreamFormat,
                 mediaType: "application/vnd.openbikecomputer.map-stream",
                 filename: "golden-map.bmap",
-                objectKey: "maps/golden-map/bike-map-stream-v1/map-test-2026-01/" +
-                    "\(fixture["signed_manifest_receipt"]!).bmap",
+                objectKey: objectKey ?? (
+                    "maps/golden-map/bike-map-stream-v1/map-test-2026-01/" +
+                        "\(sha256(publicKey))/\(String(repeating: "1", count: 64))/" +
+                        "\(String(repeating: "2", count: 64))/" +
+                        "\(fixture["signed_manifest_receipt"]!).bmap"
+                ),
                 bytes: Int64(bytes.count),
                 sha256: sha ?? sha256(bytes),
                 manifestReceipt: fixture["manifest_receipt"],
                 signedManifestReceipt: fixture["signed_manifest_receipt"],
-                signatureKeyId: "map-test-2026-01"
+                signatureKeyId: "map-test-2026-01",
+                signatureKeySha256: sha256(publicKey),
+                producerBuildSha256: String(repeating: "1", count: 64),
+                producerImageDigest: "sha256:" + String(repeating: "2", count: 64),
+                requiredIosBuild: "100",
+                requiredIosGitSha: String(repeating: "a", count: 40),
+                requiredIosBuildSha256: String(repeating: "b", count: 64),
+                requiredFirmwareVersion: nil,
+                requiredFirmwareBuild: nil,
+                requiredFirmwareGitSha: nil
             )
         }
         let trustStore = BikeMapStreamTrustStore(publicKeysByID: [
@@ -698,6 +715,27 @@ struct NavigationProtocolTests {
                 .unknownKeyID("map-test-2026-01"),
                 "unknown signing key failure is typed"
             )
+        }
+
+        do {
+            _ = try BikeMapStreamArtifactValidator.validate(
+                url: streamURL,
+                artifact: artifact(
+                    bytes: stream,
+                    objectKey: "other/maps/golden-map/bike-map-stream-v1/" +
+                        "map-test-2026-01/\(sha256(publicKey))/" +
+                        "\(String(repeating: "1", count: 40))/" +
+                        "\(fixture["signed_manifest_receipt"]!).bmap"
+                ),
+                expectedMapID: "golden-map",
+                trustStore: trustStore
+            )
+            assert(false, "stream object keys require the exact content-addressed namespace")
+        } catch {
+            guard case .invalidArtifactMetadata = error as? BikeMapStreamFormatError else {
+                assert(false, "stream object-key mismatch failure is typed: \(error)")
+                return
+            }
         }
 
         var tamperedPayload = stream
@@ -970,7 +1008,16 @@ struct NavigationProtocolTests {
             sha256: String(repeating: "1", count: 64),
             manifestReceipt: String(repeating: "2", count: 64),
             signedManifestReceipt: String(repeating: "3", count: 64),
-            signatureKeyId: "map-prod-1"
+            signatureKeyId: "map-prod-1",
+            signatureKeySha256: String(repeating: "5", count: 64),
+            producerBuildSha256: String(repeating: "1", count: 64),
+            producerImageDigest: "sha256:" + String(repeating: "2", count: 64),
+            requiredIosBuild: "100",
+            requiredIosGitSha: String(repeating: "8", count: 40),
+            requiredIosBuildSha256: String(repeating: "9", count: 64),
+            requiredFirmwareVersion: "0.3.0",
+            requiredFirmwareBuild: 42,
+            requiredFirmwareGitSha: String(repeating: "7", count: 40)
         )
         let zip = OfflineMapArtifact(
             format: OfflineMapArtifact.storedZipFormat,
@@ -981,7 +1028,91 @@ struct NavigationProtocolTests {
             sha256: String(repeating: "4", count: 64),
             manifestReceipt: nil,
             signedManifestReceipt: nil,
-            signatureKeyId: nil
+            signatureKeyId: nil,
+            signatureKeySha256: nil,
+            producerBuildSha256: nil,
+            requiredIosBuild: nil,
+            requiredFirmwareVersion: nil,
+            requiredFirmwareBuild: nil,
+            requiredFirmwareGitSha: nil
+        )
+        func migrationMetadata(primary: OfflineMapArtifact) -> SavedMapArtifactMetadata {
+            SavedMapArtifactMetadata(
+                schemaVersion: 1,
+                mapID: "map",
+                displayName: nil,
+                localArtifactFilename: "map.bmap",
+                streamFormatVersion: 1,
+                jobID: "job",
+                serverURLString: "https://maps.example.com",
+                clientInstallationID: "inst_v2_1234567890abcdef1234567890abcdef",
+                primaryArtifact: primary,
+                legacyArtifact: zip,
+                lastTransferProtocol: nil,
+                lastTransferStreamFormat: nil,
+                lastTransferSessionID: nil,
+                lastBackgroundTaskID: nil,
+                lastDeviceSequence: nil,
+                lastDeviceState: nil,
+                lastDeviceStep: nil,
+                lastDeviceStepCount: nil,
+                lastDeviceProgress: nil,
+                expectedActiveMapID: nil,
+                expectedActiveSessionID: nil,
+                lastTransferOutcome: nil
+            )
+        }
+        let oldMetadataStream = OfflineMapArtifact(
+            format: OfflineMapArtifact.bikeMapStreamFormat,
+            mediaType: "application/vnd.openbikecomputer.map-stream",
+            filename: "map.bmap",
+            objectKey: "maps/map/bike-map-stream-v1/map-prod-1/receipt.bmap",
+            bytes: 123,
+            sha256: String(repeating: "1", count: 64),
+            manifestReceipt: String(repeating: "2", count: 64),
+            signedManifestReceipt: String(repeating: "3", count: 64),
+            signatureKeyId: "map-prod-1",
+            signatureKeySha256: nil,
+            producerBuildSha256: nil,
+            requiredIosBuild: nil,
+            requiredFirmwareVersion: nil,
+            requiredFirmwareBuild: nil,
+            requiredFirmwareGitSha: nil
+        )
+        assert(
+            SavedMapStreamMigrationFallback.shouldUseLegacyArtifact(
+                for: migrationMetadata(primary: oldMetadataStream)
+            ),
+            "the exact pre-provenance saved metadata shape uses its retained ZIP"
+        )
+        assert(
+            !SavedMapStreamMigrationFallback.shouldUseLegacyArtifact(
+                for: migrationMetadata(primary: stream)
+            ),
+            "current signed metadata never converts integrity failures into ZIP fallback"
+        )
+        let partialMetadataStream = OfflineMapArtifact(
+            format: oldMetadataStream.format,
+            mediaType: oldMetadataStream.mediaType,
+            filename: oldMetadataStream.filename,
+            objectKey: oldMetadataStream.objectKey,
+            bytes: oldMetadataStream.bytes,
+            sha256: oldMetadataStream.sha256,
+            manifestReceipt: oldMetadataStream.manifestReceipt,
+            signedManifestReceipt: oldMetadataStream.signedManifestReceipt,
+            signatureKeyId: oldMetadataStream.signatureKeyId,
+            signatureKeySha256: String(repeating: "5", count: 64),
+            producerBuildSha256: nil,
+            requiredIosBuild: nil,
+            requiredFirmwareVersion: nil,
+            requiredFirmwareBuild: nil,
+            requiredFirmwareGitSha: nil
+        )
+        assert(
+            !SavedMapStreamMigrationFallback.shouldUseLegacyArtifact(
+                for: migrationMetadata(primary: partialMetadataStream)
+            ),
+            "partially missing provenance remains a hard validation failure"
         )
         let validPublicKey = Data(hex:
             "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
@@ -1029,7 +1160,11 @@ struct NavigationProtocolTests {
             activeSessionId: nil,
             activation: nil,
             protocols: [1, 2],
-            streamFormatVersions: [1]
+            streamFormatVersions: [1],
+            streamTrust: ["map-prod-1=" + String(repeating: "5", count: 64)],
+            firmwareVersion: "0.3.0",
+            firmwareBuild: 42,
+            firmwareGitSha: String(repeating: "7", count: 40)
         )
         let v1Status = MapTransferDeviceStatus(
             enabled: true,
@@ -1037,17 +1172,125 @@ struct NavigationProtocolTests {
             activeSessionId: nil,
             activation: nil,
             protocols: [1],
-            streamFormatVersions: nil
+            streamFormatVersions: nil,
+            streamTrust: nil,
+            firmwareVersion: "0.2.0",
+            firmwareBuild: 41,
+            firmwareGitSha: String(repeating: "6", count: 40)
         )
         assertEqual(
-            MapInstallProtocolSelector.select(isBikeMapStream: true, deviceStatus: v2Status),
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
+                requiredIosBuild: stream.requiredIosBuild,
+                requiredIosGitSha: stream.requiredIosGitSha,
+                requiredIosBuildSha256: stream.requiredIosBuildSha256,
+                currentIosBuild: "100",
+                currentIosGitSha: String(repeating: "8", count: 40),
+                currentIosBuildSha256: String(repeating: "9", count: 64),
+                requiredFirmwareVersion: stream.requiredFirmwareVersion,
+                requiredFirmwareBuild: stream.requiredFirmwareBuild,
+                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
+                deviceStatus: v2Status
+            ),
             .streamV2,
             "stream artifact selects v2 only when protocol and format match"
         )
+        let wrongFirmwareStatus = MapTransferDeviceStatus(
+            enabled: true,
+            activeMapId: nil,
+            activeSessionId: nil,
+            activation: nil,
+            protocols: [1, 2],
+            streamFormatVersions: [1],
+            streamTrust: ["map-prod-1=" + String(repeating: "5", count: 64)],
+            firmwareVersion: "0.3.0",
+            firmwareBuild: 43,
+            firmwareGitSha: String(repeating: "7", count: 40)
+        )
         assertEqual(
-            MapInstallProtocolSelector.select(isBikeMapStream: true, deviceStatus: v1Status),
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
+                requiredIosBuild: stream.requiredIosBuild,
+                requiredIosGitSha: stream.requiredIosGitSha,
+                requiredIosBuildSha256: stream.requiredIosBuildSha256,
+                currentIosBuild: "100",
+                currentIosGitSha: String(repeating: "8", count: 40),
+                currentIosBuildSha256: String(repeating: "9", count: 64),
+                requiredFirmwareVersion: stream.requiredFirmwareVersion,
+                requiredFirmwareBuild: stream.requiredFirmwareBuild,
+                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
+                deviceStatus: wrongFirmwareStatus
+            ),
+            .legacyArtifactRequired,
+            "a later firmware build cannot reuse a hardware approval for another binary"
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
+                requiredIosBuild: stream.requiredIosBuild,
+                requiredIosGitSha: stream.requiredIosGitSha,
+                requiredIosBuildSha256: stream.requiredIosBuildSha256,
+                currentIosBuild: "101",
+                currentIosGitSha: String(repeating: "8", count: 40),
+                currentIosBuildSha256: String(repeating: "9", count: 64),
+                requiredFirmwareVersion: stream.requiredFirmwareVersion,
+                requiredFirmwareBuild: stream.requiredFirmwareBuild,
+                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
+                deviceStatus: v2Status
+            ),
+            .legacyArtifactRequired,
+            "a later same-key app build cannot reuse an older hardware approval"
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
+                requiredIosBuild: stream.requiredIosBuild,
+                requiredIosGitSha: stream.requiredIosGitSha,
+                requiredIosBuildSha256: stream.requiredIosBuildSha256,
+                currentIosBuild: "100",
+                currentIosGitSha: String(repeating: "8", count: 40),
+                currentIosBuildSha256: String(repeating: "a", count: 64),
+                requiredFirmwareVersion: stream.requiredFirmwareVersion,
+                requiredFirmwareBuild: stream.requiredFirmwareBuild,
+                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
+                deviceStatus: v2Status
+            ),
+            .legacyArtifactRequired,
+            "a different app component cannot reuse the same bundle build approval"
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
+                deviceStatus: v1Status
+            ),
             .legacyArtifactRequired,
             "stream artifact requires a durable legacy artifact on v1 firmware"
+        )
+        let wrongKeyStatus = MapTransferDeviceStatus(
+            enabled: true,
+            activeMapId: nil,
+            activeSessionId: nil,
+            activation: nil,
+            protocols: [1, 2],
+            streamFormatVersions: [1],
+            streamTrust: ["map-prod-1=" + String(repeating: "6", count: 64)],
+            firmwareVersion: "0.3.0",
+            firmwareBuild: 42,
+            firmwareGitSha: String(repeating: "7", count: 40)
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
+                deviceStatus: wrongKeyStatus
+            ),
+            .legacyArtifactRequired,
+            "v2 requires the device to trust the artifact's exact public key material"
         )
         assertEqual(
             MapInstallProtocolSelector.select(isBikeMapStream: false, deviceStatus: v2Status),
@@ -1110,7 +1353,16 @@ struct NavigationProtocolTests {
             sha256: String(repeating: "a", count: 64),
             manifestReceipt: String(repeating: "b", count: 64),
             signedManifestReceipt: String(repeating: "c", count: 64),
-            signatureKeyId: "map-prod-1"
+            signatureKeyId: "map-prod-1",
+            signatureKeySha256: String(repeating: "5", count: 64),
+            producerBuildSha256: String(repeating: "1", count: 64),
+            producerImageDigest: "sha256:" + String(repeating: "2", count: 64),
+            requiredIosBuild: "100",
+            requiredIosGitSha: String(repeating: "8", count: 40),
+            requiredIosBuildSha256: String(repeating: "9", count: 64),
+            requiredFirmwareVersion: nil,
+            requiredFirmwareBuild: nil,
+            requiredFirmwareGitSha: nil
         )
         let metadata = SavedMapArtifactMetadata(
             schemaVersion: SavedMapArtifactMetadata.currentSchemaVersion,
@@ -1427,7 +1679,16 @@ struct NavigationProtocolTests {
             sha256: String(repeating: "1", count: 64),
             manifestReceipt: String(repeating: "2", count: 64),
             signedManifestReceipt: String(repeating: "3", count: 64),
-            signatureKeyId: "map-prod-1"
+            signatureKeyId: "map-prod-1",
+            signatureKeySha256: String(repeating: "5", count: 64),
+            producerBuildSha256: String(repeating: "1", count: 64),
+            producerImageDigest: "sha256:" + String(repeating: "2", count: 64),
+            requiredIosBuild: "100",
+            requiredIosGitSha: String(repeating: "8", count: 40),
+            requiredIosBuildSha256: String(repeating: "9", count: 64),
+            requiredFirmwareVersion: nil,
+            requiredFirmwareBuild: nil,
+            requiredFirmwareGitSha: nil
         )
         OfflineMapTestURLProtocol.configure { request in
             switch request.url?.path {
@@ -1443,6 +1704,26 @@ struct NavigationProtocolTests {
                     request.value(forHTTPHeaderField: "X-Installation-Token"),
                     credential.clientInstallationToken,
                     "artifact URL refresh uses the installation token"
+                )
+                assertEqual(
+                    request.value(forHTTPHeaderField: "X-Map-Stream-Trust"),
+                    "map-prod-1=" + String(repeating: "5", count: 64),
+                    "artifact URL refresh advertises exact client trust material"
+                )
+                assertEqual(
+                    request.value(forHTTPHeaderField: "X-Map-Stream-App-Build"),
+                    "100",
+                    "artifact URL refresh binds the exact app build"
+                )
+                assertEqual(
+                    request.value(forHTTPHeaderField: "X-Map-Stream-App-Git-Sha"),
+                    String(repeating: "8", count: 40),
+                    "artifact URL refresh binds the exact app source"
+                )
+                assertEqual(
+                    request.value(forHTTPHeaderField: "X-Map-Stream-App-Build-Sha256"),
+                    String(repeating: "9", count: 64),
+                    "artifact URL refresh binds the generated app component"
                 )
                 assert(
                     request.url?.query?.contains(
@@ -1464,6 +1745,12 @@ struct NavigationProtocolTests {
                     "manifestReceipt": artifact.manifestReceipt!,
                     "signedManifestReceipt": artifact.signedManifestReceipt!,
                     "signatureKeyId": artifact.signatureKeyId!,
+                    "signatureKeySha256": artifact.signatureKeySha256!,
+                    "producerBuildSha256": artifact.producerBuildSha256!,
+                    "producerImageDigest": artifact.producerImageDigest!,
+                    "requiredIosBuild": artifact.requiredIosBuild!,
+                    "requiredIosGitSha": artifact.requiredIosGitSha!,
+                    "requiredIosBuildSha256": artifact.requiredIosBuildSha256!,
                     "url": "/immutable/map.bmap",
                     "expiresAt": 123,
                     "expiresInSeconds": 900,
@@ -1491,6 +1778,13 @@ struct NavigationProtocolTests {
                 apiToken: "api-secret",
                 clientInstallationId: credential.clientInstallationId,
                 clientInstallationToken: credential.clientInstallationToken,
+                mapStreamTrustCapabilities: "map-prod-1=" + String(repeating: "5", count: 64),
+                mapStreamAppBuildIdentity: MapStreamAppBuildIdentity(
+                    schemaVersion: 1,
+                    build: "100",
+                    gitSha: String(repeating: "8", count: 40),
+                    componentSha256: String(repeating: "9", count: 64)
+                ),
                 session: session
             )
             assertEqual(
@@ -3600,7 +3894,13 @@ struct NavigationProtocolTests {
             sha256: String(repeating: "b", count: 64),
             manifestReceipt: String(repeating: "c", count: 64),
             signedManifestReceipt: signedReceipt,
-            signatureKeyId: "key"
+            signatureKeyId: "key",
+            signatureKeySha256: String(repeating: "d", count: 64),
+            producerBuildSha256: String(repeating: "1", count: 64),
+            requiredIosBuild: nil,
+            requiredFirmwareVersion: nil,
+            requiredFirmwareBuild: nil,
+            requiredFirmwareGitSha: nil
         )
         try? SavedMapArtifactMetadataStore.save(
             SavedMapArtifactMetadata(

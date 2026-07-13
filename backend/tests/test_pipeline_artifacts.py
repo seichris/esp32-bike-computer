@@ -71,6 +71,8 @@ class PipelineArtifactTests(unittest.TestCase):
                 ),
                 artifact_store=artifact_store,
                 map_signer=signer,
+                producer_build_sha256="1" * 64,
+                producer_image_digest="sha256:" + "2" * 64,
             )
 
             pending_keys = []
@@ -99,6 +101,12 @@ class PipelineArtifactTests(unittest.TestCase):
             self.assertEqual(first_zip.object_key, second_zip.object_key)
             self.assertIsNotNone(artifact_store.local_path(first_stream.object_key))
             self.assertEqual(first_stream.signature_key_id, "map-pipeline-test")
+            self.assertEqual(
+                first_stream.signature_key_sha256,
+                signer.public_key_sha256,
+            )
+            self.assertEqual(first_stream.producer_build_sha256, "1" * 64)
+            self.assertEqual(first_stream.producer_image_digest, "sha256:" + "2" * 64)
             self.assertEqual(first.artifact_metrics["streamFileCount"], 2)
             self.assertEqual(first.artifact_metrics["streamPayloadBytes"], 31)
             self.assertEqual(set(pending_keys), {artifact.object_key for artifact in first.artifacts})

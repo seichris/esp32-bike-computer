@@ -74,10 +74,21 @@ nonisolated struct BikeMapStreamTrustStore: Equatable {
         return value
     }
 
+    func capability(for keyID: String) -> String? {
+        guard let publicKey = publicKeyX963(for: keyID) else { return nil }
+        let fingerprint = SHA256.hash(data: publicKey)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "\(keyID)=\(fingerprint)"
+    }
+
+    var capabilityHeaderValue: String? {
+        let capabilities = publicKeysByID.keys.sorted().compactMap(capability(for:))
+        return capabilities.isEmpty ? nil : capabilities.joined(separator: ",")
+    }
+
     var isEmpty: Bool { publicKeysByID.isEmpty }
 
-    // Phase 7 provisions production signing keys before firmware advertises v2.
-    static let production = BikeMapStreamTrustStore(publicKeysByID: [:])
 }
 
 nonisolated struct VerifiedBikeMapArtifact: Equatable {
@@ -89,6 +100,15 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
     let manifestReceipt: String
     let signedManifestReceipt: String
     let signatureKeyID: String
+    let signatureKeySHA256: String
+    let producerBuildSHA256: String
+    let producerImageDigest: String
+    let requiredIosBuild: String?
+    let requiredIosGitSHA: String?
+    let requiredIosBuildSHA256: String?
+    let requiredFirmwareVersion: String?
+    let requiredFirmwareBuild: UInt32?
+    let requiredFirmwareGitSHA: String?
     let fileCount: Int
     let payloadBytes: Int64
 
@@ -101,6 +121,15 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         manifestReceipt: String,
         signedManifestReceipt: String,
         signatureKeyID: String,
+        signatureKeySHA256: String,
+        producerBuildSHA256: String,
+        producerImageDigest: String,
+        requiredIosBuild: String?,
+        requiredIosGitSHA: String?,
+        requiredIosBuildSHA256: String?,
+        requiredFirmwareVersion: String?,
+        requiredFirmwareBuild: UInt32?,
+        requiredFirmwareGitSHA: String?,
         fileCount: Int,
         payloadBytes: Int64
     ) {
@@ -112,6 +141,15 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         self.manifestReceipt = manifestReceipt
         self.signedManifestReceipt = signedManifestReceipt
         self.signatureKeyID = signatureKeyID
+        self.signatureKeySHA256 = signatureKeySHA256
+        self.producerBuildSHA256 = producerBuildSHA256
+        self.producerImageDigest = producerImageDigest
+        self.requiredIosBuild = requiredIosBuild
+        self.requiredIosGitSHA = requiredIosGitSHA
+        self.requiredIosBuildSHA256 = requiredIosBuildSHA256
+        self.requiredFirmwareVersion = requiredFirmwareVersion
+        self.requiredFirmwareBuild = requiredFirmwareBuild
+        self.requiredFirmwareGitSHA = requiredFirmwareGitSHA
         self.fileCount = fileCount
         self.payloadBytes = payloadBytes
     }
@@ -313,6 +351,11 @@ nonisolated enum BikeMapStreamArtifactValidator {
         "^VECTMAP/[A-Za-z0-9._-]+/[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\\.fm[bp]$"
 
     struct Manifest: Decodable {
+        struct Producer: Decodable {
+            let buildSha256: String
+            let imageDigest: String
+        }
+
         struct Target: Decodable {
             let renderer: String
             let formatVersion: Int
@@ -327,6 +370,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
         let schemaVersion: Int
         let mapId: String
         let displayName: String?
+        let producer: Producer
         let target: Target
         let files: [File]
     }
@@ -360,11 +404,74 @@ nonisolated enum BikeMapStreamArtifactValidator {
         guard let expectedKeyID = artifact.signatureKeyId, !expectedKeyID.isEmpty else {
             throw BikeMapStreamFormatError.invalidArtifactMetadata("signing key ID is missing")
         }
+        guard let expectedKeySHA256 = artifact.signatureKeySha256,
+              isLowercaseSHA256(expectedKeySHA256) else {
+            throw BikeMapStreamFormatError.invalidArtifactMetadata(
+                "signing key fingerprint is invalid"
+            )
+        }
+        guard let producerBuildSHA256 = artifact.producerBuildSha256,
+              isLowercaseSHA256(producerBuildSHA256) else {
+            throw BikeMapStreamFormatError.invalidArtifactMetadata(
+                "producer build identity is invalid"
+            )
+        }
+        guard let producerImageDigest = artifact.producerImageDigest,
+              producerImageDigest.range(
+                  of: "^sha256:[0-9a-f]{64}$",
+                  options: .regularExpression
+              ) != nil else {
+            throw BikeMapStreamFormatError.invalidArtifactMetadata(
+                "producer image identity is invalid"
+            )
+        }
+        guard let iosBuild = artifact.requiredIosBuild,
+              iosBuild.range(
+                  of: "^[0-9]{1,18}(?:\\.[0-9]{1,18}){0,2}$",
+                  options: .regularExpression
+              ) != nil,
+              let iosGitSHA = artifact.requiredIosGitSha,
+              iosGitSHA.range(
+                  of: "^[0-9a-f]{40}$",
+                  options: .regularExpression
+              ) != nil,
+              let iosBuildSHA256 = artifact.requiredIosBuildSha256,
+              isLowercaseSHA256(iosBuildSHA256) else {
+            throw BikeMapStreamFormatError.invalidArtifactMetadata(
+                "required app identity is incomplete"
+            )
+        }
+        let firmwareRequirements = (
+            artifact.requiredFirmwareVersion,
+            artifact.requiredFirmwareBuild,
+            artifact.requiredFirmwareGitSha
+        )
+        let hasAnyFirmwareRequirement = firmwareRequirements.0 != nil ||
+            firmwareRequirements.1 != nil || firmwareRequirements.2 != nil
+        if hasAnyFirmwareRequirement {
+            guard let version = firmwareRequirements.0, !version.isEmpty,
+                  let build = firmwareRequirements.1, build > 0,
+                  let gitSHA = firmwareRequirements.2,
+                  gitSHA.range(
+                      of: "^[0-9a-f]{40}$",
+                      options: .regularExpression
+                  ) != nil else {
+                throw BikeMapStreamFormatError.invalidArtifactMetadata(
+                    "required client/device identity is incomplete"
+                )
+            }
+        }
+        guard trustStore.capability(for: expectedKeyID) ==
+                "\(expectedKeyID)=\(expectedKeySHA256)" else {
+            throw BikeMapStreamFormatError.unknownKeyID(expectedKeyID)
+        }
+        let expectedObjectKey =
+            "maps/\(expectedMapID)/\(OfflineMapArtifact.bikeMapStreamFormat)/" +
+            "\(expectedKeyID)/\(expectedKeySHA256)/" +
+            "\(producerBuildSHA256)/" +
+            "\(producerImageDigest.dropFirst(7))/\(expectedSignedReceipt).bmap"
         guard artifact.filename == "\(expectedMapID).bmap",
-              artifact.objectKey.hasSuffix(
-                  "/\(OfflineMapArtifact.bikeMapStreamFormat)/\(expectedKeyID)/" +
-                    "\(expectedSignedReceipt).bmap"
-              ) else {
+              artifact.objectKey == expectedObjectKey else {
             throw BikeMapStreamFormatError.invalidArtifactMetadata(
                 "filename or object identity does not match"
             )
@@ -436,6 +543,12 @@ nonisolated enum BikeMapStreamArtifactValidator {
             expectedMapID: expectedMapID,
             header: header
         )
+        guard manifest.producer.buildSha256 == producerBuildSHA256,
+              manifest.producer.imageDigest == producerImageDigest else {
+            throw BikeMapStreamFormatError.invalidManifest(
+                "producer identity does not match artifact metadata"
+            )
+        }
         for file in manifest.files {
             var fileHasher = SHA256()
             var remaining = file.bytes
@@ -468,6 +581,15 @@ nonisolated enum BikeMapStreamArtifactValidator {
             manifestReceipt: expectedManifestReceipt,
             signedManifestReceipt: expectedSignedReceipt,
             signatureKeyID: expectedKeyID,
+            signatureKeySHA256: expectedKeySHA256,
+            producerBuildSHA256: producerBuildSHA256,
+            producerImageDigest: producerImageDigest,
+            requiredIosBuild: artifact.requiredIosBuild,
+            requiredIosGitSHA: artifact.requiredIosGitSha,
+            requiredIosBuildSHA256: artifact.requiredIosBuildSha256,
+            requiredFirmwareVersion: artifact.requiredFirmwareVersion,
+            requiredFirmwareBuild: artifact.requiredFirmwareBuild,
+            requiredFirmwareGitSHA: artifact.requiredFirmwareGitSha,
             fileCount: manifest.files.count,
             payloadBytes: Int64(header.payloadBytes)
         )
@@ -563,7 +685,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
     }
 }
 
-private enum CanonicalMapManifestJSON {
+nonisolated private enum CanonicalMapManifestJSON {
     private static let maximumNestingDepth = 64
 
     static func validate(_ data: Data) throws {
@@ -761,15 +883,25 @@ nonisolated enum OfflineMapArtifactFileValidator {
     }
 }
 
-private extension Data {
-    nonisolated init(hexLiteral: String) {
+extension Data {
+    nonisolated init(mapStreamHexLiteral: String) {
+        precondition(mapStreamHexLiteral.count.isMultiple(of: 2))
         self.init()
-        var index = hexLiteral.startIndex
-        while index < hexLiteral.endIndex {
-            let next = hexLiteral.index(index, offsetBy: 2)
-            append(UInt8(hexLiteral[index..<next], radix: 16)!)
+        var index = mapStreamHexLiteral.startIndex
+        while index < mapStreamHexLiteral.endIndex {
+            let next = mapStreamHexLiteral.index(index, offsetBy: 2)
+            guard let value = UInt8(mapStreamHexLiteral[index..<next], radix: 16) else {
+                preconditionFailure("generated map stream public key is not hexadecimal")
+            }
+            append(value)
             index = next
         }
+    }
+}
+
+private extension Data {
+    nonisolated init(hexLiteral: String) {
+        self.init(mapStreamHexLiteral: hexLiteral)
     }
 
     nonisolated func uint16LE(at offset: Int) -> UInt16 {

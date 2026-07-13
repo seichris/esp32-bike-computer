@@ -292,11 +292,20 @@ Status responses should include:
   `active-map.json`, when installed by transfer-capable firmware. This
   distinguishes regenerated packs that intentionally reuse a stable map ID.
 - `enabled`: whether Wi-Fi/HTTP upload mode is enabled.
+- `firmwareVersion`, `firmwareBuild`, and `firmwareGitSha`: the exact running
+  firmware identity. The git identity must be the full 40-character lowercase
+  SHA from a clean source tree; dirty or unidentified builds fail closed and do
+  not advertise protocol v2. Promoted stream artifacts name the approved values
+  and iOS stays on protocol v1 when any field differs.
 - `protocols`: supported map-install protocol versions. Version `2` is present
   only when SD storage is initialized and at least one production stream
   verification key is compiled into firmware.
 - `streamFormatVersions`: accepted device-native stream versions when protocol
   v2 is available.
+- `streamTrust`: exact production verification capabilities, each encoded as
+  `keyId=SHA256(X9.63 public key)`. iOS selects v2 only when the artifact's key
+  identity matches one of these entries; a device with an older or rotated-out
+  trust set stays on protocol v1.
 - `baseUrl`: temporary HTTP base URL when transfer mode is enabled.
 - `activation`: the latest activation `status`, monotonic boot-local
   `sequence`, `sessionId`, optional `mapId`, numbered `step`, total `steps`,

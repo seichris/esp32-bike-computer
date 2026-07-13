@@ -54,6 +54,21 @@ Status as of 2026-07-13:
   with rollback before `installed` is reported. The compiled production trust
   list intentionally remains empty until rollout, so released firmware cannot
   advertise protocol v2 prematurely.
+- Phase 6 adds strict streaming validation and production trust on iOS,
+  artifact-aware saved maps, v1/v2 negotiation, one file-backed background
+  upload, task restoration, cross-protocol arbitration, durable reconciliation,
+  reference-aware accessory Wi-Fi cleanup, and dynamic three-step progress.
+- Phase 7 software controls add one generated iOS/firmware trust registry,
+  fail-closed per-installation delivery cohorts, and promotion IDs bound to the
+  exact report, requirements, architecture-specific worker-component SHA-256,
+  immutable worker image digest, exact app component/git/build and firmware
+  git/version/build identities, and exact trusted signing-key bytes. App and
+  device advertise the key and build capabilities, so unsupported or locally
+  modified binaries remain on v1 even inside a cohort. The
+  machine-readable two-target hardware gate owns independent per-board thermal
+  ceilings and the operational runbook covers rotation, retention, rollback,
+  and incidents. Production trust and promotion registries remain empty until
+  the deferred physical-device acceptance matrix passes.
 - No production capability should advertise v2 until the signed stream parser,
   one-pass writer, checkpoint recovery, and pointer transaction all exist and
   pass the acceptance gate below.
@@ -870,9 +885,29 @@ and rollback roots remain protected.
 
 - Run full interruption, power-loss, screen-off, compatibility, and thermal
   tests on both targets.
-- Add measured feature rollout control if staged enablement is needed.
-- Document operational key rotation and artifact retention.
+- Use the fail-closed installation-cohort delivery policy: disabled by default,
+  exact allowlist for developer hardware, then stable percentage cohorts and
+  global delivery only with a committed promotion ID bound to the exact report,
+  hardware requirements, architecture-specific worker-component SHA-256,
+  exact digest-pinned worker image, exact app component/git/build and firmware
+  git/version/build identities, and currently trusted signing-key bytes. Deploy
+  the exact tested worker image digest after the approval-only control-plane
+  commit.
+- Maintain one validated public trust registry that generates both the Swift
+  and firmware key lists, rejects fixture/private material, and supports
+  additive rotation without client drift.
+- Validate the complete two-target hardware matrix with the machine-readable
+  acceptance gate, exact reviewed predecessor app/firmware identities,
+  independently reviewed per-target thermal ceilings, universal write bounds,
+  exact single-write clean scenarios, and every approved signing key on both
+  targets before creating a promotion record.
+- Follow `docs/map-stream-rollout-runbook.md` for operational key rotation,
+  artifact retention, rollback, and emergency response.
 - Promote v2 after the complete acceptance gate, not after one successful map.
+
+The software rollout controls and operational gate are implemented. The
+checked-in trust and promotion registries intentionally remain empty and the
+delivery default remains disabled until the deferred real-device matrix passes.
 
 ## Test Plan
 
@@ -942,7 +977,8 @@ Run on both `WAVESHARE_AMOLED_206` and `WAVESHARE_AMOLED_175`:
   trailing data.
 - Low SD free space and SD removal/failure.
 - Replug/reboot and active-map discovery.
-- New app to old firmware, old app to new firmware, and new-to-new matrices.
+- The exact reviewed predecessor app to new firmware, new app to the exact
+  reviewed predecessor firmware, and new-to-new matrices.
 - Previous map remains usable until successful switch and after every failure.
 
 Record phase times, payload bytes written, retry bytes skipped, free-space delta,

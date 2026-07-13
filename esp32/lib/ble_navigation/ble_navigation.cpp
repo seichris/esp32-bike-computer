@@ -16,6 +16,7 @@
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "../firmware_update/firmware_update_http.hpp"
 #include "../map_transfer_http/map_transfer_http.hpp"
+#include "../map_transfer/map_stream_compiled_trust.hpp"
 #include "../route_overlay/route_overlay.hpp"
 #include "../speaker/speaker.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -593,11 +594,18 @@ static std::string mapTransferStatusJson() {
                      ",\"enabled\":" +
                      (transferStatus.enabled ? "true" : "false") +
                      ",\"port\":" + std::to_string(transferStatus.port) +
+                     ",\"firmwareVersion\":\"" +
+                     jsonEscape(firmware_metadata::version()) +
+                     "\",\"firmwareBuild\":" +
+                     std::to_string(firmware_metadata::build()) +
+                     ",\"firmwareGitSha\":\"" +
+                     jsonEscape(firmware_metadata::gitSha()) + "\"" +
                      ",\"protocols\":[1" +
                      (streamSupported ? ",2" : "") +
                      "]" +
                      (streamSupported
-                          ? ",\"streamFormatVersions\":[1]"
+                          ? ",\"streamFormatVersions\":[1],\"streamTrust\":" +
+                                map_transfer::compiledMapStreamTrustCapabilitiesJson()
                           : "") +
                      ",\"sdPresent\":" +
                      (storage.getSdLoaded() ? "true" : "false") +

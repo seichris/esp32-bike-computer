@@ -11,6 +11,7 @@ const char *target();
 const char *version();
 uint32_t build();
 const char *gitSha();
+bool hasImmutableGitIdentity();
 const char *buildTimestamp();
 std::string json();
 

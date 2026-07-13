@@ -9,6 +9,38 @@ import CoreLocation
 import CryptoKit
 import Foundation
 
+nonisolated struct MapStreamAppBuildIdentity: Codable, Equatable {
+    let schemaVersion: Int
+    let build: String
+    let gitSha: String
+    let componentSha256: String
+
+    var isReleaseGrade: Bool {
+        schemaVersion == 1 &&
+            build.range(
+                of: "^[0-9]{1,18}(?:\\.[0-9]{1,18}){0,2}$",
+                options: .regularExpression
+            ) != nil &&
+            gitSha.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil &&
+            componentSha256.range(
+                of: "^[0-9a-f]{64}$",
+                options: .regularExpression
+            ) != nil
+    }
+
+    static var current: MapStreamAppBuildIdentity? {
+        guard let url = Bundle.main.url(
+            forResource: "MapStreamBuildIdentity",
+            withExtension: "json"
+        ), let data = try? Data(contentsOf: url),
+           let identity = try? JSONDecoder().decode(Self.self, from: data),
+           identity.isReleaseGrade else {
+            return nil
+        }
+        return identity
+    }
+}
+
 struct OfflineMapBounds: Codable, Equatable {
     let minLon: Double
     let minLat: Double
@@ -188,6 +220,55 @@ nonisolated struct OfflineMapArtifact: Codable, Equatable {
     let manifestReceipt: String?
     let signedManifestReceipt: String?
     let signatureKeyId: String?
+    let signatureKeySha256: String?
+    let producerBuildSha256: String?
+    let producerImageDigest: String?
+    let requiredIosBuild: String?
+    let requiredIosGitSha: String?
+    let requiredIosBuildSha256: String?
+    let requiredFirmwareVersion: String?
+    let requiredFirmwareBuild: UInt32?
+    let requiredFirmwareGitSha: String?
+
+    init(
+        format: String,
+        mediaType: String,
+        filename: String,
+        objectKey: String,
+        bytes: Int64,
+        sha256: String,
+        manifestReceipt: String? = nil,
+        signedManifestReceipt: String? = nil,
+        signatureKeyId: String? = nil,
+        signatureKeySha256: String? = nil,
+        producerBuildSha256: String? = nil,
+        producerImageDigest: String? = nil,
+        requiredIosBuild: String? = nil,
+        requiredIosGitSha: String? = nil,
+        requiredIosBuildSha256: String? = nil,
+        requiredFirmwareVersion: String? = nil,
+        requiredFirmwareBuild: UInt32? = nil,
+        requiredFirmwareGitSha: String? = nil
+    ) {
+        self.format = format
+        self.mediaType = mediaType
+        self.filename = filename
+        self.objectKey = objectKey
+        self.bytes = bytes
+        self.sha256 = sha256
+        self.manifestReceipt = manifestReceipt
+        self.signedManifestReceipt = signedManifestReceipt
+        self.signatureKeyId = signatureKeyId
+        self.signatureKeySha256 = signatureKeySha256
+        self.producerBuildSha256 = producerBuildSha256
+        self.producerImageDigest = producerImageDigest
+        self.requiredIosBuild = requiredIosBuild
+        self.requiredIosGitSha = requiredIosGitSha
+        self.requiredIosBuildSha256 = requiredIosBuildSha256
+        self.requiredFirmwareVersion = requiredFirmwareVersion
+        self.requiredFirmwareBuild = requiredFirmwareBuild
+        self.requiredFirmwareGitSha = requiredFirmwareGitSha
+    }
 
     var isBikeMapStream: Bool { format == Self.bikeMapStreamFormat }
     var isStoredZip: Bool { format == Self.storedZipFormat }
@@ -203,6 +284,15 @@ nonisolated struct OfflineMapArtifactDownloadURL: Decodable, Equatable {
     let manifestReceipt: String?
     let signedManifestReceipt: String?
     let signatureKeyId: String?
+    let signatureKeySha256: String?
+    let producerBuildSha256: String?
+    let producerImageDigest: String?
+    let requiredIosBuild: String?
+    let requiredIosGitSha: String?
+    let requiredIosBuildSha256: String?
+    let requiredFirmwareVersion: String?
+    let requiredFirmwareBuild: UInt32?
+    let requiredFirmwareGitSha: String?
     let url: String
     let expiresAt: Int
     let expiresInSeconds: Int
@@ -485,10 +575,18 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
     let activation: Activation?
     let protocols: [Int]?
     let streamFormatVersions: [Int]?
+    let streamTrust: [String]?
+    let firmwareVersion: String?
+    let firmwareBuild: UInt32?
+    let firmwareGitSha: String?
 
     var supportsBikeMapStreamV1: Bool {
         protocols?.contains(2) == true &&
             streamFormatVersions?.contains(1) == true
+    }
+
+    func supportsBikeMapStreamV1(trustCapability: String) -> Bool {
+        supportsBikeMapStreamV1 && streamTrust?.contains(trustCapability) == true
     }
 }
 
@@ -506,12 +604,57 @@ nonisolated enum MapInstallProtocolSelection: Equatable {
 nonisolated enum MapInstallProtocolSelector {
     static func select(
         isBikeMapStream: Bool,
+        signatureTrustCapability: String? = nil,
+        requiredIosBuild: String? = nil,
+        requiredIosGitSha: String? = nil,
+        requiredIosBuildSha256: String? = nil,
+        currentIosBuild: String? = nil,
+        currentIosGitSha: String? = nil,
+        currentIosBuildSha256: String? = nil,
+        requiredFirmwareVersion: String? = nil,
+        requiredFirmwareBuild: UInt32? = nil,
+        requiredFirmwareGitSha: String? = nil,
         deviceStatus: MapTransferDeviceStatus
     ) -> MapInstallProtocolSelection {
         guard isBikeMapStream else { return .archiveV1 }
-        return deviceStatus.supportsBikeMapStreamV1
-            ? .streamV2
-            : .legacyArtifactRequired
+        guard let signatureTrustCapability else {
+            return .legacyArtifactRequired
+        }
+        guard deviceStatus.supportsBikeMapStreamV1(
+            trustCapability: signatureTrustCapability
+        ) else {
+            return .legacyArtifactRequired
+        }
+        let requirements = (
+            requiredIosBuild,
+            requiredIosGitSha,
+            requiredIosBuildSha256,
+            requiredFirmwareVersion,
+            requiredFirmwareBuild,
+            requiredFirmwareGitSha
+        )
+        guard let requiredAppBuild = requirements.0,
+              currentIosBuild == requiredAppBuild,
+              let requiredAppGitSHA = requirements.1,
+              currentIosGitSha == requiredAppGitSHA,
+              let requiredAppBuildSHA256 = requirements.2,
+              currentIosBuildSha256 == requiredAppBuildSHA256 else {
+            return .legacyArtifactRequired
+        }
+        let deviceRequirements = (requirements.3, requirements.4, requirements.5)
+        if deviceRequirements.0 == nil && deviceRequirements.1 == nil &&
+            deviceRequirements.2 == nil {
+            return .streamV2
+        }
+        guard let requiredVersion = deviceRequirements.0,
+              let requiredBuild = deviceRequirements.1,
+              let requiredGitSHA = deviceRequirements.2,
+              deviceStatus.firmwareVersion == requiredVersion,
+              deviceStatus.firmwareBuild == requiredBuild,
+              deviceStatus.firmwareGitSha == requiredGitSHA else {
+            return .legacyArtifactRequired
+        }
+        return .streamV2
     }
 }
 
@@ -1505,6 +1648,8 @@ struct OfflineMapPlatformClient {
     let apiToken: String?
     let clientInstallationId: String
     let clientInstallationToken: String?
+    let mapStreamTrustCapabilities: String?
+    let mapStreamAppBuildIdentity: MapStreamAppBuildIdentity?
     var session: URLSession = .shared
 
     init(
@@ -1512,12 +1657,16 @@ struct OfflineMapPlatformClient {
         apiToken: String? = nil,
         clientInstallationId: String,
         clientInstallationToken: String? = nil,
+        mapStreamTrustCapabilities: String? = BikeMapStreamTrustStore.production.capabilityHeaderValue,
+        mapStreamAppBuildIdentity: MapStreamAppBuildIdentity? = .current,
         session: URLSession = .shared
     ) {
         self.baseURL = baseURL
         self.apiToken = apiToken?.isEmpty == true ? nil : apiToken
         self.clientInstallationId = clientInstallationId
         self.clientInstallationToken = clientInstallationToken
+        self.mapStreamTrustCapabilities = mapStreamTrustCapabilities
+        self.mapStreamAppBuildIdentity = mapStreamAppBuildIdentity
         self.session = session
     }
 
@@ -1637,7 +1786,16 @@ struct OfflineMapPlatformClient {
               response.sha256 == artifact.sha256,
               response.manifestReceipt == artifact.manifestReceipt,
               response.signedManifestReceipt == artifact.signedManifestReceipt,
-              response.signatureKeyId == artifact.signatureKeyId else {
+              response.signatureKeyId == artifact.signatureKeyId,
+              response.signatureKeySha256 == artifact.signatureKeySha256,
+              response.producerBuildSha256 == artifact.producerBuildSha256,
+              response.producerImageDigest == artifact.producerImageDigest,
+              response.requiredIosBuild == artifact.requiredIosBuild,
+              response.requiredIosGitSha == artifact.requiredIosGitSha,
+              response.requiredIosBuildSha256 == artifact.requiredIosBuildSha256,
+              response.requiredFirmwareVersion == artifact.requiredFirmwareVersion,
+              response.requiredFirmwareBuild == artifact.requiredFirmwareBuild,
+              response.requiredFirmwareGitSha == artifact.requiredFirmwareGitSha else {
             throw OfflineMapPlatformError.invalidResponse
         }
         return try absoluteURL(for: response.url, baseURL: baseURL)
@@ -1742,6 +1900,26 @@ struct OfflineMapPlatformClient {
                 forHTTPHeaderField: "X-Installation-Token"
             )
         }
+        if let mapStreamTrustCapabilities, !mapStreamTrustCapabilities.isEmpty {
+            request.setValue(
+                mapStreamTrustCapabilities,
+                forHTTPHeaderField: "X-Map-Stream-Trust"
+            )
+            if let identity = mapStreamAppBuildIdentity, identity.isReleaseGrade {
+                request.setValue(
+                    identity.build,
+                    forHTTPHeaderField: "X-Map-Stream-App-Build"
+                )
+                request.setValue(
+                    identity.gitSha,
+                    forHTTPHeaderField: "X-Map-Stream-App-Git-Sha"
+                )
+                request.setValue(
+                    identity.componentSha256,
+                    forHTTPHeaderField: "X-Map-Stream-App-Build-Sha256"
+                )
+            }
+        }
     }
 
     private static func endpointURL(baseURL: URL, path: String) throws -> URL {
@@ -1782,7 +1960,7 @@ private extension Data {
 }
 
 extension JSONEncoder {
-    static var offlineMap: JSONEncoder {
+    nonisolated static var offlineMap: JSONEncoder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         return encoder

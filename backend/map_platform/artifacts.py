@@ -16,6 +16,14 @@ BIKE_MAP_STREAM_MEDIA_TYPE = "application/vnd.openbikecomputer.map-stream"
 ZIP_STORED_FORMAT = "zip-stored-v1"
 ZIP_MEDIA_TYPE = "application/zip"
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+OCI_DIGEST_PATTERN = re.compile(r"sha256:([0-9a-f]{64})")
+MAXIMUM_ARTIFACT_BYTES = (1 << 63) - 1
+MAXIMUM_STREAM_ARTIFACT_BYTES = (
+    32  # fixed header
+    + 2 * 1024 * 1024  # canonical manifest
+    + 4 + 64 + 64  # signature prefix, maximum key ID, and raw signature
+    + 512 * 1024 * 1024  # payload
+)
 
 
 class ArtifactStoreError(RuntimeError):
@@ -33,6 +41,9 @@ class ArtifactRecord:
     manifest_receipt: str | None = None
     signed_manifest_receipt: str | None = None
     signature_key_id: str | None = None
+    signature_key_sha256: str | None = None
+    producer_build_sha256: str | None = None
+    producer_image_digest: str | None = None
 
     def __post_init__(self) -> None:
         _validate_object_key(self.object_key)
@@ -49,8 +60,8 @@ class ArtifactRecord:
             or any(ord(character) < 32 or ord(character) == 127 for character in self.filename)
         ):
             raise ValueError("artifact filename is invalid")
-        if self.bytes <= 0:
-            raise ValueError("artifact byte count must be positive")
+        if type(self.bytes) is not int or not 1 <= self.bytes <= MAXIMUM_ARTIFACT_BYTES:
+            raise ValueError("artifact byte count is outside the client range")
         if not SHA256_PATTERN.fullmatch(self.sha256):
             raise ValueError("artifact SHA-256 is invalid")
         for receipt in (self.manifest_receipt, self.signed_manifest_receipt):
@@ -60,18 +71,55 @@ class ArtifactRecord:
             r"[A-Za-z0-9._-]{1,64}", self.signature_key_id
         ):
             raise ValueError("artifact signature key ID is invalid")
+        if self.signature_key_sha256 is not None and not SHA256_PATTERN.fullmatch(
+            self.signature_key_sha256
+        ):
+            raise ValueError("artifact signature key fingerprint is invalid")
+        if self.producer_build_sha256 is not None and not SHA256_PATTERN.fullmatch(
+            self.producer_build_sha256
+        ):
+            raise ValueError("artifact producer build SHA-256 is invalid")
+        if self.producer_image_digest is not None and not OCI_DIGEST_PATTERN.fullmatch(
+            self.producer_image_digest
+        ):
+            raise ValueError("artifact producer image digest is invalid")
         if self.format == BIKE_MAP_STREAM_FORMAT:
+            if self.bytes > MAXIMUM_STREAM_ARTIFACT_BYTES:
+                raise ValueError("map stream artifact byte count exceeds the format limit")
+            if not self.filename.endswith(".bmap"):
+                raise ValueError("map stream artifact filename is invalid")
+            map_id = self.filename.removesuffix(".bmap")
+            _validate_map_id(map_id)
             if not (
                 self.manifest_receipt
                 and self.signed_manifest_receipt
                 and self.signature_key_id
             ):
                 raise ValueError("map stream artifact is missing signed identity metadata")
-            expected_suffix = (
-                f"/{BIKE_MAP_STREAM_FORMAT}/{self.signature_key_id}/"
-                f"{self.signed_manifest_receipt}.bmap"
+            producer_identity_fields = (
+                self.signature_key_sha256,
+                self.producer_build_sha256,
+                self.producer_image_digest,
             )
-            if not self.object_key.endswith(expected_suffix):
+            if any(producer_identity_fields) and not all(producer_identity_fields):
+                raise ValueError("map stream artifact producer identity is incomplete")
+            image_digest_match = (
+                OCI_DIGEST_PATTERN.fullmatch(self.producer_image_digest)
+                if self.producer_image_digest
+                else None
+            )
+            expected_key = (
+                f"maps/{map_id}/{BIKE_MAP_STREAM_FORMAT}/{self.signature_key_id}/"
+                + (
+                    f"{self.signature_key_sha256}/"
+                    f"{self.producer_build_sha256}/"
+                    f"{image_digest_match.group(1)}/"
+                    if image_digest_match
+                    else ""
+                )
+                + f"{self.signed_manifest_receipt}.bmap"
+            )
+            if self.object_key != expected_key:
                 raise ValueError("map stream artifact object key does not match its identity")
 
     def to_dict(self) -> dict[str, Any]:
@@ -89,24 +137,60 @@ class ArtifactRecord:
             result["signedManifestReceipt"] = self.signed_manifest_receipt
         if self.signature_key_id is not None:
             result["signatureKeyId"] = self.signature_key_id
+        if self.signature_key_sha256 is not None:
+            result["signatureKeySha256"] = self.signature_key_sha256
+        if self.producer_build_sha256 is not None:
+            result["producerBuildSha256"] = self.producer_build_sha256
+        if self.producer_image_digest is not None:
+            result["producerImageDigest"] = self.producer_image_digest
         return result
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ArtifactRecord:
         def optional_string(key: str) -> str | None:
             field = value.get(key)
-            return str(field) if field is not None else None
+            if field is not None and not isinstance(field, str):
+                raise ValueError(f"artifact field {key} must be a string")
+            return field
+
+        required_fields = {
+            "format",
+            "mediaType",
+            "filename",
+            "objectKey",
+            "bytes",
+            "sha256",
+        }
+        optional_fields = {
+            "manifestReceipt",
+            "signedManifestReceipt",
+            "signatureKeyId",
+            "signatureKeySha256",
+            "producerBuildSha256",
+            "producerImageDigest",
+        }
+        if set(value) - required_fields - optional_fields or not required_fields.issubset(value):
+            raise ValueError("artifact metadata has invalid fields")
+        if any(not isinstance(value[field], str) for field in required_fields - {"bytes"}):
+            raise ValueError("artifact metadata has invalid field types")
+        if type(value["bytes"]) is not int:
+            raise ValueError("artifact byte count must be an integer")
 
         return cls(
-            format=str(value["format"]),
-            media_type=str(value["mediaType"]),
-            filename=str(value["filename"]),
-            object_key=str(value["objectKey"]),
-            bytes=int(value["bytes"]),
-            sha256=str(value["sha256"]),
+            format=value["format"],
+            media_type=value["mediaType"],
+            filename=value["filename"],
+            object_key=value["objectKey"],
+            bytes=value["bytes"],
+            sha256=value["sha256"],
             manifest_receipt=optional_string("manifestReceipt"),
             signed_manifest_receipt=optional_string("signedManifestReceipt"),
             signature_key_id=optional_string("signatureKeyId"),
+            signature_key_sha256=optional_string("signatureKeySha256"),
+            producer_build_sha256=optional_string(
+                "producerBuildSha256"
+            ),
+            producer_image_digest=optional_string("producerImageDigest"),
         )
 
 
@@ -396,15 +480,27 @@ def map_stream_object_key(
     map_id: str,
     signed_manifest_receipt: str,
     signature_key_id: str,
+    signature_key_sha256: str,
+    producer_build_sha256: str,
+    producer_image_digest: str,
 ) -> str:
     _validate_map_id(map_id)
     if not SHA256_PATTERN.fullmatch(signed_manifest_receipt):
         raise ValueError("signed manifest receipt is invalid")
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", signature_key_id):
         raise ValueError("signature key ID is invalid")
+    if not SHA256_PATTERN.fullmatch(signature_key_sha256):
+        raise ValueError("signature key fingerprint is invalid")
+    if not SHA256_PATTERN.fullmatch(producer_build_sha256):
+        raise ValueError("producer build SHA-256 is invalid")
+    image_digest_match = OCI_DIGEST_PATTERN.fullmatch(producer_image_digest)
+    if not image_digest_match:
+        raise ValueError("producer image digest is invalid")
     return (
         f"maps/{map_id}/{BIKE_MAP_STREAM_FORMAT}/"
-        f"{signature_key_id}/{signed_manifest_receipt}.bmap"
+        f"{signature_key_id}/{signature_key_sha256}/"
+        f"{producer_build_sha256}/{image_digest_match.group(1)}/"
+        f"{signed_manifest_receipt}.bmap"
     )
 
 

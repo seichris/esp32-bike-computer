@@ -13,6 +13,7 @@ from map_platform.artifacts import (
     ArtifactRecord,
     ArtifactStoreError,
     FileSystemArtifactStore,
+    MAXIMUM_STREAM_ARTIFACT_BYTES,
     S3ArtifactStore,
     create_artifact_store_from_environment,
     sha256_file,
@@ -90,14 +91,32 @@ class ArtifactStoreTests(unittest.TestCase):
             format="bike-map-stream-v1",
             media_type="application/vnd.openbikecomputer.map-stream",
             filename="map.bmap",
-            object_key=f"maps/map/bike-map-stream-v1/map-prod-1/{'4' * 64}.bmap",
+            object_key=(
+                f"maps/map/bike-map-stream-v1/map-prod-1/{'5' * 64}/"
+                f"{'1' * 64}/{'6' * 64}/{'4' * 64}.bmap"
+            ),
             bytes=10,
             sha256="2" * 64,
             manifest_receipt="3" * 64,
             signed_manifest_receipt="4" * 64,
             signature_key_id="map-prod-1",
+            signature_key_sha256="5" * 64,
+            producer_build_sha256="1" * 64,
+            producer_image_digest="sha256:" + "6" * 64,
         )
         self.assertEqual(ArtifactRecord.from_dict(record.to_dict()), record)
+        for invalid_bytes in (True, 1 << 63, 10**100):
+            malformed = record.to_dict()
+            malformed["bytes"] = invalid_bytes
+            with self.subTest(invalid_bytes=invalid_bytes), self.assertRaises(
+                ValueError
+            ):
+                ArtifactRecord.from_dict(malformed)
+
+        oversized_stream = record.to_dict()
+        oversized_stream["bytes"] = MAXIMUM_STREAM_ARTIFACT_BYTES + 1
+        with self.assertRaisesRegex(ValueError, "format limit"):
+            ArtifactRecord.from_dict(oversized_stream)
         with self.assertRaises(ValueError):
             ArtifactRecord(
                 format="x",
@@ -106,6 +125,25 @@ class ArtifactStoreTests(unittest.TestCase):
                 object_key="../escape",
                 bytes=1,
                 sha256="0" * 64,
+            )
+
+        with self.assertRaisesRegex(ValueError, "object key"):
+            ArtifactRecord(
+                format="bike-map-stream-v1",
+                media_type="application/vnd.openbikecomputer.map-stream",
+                filename="map.bmap",
+                object_key=(
+                    f"other/maps/map/bike-map-stream-v1/map-prod-1/{'5' * 64}/"
+                    f"{'1' * 64}/{'6' * 64}/{'4' * 64}.bmap"
+                ),
+                bytes=10,
+                sha256="2" * 64,
+                manifest_receipt="3" * 64,
+                signed_manifest_receipt="4" * 64,
+                signature_key_id="map-prod-1",
+                signature_key_sha256="5" * 64,
+                producer_build_sha256="1" * 64,
+                producer_image_digest="sha256:" + "6" * 64,
             )
 
     def test_filesystem_store_is_immutable_idempotent_and_race_safe(self):

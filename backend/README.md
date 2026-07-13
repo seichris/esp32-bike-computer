@@ -111,6 +111,33 @@ path passes the rollout acceptance gate. When it is set to `1`, missing or
 invalid signing configuration fails closed; the backend never emits an unsigned
 stream artifact.
 
+Signed artifact generation and client delivery are separate controls. The API
+defaults `MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE` to `disabled`. Use `allowlist`
+with `MAP_PLATFORM_MAP_STREAM_ROLLOUT_ALLOWLIST` for exact registered hardware
+test installations. `percentage` additionally requires
+`MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS`, a stable 32-byte-or-longer
+`MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET`, and an approved
+`MAP_PLATFORM_MAP_STREAM_PROMOTION_ID`; `all` also requires an approved
+promotion ID. The Docker build derives `producerBuildSha256` from the exact
+worker source, pipeline configuration, Python dependency inventory,
+architecture-qualified system packages, and native platform inventory. The
+worker executes directly from that hashed source tree, verifies the runtime
+package location, recomputes the content identity at startup, and signs it into
+every stream manifest. It is not accepted from a build argument or runtime
+label, and an approval-only control-plane commit does not change it.
+Percentage and global modes refuse to start unless the promotion, current
+hardware-requirements hash, and every signing key match the checked-in approval
+and production trust registries. They serve only artifacts whose signed worker
+content, key material, requesting iOS build, and required device firmware
+identity match that approval. Pin `MAP_PLATFORM_WORKER_IMAGE` as the immutable
+`registry/repository@sha256:<digest>` reference used by the hardware run when
+promoting. The same Compose value supplies the worker image and the API/worker
+admission identity, while registry signature/provenance policy verifies that
+digest before deployment. The API image may advance to carry the approval
+record without rebuilding the tested worker. See
+`docs/map-stream-rollout-runbook.md` for commissioning, hardware acceptance,
+promotion, rollback, retention, and rotation.
+
 Useful production environment variables:
 
 - `MAP_PLATFORM_ADMIN_TOKEN`: separate server-only bearer token for worker,
@@ -166,6 +193,12 @@ POST /v1/map-packs/{mapId}/artifacts/bike-map-stream-v1/download-url
 Before creating v2 jobs, the app calls `POST /v1/installations` once and stores
 the returned installation ID and high-entropy token in the Keychain. Requests
 for that registered installation send the token as `X-Installation-Token`.
+An app build with production stream keys also sends `X-Map-Stream-Trust` as a
+comma-separated set of exact `keyId=SHA256(X9.63 public key)` capabilities.
+It sends its `CFBundleVersion` as `X-Map-Stream-App-Build`. Without both
+capabilities, or when a promoted build differs from the approval, the API keeps
+returning only the ZIP artifact even if the installation is in the rollout
+cohort.
 Artifact URL refresh always requires this installation-bound credential; the
 bundled app API token and a caller-supplied installation ID are not sufficient.
 Issuance is stateless: the server writes no per-installation file, so repeated
@@ -180,8 +213,9 @@ presigned GET URL.
 For signing-key rotation, first ship the new public key in both trust stores,
 then change the backend key ID/private key, retain the previous verification key
 through the artifact-retention window, and remove it only after old artifacts no
-longer need transfer. Object keys include both the key ID and signed manifest
-receipt, so rotations never overwrite existing artifacts.
+longer need transfer. Object keys include the key ID, exact public-key
+fingerprint, producer build SHA-256, and signed manifest receipt, so rotations
+and candidate builds never overwrite one another.
 
 Publication leases, superseded retry objects, terminal failures, and expired
 artifacts feed a durable garbage-collection queue in job metadata. Maintenance

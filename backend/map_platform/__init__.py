@@ -10,8 +10,13 @@ __all__ = [
     "manifest",
     "map_signing",
     "map_stream",
+    "map_stream_build_identity",
+    "map_stream_hardware_requirements",
+    "map_stream_rollout",
+    "map_stream_trust_registry",
     "pipeline",
     "source_cache",
     "sources",
+    "strict_json",
     "worker",
 ]

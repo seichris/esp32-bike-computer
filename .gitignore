@@ -45,6 +45,7 @@ OSM_Extract/__pycache__
 OSM_Extract/conf/test*
 
 backend/.venv/
+*.egg-info/
 backend/data/*
 !backend/data/.gitkeep
 

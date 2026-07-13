@@ -25,6 +25,13 @@ TEST_PRIVATE_VALUE = 1
 
 
 def build_vector() -> dict[str, str]:
+    private_key = ec.derive_private_key(TEST_PRIVATE_VALUE, ec.SECP256R1())
+    public_key = private_key.public_key().public_numbers()
+    x963_public_key = (
+        b"\x04"
+        + public_key.x.to_bytes(32, "big")
+        + public_key.y.to_bytes(32, "big")
+    )
     manifest = {
         "bounds": [103.75, 1.24, 103.93, 1.37],
         "displayName": "Golden Map",
@@ -36,6 +43,10 @@ def build_vector() -> dict[str, str]:
             }
         ],
         "mapId": "golden-map",
+        "producer": {
+            "buildSha256": "1" * 64,
+            "imageDigest": "sha256:" + "2" * 64,
+        },
         "schemaVersion": 1,
         "target": {
             "formatVersion": 1,
@@ -44,7 +55,6 @@ def build_vector() -> dict[str, str]:
         },
     }
     manifest_bytes = canonical_manifest_bytes(manifest)
-    private_key = ec.derive_private_key(TEST_PRIVATE_VALUE, ec.SECP256R1())
     der_signature = private_key.sign(
         signed_manifest_payload(manifest_bytes),
         ec.ECDSA(hashes.SHA256(), deterministic_signing=True),
@@ -59,12 +69,6 @@ def build_vector() -> dict[str, str]:
         MapStreamSignatureEnvelope(TEST_KEY_ID, raw_signature),
         file_count=1,
         payload_bytes=len(TEST_PAYLOAD),
-    )
-    public_key = private_key.public_key().public_numbers()
-    x963_public_key = (
-        b"\x04"
-        + public_key.x.to_bytes(32, "big")
-        + public_key.y.to_bytes(32, "big")
     )
     rotation_private_key = ec.derive_private_key(2, ec.SECP256R1())
     rotation_der_signature = rotation_private_key.sign(

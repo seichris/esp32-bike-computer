@@ -10,11 +10,10 @@ namespace {
 struct CompiledKey {
   const char *keyId;
   const char *publicKeyX963Hex;
+  const char *publicKeySha256;
 };
 
-// Rotation is additive: ship new public keys here before the backend starts
-// signing with them, then remove retired keys only after old artifacts age out.
-constexpr std::array<CompiledKey, 0> kCompiledKeys = {};
+#include "map_stream_compiled_keys.generated.inc"
 
 bool decodeHex(const char *hex, std::array<uint8_t, 65> &bytes) {
   if (hex == nullptr || std::char_traits<char>::length(hex) != bytes.size() * 2)
@@ -50,6 +49,19 @@ MapStreamTrustStore compiledMapStreamTrustStore() {
     }
   }
   return trust;
+}
+
+std::string compiledMapStreamTrustCapabilitiesJson() {
+  std::string json = "[";
+  bool first = true;
+  for (const CompiledKey &key : kCompiledKeys) {
+    if (!first)
+      json += ",";
+    first = false;
+    json += "\"" + std::string(key.keyId) + "=" + key.publicKeySha256 + "\"";
+  }
+  json += "]";
+  return json;
 }
 
 } // namespace map_transfer

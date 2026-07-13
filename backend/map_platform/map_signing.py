@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -68,6 +69,10 @@ class P256MapArtifactSigner:
     def public_key_x963(self) -> bytes:
         numbers = self._private_key.public_key().public_numbers()
         return b"\x04" + numbers.x.to_bytes(32, "big") + numbers.y.to_bytes(32, "big")
+
+    @property
+    def public_key_sha256(self) -> str:
+        return hashlib.sha256(self.public_key_x963()).hexdigest()
 
 
 def map_stream_generation_enabled() -> bool:

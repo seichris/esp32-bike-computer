@@ -10,6 +10,10 @@ from .artifacts import create_artifact_store_from_environment
 from .geofabrik_sources import GeofabrikSourceProvider
 from .jobs import JobStore, MapJobService
 from .map_signing import load_map_artifact_signer_from_environment
+from .map_stream_build_identity import (
+    image_digest_from_reference,
+    verify_map_stream_build_identity,
+)
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
 from .source_cache import SourceCache
 from .sources import SourceIndex
@@ -94,6 +98,24 @@ def main() -> int:
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
 
     def create_pipeline() -> MapBuildPipeline:
+        map_signer = load_map_artifact_signer_from_environment()
+        worker_image_reference = os.environ.get(
+            "MAP_PLATFORM_WORKER_IMAGE_REFERENCE",
+            "",
+        ).strip()
+        producer_image_digest = (
+            image_digest_from_reference(worker_image_reference)
+            if map_signer is not None
+            else None
+        )
+        build_identity = (
+            verify_map_stream_build_identity(
+                repo_root / "config" / "map-stream-build-identity.json",
+                repo_root,
+            )
+            if map_signer is not None
+            else None
+        )
         return MapBuildPipeline(
             PipelinePaths(
                 repo_root=repo_root,
@@ -102,7 +124,11 @@ def main() -> int:
             ),
             source_cache=source_cache,
             artifact_store=create_artifact_store_from_environment(data_root),
-            map_signer=load_map_artifact_signer_from_environment(),
+            map_signer=map_signer,
+            producer_build_sha256=(
+                build_identity.producer_build_sha256 if build_identity else None
+            ),
+            producer_image_digest=producer_image_digest,
         )
 
     if args.command == "create-job":

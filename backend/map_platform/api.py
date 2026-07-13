@@ -13,6 +13,18 @@ from .installations import InstallationCredentialError, InstallationCredentialSt
 from .jobs import JobClaimError, JobStore, MapJobService
 from .limits import JobLimits
 from .map_signing import map_stream_generation_enabled
+from .map_stream_hardware_requirements import load_hardware_requirements
+from .map_stream_rollout import (
+    MapStreamRolloutMode,
+    MapStreamRolloutPolicy,
+    configured_map_stream_rollout_mode,
+    load_approved_promotions,
+    parse_map_stream_app_build,
+    parse_map_stream_app_build_sha256,
+    parse_map_stream_app_git_sha,
+    parse_map_stream_trust_capabilities,
+)
+from .map_stream_trust_registry import trusted_key_fingerprints
 from .models import JobStatus
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
 from .source_cache import SourceCache, SourceCacheError
@@ -53,6 +65,45 @@ def create_app():
         installation_secret,
         previous_secrets=previous_installation_secrets,
     )
+    rollout_approvals_path = Path(
+        os.environ.get(
+            "MAP_PLATFORM_MAP_STREAM_ROLLOUT_APPROVALS",
+            repo_root / "config" / "map-stream-rollout-approvals.json",
+        )
+    )
+    rollout_mode = configured_map_stream_rollout_mode()
+    rollout_controls: dict[str, Any] = {}
+    if rollout_mode in {
+        MapStreamRolloutMode.PERCENTAGE,
+        MapStreamRolloutMode.ALL,
+    }:
+        map_stream_trust_path = Path(
+            os.environ.get(
+                "MAP_PLATFORM_MAP_STREAM_TRUST_REGISTRY",
+                repo_root / "config" / "map-stream-trust.json",
+            )
+        )
+        hardware_requirements_path = Path(
+            os.environ.get(
+                "MAP_PLATFORM_MAP_STREAM_HARDWARE_REQUIREMENTS",
+                repo_root / "config" / "map-stream-hardware-gate.json",
+            )
+        )
+        hardware_requirements = load_hardware_requirements(
+            hardware_requirements_path
+        )
+        rollout_controls = {
+            "approved_promotions_by_id": load_approved_promotions(
+                rollout_approvals_path
+            ),
+            "trusted_signing_keys": trusted_key_fingerprints(
+                map_stream_trust_path
+            ),
+            "current_requirements_sha256": hardware_requirements.sha256,
+        }
+    map_stream_rollout = MapStreamRolloutPolicy.from_environment(
+        **rollout_controls
+    )
     inline_worker_enabled = os.environ.get(
         "MAP_PLATFORM_INLINE_WORKER_ENABLED",
         "0",
@@ -73,6 +124,82 @@ def create_app():
     app = FastAPI(title="Open Bike Computer Offline Map Platform", version="0.1.0")
     app.state.artifact_store = artifact_store
     app.state.installation_store = installation_store
+    app.state.map_stream_rollout = map_stream_rollout
+
+    def public_job(
+        job,
+        installation_id: str | None,
+        client_trust_capabilities: frozenset[tuple[str, str]],
+        client_app_build: str | None,
+        client_app_git_sha: str | None,
+        client_app_build_sha256: str | None,
+    ) -> dict[str, Any]:
+        result = job.to_dict()
+        public_artifacts: list[dict[str, Any]] = []
+        stream_allowed = False
+        for artifact in result.get("artifacts", []):
+            if artifact.get("format") != BIKE_MAP_STREAM_FORMAT:
+                public_artifacts.append(artifact)
+                continue
+            if not map_stream_rollout.allows_artifact(
+                installation_id,
+                artifact.get("signatureKeyId"),
+                artifact.get("signatureKeySha256"),
+                artifact.get("producerBuildSha256"),
+                artifact.get("producerImageDigest"),
+                client_trust_capabilities,
+                client_app_build,
+                client_app_git_sha,
+                client_app_build_sha256,
+            ):
+                continue
+            stream_allowed = True
+            public_artifacts.append(
+                {
+                    **artifact,
+                    **map_stream_rollout.artifact_identity_requirements(
+                        client_app_build,
+                        client_app_git_sha,
+                        client_app_build_sha256,
+                    ),
+                }
+            )
+        result["artifacts"] = public_artifacts
+        if not stream_allowed and isinstance(result.get("artifactMetrics"), dict):
+            result["artifactMetrics"] = {
+                key: value
+                for key, value in result["artifactMetrics"].items()
+                if not key.startswith("stream")
+            } or None
+        return result
+
+    def client_map_stream_trust_capabilities(
+        header_value: str | None,
+    ) -> frozenset[tuple[str, str]]:
+        try:
+            return parse_map_stream_trust_capabilities(header_value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def client_map_stream_app_identity(
+        build_header: str | None,
+        git_sha_header: str | None,
+        build_sha256_header: str | None,
+    ) -> tuple[str | None, str | None, str | None]:
+        try:
+            identity = (
+                parse_map_stream_app_build(build_header),
+                parse_map_stream_app_git_sha(git_sha_header),
+                parse_map_stream_app_build_sha256(build_sha256_header),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if any(identity) and not all(identity):
+            raise HTTPException(
+                status_code=400,
+                detail="map stream app identity headers are incomplete",
+            )
+        return identity
 
     def require_api_token(authorization: str | None = Header(default=None)) -> None:
         if not api_token:
@@ -113,8 +240,11 @@ def create_app():
                 raise HTTPException(status_code=401, detail=str(exc)) from exc
 
     @app.get("/healthz")
-    def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+    def healthz() -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "mapStreamRollout": map_stream_rollout.public_summary(),
+        }
 
     @app.post("/v1/installations", dependencies=[Depends(require_api_token)])
     def create_installation() -> dict[str, str]:
@@ -138,13 +268,42 @@ def create_app():
             default=None,
             alias="X-Installation-Token",
         ),
+        x_map_stream_trust: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-Trust",
+        ),
+        x_map_stream_app_build: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Build",
+        ),
+        x_map_stream_app_git_sha: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Git-Sha",
+        ),
+        x_map_stream_app_build_sha256: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Build-Sha256",
+        ),
     ) -> dict[str, Any]:
         try:
+            trust_capabilities = client_map_stream_trust_capabilities(x_map_stream_trust)
+            app_build, app_git_sha, app_build_sha256 = client_map_stream_app_identity(
+                x_map_stream_app_build,
+                x_map_stream_app_git_sha,
+                x_map_stream_app_build_sha256,
+            )
             verify_registered_installation(
                 payload.get("clientInstallationId"),
                 x_installation_token,
             )
-            return service.create_job(payload).to_dict()
+            return public_job(
+                service.create_job(payload),
+                payload.get("clientInstallationId"),
+                trust_capabilities,
+                app_build,
+                app_git_sha,
+                app_build_sha256,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -155,15 +314,49 @@ def create_app():
             default=None,
             alias="X-Installation-Token",
         ),
+        x_map_stream_trust: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-Trust",
+        ),
+        x_map_stream_app_build: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Build",
+        ),
+        x_map_stream_app_git_sha: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Git-Sha",
+        ),
+        x_map_stream_app_build_sha256: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Build-Sha256",
+        ),
     ) -> dict[str, Any]:
         if clientInstallationId is None:
             raise HTTPException(status_code=400, detail="clientInstallationId is required")
         try:
+            trust_capabilities = client_map_stream_trust_capabilities(x_map_stream_trust)
+            app_build, app_git_sha, app_build_sha256 = client_map_stream_app_identity(
+                x_map_stream_app_build,
+                x_map_stream_app_git_sha,
+                x_map_stream_app_build_sha256,
+            )
             verify_registered_installation(clientInstallationId, x_installation_token)
             jobs = service.list_jobs(client_installation_id=clientInstallationId)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"jobs": [job.to_dict() for job in jobs]}
+        return {
+            "jobs": [
+                public_job(
+                    job,
+                    clientInstallationId,
+                    trust_capabilities,
+                    app_build,
+                    app_git_sha,
+                    app_build_sha256,
+                )
+                for job in jobs
+            ]
+        }
 
     @app.get("/v1/map-jobs/{job_id}", dependencies=[Depends(require_api_token)])
     def get_map_job(
@@ -173,10 +366,39 @@ def create_app():
             default=None,
             alias="X-Installation-Token",
         ),
+        x_map_stream_trust: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-Trust",
+        ),
+        x_map_stream_app_build: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Build",
+        ),
+        x_map_stream_app_git_sha: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Git-Sha",
+        ),
+        x_map_stream_app_build_sha256: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Build-Sha256",
+        ),
     ) -> dict[str, Any]:
         try:
+            trust_capabilities = client_map_stream_trust_capabilities(x_map_stream_trust)
+            app_build, app_git_sha, app_build_sha256 = client_map_stream_app_identity(
+                x_map_stream_app_build,
+                x_map_stream_app_git_sha,
+                x_map_stream_app_build_sha256,
+            )
             verify_registered_installation(clientInstallationId, x_installation_token)
-            return service.get_job_for_installation(job_id, clientInstallationId).to_dict()
+            return public_job(
+                service.get_job_for_installation(job_id, clientInstallationId),
+                clientInstallationId,
+                trust_capabilities,
+                app_build,
+                app_git_sha,
+                app_build_sha256,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
@@ -205,11 +427,40 @@ def create_app():
             default=None,
             alias="X-Installation-Token",
         ),
+        x_map_stream_trust: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-Trust",
+        ),
+        x_map_stream_app_build: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Build",
+        ),
+        x_map_stream_app_git_sha: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Git-Sha",
+        ),
+        x_map_stream_app_build_sha256: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Build-Sha256",
+        ),
     ) -> dict[str, Any]:
         try:
+            trust_capabilities = client_map_stream_trust_capabilities(x_map_stream_trust)
+            app_build, app_git_sha, app_build_sha256 = client_map_stream_app_identity(
+                x_map_stream_app_build,
+                x_map_stream_app_git_sha,
+                x_map_stream_app_build_sha256,
+            )
             verify_registered_installation(clientInstallationId, x_installation_token)
             service.get_job_for_installation(job_id, clientInstallationId)
-            return service.cancel_job(job_id).to_dict()
+            return public_job(
+                service.cancel_job(job_id),
+                clientInstallationId,
+                trust_capabilities,
+                app_build,
+                app_git_sha,
+                app_build_sha256,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
@@ -270,8 +521,30 @@ def create_app():
             default=None,
             alias="X-Installation-Token",
         ),
+        x_map_stream_trust: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-Trust",
+        ),
+        x_map_stream_app_build: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Build",
+        ),
+        x_map_stream_app_git_sha: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Git-Sha",
+        ),
+        x_map_stream_app_build_sha256: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Build-Sha256",
+        ),
     ) -> dict[str, Any]:
         try:
+            trust_capabilities = client_map_stream_trust_capabilities(x_map_stream_trust)
+            app_build, app_git_sha, app_build_sha256 = client_map_stream_app_identity(
+                x_map_stream_app_build,
+                x_map_stream_app_git_sha,
+                x_map_stream_app_build_sha256,
+            )
             verify_registered_installation(clientInstallationId, x_installation_token)
             job = service.find_by_map_id(
                 map_id,
@@ -281,7 +554,14 @@ def create_app():
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not job or job.status != JobStatus.READY:
             raise HTTPException(status_code=404, detail="map pack not found")
-        return job.to_dict()
+        return public_job(
+            job,
+            clientInstallationId,
+            trust_capabilities,
+            app_build,
+            app_git_sha,
+            app_build_sha256,
+        )
 
     @app.post("/v1/map-packs/{map_id}/download-url", dependencies=[Depends(require_api_token)])
     def create_download_url(
@@ -333,8 +613,30 @@ def create_app():
             default=None,
             alias="X-Installation-Token",
         ),
+        x_map_stream_trust: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-Trust",
+        ),
+        x_map_stream_app_build: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Build",
+        ),
+        x_map_stream_app_git_sha: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Git-Sha",
+        ),
+        x_map_stream_app_build_sha256: str | None = Header(
+            default=None,
+            alias="X-Map-Stream-App-Build-Sha256",
+        ),
     ) -> dict[str, Any]:
         try:
+            trust_capabilities = client_map_stream_trust_capabilities(x_map_stream_trust)
+            app_build, app_git_sha, app_build_sha256 = client_map_stream_app_identity(
+                x_map_stream_app_build,
+                x_map_stream_app_git_sha,
+                x_map_stream_app_build_sha256,
+            )
             verify_registered_installation(
                 clientInstallationId,
                 x_installation_token,
@@ -355,6 +657,11 @@ def create_app():
             raise HTTPException(status_code=404, detail="map artifact not ready") from exc
         if not job or job.status != JobStatus.READY:
             raise HTTPException(status_code=404, detail="map artifact not ready")
+        if (
+            artifact_format == BIKE_MAP_STREAM_FORMAT
+            and not map_stream_rollout.includes(clientInstallationId)
+        ):
+            raise HTTPException(status_code=404, detail="map artifact not ready")
         if artifact_format == BIKE_MAP_STREAM_FORMAT and signedManifestReceipt is None:
             raise HTTPException(
                 status_code=400,
@@ -373,6 +680,21 @@ def create_app():
             None,
         )
         if artifact is None:
+            raise HTTPException(status_code=404, detail="map artifact not ready")
+        if (
+            artifact_format == BIKE_MAP_STREAM_FORMAT
+            and not map_stream_rollout.allows_artifact(
+                clientInstallationId,
+                artifact.signature_key_id,
+                artifact.signature_key_sha256,
+                artifact.producer_build_sha256,
+                artifact.producer_image_digest,
+                trust_capabilities,
+                app_build,
+                app_git_sha,
+                app_build_sha256,
+            )
+        ):
             raise HTTPException(status_code=404, detail="map artifact not ready")
         expires_in_seconds = 900
         external_url = artifact_store.create_download_url(
@@ -396,6 +718,15 @@ def create_app():
             expires_at = int(time.time()) + expires_in_seconds
         return {
             **artifact.to_dict(),
+            **(
+                map_stream_rollout.artifact_identity_requirements(
+                    app_build,
+                    app_git_sha,
+                    app_build_sha256,
+                )
+                if artifact_format == BIKE_MAP_STREAM_FORMAT
+                else {}
+            ),
             "url": external_url,
             "expiresAt": expires_at,
             "expiresInSeconds": expires_in_seconds,

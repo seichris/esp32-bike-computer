@@ -673,6 +673,21 @@ nonisolated enum SavedMapArtifactMetadataStore {
     }
 }
 
+nonisolated enum SavedMapStreamMigrationFallback {
+    static func shouldUseLegacyArtifact(
+        for metadata: SavedMapArtifactMetadata
+    ) -> Bool {
+        guard let primary = metadata.primaryArtifact,
+              primary.isBikeMapStream,
+              primary.signatureKeySha256 == nil,
+              primary.producerBuildSha256 == nil,
+              metadata.legacyArtifact?.isStoredZip == true else {
+            return false
+        }
+        return true
+    }
+}
+
 nonisolated enum OfflineMapArtifactDownloadChoice: Equatable {
     case bikeMapStream(OfflineMapArtifact, legacy: OfflineMapArtifact?)
     case legacyZip(OfflineMapArtifact?)
@@ -2040,6 +2055,13 @@ final class OfflineMapManager: ObservableObject {
         statusMessage = "preparing transfer"
         transferProgress = 0
         activationProgress = nil
+        if packURL.pathExtension.lowercased() == "bmap",
+           let metadata = SavedMapArtifactMetadataStore.load(for: packURL),
+           SavedMapStreamMigrationFallback.shouldUseLegacyArtifact(for: metadata) {
+            let legacyURL = try await materializeLegacyFallback(for: metadata)
+            try await transferPack(at: legacyURL, bleManager: bleManager)
+            return
+        }
         let trustStore = mapStreamTrustStore
         let validationTask = Task.detached(priority: .userInitiated) {
             if packURL.pathExtension.lowercased() == "bmap" {
@@ -2173,9 +2195,21 @@ final class OfflineMapManager: ObservableObject {
                     sessionToken: transferSession.sessionToken
                 )
                 let initialDeviceStatus = try await client.status()
-                if case .stream(_, let metadata) = prepared,
+                if case .stream(let artifact, let metadata) = prepared,
                    MapInstallProtocolSelector.select(
                        isBikeMapStream: true,
+                       signatureTrustCapability:
+                           "\(artifact.signatureKeyID)=\(artifact.signatureKeySHA256)",
+                       requiredIosBuild: artifact.requiredIosBuild,
+                       requiredIosGitSha: artifact.requiredIosGitSHA,
+                       requiredIosBuildSha256: artifact.requiredIosBuildSHA256,
+                       currentIosBuild: MapStreamAppBuildIdentity.current?.build,
+                       currentIosGitSha: MapStreamAppBuildIdentity.current?.gitSha,
+                       currentIosBuildSha256:
+                           MapStreamAppBuildIdentity.current?.componentSha256,
+                       requiredFirmwareVersion: artifact.requiredFirmwareVersion,
+                       requiredFirmwareBuild: artifact.requiredFirmwareBuild,
+                       requiredFirmwareGitSha: artifact.requiredFirmwareGitSHA,
                        deviceStatus: initialDeviceStatus
                    ) == .legacyArtifactRequired {
                     throw MapTransferControl.legacyArtifactRequired(metadata)

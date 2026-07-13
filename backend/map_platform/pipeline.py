@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from copy import deepcopy
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -136,14 +137,28 @@ class MapBuildPipeline:
         *,
         artifact_store=None,
         map_signer=None,
+        producer_build_sha256: str | None = None,
+        producer_image_digest: str | None = None,
     ):
         self.paths = paths
         self.runner = runner or CommandRunner()
         self.source_cache = source_cache or SourceCache(paths.repo_root)
         self.artifact_store = artifact_store
         self.map_signer = map_signer
+        self.producer_build_sha256 = producer_build_sha256
+        self.producer_image_digest = producer_image_digest
         if self.map_signer is not None and self.artifact_store is None:
             raise ValueError("map stream generation requires durable artifact storage")
+        if self.map_signer is not None and not re.fullmatch(
+            r"[0-9a-f]{64}",
+            self.producer_build_sha256 or "",
+        ):
+            raise ValueError("map stream generation requires an immutable build identity")
+        if self.map_signer is not None and not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            self.producer_image_digest or "",
+        ):
+            raise ValueError("map stream generation requires an immutable worker image digest")
 
     def build(
         self,
@@ -220,9 +235,14 @@ class MapBuildPipeline:
 
         if self.map_signer is not None:
             stream_path = job_dir / f"{map_id}.bmap"
+            stream_manifest = deepcopy(manifest)
+            stream_manifest["producer"] = {
+                "buildSha256": self.producer_build_sha256,
+                "imageDigest": self.producer_image_digest,
+            }
             stream_build = write_map_stream_artifact(
                 pack_root,
-                manifest,
+                stream_manifest,
                 self.map_signer,
                 stream_path,
             )
@@ -230,6 +250,9 @@ class MapBuildPipeline:
                 map_id,
                 stream_build.signed_manifest_receipt,
                 stream_build.signature_key_id,
+                self.map_signer.public_key_sha256,
+                self.producer_build_sha256,
+                self.producer_image_digest,
             )
             lease = (
                 artifact_publication_lease(stream_key)
@@ -270,6 +293,9 @@ class MapBuildPipeline:
                     manifest_receipt=stream_build.manifest_receipt,
                     signed_manifest_receipt=stream_build.signed_manifest_receipt,
                     signature_key_id=stream_build.signature_key_id,
+                    signature_key_sha256=self.map_signer.public_key_sha256,
+                    producer_build_sha256=self.producer_build_sha256,
+                    producer_image_digest=self.producer_image_digest,
                 ),
             )
         return MapBuildResult(

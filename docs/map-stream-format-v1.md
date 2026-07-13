@@ -63,6 +63,16 @@ recreate the signed input.
 
 Every file entry includes a safe `VECTMAP/<mapId>/...fm[bp]` path, byte count,
 and lowercase SHA-256. Payload order is exactly manifest file order.
+Production manifests also include a `producer` object containing the immutable
+64-character lowercase `buildSha256` derived inside the worker-image build from
+the exact worker/pipeline sources, dependency inventories, and native
+architecture, plus the immutable OCI `imageDigest` in
+`sha256:<64 lowercase hex>` form. Both values are inside the signed canonical
+manifest. The build identity is recomputed when the worker starts, and the image
+digest comes from the digest-pinned image reference used to start that worker;
+neither is accepted from an artifact caller. The signing-key fingerprint
+stays in the key-specific artifact identity described below, so a pure key
+rotation preserves `manifestReceipt` while changing `signedManifestReceipt`.
 `mapId`, the directory below it, and the filename (including extension) are each
 1...64 ASCII bytes. With the literal `VECTMAP` prefix and separators, the exact
 maximum relative path is therefore 202 bytes. Readers must enforce both the
@@ -123,6 +133,19 @@ iOS can validate downloads and cached files. Firmware does not calculate a
 whole-artifact hash; it verifies the signature and calculates each file hash
 once while writing that file to SD.
 
+Published artifact metadata repeats the signature key ID, public-key
+fingerprint, producer build SHA-256, producer image digest, and both receipts.
+The exact object key is
+`maps/<mapId>/bike-map-stream-v1/<keyId>/<keyFingerprint>/<producerBuildSha256>/<imageDigestHex>/<signedManifestReceipt>.bmap`.
+iOS requires those values, the content-addressed object key, the actual trusted
+public key, and the signed manifest producer object to agree before upload. The
+rollout API uses the same key material, producer build identity, and image
+digest to exclude artifacts outside an approved hardware candidate. Every
+stream response binds the requesting app's numeric build, full clean git SHA,
+and generated component SHA-256; promoted responses additionally bind the
+required firmware version, bounded build number, and full clean firmware git
+SHA. Any mismatch stays on the retained ZIP path.
+
 ## Required Failure Behavior
 
 Readers fail closed on:
@@ -138,6 +161,15 @@ Readers fail closed on:
 - truncation or trailing bytes.
 
 Integrity failures never automatically fall back to protocol v1.
+
+## Production Trust Registry
+
+`config/map-stream-trust.json` is the only source of production verification
+keys. `backend/tools/generate_map_stream_trust.py` validates that registry and
+generates both the Swift and firmware trust lists; CI rejects drift, malformed
+P-256 points, private fields, duplicate keys, excessive active keys, and the
+golden-vector identities below. Rotation is additive and follows
+`docs/map-stream-rollout-runbook.md`.
 
 ## Golden Vector
 

@@ -5,9 +5,17 @@
 import os.path
 from platformio import util
 import shutil
-import subprocess
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from SCons.Script import DefaultEnvironment
+
+env = DefaultEnvironment()
+TOOLS_DIR = Path(env.get("PROJECT_DIR")).resolve() / "tools"
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+
+from firmware_build_identity import firmware_git_identity
 
 try:
     import configparser
@@ -15,7 +23,6 @@ except ImportError:
     import ConfigParser as configparser
 
 # get platformio environment variables
-env = DefaultEnvironment()
 config = configparser.ConfigParser()
 config.read("platformio.ini")
 
@@ -25,15 +32,7 @@ flavor = env.get("PIOENV")
 revision = config.get("common","revision")
 version = config.get("common", "version")
 build_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-try:
-    git_sha = subprocess.check_output(
-        ["git", "rev-parse", "--short=12", "HEAD"],
-        cwd=env.get("PROJECT_DIR"),
-        stderr=subprocess.DEVNULL,
-        text=True,
-    ).strip()
-except Exception:
-    git_sha = "unknown"
+git_sha = firmware_git_identity(Path(env.get("PROJECT_DIR")).resolve().parent)
 
 dfl_lat = os.environ.get('ICENAV3_LAT')
 dfl_lon = os.environ.get('ICENAV3_LON')

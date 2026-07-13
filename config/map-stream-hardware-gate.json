@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "targets": [
+    "WAVESHARE_AMOLED_175",
+    "WAVESHARE_AMOLED_206"
+  ],
+  "scenarios": {
+    "app_force_terminated_upload": 1,
+    "app_suspended_upload": 1,
+    "bad_signature": 1,
+    "corrupt_payload": 1,
+    "display_off_upload": 1,
+    "low_sd_space": 1,
+    "new_app_new_firmware": 1,
+    "new_app_old_firmware": 1,
+    "old_app_new_firmware": 1,
+    "power_loss_cleanup": 1,
+    "power_loss_early_file": 1,
+    "power_loss_finalization": 1,
+    "power_loss_header": 1,
+    "power_loss_late_file": 1,
+    "power_loss_manifest": 1,
+    "power_loss_middle_file": 1,
+    "power_loss_pointer_transaction": 1,
+    "power_loss_ready_marker": 1,
+    "reboot_active_map_discovery": 1,
+    "sd_removal": 1,
+    "shanghai_clean_install": 3,
+    "small_clean_install": 1,
+    "trailing_data": 1,
+    "truncated_stream": 1,
+    "wifi_interruption_10_percent": 1,
+    "wifi_interruption_50_percent": 1,
+    "wifi_interruption_90_percent": 1,
+    "wrong_map_id": 1
+  },
+  "boundedResumeScenarios": [
+    "power_loss_early_file",
+    "power_loss_late_file",
+    "power_loss_middle_file",
+    "wifi_interruption_10_percent",
+    "wifi_interruption_50_percent",
+    "wifi_interruption_90_percent"
+  ],
+  "exactSingleWriteScenarios": [
+    "app_force_terminated_upload",
+    "app_suspended_upload",
+    "display_off_upload",
+    "new_app_new_firmware",
+    "shanghai_clean_install",
+    "small_clean_install"
+  ],
+  "requiredRetrySkipScenarios": [
+    "power_loss_late_file",
+    "power_loss_middle_file",
+    "wifi_interruption_50_percent",
+    "wifi_interruption_90_percent"
+  ],
+  "legacyCompatibility": {
+    "oldApp": {
+      "iosBuild": "1",
+      "iosGitSha": "585a53dcfd0c3d0dd34e630c1b6ce4d1c7b66d7e"
+    },
+    "oldFirmware": {
+      "version": "0.2.4",
+      "build": 88,
+      "gitSha": "585a53dcfd0c3d0dd34e630c1b6ce4d1c7b66d7e"
+    }
+  },
+  "requiredAssertions": [
+    "durablePrefixNotRewritten",
+    "finalStateCorrect",
+    "previousMapRecoverable",
+    "singlePayloadHash",
+    "singlePayloadWrite",
+    "uiResponsive"
+  ],
+  "requiredMetrics": [
+    "durableBytesRewritten",
+    "maxTemperatureC",
+    "payloadBytes",
+    "payloadBytesWritten",
+    "retryBytesSkipped",
+    "step1Seconds",
+    "step2Seconds",
+    "step3Seconds"
+  ],
+  "maximumResumeWriteAmplificationBytes": 2097152,
+  "minimumShanghaiPostTransferReductionPercent": 25,
+  "minimumShanghaiSdWriteReductionPercent": 25,
+  "maximumShanghaiTemperatureRegressionC": 2,
+  "maximumTemperatureCByTarget": {
+    "WAVESHARE_AMOLED_175": 65,
+    "WAVESHARE_AMOLED_206": 65
+  }
+}

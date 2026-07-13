@@ -33,6 +33,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Test generated app build identity
+        run: python3 -m unittest discover -s scripts/tests
+        working-directory: ios-app
       - name: Run Swift helper tests
         run: ./scripts/run-navigation-tests.sh
         working-directory: ios-app
@@ -100,6 +103,10 @@ jobs:
         run: python -m pip install -e '.[test,object-storage]'
       - name: Python syntax
         run: python -m py_compile map_platform/*.py tests/*.py
+      - name: Generated map stream trust registry
+        run: |
+          python tools/generate_map_stream_trust.py --check
+          python tools/check_map_stream_hardware_gate.py --validate-requirements
       - name: Unit tests
         run: python -m unittest discover -s tests
       - name: Production Compose config
@@ -110,7 +117,11 @@ jobs:
           MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS: "86400"
         run: docker compose config
       - name: Build backend production image
-        run: docker build --file Dockerfile --tag open-bike-map-platform-ci ..
+        run: >-
+          docker build
+          --file Dockerfile
+          --tag open-bike-map-platform-ci
+          ..
       - name: Smoke-start backend production image
         run: >-
           docker run --rm
@@ -119,7 +130,7 @@ jobs:
           -e MAP_PLATFORM_INSTALLATION_SECRET=ci-installation-secret-32-bytes-minimum
           -e MAP_PLATFORM_DATA_ROOT=/tmp/map-platform-data
           open-bike-map-platform-ci
-          python -c "from map_platform.api import create_app; app = create_app(); assert app.title"
+          python -c "from pathlib import Path; from map_platform.api import create_app; from map_platform.map_stream_build_identity import verify_map_stream_build_identity; identity = verify_map_stream_build_identity(Path('/app/config/map-stream-build-identity.json'), Path('/app')); assert len(identity.producer_build_sha256) == 64; app = create_app(); assert app.title"
       - name: Smoke worker heartbeat
         run: >-
           docker run --rm
@@ -142,6 +153,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libmbedtls-dev
       - name: GUI layout host tests
         run: |
+          PYTHONPATH=tools python -m unittest tools.tests.test_firmware_build_identity
           g++ -std=c++17 \
             tools/tests/test_gui_layout.cpp \
             -o /tmp/test_gui_layout_175

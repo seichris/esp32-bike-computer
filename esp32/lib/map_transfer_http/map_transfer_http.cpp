@@ -270,7 +270,8 @@ bool MapTransferHttpServer::streamInstallSupported() const {
   const bool trusted = streamTrustStore_.size() > 0;
   const std::function<bool()> probe = streamStorageProbe_;
   unlockState();
-  return available && trusted && (!probe || probe()) &&
+  return firmware_metadata::hasImmutableGitIdentity() && available && trusted &&
+         (!probe || probe()) &&
          streamStoragePathAccessible();
 }
 
@@ -874,10 +875,18 @@ void MapTransferHttpServer::handleStatus(WiFiClient &client) {
                      ",\"enabled\":" +
                      (transferStatus.enabled ? "true" : "false") +
                      ",\"port\":" + std::to_string(transferStatus.port) +
+                     ",\"firmwareVersion\":\"" +
+                     jsonEscape(firmware_metadata::version()) +
+                     "\",\"firmwareBuild\":" +
+                     std::to_string(firmware_metadata::build()) +
+                     ",\"firmwareGitSha\":\"" +
+                     jsonEscape(firmware_metadata::gitSha()) + "\"" +
                      ",\"protocols\":[1" +
                      (streamSupported ? ",2" : "") + "]";
-  if (streamSupported)
-    body += ",\"streamFormatVersions\":[1]";
+  if (streamSupported) {
+    body += ",\"streamFormatVersions\":[1],\"streamTrust\":" +
+            compiledMapStreamTrustCapabilitiesJson();
+  }
   if (!transferStatus.baseUrl.empty()) {
     body += ",\"baseUrl\":\"" + jsonEscape(transferStatus.baseUrl) + "\"";
   }

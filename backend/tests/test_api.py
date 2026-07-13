@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 
 from map_platform.api import create_app
@@ -16,6 +18,81 @@ class MapJobRunAPITests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.repo_root = Path(__file__).resolve().parents[2]
+        self.hardware_requirements_path = (
+            self.repo_root / "config" / "map-stream-hardware-gate.json"
+        )
+        requirements_sha256 = hashlib.sha256(
+            self.hardware_requirements_path.read_bytes()
+        ).hexdigest()
+        self.trust_registry_path = Path(self.tmp.name) / "map-stream-trust.json"
+        trust_public_key = ec.derive_private_key(
+            7,
+            ec.SECP256R1(),
+        ).public_key().public_bytes(
+            serialization.Encoding.X962,
+            serialization.PublicFormat.UncompressedPoint,
+        ).hex()
+        self.trust_key_sha256 = hashlib.sha256(
+            bytes.fromhex(trust_public_key)
+        ).hexdigest()
+        self.stream_trust_header = (
+            f"map-prod-1={self.trust_key_sha256}"
+        )
+        self.worker_image_digest = "sha256:" + "8" * 64
+        self.ios_git_sha = "9" * 40
+        self.ios_build_sha256 = "a" * 64
+        self.trust_registry_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "keys": [
+                        {
+                            "keyId": "map-prod-1",
+                            "publicKeyX963Hex": trust_public_key,
+                            "state": "trusted",
+                            "createdAt": "2026-07-13",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.rollout_approvals_path = Path(self.tmp.name) / "rollout-approvals.json"
+        self.rollout_approvals_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "approvals": [
+                        {
+                            "promotionId": "msr-20260713-api-tests",
+                            "candidateGitSha": "1" * 40,
+                            "producerBuildSha256": "6" * 64,
+                            "workerImageDigest": self.worker_image_digest,
+                            "firmwareVersion": "0.3.0",
+                            "firmwareBuild": 42,
+                            "firmwareGitSha": "7" * 40,
+                            "iosBuild": "100",
+                            "iosGitSha": self.ios_git_sha,
+                            "iosBuildSha256": self.ios_build_sha256,
+                            "reportSha256": "2" * 64,
+                            "requirementsSha256": requirements_sha256,
+                            "approvedAt": "2026-07-13T00:00:00Z",
+                            "approvedBy": "backend-tests",
+                            "targets": [
+                                "WAVESHARE_AMOLED_175",
+                                "WAVESHARE_AMOLED_206",
+                            ],
+                            "signingKeys": [
+                                {
+                                    "keyId": "map-prod-1",
+                                    "publicKeySha256": self.trust_key_sha256,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
         self.environment = patch.dict(
             os.environ,
             {
@@ -29,12 +106,33 @@ class MapJobRunAPITests(unittest.TestCase):
                 "MAP_PLATFORM_ARTIFACT_STORE": "filesystem",
                 "MAP_PLATFORM_ARTIFACT_ROOT": str(Path(self.tmp.name) / "artifacts"),
                 "MAP_PLATFORM_MAP_STREAM_ENABLED": "0",
+                "MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE": "all",
+                "MAP_PLATFORM_MAP_STREAM_ROLLOUT_ALLOWLIST": "",
+                "MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS": "0",
+                "MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET": "",
+                "MAP_PLATFORM_MAP_STREAM_PROMOTION_ID": "msr-20260713-api-tests",
+                "MAP_PLATFORM_WORKER_IMAGE_REFERENCE": (
+                    "registry.invalid/map-worker@" + self.worker_image_digest
+                ),
+                "MAP_PLATFORM_MAP_STREAM_ROLLOUT_APPROVALS": str(
+                    self.rollout_approvals_path
+                ),
+                "MAP_PLATFORM_MAP_STREAM_TRUST_REGISTRY": str(
+                    self.trust_registry_path
+                ),
+                "MAP_PLATFORM_MAP_STREAM_HARDWARE_REQUIREMENTS": str(
+                    self.hardware_requirements_path
+                ),
                 "MAP_PLATFORM_INLINE_WORKER_ENABLED": "1",
             },
             clear=False,
         )
         self.environment.start()
         self.client = TestClient(create_app())
+        self.client.headers["X-Map-Stream-Trust"] = self.stream_trust_header
+        self.client.headers["X-Map-Stream-App-Build"] = "100"
+        self.client.headers["X-Map-Stream-App-Git-Sha"] = self.ios_git_sha
+        self.client.headers["X-Map-Stream-App-Build-Sha256"] = self.ios_build_sha256
 
     def tearDown(self):
         self.client.close()
@@ -99,6 +197,39 @@ class MapJobRunAPITests(unittest.TestCase):
                 self.assertEqual(response.json()["detail"], "inline map workers are disabled")
             finally:
                 client.close()
+
+    def test_disabled_and_allowlist_modes_do_not_depend_on_promotion_files(self):
+        missing = str(Path(self.tmp.name) / "missing-rollout-control.json")
+        modes = [
+            {
+                "MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE": "disabled",
+                "MAP_PLATFORM_MAP_STREAM_ROLLOUT_ALLOWLIST": "",
+            },
+            {
+                "MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE": "allowlist",
+                "MAP_PLATFORM_MAP_STREAM_ROLLOUT_ALLOWLIST": (
+                    "inst_v2_00000000000000000000000000000001"
+                ),
+            },
+        ]
+        for mode in modes:
+            with self.subTest(mode=mode["MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE"]):
+                with patch.dict(
+                    os.environ,
+                    {
+                        **mode,
+                        "MAP_PLATFORM_MAP_STREAM_PROMOTION_ID": "",
+                        "MAP_PLATFORM_MAP_STREAM_ROLLOUT_APPROVALS": missing,
+                        "MAP_PLATFORM_MAP_STREAM_TRUST_REGISTRY": missing,
+                        "MAP_PLATFORM_MAP_STREAM_HARDWARE_REQUIREMENTS": missing,
+                    },
+                    clear=False,
+                ):
+                    client = TestClient(create_app())
+                    try:
+                        self.assertEqual(client.get("/healthz").status_code, 200)
+                    finally:
+                        client.close()
 
     def test_same_map_jobs_publish_and_download_exact_job_artifacts(self):
         def create_owned(request_id: str) -> str:
@@ -188,7 +319,10 @@ class MapJobRunAPITests(unittest.TestCase):
         source.write_bytes(b"immutable-bike-map-stream")
         sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
         receipt = "4" * 64
-        object_key = f"maps/map-artifact/bike-map-stream-v1/map-prod-1/{receipt}.bmap"
+        object_key = (
+            "maps/map-artifact/bike-map-stream-v1/map-prod-1/"
+            f"{self.trust_key_sha256}/{'6' * 64}/{'8' * 64}/{receipt}.bmap"
+        )
         self.client.app.state.artifact_store.put(
             source,
             object_key,
@@ -210,6 +344,9 @@ class MapJobRunAPITests(unittest.TestCase):
                     "manifestReceipt": "3" * 64,
                     "signedManifestReceipt": receipt,
                     "signatureKeyId": "map-prod-1",
+                    "signatureKeySha256": self.trust_key_sha256,
+                    "producerBuildSha256": "6" * 64,
+                    "producerImageDigest": self.worker_image_digest,
                 }
             ],
         )
@@ -240,6 +377,14 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(signed.status_code, 200)
         self.assertEqual(signed.json()["signedManifestReceipt"], receipt)
         self.assertEqual(signed.json()["sha256"], sha256)
+        self.assertEqual(signed.json()["requiredIosBuild"], "100")
+        self.assertEqual(signed.json()["requiredIosGitSha"], self.ios_git_sha)
+        self.assertEqual(
+            signed.json()["requiredIosBuildSha256"], self.ios_build_sha256
+        )
+        self.assertEqual(signed.json()["requiredFirmwareVersion"], "0.3.0")
+        self.assertEqual(signed.json()["requiredFirmwareBuild"], 42)
+        self.assertEqual(signed.json()["requiredFirmwareGitSha"], "7" * 40)
         downloaded = self.client.get(signed.json()["url"])
         self.assertEqual(downloaded.status_code, 200)
         self.assertEqual(downloaded.content, source.read_bytes())
@@ -254,6 +399,30 @@ class MapJobRunAPITests(unittest.TestCase):
                 "signedManifestReceipt": "5" * 64,
             },
             headers=installation_headers,
+        )
+        wrong_app_build = self.client.post(
+            "/v1/map-packs/map-artifact/artifacts/bike-map-stream-v1/download-url",
+            params={
+                "clientInstallationId": installation_id,
+                "jobId": job_id,
+                "signedManifestReceipt": receipt,
+            },
+            headers={
+                **installation_headers,
+                "X-Map-Stream-App-Build": "101",
+            },
+        )
+        wrong_app_binary = self.client.post(
+            "/v1/map-packs/map-artifact/artifacts/bike-map-stream-v1/download-url",
+            params={
+                "clientInstallationId": installation_id,
+                "jobId": job_id,
+                "signedManifestReceipt": receipt,
+            },
+            headers={
+                **installation_headers,
+                "X-Map-Stream-App-Build-Sha256": "b" * 64,
+            },
         )
         other_installation = self.client.post(
             "/v1/map-packs/map-artifact/artifacts/bike-map-stream-v1/download-url",
@@ -272,8 +441,225 @@ class MapJobRunAPITests(unittest.TestCase):
             headers=installation_headers,
         )
         self.assertEqual(wrong_identity.status_code, 404)
+        self.assertEqual(wrong_app_build.status_code, 404)
+        self.assertEqual(wrong_app_binary.status_code, 404)
         self.assertEqual(other_installation.status_code, 401)
         self.assertEqual(missing_identity.status_code, 400)
+
+    def test_stream_artifacts_are_hidden_outside_the_rollout_cohort(self):
+        allowed = self.client.post("/v1/installations").json()
+        blocked = self.client.post("/v1/installations").json()
+        with patch.dict(
+            os.environ,
+            {
+                "MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE": "allowlist",
+                "MAP_PLATFORM_MAP_STREAM_ROLLOUT_ALLOWLIST": allowed[
+                    "clientInstallationId"
+                ],
+                "MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS": "0",
+                "MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET": "",
+                "MAP_PLATFORM_MAP_STREAM_PROMOTION_ID": "",
+            },
+            clear=False,
+        ):
+            rollout_client = TestClient(create_app())
+            rollout_client.headers["X-Map-Stream-Trust"] = self.stream_trust_header
+            rollout_client.headers["X-Map-Stream-App-Build"] = "100"
+            rollout_client.headers["X-Map-Stream-App-Git-Sha"] = self.ios_git_sha
+            rollout_client.headers["X-Map-Stream-App-Build-Sha256"] = (
+                self.ios_build_sha256
+            )
+        try:
+            jobs = []
+            for owner, request_id in (
+                (allowed, "request-rollout-allowed"),
+                (blocked, "request-rollout-blocked"),
+            ):
+                response = rollout_client.post(
+                    "/v1/map-jobs",
+                    json={
+                        "mode": "custom_bbox",
+                        "bbox": [103.75, 1.24, 103.93, 1.37],
+                        "clientInstallationId": owner["clientInstallationId"],
+                        "clientRequestId": request_id,
+                    },
+                    headers={
+                        "X-Installation-Token": owner["clientInstallationToken"]
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                jobs.append((owner, response.json()["jobId"]))
+
+            receipt = "9" * 64
+            artifacts = [
+                {
+                    "format": "bike-map-stream-v1",
+                    "mediaType": "application/vnd.openbikecomputer.map-stream",
+                    "filename": "map-rollout.bmap",
+                    "objectKey": (
+                        "maps/map-rollout/bike-map-stream-v1/"
+                        f"map-prod-1/{self.trust_key_sha256}/"
+                        f"{'6' * 64}/{'8' * 64}/{receipt}.bmap"
+                    ),
+                    "bytes": 123,
+                    "sha256": "a" * 64,
+                    "manifestReceipt": "b" * 64,
+                    "signedManifestReceipt": receipt,
+                    "signatureKeyId": "map-prod-1",
+                    "signatureKeySha256": self.trust_key_sha256,
+                    "producerBuildSha256": "6" * 64,
+                    "producerImageDigest": self.worker_image_digest,
+                },
+                {
+                    "format": "zip-stored-v1",
+                    "mediaType": "application/zip",
+                    "filename": "map-rollout.zip",
+                    "objectKey": "maps/map-rollout/zip-stored-v1/archive.zip",
+                    "bytes": 456,
+                    "sha256": "c" * 64,
+                },
+            ]
+            for _, job_id in jobs:
+                self.update_job(
+                    job_id,
+                    status="ready",
+                    mapId="map-rollout",
+                    artifacts=artifacts,
+                    artifactMetrics={
+                        "streamPayloadBytes": 123,
+                        "streamSignatureKeyId": "map-prod-1",
+                        "zipHashingSeconds": 1.5,
+                    },
+                )
+
+            responses = []
+            for owner, job_id in jobs:
+                responses.append(
+                    rollout_client.get(
+                        f"/v1/map-jobs/{job_id}",
+                        params={
+                            "clientInstallationId": owner["clientInstallationId"]
+                        },
+                        headers={
+                            "X-Installation-Token": owner[
+                                "clientInstallationToken"
+                            ]
+                        },
+                    )
+                )
+            self.assertEqual(
+                [value["format"] for value in responses[0].json()["artifacts"]],
+                ["bike-map-stream-v1", "zip-stored-v1"],
+            )
+            self.assertNotIn(
+                "requiredFirmwareVersion",
+                responses[0].json()["artifacts"][0],
+            )
+            self.assertEqual(
+                [value["format"] for value in responses[1].json()["artifacts"]],
+                ["zip-stored-v1"],
+            )
+            no_capability = rollout_client.get(
+                f"/v1/map-jobs/{jobs[0][1]}",
+                params={
+                    "clientInstallationId": allowed["clientInstallationId"]
+                },
+                headers={
+                    "X-Installation-Token": allowed["clientInstallationToken"],
+                    "X-Map-Stream-Trust": "",
+                },
+            )
+            self.assertEqual(no_capability.status_code, 200)
+            self.assertEqual(
+                [
+                    value["format"]
+                    for value in no_capability.json()["artifacts"]
+                ],
+                ["zip-stored-v1"],
+            )
+            invalid_capability = rollout_client.get(
+                f"/v1/map-jobs/{jobs[0][1]}",
+                params={
+                    "clientInstallationId": allowed["clientInstallationId"]
+                },
+                headers={
+                    "X-Installation-Token": allowed["clientInstallationToken"],
+                    "X-Map-Stream-Trust": "malformed",
+                },
+            )
+            self.assertEqual(invalid_capability.status_code, 400)
+            self.assertEqual(
+                responses[1].json()["artifactMetrics"],
+                {"zipHashingSeconds": 1.5},
+            )
+
+            blocked_refresh = rollout_client.post(
+                "/v1/map-packs/map-rollout/artifacts/"
+                "bike-map-stream-v1/download-url",
+                params={
+                    "clientInstallationId": blocked["clientInstallationId"],
+                    "jobId": jobs[1][1],
+                    "signedManifestReceipt": receipt,
+                },
+                headers={
+                    "X-Installation-Token": blocked["clientInstallationToken"]
+                },
+            )
+            self.assertEqual(blocked_refresh.status_code, 404)
+            self.assertEqual(
+                rollout_client.get("/healthz").json()["mapStreamRollout"],
+                {"mode": "allowlist", "allowlistCount": 1},
+            )
+        finally:
+            rollout_client.close()
+
+    def test_malformed_stream_headers_are_rejected_before_reads_or_mutations(self):
+        jobs_root = Path(self.tmp.name) / "jobs"
+        before = len(list(jobs_root.glob("*.json"))) if jobs_root.exists() else 0
+        malformed_create = self.client.post(
+            "/v1/map-jobs",
+            json={"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]},
+            headers={"X-Map-Stream-Trust": "malformed"},
+        )
+        self.assertEqual(malformed_create.status_code, 400)
+        after = len(list(jobs_root.glob("*.json"))) if jobs_root.exists() else 0
+        self.assertEqual(after, before)
+
+        job_id = self.create_job()
+        malformed_cancel = self.client.post(
+            f"/v1/map-jobs/{job_id}/cancel",
+            headers={"X-Map-Stream-App-Build": "not-a-build"},
+        )
+        self.assertEqual(malformed_cancel.status_code, 400)
+        self.assertEqual(
+            self.client.get(f"/v1/map-jobs/{job_id}").json()["status"],
+            "queued",
+        )
+
+        incomplete_identity = self.client.post(
+            f"/v1/map-jobs/{job_id}/cancel",
+            headers={
+                "X-Map-Stream-App-Build": "100",
+                "X-Map-Stream-App-Git-Sha": "",
+                "X-Map-Stream-App-Build-Sha256": "",
+            },
+        )
+        self.assertEqual(incomplete_identity.status_code, 400)
+        self.assertEqual(
+            self.client.get(f"/v1/map-jobs/{job_id}").json()["status"],
+            "queued",
+        )
+
+        installation = self.client.post("/v1/installations").json()
+        malformed_empty_list = self.client.get(
+            "/v1/map-jobs",
+            params={"clientInstallationId": installation["clientInstallationId"]},
+            headers={
+                "X-Installation-Token": installation["clientInstallationToken"],
+                "X-Map-Stream-Trust": "malformed",
+            },
+        )
+        self.assertEqual(malformed_empty_list.status_code, 400)
 
     def test_artifact_url_refresh_returns_object_store_presigned_url(self):
         class PresigningStore:
@@ -288,6 +674,10 @@ class MapJobRunAPITests(unittest.TestCase):
             return_value=PresigningStore(),
         ):
             client = TestClient(create_app())
+            client.headers["X-Map-Stream-Trust"] = self.stream_trust_header
+            client.headers["X-Map-Stream-App-Build"] = "100"
+            client.headers["X-Map-Stream-App-Git-Sha"] = self.ios_git_sha
+            client.headers["X-Map-Stream-App-Build-Sha256"] = self.ios_build_sha256
         try:
             installation = client.post("/v1/installations").json()
             headers = {
@@ -315,13 +705,17 @@ class MapJobRunAPITests(unittest.TestCase):
                         "filename": "map-presigned.bmap",
                         "objectKey": (
                             "maps/map-presigned/bike-map-stream-v1/"
-                            f"map-prod-1/{receipt}.bmap"
+                            f"map-prod-1/{self.trust_key_sha256}/"
+                            f"{'6' * 64}/{'8' * 64}/{receipt}.bmap"
                         ),
                         "bytes": 123,
                         "sha256": "7" * 64,
                         "manifestReceipt": "8" * 64,
                         "signedManifestReceipt": receipt,
                         "signatureKeyId": "map-prod-1",
+                        "signatureKeySha256": self.trust_key_sha256,
+                        "producerBuildSha256": "6" * 64,
+                        "producerImageDigest": self.worker_image_digest,
                     }
                 ],
             )
