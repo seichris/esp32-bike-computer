@@ -47,9 +47,15 @@ The manifest immediately follows the header and is encoded as UTF-8 JSON:
 - object keys sorted lexicographically;
 - no insignificant whitespace;
 - no trailing newline;
-- finite JSON numbers only;
+- canonical base-10 JSON integers only; floating-point JSON is forbidden;
 - files sorted lexicographically by normalized relative `path`;
 - file paths unique.
+
+Geographic bounds use `boundsE7`: four signed integers in
+`[minimum longitude, minimum latitude, maximum longitude, maximum latitude]`
+order, measured in 10^-7 degrees. The backend converts source `bounds` values
+with decimal round-half-even semantics before signing. This keeps centimeter-
+scale precision without relying on language-specific floating-point rendering.
 
 The authoritative bytes are the bytes embedded in the artifact. Consumers hash
 and verify those bytes directly; they do not parse and reserialize JSON to
@@ -138,10 +144,13 @@ Integrity failures never automatically fall back to protocol v1.
 The shared golden vector is
 [`backend/tests/fixtures/map_stream_v1_golden.txt`](../backend/tests/fixtures/map_stream_v1_golden.txt).
 It contains the exact header, canonical manifest, signature envelope, payload,
-complete stream, receipts, and test public key as hexadecimal fields.
+complete stream, receipts, primary test public key, and a second key/signature
+pair used to test trust-store rotation as hexadecimal fields.
 
-The fixed test private scalar is `1` and is for tests only. It must never be
-accepted by a production trust store. Regenerate the vector with:
+The fixed test private scalars are `1` for the primary signature and `2` for
+the rotation signature. Both scalars and both derived public keys are public
+test material. Neither public key may ever be accepted by an iOS or firmware
+production trust store. Regenerate the vector with:
 
 ```sh
 cd backend

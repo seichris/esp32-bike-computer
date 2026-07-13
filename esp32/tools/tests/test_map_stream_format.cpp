@@ -325,12 +325,10 @@ int main() {
   {
     auto trust = trustStore(publicKey);
     assert(!trust.add("map-test-2026-01", publicKey.data(), publicKey.size()));
-    const auto rotationPublicKey = decodeHex(
-        "047cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc476699"
-        "7807775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1");
-    const auto rotationSignature = decodeHex(
-        "542a60eb88e9d7c32ad733aace31f2da7cd6e6d37ac47a47de1cefa9994f2397"
-        "1882298838d069981066510816edf01bafde3037dd82fe3ba68b2ae275a31bd1");
+    const auto rotationPublicKey =
+        decodeHex(fixture.at("rotation_public_key_x963_hex"));
+    const auto rotationSignature =
+        decodeHex(fixture.at("rotation_signature_hex"));
     assert(trust.add("map-test-2026-02", rotationPublicKey.data(),
                      rotationPublicKey.size()));
     assert(trust.size() == 2);
@@ -759,6 +757,35 @@ int main() {
     auto withWhitespace = validManifest;
     withWhitespace.insert(1, " ");
     assert(!parseMapStreamManifest(withWhitespace, manifestHeader, parsed));
+    auto withUnknownValue = [&](const std::string &value) {
+      auto candidate = validManifest;
+      candidate.insert(candidate.size() - 1, ",\"z\":" + value);
+      return candidate;
+    };
+    assert(!parseMapStreamManifest(withUnknownValue("\"\\/\""),
+                                   manifestHeader, parsed));
+    assert(!parseMapStreamManifest(withUnknownValue("\"\\u000A\""),
+                                   manifestHeader, parsed));
+    assert(!parseMapStreamManifest(withUnknownValue("\"\\u000a\""),
+                                   manifestHeader, parsed));
+    assert(!parseMapStreamManifest(withUnknownValue("1.00"), manifestHeader,
+                                   parsed));
+    assert(!parseMapStreamManifest(withUnknownValue("1E+16"), manifestHeader,
+                                   parsed));
+    assert(!parseMapStreamManifest(withUnknownValue("1e+01"), manifestHeader,
+                                   parsed));
+    assert(!parseMapStreamManifest(withUnknownValue("1.0e+16"),
+                                   manifestHeader, parsed));
+    assert(!parseMapStreamManifest(
+        withUnknownValue("1.234567890123456789"), manifestHeader, parsed));
+    assert(!parseMapStreamManifest(withUnknownValue("1e-05"), manifestHeader,
+                                   parsed));
+    assert(!parseMapStreamManifest(withUnknownValue("-0"), manifestHeader,
+                                   parsed));
+    assert(parseMapStreamManifest(withUnknownValue("-1"), manifestHeader,
+                                  parsed));
+    assert(parseMapStreamManifest(withUnknownValue("\"\\u0000\""),
+                                  manifestHeader, parsed));
     auto reorderedTopLevel = validManifest;
     const std::string orderedPrefix = "{\"files\":";
     assert(reorderedTopLevel.rfind(orderedPrefix, 0) == 0);

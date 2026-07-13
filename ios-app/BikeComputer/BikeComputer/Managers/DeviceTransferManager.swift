@@ -189,8 +189,15 @@ final class DeviceTransferManager {
     private func removeJoinedAccessPointIfNeeded() {
 #if os(iOS)
         guard let ssid = joinedAccessPointSSID else { return }
-        NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: ssid)
+        Self.removeAccessoryNetworkConfiguration(ssid: ssid)
         joinedAccessPointSSID = nil
+#endif
+    }
+
+    nonisolated static func removeAccessoryNetworkConfiguration(ssid: String) {
+#if os(iOS)
+        guard !ssid.isEmpty else { return }
+        NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: ssid)
 #endif
     }
 

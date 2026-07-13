@@ -66,6 +66,23 @@ def build_vector() -> dict[str, str]:
         + public_key.x.to_bytes(32, "big")
         + public_key.y.to_bytes(32, "big")
     )
+    rotation_private_key = ec.derive_private_key(2, ec.SECP256R1())
+    rotation_der_signature = rotation_private_key.sign(
+        signed_manifest_payload(manifest_bytes),
+        ec.ECDSA(hashes.SHA256(), deterministic_signing=True),
+    )
+    rotation_r, rotation_s = utils.decode_dss_signature(rotation_der_signature)
+    if rotation_s > P256_HALF_ORDER:
+        rotation_s = P256_ORDER - rotation_s
+    rotation_signature = (
+        rotation_r.to_bytes(32, "big") + rotation_s.to_bytes(32, "big")
+    )
+    rotation_public_key = rotation_private_key.public_key().public_numbers()
+    rotation_x963_public_key = (
+        b"\x04"
+        + rotation_public_key.x.to_bytes(32, "big")
+        + rotation_public_key.y.to_bytes(32, "big")
+    )
     stream = prefix + TEST_PAYLOAD
     return {
         "manifest_hex": manifest_bytes.hex(),
@@ -76,6 +93,8 @@ def build_vector() -> dict[str, str]:
         "manifest_receipt": manifest_receipt(manifest_bytes),
         "signed_manifest_receipt": signed_manifest_receipt(manifest_bytes, envelope),
         "public_key_x963_hex": x963_public_key.hex(),
+        "rotation_public_key_x963_hex": rotation_x963_public_key.hex(),
+        "rotation_signature_hex": rotation_signature.hex(),
     }
 
 

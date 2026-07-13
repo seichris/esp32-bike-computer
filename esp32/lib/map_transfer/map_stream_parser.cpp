@@ -167,7 +167,6 @@ private:
       switch (escaped) {
       case '"':
       case '\\':
-      case '/':
         if (output.size() >= 256)
           return false;
         output.push_back(escaped);
@@ -197,25 +196,31 @@ private:
           return false;
         output.push_back('\t');
         break;
-      case 'u':
+      case 'u': {
         if (position_ + 4 > text_.size())
           return false;
+        uint16_t unicodeValue = 0;
         for (size_t index = 0; index < 4; index++) {
           const char digit = text_[position_ + index];
           if (!((digit >= '0' && digit <= '9') ||
-                (digit >= 'a' && digit <= 'f') ||
-                (digit >= 'A' && digit <= 'F'))) {
+                (digit >= 'a' && digit <= 'f'))) {
             return false;
           }
+          unicodeValue = static_cast<uint16_t>(unicodeValue << 4);
+          unicodeValue = static_cast<uint16_t>(
+              unicodeValue + (digit <= '9' ? digit - '0' : digit - 'a' + 10));
         }
-        // Canonical identity/path fields are restricted ASCII and never use
-        // unicode escapes. Preserve JSON validity while making any escaped
-        // identity fail the later safe-character validation.
+        if (unicodeValue >= 0x20 || unicodeValue == 0x08 ||
+            unicodeValue == 0x09 || unicodeValue == 0x0a ||
+            unicodeValue == 0x0c || unicodeValue == 0x0d) {
+          return false;
+        }
         if (output.size() >= 256)
           return false;
-        output.push_back('?');
+        output.push_back(static_cast<char>(unicodeValue));
         position_ += 4;
         break;
+      }
       default:
         return false;
       }
@@ -239,20 +244,28 @@ private:
       if (position_ >= text_.size())
         return false;
       const char escaped = text_[position_++];
-      if (escaped == '"' || escaped == '\\' || escaped == '/' ||
-          escaped == 'b' || escaped == 'f' || escaped == 'n' ||
+      if (escaped == '"' || escaped == '\\' || escaped == 'b' ||
+          escaped == 'f' || escaped == 'n' ||
           escaped == 'r' || escaped == 't') {
         continue;
       }
       if (escaped != 'u' || position_ + 4 > text_.size())
         return false;
+      uint16_t unicodeValue = 0;
       for (size_t index = 0; index < 4; index++) {
         const char digit = text_[position_ + index];
         if (!((digit >= '0' && digit <= '9') ||
-              (digit >= 'a' && digit <= 'f') ||
-              (digit >= 'A' && digit <= 'F'))) {
+              (digit >= 'a' && digit <= 'f'))) {
           return false;
         }
+        unicodeValue = static_cast<uint16_t>(unicodeValue << 4);
+        unicodeValue = static_cast<uint16_t>(
+            unicodeValue + (digit <= '9' ? digit - '0' : digit - 'a' + 10));
+      }
+      if (unicodeValue >= 0x20 || unicodeValue == 0x08 ||
+          unicodeValue == 0x09 || unicodeValue == 0x0a ||
+          unicodeValue == 0x0c || unicodeValue == 0x0d) {
+        return false;
       }
       position_ += 4;
     }
@@ -442,45 +455,35 @@ private:
         return true;
       }
     }
-    size_t start = position_;
-    if (text_[position_] == '-')
-      position_++;
-    const size_t integerStart = position_;
-    bool digit = false;
-    while (position_ < text_.size() && text_[position_] >= '0' &&
-           text_[position_] <= '9') {
-      digit = true;
-      position_++;
-    }
-    if (position_ - integerStart > 1 && text_[integerStart] == '0')
+    return skipCanonicalInteger();
+  }
+
+  bool skipCanonicalInteger() {
+    const bool negative = consume('-');
+    if (position_ >= text_.size())
       return false;
-    if (position_ < text_.size() && text_[position_] == '.') {
-      position_++;
-      bool fraction = false;
+
+    const size_t integerStart = position_;
+    if (consume('0')) {
+      if (position_ < text_.size() && text_[position_] >= '0' &&
+          text_[position_] <= '9') {
+        return false;
+      }
+    } else {
+      if (text_[position_] < '1' || text_[position_] > '9')
+        return false;
       while (position_ < text_.size() && text_[position_] >= '0' &&
              text_[position_] <= '9') {
-        fraction = true;
         position_++;
       }
-      if (!fraction)
-        return false;
     }
+    const size_t integerBytes = position_ - integerStart;
     if (position_ < text_.size() &&
-        (text_[position_] == 'e' || text_[position_] == 'E')) {
-      position_++;
-      if (position_ < text_.size() &&
-          (text_[position_] == '+' || text_[position_] == '-'))
-        position_++;
-      bool exponent = false;
-      while (position_ < text_.size() && text_[position_] >= '0' &&
-             text_[position_] <= '9') {
-        exponent = true;
-        position_++;
-      }
-      if (!exponent)
-        return false;
+        (text_[position_] == '.' || text_[position_] == 'e' ||
+         text_[position_] == 'E')) {
+      return false;
     }
-    return digit && position_ > start;
+    return !(negative && integerBytes == 1 && text_[integerStart] == '0');
   }
 
   bool finishFile(const std::string &path, const std::string &sha256,

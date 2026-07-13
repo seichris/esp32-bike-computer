@@ -498,7 +498,10 @@ private struct DownloadedMapRow: View {
                         .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.borderless)
-                .disabled(manager.isBusy || !bleManager.isNavigationReady)
+                .disabled(
+                    manager.isBusy || manager.hasActiveBackgroundUpload ||
+                        !bleManager.isNavigationReady
+                )
                 .accessibilityLabel("Transfer \(displayName) to device")
             }
 
@@ -511,7 +514,7 @@ private struct DownloadedMapRow: View {
                     .frame(width: 32, height: 32)
             }
             .buttonStyle(.borderless)
-            .disabled(manager.isBusy)
+            .disabled(manager.isBusy || manager.hasActiveBackgroundUpload)
             .accessibilityLabel("Delete \(displayName)")
         }
         .alert("Already on Device", isPresented: $isShowingInstalledConfirmation) {

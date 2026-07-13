@@ -9,6 +9,7 @@ import time
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
@@ -36,6 +37,7 @@ MAX_RELATIVE_PATH_BYTES = MAX_PACK_RELATIVE_PATH_BYTES
 MAX_FILE_COUNT = 100_000
 MAX_PAYLOAD_BYTES = 512 * 1024 * 1024
 MAX_BLOCK_BYTES = 2 * 1024 * 1024
+COORDINATE_E7_SCALE = Decimal("10000000")
 
 _HEADER = struct.Struct("<8sHHIHHIQ")
 _SIGNATURE_PREFIX = struct.Struct("<BBH")
@@ -48,6 +50,65 @@ class MapStreamFormatError(ValueError):
 
 class MapStreamBuildError(RuntimeError):
     code = "map_stream_build_failed"
+
+
+def _coordinate_e7(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise MapStreamFormatError("map stream manifest bounds are invalid")
+    try:
+        decimal = Decimal(str(value))
+    except InvalidOperation as exc:
+        raise MapStreamFormatError("map stream manifest bounds are invalid") from exc
+    if not decimal.is_finite():
+        raise MapStreamFormatError("map stream manifest bounds are invalid")
+    return int(
+        (decimal * COORDINATE_E7_SCALE).to_integral_value(
+            rounding=ROUND_HALF_EVEN
+        )
+    )
+
+
+def _normalize_bounds_e7(manifest: dict[str, Any]) -> None:
+    if "bounds" in manifest and "boundsE7" in manifest:
+        raise MapStreamFormatError("map stream manifest has conflicting bounds")
+    if "bounds" in manifest:
+        bounds = manifest.pop("bounds")
+        if not isinstance(bounds, (list, tuple)) or len(bounds) != 4:
+            raise MapStreamFormatError("map stream manifest bounds are invalid")
+        manifest["boundsE7"] = [_coordinate_e7(value) for value in bounds]
+    if "boundsE7" not in manifest:
+        return
+    bounds_e7 = manifest["boundsE7"]
+    if (
+        not isinstance(bounds_e7, (list, tuple))
+        or len(bounds_e7) != 4
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in bounds_e7)
+    ):
+        raise MapStreamFormatError("map stream manifest boundsE7 are invalid")
+    minimum_longitude, minimum_latitude, maximum_longitude, maximum_latitude = bounds_e7
+    if (
+        not -1_800_000_000 <= minimum_longitude <= 1_800_000_000
+        or not -1_800_000_000 <= maximum_longitude <= 1_800_000_000
+        or not -900_000_000 <= minimum_latitude <= 900_000_000
+        or not -900_000_000 <= maximum_latitude <= 900_000_000
+        or minimum_longitude >= maximum_longitude
+        or minimum_latitude >= maximum_latitude
+    ):
+        raise MapStreamFormatError("map stream manifest boundsE7 are invalid")
+    manifest["boundsE7"] = list(bounds_e7)
+
+
+def _reject_floating_json(value: Any) -> None:
+    if isinstance(value, float):
+        raise MapStreamFormatError(
+            "map stream manifest floating-point JSON is unsupported"
+        )
+    if isinstance(value, dict):
+        for child in value.values():
+            _reject_floating_json(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            _reject_floating_json(child)
 
 
 @dataclass(frozen=True)
@@ -203,6 +264,8 @@ class MapStreamArtifactBuild:
 
 def canonical_manifest_bytes(manifest: dict[str, Any]) -> bytes:
     normalized = deepcopy(manifest)
+    _normalize_bounds_e7(normalized)
+    _reject_floating_json(normalized)
     if normalized.get("schemaVersion") != 1:
         raise MapStreamFormatError("map stream manifest schema version is unsupported")
     map_id = normalized.get("mapId")

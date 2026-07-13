@@ -209,9 +209,14 @@ fixtures. At minimum:
 - UTF-8;
 - sorted object keys;
 - no insignificant whitespace;
-- deterministic number and string encoding;
+- canonical base-10 integer and string encoding, with floating-point JSON
+  forbidden;
 - no trailing newline;
 - stable file ordering by normalized relative path.
+
+Geographic bounds are signed `boundsE7` integers measured in 10^-7 degrees,
+so all consumers validate identical bytes without implementing different
+shortest-floating-point renderers.
 
 The existing manifest semantics remain:
 

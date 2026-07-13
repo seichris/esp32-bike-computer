@@ -37,6 +37,43 @@ def read_fixture() -> dict[str, str]:
 
 
 class MapStreamFormatTests(unittest.TestCase):
+    def test_canonical_manifest_uses_integer_e7_bounds_and_rejects_floats(self):
+        file = {
+            "path": "VECTMAP/map/+0000+0000/1.fmb",
+            "bytes": 1,
+            "sha256": "0" * 64,
+        }
+        encoded = canonical_manifest_bytes(
+            {
+                "schemaVersion": 1,
+                "mapId": "map",
+                "bounds": [103.75, 1.24, 103.93, 1.37],
+                "files": [file],
+            }
+        )
+        self.assertIn(b'"boundsE7":[1037500000,12400000,1039300000,13700000]', encoded)
+        self.assertNotIn(b'"bounds"', encoded)
+
+        with self.assertRaises(MapStreamFormatError):
+            canonical_manifest_bytes(
+                {
+                    "schemaVersion": 1,
+                    "mapId": "map",
+                    "files": [file],
+                    "z": 1.234567890123456789,
+                }
+            )
+
+        integer_extension = canonical_manifest_bytes(
+            {
+                "schemaVersion": 1,
+                "mapId": "map",
+                "files": [file],
+                "z": -1,
+            }
+        )
+        self.assertIn(b'"z":-1', integer_extension)
+
     def test_golden_vector_header_envelope_receipts_and_signature(self):
         fixture = read_fixture()
         stream = bytes.fromhex(fixture["stream_hex"])

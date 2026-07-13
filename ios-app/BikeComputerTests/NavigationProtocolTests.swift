@@ -1,6 +1,7 @@
 import Foundation
 import CoreLocation
 import CoreBluetooth
+import CryptoKit
 import MapKit
 
 func assert(_ condition: @autoclosure () -> Bool, _ message: String) {
@@ -399,6 +400,14 @@ struct NavigationProtocolTests {
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         testOfflineMapCustomBBoxRequest()
         testBikeMapStreamGoldenVector()
+        testBikeMapStreamArtifactValidation()
+        testOfflineMapArtifactSelectionAndProtocolNegotiation()
+        testSavedMapArtifactMetadataRoundTrip()
+        testBackgroundMapUploadRestorationState()
+        testBackgroundMapUploadArbitration()
+        testBackgroundMapUploadResponseBufferIsBounded()
+        testMapStreamBackgroundUploadRequest()
+        await testOfflineMapInstallationCredentialClient()
         testOfflineMapPreparationTimeEstimate()
         testOfflineMapJobProgressDecoding()
         testOfflineMapJobProgressAbsentFallback()
@@ -406,7 +415,6 @@ struct NavigationProtocolTests {
         testMapActivationProgressPresentation()
         testOfflineMapDownloadingSectionPresentation()
         testOfflineMapActivityCounterOverlappingOperations()
-        testBackgroundTransferCompletionGate()
         testOfflineMapJobPersistence()
         testOfflineMapInstallationIdentity()
         testOfflineMapJobRecoverySelection()
@@ -609,6 +617,893 @@ struct NavigationProtocolTests {
             assert(false, "unsupported map stream version is rejected")
         } catch {
             assertEqual(error as? BikeMapStreamFormatError, .unsupportedVersion, "version failure is typed")
+        }
+    }
+
+    static func testBikeMapStreamArtifactValidation() {
+        let fixtureURL = URL(fileURLWithPath: "backend/tests/fixtures/map_stream_v1_golden.txt")
+        guard let text = try? String(contentsOf: fixtureURL, encoding: .utf8) else {
+            assert(false, "map stream artifact fixture is readable")
+            return
+        }
+        let fixture = Dictionary(uniqueKeysWithValues: text.split(separator: "\n").map { line in
+            let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            return (String(parts[0]), String(parts[1]))
+        })
+        guard let stream = Data(hex: fixture["stream_hex"] ?? ""),
+              let manifest = Data(hex: fixture["manifest_hex"] ?? ""),
+              let publicKey = Data(hex: fixture["public_key_x963_hex"] ?? ""),
+              let header = try? BikeMapStreamFormat.parseHeader(stream.prefix(32)) else {
+            assert(false, "map stream artifact fixture fields decode")
+            return
+        }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bike-map-stream-swift-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        func sha256(_ data: Data) -> String {
+            SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        }
+        func artifact(bytes: Data, sha: String? = nil) -> OfflineMapArtifact {
+            OfflineMapArtifact(
+                format: OfflineMapArtifact.bikeMapStreamFormat,
+                mediaType: "application/vnd.openbikecomputer.map-stream",
+                filename: "golden-map.bmap",
+                objectKey: "maps/golden-map/bike-map-stream-v1/map-test-2026-01/" +
+                    "\(fixture["signed_manifest_receipt"]!).bmap",
+                bytes: Int64(bytes.count),
+                sha256: sha ?? sha256(bytes),
+                manifestReceipt: fixture["manifest_receipt"],
+                signedManifestReceipt: fixture["signed_manifest_receipt"],
+                signatureKeyId: "map-test-2026-01"
+            )
+        }
+        let trustStore = BikeMapStreamTrustStore(publicKeysByID: [
+            "map-test-2026-01": publicKey,
+            "map-next-2026-02": publicKey,
+        ])
+        let streamURL = directory.appendingPathComponent("golden-map.bmap")
+        try! stream.write(to: streamURL)
+        do {
+            let verified = try BikeMapStreamArtifactValidator.validate(
+                url: streamURL,
+                artifact: artifact(bytes: stream),
+                expectedMapID: "golden-map",
+                trustStore: trustStore
+            )
+            assertEqual(verified.mapID, "golden-map", "stream validator returns authenticated map ID")
+            assertEqual(verified.fileCount, 1, "stream validator returns authenticated file count")
+            assertEqual(verified.payloadBytes, 8, "stream validator returns authenticated payload bytes")
+            assertEqual(
+                verified.signedManifestReceipt,
+                fixture["signed_manifest_receipt"],
+                "stream validator preserves stable session identity"
+            )
+        } catch {
+            assert(false, "valid complete map stream is accepted: \(error)")
+        }
+
+        do {
+            _ = try BikeMapStreamArtifactValidator.validate(
+                url: streamURL,
+                artifact: artifact(bytes: stream),
+                expectedMapID: "golden-map",
+                trustStore: .init(publicKeysByID: ["map-next-2026-02": publicKey])
+            )
+            assert(false, "unknown signing key is rejected")
+        } catch {
+            assertEqual(
+                error as? BikeMapStreamFormatError,
+                .unknownKeyID("map-test-2026-01"),
+                "unknown signing key failure is typed"
+            )
+        }
+
+        var tamperedPayload = stream
+        tamperedPayload[tamperedPayload.index(before: tamperedPayload.endIndex)] ^= 1
+        let tamperedURL = directory.appendingPathComponent("tampered.bmap")
+        try! tamperedPayload.write(to: tamperedURL)
+        do {
+            _ = try BikeMapStreamArtifactValidator.validate(
+                url: tamperedURL,
+                artifact: artifact(bytes: tamperedPayload),
+                expectedMapID: "golden-map",
+                trustStore: trustStore
+            )
+            assert(false, "payload tampering is rejected")
+        } catch {
+            guard case .fileHashMismatch = error as? BikeMapStreamFormatError else {
+                assert(false, "payload tampering reports a file hash mismatch: \(error)")
+                return
+            }
+        }
+
+        do {
+            _ = try BikeMapStreamArtifactValidator.validate(
+                url: streamURL,
+                artifact: artifact(bytes: stream, sha: String(repeating: "0", count: 64)),
+                expectedMapID: "golden-map",
+                trustStore: trustStore
+            )
+            assert(false, "whole-artifact metadata mismatch is rejected")
+        } catch {
+            assertEqual(
+                error as? BikeMapStreamFormatError,
+                .artifactHashMismatch,
+                "whole-artifact mismatch failure is typed"
+            )
+        }
+
+        for (name, bytes) in [
+            ("truncated", Data(stream.dropLast())),
+            ("extended", stream + Data([0])),
+        ] {
+            let url = directory.appendingPathComponent("\(name).bmap")
+            try! bytes.write(to: url)
+            do {
+                _ = try BikeMapStreamArtifactValidator.validate(
+                    url: url,
+                    artifact: artifact(bytes: bytes),
+                    expectedMapID: "golden-map",
+                    trustStore: trustStore
+                )
+                assert(false, "\(name) artifact is rejected")
+            } catch {
+                assertEqual(
+                    error as? BikeMapStreamFormatError,
+                    .invalidContentLength,
+                    "\(name) artifact length failure is typed"
+                )
+            }
+        }
+
+        let manifestText = String(data: manifest, encoding: .utf8)!
+        func manifestWithUnknownValue(_ value: String) -> Data {
+            Data((manifestText.dropLast() + ",\"z\":\(value)}").utf8)
+        }
+        var nonCanonical = Data(" ".utf8)
+        nonCanonical.append(manifest)
+        let nonCanonicalHeader = BikeMapStreamFormat.Header(
+            formatVersion: 1,
+            flags: 0,
+            manifestBytes: UInt32(nonCanonical.count),
+            signatureEnvelopeBytes: header.signatureEnvelopeBytes,
+            fileCount: 1,
+            payloadBytes: 8
+        )
+        do {
+            _ = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
+                nonCanonical,
+                expectedMapID: "golden-map",
+                header: nonCanonicalHeader
+            )
+            assert(false, "non-canonical manifest JSON is rejected")
+        } catch {
+            guard case .invalidManifest = error as? BikeMapStreamFormatError else {
+                assert(false, "non-canonical manifest failure is typed")
+                return
+            }
+        }
+        let nonShortestNumber = manifestWithUnknownValue("1.0")
+        let nonShortestHeader = BikeMapStreamFormat.Header(
+            formatVersion: 1,
+            flags: 0,
+            manifestBytes: UInt32(nonShortestNumber.count),
+            signatureEnvelopeBytes: header.signatureEnvelopeBytes,
+            fileCount: 1,
+            payloadBytes: 8
+        )
+        do {
+            _ = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
+                nonShortestNumber,
+                expectedMapID: "golden-map",
+                header: nonShortestHeader
+            )
+            assert(false, "non-shortest manifest number is rejected")
+        } catch {
+            guard case .invalidManifest = error as? BikeMapStreamFormatError else {
+                assert(false, "non-shortest number failure is typed")
+                return
+            }
+        }
+
+        for value in [
+            "\"\\/\"", "\"\\u000A\"", "\"\\u000a\"", "1.00", "1E+16",
+            "1e+01", "1.0e+16", "1.234567890123456789", "1e-05", "-0",
+        ] {
+            let candidate = manifestWithUnknownValue(value)
+            let candidateHeader = BikeMapStreamFormat.Header(
+                formatVersion: 1,
+                flags: 0,
+                manifestBytes: UInt32(candidate.count),
+                signatureEnvelopeBytes: header.signatureEnvelopeBytes,
+                fileCount: 1,
+                payloadBytes: 8
+            )
+            do {
+                _ = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
+                    candidate,
+                    expectedMapID: "golden-map",
+                    header: candidateHeader
+                )
+                assert(false, "non-canonical unknown JSON value \(value) is rejected")
+            } catch {
+                guard case .invalidManifest = error as? BikeMapStreamFormatError else {
+                    assert(false, "unknown JSON canonicalization failure is typed")
+                    return
+                }
+            }
+        }
+        for value in ["-1", "\"\\u0000\""] {
+            let candidate = manifestWithUnknownValue(value)
+            let candidateHeader = BikeMapStreamFormat.Header(
+                formatVersion: 1,
+                flags: 0,
+                manifestBytes: UInt32(candidate.count),
+                signatureEnvelopeBytes: header.signatureEnvelopeBytes,
+                fileCount: 1,
+                payloadBytes: 8
+            )
+            do {
+                _ = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
+                    candidate,
+                    expectedMapID: "golden-map",
+                    header: candidateHeader
+                )
+            } catch {
+                assert(false, "canonical unknown JSON value \(value) is accepted: \(error)")
+            }
+        }
+
+        let originalPath = "VECTMAP/golden-map/+0000+0000/0_0.fmb"
+        let unsafeManifest = Data(manifestText.replacingOccurrences(
+            of: originalPath,
+            with: "VECTMAP/golden-map/../escape.fmb"
+        ).utf8)
+        let unsafeHeader = BikeMapStreamFormat.Header(
+            formatVersion: 1,
+            flags: 0,
+            manifestBytes: UInt32(unsafeManifest.count),
+            signatureEnvelopeBytes: header.signatureEnvelopeBytes,
+            fileCount: 1,
+            payloadBytes: 8
+        )
+        do {
+            _ = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
+                unsafeManifest,
+                expectedMapID: "golden-map",
+                header: unsafeHeader
+            )
+            assert(false, "unsafe map stream path is rejected")
+        } catch {
+            guard case .invalidManifest = error as? BikeMapStreamFormatError else {
+                assert(false, "unsafe path manifest failure is typed")
+                return
+            }
+        }
+
+        let filesPrefix = "\"files\":["
+        let filesStart = manifestText.range(of: filesPrefix)!.upperBound
+        let filesEnd = manifestText.range(
+            of: "],\"mapId\"",
+            range: filesStart..<manifestText.endIndex
+        )!.lowerBound
+        let originalFileText = String(manifestText[filesStart..<filesEnd])
+        func manifestReplacingFiles(_ files: String) -> Data {
+            var value = manifestText
+            value.replaceSubrange(filesStart..<filesEnd, with: files)
+            return Data(value.utf8)
+        }
+        func assertInvalidManifest(
+            _ data: Data,
+            fileCount: UInt32,
+            payloadBytes: UInt64,
+            _ message: String
+        ) {
+            let candidateHeader = BikeMapStreamFormat.Header(
+                formatVersion: 1,
+                flags: 0,
+                manifestBytes: UInt32(data.count),
+                signatureEnvelopeBytes: header.signatureEnvelopeBytes,
+                fileCount: fileCount,
+                payloadBytes: payloadBytes
+            )
+            do {
+                _ = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
+                    data,
+                    expectedMapID: "golden-map",
+                    header: candidateHeader
+                )
+                assert(false, message)
+            } catch {
+                guard case .invalidManifest = error as? BikeMapStreamFormatError else {
+                    assert(false, "\(message) reports a typed manifest failure")
+                    return
+                }
+            }
+        }
+        assertInvalidManifest(
+            manifestReplacingFiles("\(originalFileText),\(originalFileText)"),
+            fileCount: 2,
+            payloadBytes: 16,
+            "duplicate manifest paths are rejected"
+        )
+
+        let secondFileText = originalFileText.replacingOccurrences(
+            of: originalPath,
+            with: "VECTMAP/golden-map/+0000+0000/1_0.fmb"
+        )
+        assertInvalidManifest(
+            manifestReplacingFiles("\(secondFileText),\(originalFileText)"),
+            fileCount: 2,
+            payloadBytes: 16,
+            "reordered manifest paths are rejected"
+        )
+
+        assertInvalidManifest(
+            manifest,
+            fileCount: 1,
+            payloadBytes: 9,
+            "manifest payload sum mismatch is rejected"
+        )
+
+        let oversizedFileText = originalFileText.replacingOccurrences(
+            of: "\"bytes\":8",
+            with: "\"bytes\":2097153"
+        )
+        assertInvalidManifest(
+            manifestReplacingFiles(oversizedFileText),
+            fileCount: 1,
+            payloadBytes: UInt64(2 * 1024 * 1024 + 1),
+            "per-file stream size limit is enforced"
+        )
+    }
+
+    static func testOfflineMapArtifactSelectionAndProtocolNegotiation() {
+        let stream = OfflineMapArtifact(
+            format: OfflineMapArtifact.bikeMapStreamFormat,
+            mediaType: "application/vnd.openbikecomputer.map-stream",
+            filename: "map.bmap",
+            objectKey: "maps/map.bmap",
+            bytes: 123,
+            sha256: String(repeating: "1", count: 64),
+            manifestReceipt: String(repeating: "2", count: 64),
+            signedManifestReceipt: String(repeating: "3", count: 64),
+            signatureKeyId: "map-prod-1"
+        )
+        let zip = OfflineMapArtifact(
+            format: OfflineMapArtifact.storedZipFormat,
+            mediaType: "application/zip",
+            filename: "map.zip",
+            objectKey: "maps/map.zip",
+            bytes: 321,
+            sha256: String(repeating: "4", count: 64),
+            manifestReceipt: nil,
+            signedManifestReceipt: nil,
+            signatureKeyId: nil
+        )
+        let validPublicKey = Data(hex:
+            "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+        )!
+        let trusted = BikeMapStreamTrustStore(publicKeysByID: ["map-prod-1": validPublicKey])
+        assertEqual(
+            try? OfflineMapArtifactSelector.select(artifacts: [zip, stream], trustStore: trusted),
+            .bikeMapStream(stream, legacy: zip),
+            "trusted stream is the canonical download with a durable legacy companion"
+        )
+        assertEqual(
+            try? OfflineMapArtifactSelector.select(
+                artifacts: [zip, stream],
+                trustStore: .init(publicKeysByID: [:])
+            ),
+            .legacyZip(zip),
+            "rollout-disabled trust store explicitly keeps legacy ZIP"
+        )
+        assertEqual(
+            try? OfflineMapArtifactSelector.select(
+                artifacts: [zip, stream],
+                trustStore: trusted,
+                canDownloadStreamArtifact: false
+            ),
+            .legacyZip(zip),
+            "legacy-owned jobs retain their tokenless ZIP recovery path"
+        )
+        do {
+            _ = try OfflineMapArtifactSelector.select(
+                artifacts: [zip, stream],
+                trustStore: .init(publicKeysByID: ["map-prod-2": validPublicKey])
+            )
+            assert(false, "unknown production signing key does not silently use ZIP")
+        } catch {
+            assertEqual(
+                error as? BikeMapStreamFormatError,
+                .unknownKeyID("map-prod-1"),
+                "unknown production key failure is typed"
+            )
+        }
+
+        let v2Status = MapTransferDeviceStatus(
+            enabled: true,
+            activeMapId: nil,
+            activeSessionId: nil,
+            activation: nil,
+            protocols: [1, 2],
+            streamFormatVersions: [1]
+        )
+        let v1Status = MapTransferDeviceStatus(
+            enabled: true,
+            activeMapId: nil,
+            activeSessionId: nil,
+            activation: nil,
+            protocols: [1],
+            streamFormatVersions: nil
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(isBikeMapStream: true, deviceStatus: v2Status),
+            .streamV2,
+            "stream artifact selects v2 only when protocol and format match"
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(isBikeMapStream: true, deviceStatus: v1Status),
+            .legacyArtifactRequired,
+            "stream artifact requires a durable legacy artifact on v1 firmware"
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(isBikeMapStream: false, deviceStatus: v2Status),
+            .archiveV1,
+            "existing ZIP remains explicitly protocol v1"
+        )
+        assertEqual(
+            ExistingMapStreamAttemptDisposition.evaluate(
+                expectedSessionID: "session",
+                activeSessionID: nil,
+                activationStatus: "activating",
+                activationSessionID: "session"
+            ),
+            .awaitDevice,
+            "same-session activation is reconciled without a duplicate upload"
+        )
+        assertEqual(
+            ExistingMapStreamAttemptDisposition.evaluate(
+                expectedSessionID: "session",
+                activeSessionID: nil,
+                activationStatus: "paused",
+                activationSessionID: "session"
+            ),
+            .upload,
+            "a paused same-session stream remains resumable"
+        )
+        assertEqual(
+            ExistingMapStreamAttemptDisposition.evaluate(
+                expectedSessionID: "session",
+                activeSessionID: "session",
+                activationStatus: "idle",
+                activationSessionID: nil
+            ),
+            .installed,
+            "an exact active session never retransmits"
+        )
+    }
+
+    @MainActor
+    static func testSavedMapArtifactMetadataRoundTrip() {
+        let suite = "SavedMapArtifactMetadataTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("map-id", forKey: "offlineMap.lastTransfer.mapId")
+        defaults.set(String(repeating: "c", count: 64), forKey: "offlineMap.lastTransfer.sessionId")
+        defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("saved-map-metadata-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let artifactURL = directory.appendingPathComponent("map-id.bmap")
+        let originalBytes = Data([1, 2, 3, 4])
+        try! originalBytes.write(to: artifactURL)
+        let artifact = OfflineMapArtifact(
+            format: OfflineMapArtifact.bikeMapStreamFormat,
+            mediaType: "application/vnd.openbikecomputer.map-stream",
+            filename: "map-id.bmap",
+            objectKey: "maps/map-id.bmap",
+            bytes: 4,
+            sha256: String(repeating: "a", count: 64),
+            manifestReceipt: String(repeating: "b", count: 64),
+            signedManifestReceipt: String(repeating: "c", count: 64),
+            signatureKeyId: "map-prod-1"
+        )
+        let metadata = SavedMapArtifactMetadata(
+            schemaVersion: SavedMapArtifactMetadata.currentSchemaVersion,
+            mapID: "map-id",
+            displayName: "China",
+            localArtifactFilename: artifactURL.lastPathComponent,
+            streamFormatVersion: 1,
+            jobID: "job-id",
+            serverURLString: "https://maps.example.com",
+            clientInstallationID: "inst_v2_1234567890abcdef1234567890abcdef",
+            primaryArtifact: artifact,
+            legacyArtifact: nil,
+            lastTransferProtocol: nil,
+            lastTransferStreamFormat: nil,
+            lastTransferSessionID: nil,
+            lastBackgroundTaskID: nil,
+            lastDeviceSequence: 7,
+            lastDeviceState: "receiving",
+            lastDeviceStep: 1,
+            lastDeviceStepCount: 3,
+            lastDeviceProgress: 42,
+            expectedActiveMapID: "map-id",
+            expectedActiveSessionID: nil,
+            lastTransferOutcome: nil
+        )
+        try! SavedMapArtifactMetadataStore.save(metadata, for: artifactURL)
+        let manager = OfflineMapManager(defaults: defaults, cacheDirectory: directory)
+        assertEqual(
+            manager.activationProgress?.label,
+            "Step 1/3 - 42%",
+            "structured device progress survives app relaunch"
+        )
+        let backgroundDescriptor = BackgroundMapUploadDescriptor(
+            mapID: "map-id",
+            sessionID: String(repeating: "c", count: 64),
+            protocolVersion: 2,
+            streamFormatVersion: 1,
+            artifactFilename: artifactURL.lastPathComponent
+        )
+        BackgroundMapUploadStateStore.markStarted(
+            taskID: 99,
+            descriptor: backgroundDescriptor,
+            expectedBytes: 100,
+            defaults: defaults
+        )
+        BackgroundMapUploadStateStore.markProgress(
+            taskID: 99,
+            completedBytes: 67,
+            expectedBytes: 100,
+            defaults: defaults
+        )
+        let restoredManager = OfflineMapManager(defaults: defaults, cacheDirectory: directory)
+        assertEqual(
+            restoredManager.activationProgress?.label,
+            "Step 1/3 - 67%",
+            "a relaunched manager adopts persisted background task progress"
+        )
+        assertEqual(
+            restoredManager.statusMessage,
+            "Map upload continues on device",
+            "a restored in-flight task suppresses a duplicate upload prompt"
+        )
+        assertEqual(
+            manager.renameCachedPack(at: artifactURL, to: " Shanghai "),
+            "Shanghai",
+            "saved map rename is trimmed"
+        )
+        assertEqual(
+            SavedMapArtifactMetadataStore.load(for: artifactURL)?.displayName,
+            "Shanghai",
+            "saved map rename updates artifact-aware metadata"
+        )
+        assertEqual(
+            try? Data(contentsOf: artifactURL),
+            originalBytes,
+            "saved map rename never rewrites signed artifact bytes"
+        )
+    }
+
+    static func testBackgroundMapUploadRestorationState() {
+        let suite = "BackgroundMapUploadStateTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let descriptor = BackgroundMapUploadDescriptor(
+            mapID: "map-id",
+            sessionID: String(repeating: "d", count: 64),
+            protocolVersion: 2,
+            streamFormatVersion: 1,
+            artifactFilename: "map-id.bmap"
+        )
+        let startedAt = Date(timeIntervalSince1970: 100)
+        BackgroundMapUploadStateStore.markStarted(
+            taskID: 17,
+            descriptor: descriptor,
+            now: startedAt,
+            defaults: defaults
+        )
+        assertEqual(
+            BackgroundMapUploadStateStore.records(defaults: defaults),
+            [BackgroundMapUploadRecord(
+                taskID: 17,
+                descriptor: descriptor,
+                startedAt: startedAt,
+                completedAt: nil,
+                succeeded: nil,
+                errorCode: nil,
+                completedBytes: 0
+            )],
+            "background upload identity survives process state loss"
+        )
+        BackgroundMapUploadStateStore.markProgress(
+            taskID: 17,
+            completedBytes: 42,
+            expectedBytes: 100,
+            defaults: defaults
+        )
+        assertEqual(
+            BackgroundMapUploadStateStore.latest(
+                mapID: "map-id",
+                sessionID: descriptor.sessionID,
+                defaults: defaults
+            )?.percentage,
+            42,
+            "restored background upload records retain determinate progress"
+        )
+        let completedAt = Date(timeIntervalSince1970: 200)
+        BackgroundMapUploadStateStore.markCompleted(
+            taskID: 17,
+            succeeded: true,
+            errorCode: nil,
+            now: completedAt,
+            defaults: defaults
+        )
+        let completed = BackgroundMapUploadStateStore.records(defaults: defaults).first
+        assertEqual(completed?.completedAt, completedAt, "background completion is durable")
+        assertEqual(completed?.succeeded, true, "background success is durable")
+
+        let replacement = BackgroundMapUploadDescriptor(
+            mapID: "other-map",
+            sessionID: String(repeating: "e", count: 64),
+            protocolVersion: 2,
+            streamFormatVersion: 1,
+            artifactFilename: "other-map.bmap"
+        )
+        BackgroundMapUploadStateStore.markStarted(
+            taskID: 17,
+            descriptor: replacement,
+            defaults: defaults
+        )
+        assertEqual(
+            BackgroundMapUploadStateStore.records(defaults: defaults).map(\.descriptor),
+            [replacement],
+            "a reused URL session task ID replaces stale cross-session state"
+        )
+    }
+
+    static func testBackgroundMapUploadArbitration() {
+        let current = BackgroundMapUploadDescriptor(
+            mapID: "map-a",
+            sessionID: "session-a",
+            protocolVersion: 2,
+            streamFormatVersion: 1,
+            artifactFilename: "map-a.bmap",
+            accessPointSSID: "BikeComputer-1234"
+        )
+        let other = BackgroundMapUploadDescriptor(
+            mapID: "map-b",
+            sessionID: "session-b",
+            protocolVersion: 2,
+            streamFormatVersion: 1,
+            artifactFilename: "map-b.bmap",
+            accessPointSSID: "BikeComputer-1234"
+        )
+        assertEqual(
+            BackgroundMapUploadArbitration.evaluate(
+                active: [],
+                mapID: current.mapID,
+                sessionID: current.sessionID
+            ),
+            .begin,
+            "no restored upload leaves the device transfer channel available"
+        )
+        assertEqual(
+            BackgroundMapUploadArbitration.evaluate(
+                active: [current],
+                mapID: current.mapID,
+                sessionID: current.sessionID
+            ),
+            .retainExisting,
+            "the exact restored upload is reconciled instead of duplicated"
+        )
+        assertEqual(
+            BackgroundMapUploadArbitration.evaluate(
+                active: [current],
+                mapID: other.mapID,
+                sessionID: other.sessionID
+            ),
+            .blockForOther,
+            "a restored upload globally reserves the single device transfer channel"
+        )
+        assertEqual(
+            BackgroundMapUploadArbitration.evaluate(
+                active: [current, other],
+                mapID: current.mapID,
+                sessionID: current.sessionID
+            ),
+            .blockForOther,
+            "pre-existing cross-session collisions fail closed"
+        )
+        assertEqual(
+            BackgroundMapUploadArbitration.evaluate(
+                active: [],
+                hasUnidentifiedActiveUpload: true,
+                mapID: current.mapID,
+                sessionID: current.sessionID
+            ),
+            .blockForOther,
+            "a restored descriptorless upload reserves the device channel"
+        )
+        let legacy = BackgroundMapUploadDescriptor(
+            mapID: "legacy-map",
+            sessionID: "legacy-session",
+            protocolVersion: 1,
+            streamFormatVersion: nil,
+            artifactFilename: "legacy-map.zip",
+            accessPointSSID: "BikeComputer-1234"
+        )
+        assertEqual(
+            BackgroundMapUploadArbitration.evaluate(
+                active: [legacy],
+                mapID: current.mapID,
+                sessionID: current.sessionID
+            ),
+            .blockForOther,
+            "an active legacy upload blocks a stream transfer"
+        )
+    }
+
+    static func testBackgroundMapUploadResponseBufferIsBounded() {
+        var buffer = BackgroundMapUploadResponseBuffer()
+        assert(
+            buffer.append(Data(repeating: 0x61, count: 4 * 1024)),
+            "background upload accepts its complete bounded response"
+        )
+        assert(
+            !buffer.append(Data([0x62])),
+            "background upload rejects a response beyond its fixed budget"
+        )
+        assertEqual(
+            buffer.data.count,
+            4 * 1024,
+            "rejected response bytes are not accumulated"
+        )
+    }
+
+    static func testMapStreamBackgroundUploadRequest() {
+        let request = MapTransferDeviceClient.streamUploadRequest(
+            baseURL: URL(string: "http://192.168.4.1:8080")!,
+            sessionId: "receipt+with/slash",
+            sessionToken: "transfer-secret",
+            contentLength: 123_456
+        )
+        assertEqual(request.httpMethod, "PUT", "stream background upload uses PUT")
+        assertEqual(
+            request.value(forHTTPHeaderField: "Content-Type"),
+            "application/vnd.openbikecomputer.map-stream",
+            "stream background upload uses the fixed media type"
+        )
+        assertEqual(
+            request.value(forHTTPHeaderField: "Content-Length"),
+            "123456",
+            "stream background upload binds exact artifact length"
+        )
+        assertEqual(
+            request.value(forHTTPHeaderField: "X-BikeComputer-Transfer-Token"),
+            "transfer-secret",
+            "stream background upload authenticates the device request"
+        )
+        assert(
+            request.url?.absoluteString.contains("receipt%2Bwith%2Fslash/install-stream") == true,
+            "stream background upload URL encodes session identity"
+        )
+        assert(
+            request.value(forHTTPHeaderField: "X-Manifest-Receipt") == nil,
+            "caller-controlled manifest headers are not part of the trust boundary"
+        )
+    }
+
+    static func testOfflineMapInstallationCredentialClient() async {
+        let suite = "OfflineMapInstallationCredentialTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let credential = OfflineMapInstallationCredential(
+            clientInstallationId: "inst_v2_1234567890abcdef1234567890abcdef",
+            clientInstallationToken: "v1." + String(repeating: "A", count: 43)
+        )
+        let store = OfflineMapInstallationCredentialStore(defaults: defaults)
+        try! store.save(credential, serverURLString: "https://maps.example.com/")
+        assertEqual(
+            store.load(serverURLString: "https://MAPS.example.com"),
+            credential,
+            "installation credential is scoped to normalized server identity"
+        )
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let artifact = OfflineMapArtifact(
+            format: OfflineMapArtifact.bikeMapStreamFormat,
+            mediaType: "application/vnd.openbikecomputer.map-stream",
+            filename: "map.bmap",
+            objectKey: "maps/map/map.bmap",
+            bytes: 99,
+            sha256: String(repeating: "1", count: 64),
+            manifestReceipt: String(repeating: "2", count: 64),
+            signedManifestReceipt: String(repeating: "3", count: 64),
+            signatureKeyId: "map-prod-1"
+        )
+        OfflineMapTestURLProtocol.configure { request in
+            switch request.url?.path {
+            case "/v1/installations":
+                assertEqual(
+                    request.value(forHTTPHeaderField: "Authorization"),
+                    "Bearer api-secret",
+                    "installation registration uses service authentication"
+                )
+                return (200, try! JSONEncoder().encode(credential))
+            case "/v1/map-packs/map/artifacts/bike-map-stream-v1/download-url":
+                assertEqual(
+                    request.value(forHTTPHeaderField: "X-Installation-Token"),
+                    credential.clientInstallationToken,
+                    "artifact URL refresh uses the installation token"
+                )
+                assert(
+                    request.url?.query?.contains(
+                        "clientInstallationId=\(credential.clientInstallationId)"
+                    ) == true,
+                    "artifact URL refresh is installation scoped"
+                )
+                assert(
+                    request.url?.query?.contains("signedManifestReceipt=\(String(repeating: "3", count: 64))") == true,
+                    "artifact URL refresh is immutable-receipt scoped"
+                )
+                let response: [String: Any] = [
+                    "format": artifact.format,
+                    "mediaType": artifact.mediaType,
+                    "filename": artifact.filename,
+                    "objectKey": artifact.objectKey,
+                    "bytes": artifact.bytes,
+                    "sha256": artifact.sha256,
+                    "manifestReceipt": artifact.manifestReceipt!,
+                    "signedManifestReceipt": artifact.signedManifestReceipt!,
+                    "signatureKeyId": artifact.signatureKeyId!,
+                    "url": "/immutable/map.bmap",
+                    "expiresAt": 123,
+                    "expiresInSeconds": 900,
+                ]
+                return (200, try! JSONSerialization.data(withJSONObject: response))
+            default:
+                return (404, Data())
+            }
+        }
+        defer { OfflineMapTestURLProtocol.reset() }
+        let unregisteredClient = OfflineMapPlatformClient(
+            baseURL: URL(string: "https://maps.example.com")!,
+            apiToken: "api-secret",
+            clientInstallationId: "legacy-installation",
+            session: session
+        )
+        do {
+            assertEqual(
+                try await unregisteredClient.registerInstallation(),
+                credential,
+                "server-issued installation credential decodes"
+            )
+            let registeredClient = OfflineMapPlatformClient(
+                baseURL: URL(string: "https://maps.example.com")!,
+                apiToken: "api-secret",
+                clientInstallationId: credential.clientInstallationId,
+                clientInstallationToken: credential.clientInstallationToken,
+                session: session
+            )
+            assertEqual(
+                try await registeredClient.artifactDownloadURL(
+                    mapId: "map",
+                    jobId: "job-id",
+                    artifact: artifact
+                ).absoluteString,
+                "https://maps.example.com/immutable/map.bmap",
+                "artifact URL refresh returns an absolute immutable URL"
+            )
+        } catch {
+            assert(false, "installation credential client contract succeeds: \(error)")
         }
     }
 
@@ -1133,6 +2028,54 @@ struct NavigationProtocolTests {
         } catch {
             assert(false, "real downloader should use OfflineMapPlatformError")
         }
+
+        OfflineMapTestURLProtocol.configure { _ in
+            (403, Data(repeating: 0x41, count: 32 * 1024))
+        }
+        do {
+            _ = try await OfflineMapPackDownloader.download(
+                from: URL(string: "https://maps.example/large-error.zip")!,
+                onProgress: { _ in },
+                onByteProgress: { _ in },
+                configuration: configuration
+            )
+            assert(false, "large HTTP error bodies must not be cached as maps")
+        } catch let error as OfflineMapPlatformError {
+            guard case .serverStatus(_, let body) = error else {
+                assert(false, "large HTTP error should retain its status")
+                return
+            }
+            assert(
+                body.utf8.count <= 4 * 1024 + 3,
+                "map download diagnostics retain only a bounded error prefix"
+            )
+        } catch {
+            assert(false, "large HTTP error should use OfflineMapPlatformError")
+        }
+
+        OfflineMapTestURLProtocol.configure { _ in
+            (200, Data(repeating: 0x42, count: 5))
+        }
+        do {
+            _ = try await OfflineMapPackDownloader.download(
+                from: URL(string: "https://maps.example/oversized.bmap")!,
+                constraints: OfflineMapDownloadConstraints(
+                    exactBytes: 4,
+                    maximumBytes: BikeMapStreamFormat.maximumArtifactBytes
+                ),
+                onProgress: { _ in },
+                onByteProgress: { _ in },
+                configuration: configuration
+            )
+            assert(false, "a map artifact cannot exceed its declared byte count")
+        } catch let error as BikeMapStreamFormatError {
+            guard case .invalidArtifactMetadata = error else {
+                assert(false, "oversized map download reports metadata mismatch")
+                return
+            }
+        } catch {
+            assert(false, "oversized map download reports a typed format error")
+        }
     }
 
     static func testOfflineMapProgressPresentation() {
@@ -1170,6 +2113,26 @@ struct NavigationProtocolTests {
         )
         assertEqual(progress?.label, "Step 1/5 - 6%", "activation progress includes the total step count")
         assertEqual(progress?.fraction, 0.06, "activation percentage drives the progress bar")
+        assertEqual(
+            MapActivationProgressPresentation.make(
+                status: "receiving",
+                step: 1,
+                stepCount: 3,
+                percentage: 50
+            )?.label,
+            "Step 1/3 - 50%",
+            "stream reception uses the dynamic three-step presentation"
+        )
+        assertEqual(
+            MapActivationProgressPresentation.make(
+                status: "finalizing",
+                step: 2,
+                stepCount: 3,
+                percentage: 1
+            )?.label,
+            "Step 2/3 - 1%",
+            "device-owned finalization remains visible after upload"
+        )
         assertEqual(
             MapActivationProgressPresentation.make(
                 status: "installed",
@@ -1241,32 +2204,6 @@ struct NavigationProtocolTests {
         )
         counter.end()
         assert(!counter.isBusy, "busy state clears after the final operation finishes")
-    }
-
-    static func testBackgroundTransferCompletionGate() {
-        var gate = BackgroundTransferCompletionGate()
-        gate.beginWorkflow()
-        assert(
-            !gate.didFinishEvents(),
-            "background session completion waits for activation and cleanup"
-        )
-        assert(
-            gate.finishWorkflow(),
-            "completion is released after the transfer workflow finishes"
-        )
-
-        gate.beginWorkflow()
-        gate.beginWorkflow()
-        assert(!gate.didFinishEvents(), "multiple workflows hold completion")
-        assert(!gate.finishWorkflow(), "one remaining workflow still holds completion")
-        assert(gate.finishWorkflow(), "the final workflow releases completion")
-
-        gate.beginWorkflow()
-        assert(!gate.finishWorkflow(), "workflow completion waits for URL session events")
-        assert(
-            gate.didFinishEvents(),
-            "URL session events release completion after the workflow already finished"
-        )
     }
 
     @MainActor
@@ -1498,7 +2435,7 @@ struct NavigationProtocolTests {
             defaults: persistedDefaults,
             mapPlatformSession: session,
             cacheDirectory: persistedCache,
-            packDownload: { _, onProgress, _ in
+            packDownload: { _, _, onProgress, _ in
                 persistedDownloadCount += 1
                 onProgress(1)
                 let url = FileManager.default.temporaryDirectory
@@ -1536,7 +2473,7 @@ struct NavigationProtocolTests {
             defaults: persistedDefaults,
             mapPlatformSession: session,
             cacheDirectory: persistedCache,
-            packDownload: { _, _, _ in
+            packDownload: { _, _, _, _ in
                 persistedDownloadCount += 1
                 throw URLError(.cannotConnectToHost)
             }
@@ -1583,7 +2520,7 @@ struct NavigationProtocolTests {
             defaults: managedDefaults,
             mapPlatformSession: session,
             cacheDirectory: managedCache,
-            packDownload: { _, onProgress, _ in
+            packDownload: { _, _, onProgress, _ in
                 onProgress(1)
                 let url = FileManager.default.temporaryDirectory
                     .appendingPathComponent(UUID().uuidString)
@@ -1648,7 +2585,7 @@ struct NavigationProtocolTests {
             defaults: rotatedCustomDefaults,
             mapPlatformSession: session,
             cacheDirectory: rotatedCustomCache,
-            packDownload: { _, onProgress, _ in
+            packDownload: { _, _, onProgress, _ in
                 onProgress(1)
                 let url = FileManager.default.temporaryDirectory
                     .appendingPathComponent(UUID().uuidString)
@@ -1691,7 +2628,7 @@ struct NavigationProtocolTests {
             defaults: discoveryDefaults,
             mapPlatformSession: session,
             cacheDirectory: discoveryCache,
-            packDownload: { _, onProgress, _ in
+            packDownload: { _, _, onProgress, _ in
                 onProgress(1)
                 let url = FileManager.default.temporaryDirectory
                     .appendingPathComponent(UUID().uuidString)
@@ -1788,7 +2725,7 @@ struct NavigationProtocolTests {
             defaults: downloadRetryDefaults,
             mapPlatformSession: session,
             cacheDirectory: downloadRetryCache,
-            packDownload: { _, onProgress, _ in
+            packDownload: { _, _, onProgress, _ in
                 packDownloadAttemptCount += 1
                 if packDownloadAttemptCount <= 2 {
                     let url = FileManager.default.temporaryDirectory
@@ -1936,7 +2873,7 @@ struct NavigationProtocolTests {
             defaults: retryDefaults,
             mapPlatformSession: session,
             cacheDirectory: retryCache,
-            packDownload: { _, onProgress, _ in
+            packDownload: { _, _, onProgress, _ in
                 onProgress(1)
                 let url = FileManager.default.temporaryDirectory
                     .appendingPathComponent(UUID().uuidString)
@@ -2391,6 +3328,10 @@ struct NavigationProtocolTests {
             source.contains(".alert(\"Already on Device\""),
             "tapping installed status explains that the map is already on the device"
         )
+        assert(
+            source.contains("manager.hasActiveBackgroundUpload"),
+            "a restored upload disables conflicting saved-map upload and delete actions"
+        )
     }
 
     @MainActor
@@ -2641,6 +3582,69 @@ struct NavigationProtocolTests {
             ),
             "legacy firmware cannot hide upload for a regenerated same-area pack"
         )
+
+        let streamURL = url.deletingPathExtension().appendingPathExtension("bmap")
+        try? Data([0x01]).write(to: streamURL)
+        defer {
+            try? FileManager.default.removeItem(at: streamURL)
+            try? SavedMapArtifactMetadataStore.delete(for: streamURL)
+        }
+        let signedReceipt = String(repeating: "a", count: 64)
+        let legacyFallbackSession = "map-1-legacy-session"
+        let streamArtifact = OfflineMapArtifact(
+            format: OfflineMapArtifact.bikeMapStreamFormat,
+            mediaType: "application/vnd.openbikecomputer.map-stream",
+            filename: "map-1.bmap",
+            objectKey: "maps/map-1/bike-map-stream-v1/key/\(signedReceipt).bmap",
+            bytes: 1,
+            sha256: String(repeating: "b", count: 64),
+            manifestReceipt: String(repeating: "c", count: 64),
+            signedManifestReceipt: signedReceipt,
+            signatureKeyId: "key"
+        )
+        try? SavedMapArtifactMetadataStore.save(
+            SavedMapArtifactMetadata(
+                schemaVersion: 1,
+                mapID: "map-1",
+                displayName: "Map 1",
+                localArtifactFilename: streamURL.lastPathComponent,
+                streamFormatVersion: 1,
+                jobID: "job-1",
+                serverURLString: "https://maps.example",
+                clientInstallationID: "installation",
+                primaryArtifact: streamArtifact,
+                legacyArtifact: nil,
+                lastTransferProtocol: 1,
+                lastTransferStreamFormat: nil,
+                lastTransferSessionID: legacyFallbackSession,
+                lastBackgroundTaskID: nil,
+                lastDeviceSequence: nil,
+                lastDeviceState: "installed",
+                lastDeviceStep: 3,
+                lastDeviceStepCount: 3,
+                lastDeviceProgress: 100,
+                expectedActiveMapID: "map-1",
+                expectedActiveSessionID: legacyFallbackSession,
+                lastTransferOutcome: "installed"
+            ),
+            for: streamURL
+        )
+        assert(
+            manager.isCachedPackInstalled(
+                streamURL,
+                activeMapId: "map-1",
+                activeSessionId: legacyFallbackSession
+            ),
+            "a canonical stream map installed through v1 recognizes its legacy session"
+        )
+        assert(
+            manager.isCachedPackInstalled(
+                streamURL,
+                activeMapId: "map-1",
+                activeSessionId: signedReceipt
+            ),
+            "the same canonical stream map still recognizes a later v2 install"
+        )
     }
 
     static func testOfflineMapManifestDecoding() {
@@ -2739,6 +3743,22 @@ struct NavigationProtocolTests {
             ),
             "failed",
             "cancelling before activation does not claim a device-side attempt"
+        )
+        assertEqual(
+            MapTransferOutcomePolicy.outcome(
+                after: URLError(.networkConnectionLost),
+                activationMayBeInFlight: true
+            ),
+            "unconfirmed",
+            "an interrupted stream remains resumable and reconcilable"
+        )
+        assertEqual(
+            MapTransferOutcomePolicy.outcome(
+                after: OfflineMapPlatformError.serverStatus(408, "stream_paused"),
+                activationMayBeInFlight: true
+            ),
+            "unconfirmed",
+            "device checkpoint timeout remains resumable"
         )
     }
 
@@ -3000,6 +4020,16 @@ struct NavigationProtocolTests {
             ).decision,
             .installed,
             "an exact active-session transition proves a fast same-ID installation"
+        )
+        assertEqual(
+            evaluate(
+                previousMapId: nil,
+                previousSessionId: nil,
+                previousSequence: nil,
+                activeSessionId: "session-1"
+            ).decision,
+            .installed,
+            "an exact active session proves a fast first installation"
         )
         assertEqual(
             evaluate(
