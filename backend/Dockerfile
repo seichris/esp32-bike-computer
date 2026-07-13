@@ -28,11 +28,12 @@ COPY OSM_Extract /app/OSM_Extract
 RUN python -m pip install '/app/backend[api,object-storage]' \
   && python -m pip install pillow shapely "matplotlib<3.6" pyyaml
 
+ENV PYTHONPATH=/app/backend
+
 RUN python /app/backend/tools/generate_map_stream_build_identity.py \
     --repo-root /app \
     --output /app/config/map-stream-build-identity.json
 
-ENV PYTHONPATH=/app/backend
 ENV MAP_PLATFORM_REPO_ROOT=/app
 ENV MAP_PLATFORM_DATA_ROOT=/data
 ENV MAP_PLATFORM_SOURCE_INDEX=/app/backend/config/source-regions.json
