@@ -3600,8 +3600,12 @@ struct NavigationProtocolTests {
             "settings form passes its focus binding into Saved Maps"
         )
         assert(
-            source.contains(".onTapGesture {\n                focusedSavedMapFilename = nil\n            }"),
-            "tapping another Settings form area clears saved-map name focus"
+            source.contains("Spacer()\n                .contentShape(Rectangle())\n                .onTapGesture {\n                    focusedPackFilename = nil\n                }"),
+            "tapping outside the saved-map name clears focus without covering form controls"
+        )
+        assert(
+            source.contains("manager.beginMapAreaSelection()\n                if manager.isMapAreaSelectionActive {\n                    dismiss()\n                }"),
+            "Download a new Map starts selection and explicitly dismisses Settings"
         )
         assert(
             source.contains(".onChange(of: focusedPackFilename) { newValue in\n            scheduleRenameCommitIfNeeded(focusedFilename: newValue)\n        }"),

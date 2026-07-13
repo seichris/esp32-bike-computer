@@ -95,9 +95,6 @@ struct SettingsView: View {
                     }
                 }
             }
-            .onTapGesture {
-                focusedSavedMapFilename = nil
-            }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
         }
@@ -328,6 +325,7 @@ private struct DownloadingMapsSettingsSection: View {
 }
 
 private struct SavedMapsSettingsSection: View {
+    @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
     @FocusState.Binding var focusedPackFilename: String?
@@ -351,10 +349,18 @@ private struct SavedMapsSettingsSection: View {
                 }
             }
 
-            Button(action: manager.beginMapAreaSelection) {
+            Button {
+                if let commit = renameInteraction.finish() {
+                    commitRename(commit)
+                }
+                focusedPackFilename = nil
+                manager.beginMapAreaSelection()
+                if manager.isMapAreaSelectionActive {
+                    dismiss()
+                }
+            } label: {
                 Label("Download a new Map", systemImage: "rectangle.dashed")
             }
-            .disabled(manager.isBusy || manager.hasPendingMapJob)
         }
         .onChange(of: focusedPackFilename) { newValue in
             scheduleRenameCommitIfNeeded(focusedFilename: newValue)
