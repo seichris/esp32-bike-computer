@@ -482,12 +482,14 @@ changing the amplifier or gain assumptions.
 
 ### 2. Power Sequencing (AXP2101)
 
-The touch screen and display backlight are powered by the AXP2101 PMU. You **must** initialize the AXP2101 via I2C and enable the relevant ALDO/DLDO voltage rails before the screen or touch will respond.
+The display, touch peripherals, and ES8311 codec analog supply are powered by
+the AXP2101 PMU. You **must** initialize the AXP2101 via I2C and enable the
+relevant ALDO/DLDO voltage rails before these devices will respond.
 
 **Initialization sequence:**
 ```cpp
 Wire.beginTransmission(0x34);
-Wire.write(0x90); Wire.write(0x9C); // Enable DLDO1
+Wire.write(0x90); Wire.write(0x9D); // Enable ALDO1 plus display/peripheral rails
 Wire.endTransmission();
 // Enable ALDO1-4, BLDO1-2 similarly on registers 0x92-0x97
 ```
@@ -496,8 +498,9 @@ If the screen is black, it is likely an AXP2101 configuration issue, not a pinou
 
 Verified firmware behavior:
 - AXP2101 is found at `0x34`.
-- Enable register `0x90` should read back `0x9C` after display/peripheral
-  rails are enabled.
+- Enable register `0x90` should read back `0x9D` after display, peripheral, and
+  codec analog rails are enabled. Bit 0 (ALDO1) supplies the ES8311 `AVDD`;
+  leaving it clear makes speaker playback silent after a cold boot.
 - Voltage register readback can be noisy on this shared I2C bus; treat final
   enable-register readback and successful peripheral initialization as the
   stronger boot signal.

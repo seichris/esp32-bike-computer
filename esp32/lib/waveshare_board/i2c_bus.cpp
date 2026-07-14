@@ -64,6 +64,7 @@ void logFailure(const char *label, const char *operation, uint8_t address) {
   lastFailureLogMs = now;
 }
 
+#ifdef WAVESHARE_AMOLED_206
 void recoverAfterFailure() {
   i2cStats.recoveryAttempts++;
   if (busConfigured) {
@@ -77,6 +78,7 @@ void recoverAfterFailure() {
     Wire.setTimeOut(DEFAULT_TIMEOUT_MS);
   }
 }
+#endif
 
 template <typename Fn>
 bool withRetries(uint8_t address, const char *label, const char *operation,
@@ -101,7 +103,9 @@ bool withRetries(uint8_t address, const char *label, const char *operation,
     }
 
     i2cStats.failedTransactions++;
+#ifdef WAVESHARE_AMOLED_206
     recoverAfterFailure();
+#endif
     if (attempt + 1 < attempts) {
       delay(2);
     }
@@ -116,6 +120,17 @@ bool withRetries(uint8_t address, const char *label, const char *operation,
 void configureBus(uint32_t clockHz) {
   ensureMutex();
   activeClockHz = clockHz;
+#ifdef WAVESHARE_AMOLED_175
+  busConfigured = Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  if (busConfigured) {
+    Wire.setClock(activeClockHz);
+    Wire.setTimeOut(DEFAULT_TIMEOUT_MS);
+  }
+  Serial.printf("Waveshare I2C: %s SDA=%u SCL=%u clock=%lu Hz timeout=%u ms\n",
+                busConfigured ? "configured" : "configuration failed",
+                I2C_SDA_PIN, I2C_SCL_PIN,
+                static_cast<unsigned long>(activeClockHz), DEFAULT_TIMEOUT_MS);
+#else
   Wire.setPins(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.begin();
   Wire.setClock(activeClockHz);
@@ -124,6 +139,7 @@ void configureBus(uint32_t clockHz) {
   Serial.printf("Waveshare I2C: configured SDA=%u SCL=%u clock=%lu Hz timeout=%u ms\n",
                 I2C_SDA_PIN, I2C_SCL_PIN,
                 static_cast<unsigned long>(activeClockHz), DEFAULT_TIMEOUT_MS);
+#endif
 }
 
 const Stats &stats() { return i2cStats; }
@@ -145,6 +161,34 @@ void debugScan(Stream &out, uint8_t firstAddress, uint8_t lastAddress) {
 }
 
 bool probe(uint8_t address, const char *label, uint8_t attempts) {
+#ifdef WAVESHARE_AMOLED_175
+  if (attempts == 0) {
+    attempts = 1;
+  }
+
+  BusLock lock;
+  if (!lock.ok()) {
+    i2cStats.failedTransactions++;
+    logFailure(label, "probe", address);
+    i2cStats.missingDevices++;
+    return false;
+  }
+
+  for (uint8_t attempt = 0; attempt < attempts; ++attempt) {
+    Wire.beginTransmission(address);
+    if (Wire.endTransmission() == 0) {
+      return true;
+    }
+    i2cStats.failedTransactions++;
+    if (attempt + 1 < attempts) {
+      delay(2);
+    }
+  }
+
+  logFailure(label, "probe", address);
+  i2cStats.missingDevices++;
+  return false;
+#else
   bool ok = withRetries(address, label, "probe", attempts, [address]() {
     Wire.beginTransmission(address);
     return Wire.endTransmission() == 0;
@@ -153,6 +197,7 @@ bool probe(uint8_t address, const char *label, uint8_t attempts) {
     i2cStats.missingDevices++;
   }
   return ok;
+#endif
 }
 
 bool writeRegister8(uint8_t address, uint8_t reg, uint8_t value,
@@ -211,7 +256,11 @@ bool readRegisterBlock8(uint8_t address, uint8_t reg, uint8_t *data,
                      [address, reg, data, len]() {
                        Wire.beginTransmission(address);
                        Wire.write(reg);
+#ifdef WAVESHARE_AMOLED_175
+                       if (Wire.endTransmission() != 0) {
+#else
                        if (Wire.endTransmission(false) != 0) {
+#endif
                          return false;
                        }
 
@@ -239,7 +288,11 @@ bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
                        Wire.beginTransmission(address);
                        Wire.write(reg >> 8);
                        Wire.write(reg & 0xFF);
+#ifdef WAVESHARE_AMOLED_175
+                       if (Wire.endTransmission() != 0) {
+#else
                        if (Wire.endTransmission(false) != 0) {
+#endif
                          return false;
                        }
 
