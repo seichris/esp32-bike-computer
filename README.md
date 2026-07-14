@@ -2,32 +2,20 @@
 
 # Open Source Bike Computer
 
-Navigate your bike rides with LED screen bike computer.
+Navigate your bike rides with a sleek, compact bike computer.
 
-- **Paired iOS app**: Plan routes, record workout metrics, and stream turn-by-turn navigation, GPS, map settings, and ride telemetry to the handlebar display over BLE.
-- **Supported hardware**:
-  - [Waveshare ESP32-S3-Touch-AMOLED-1.75](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31262)
-  - [Waveshare ESP32-S3-Touch-AMOLED-2.06](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm)
-  - [Seeed Studio XIAO nRF52840](https://www.seeedstudio.com/Seeed-XIAO-BLE-nRF52840-p-5201.html) + [1.28" Round Touch Display for XIAO](https://www.seeedstudio.com/1-28-Round-Touch-Display-for-Seeed-Studio-XIAO-ESP32.html) via [PR #31](https://github.com/seichris/open-bike-computer/pull/31)
+## Get started
 
-The firmware, iOS app, and hardware notes are open source, so you can tailor the
-device to your rides. See [CONTRIBUTING.md](CONTRIBUTING.md) to build on this
-codebase.
+1. **Get your bike computer.** Choose the round [Waveshare 1.75-inch](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31262), the larger rectangular [Waveshare 2.06-inch](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm), or a compact round build using the [Seeed Studio XIAO nRF52840](https://www.seeedstudio.com/Seeed-XIAO-BLE-nRF52840-p-5201.html) + [1.28-inch Round Touch Display](https://www.seeedstudio.com/1-28-Round-Touch-Display-for-Seeed-Studio-XIAO-ESP32.html).
+2. **Download the free iOS app** and pair your bike computer.
+3. **Ride.** Start your workout and follow turn-by-turn navigation from your handlebars.
 
-The iOS app needs an internet connection for route planning. For a fully
-offline, phone-free setup, flash [IceNav-v3](https://github.com/jgauchia/IceNav-v3)
-on a GPS-equipped board like the
-[Waveshare ESP32-S3-Touch-AMOLED-1.75 with GPS](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31264).
+To mount your bike computer on a Garmin mount, use our 3D-printable files in
+[`hardware/cad`](https://github.com/seichris/open-bike-computer/blob/main/hardware/cad/README.md).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the repo layout, build and test flow, supported-hardware notes, and the current BLE protocol overview.
+Ideas and feature requests are welcome—[open an issue](https://github.com/seichris/open-bike-computer/issues/new).
 
-## Garmin mounts
-
-Mount your Bike Computer on a Garmin mount, using our 3d print files in [`hardware/cad`](hardware/cad/README.md).
-
-## Offline maps
-
-See [OFFLINE_MAPS.md](OFFLINE_MAPS.md) to generate OpenStreetMap vector blocks
-for SD-card map rendering.
+For code contributions, see
+[CONTRIBUTING.md](https://github.com/seichris/open-bike-computer/blob/main/CONTRIBUTING.md).
