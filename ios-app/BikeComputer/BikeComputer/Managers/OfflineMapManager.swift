@@ -861,6 +861,13 @@ final class OfflineMapManager: ObservableObject {
         lastTransferOutcome == "unconfirmed"
     }
 
+    var hasPausedMapUpload: Bool {
+        guard let packURL = try? cachedPackURL(mapId: lastTransferMapId) else {
+            return false
+        }
+        return isPausedMapUpload(packURL)
+    }
+
     var hasDownloadedPendingDeviceInstall: Bool {
         guard OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults),
               let activeJobId = OfflineMapJobPersistence.activeJobId(defaults: defaults),
@@ -1171,9 +1178,48 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func transferCachedPack(at packURL: URL, bleManager: BLEManager) {
+        startCachedPackTransfer(
+            at: packURL,
+            bleManager: bleManager,
+            resumePausedUpload: isPausedMapUpload(packURL)
+        )
+    }
+
+    func resumePausedMapUpload(bleManager: BLEManager) {
+        guard let packURL = try? cachedPackURL(mapId: lastTransferMapId),
+              isPausedMapUpload(packURL) else {
+            return
+        }
+        startCachedPackTransfer(
+            at: packURL,
+            bleManager: bleManager,
+            resumePausedUpload: true
+        )
+    }
+
+    func isPausedMapUpload(_ packURL: URL) -> Bool {
+        let metadata = SavedMapArtifactMetadataStore.load(for: packURL)
+        return PausedMapUploadResumePolicy.isAvailable(
+            lastTransferOutcome: lastTransferOutcome,
+            lastTransferMapID: lastTransferMapId,
+            candidateMapID: savedMapID(for: packURL),
+            lastDeviceState: metadata?.lastDeviceState,
+            statusMessage: statusMessage
+        )
+    }
+
+    private func startCachedPackTransfer(
+        at packURL: URL,
+        bleManager: BLEManager,
+        resumePausedUpload: Bool
+    ) {
         Task {
             await runBusy {
-                try await self.transferPack(at: packURL, bleManager: bleManager)
+                try await self.transferPack(
+                    at: packURL,
+                    bleManager: bleManager,
+                    resumePausedUpload: resumePausedUpload
+                )
             }
         }
     }
@@ -2051,10 +2097,30 @@ final class OfflineMapManager: ObservableObject {
         try await transferPack(at: packURL, bleManager: bleManager)
     }
 
-    private func transferPack(at packURL: URL, bleManager: BLEManager) async throws {
+    private func transferPack(
+        at packURL: URL,
+        bleManager: BLEManager,
+        resumePausedUpload: Bool = false
+    ) async throws {
+        let resumeProgressFloor: Int
+        if resumePausedUpload {
+            let lastVisibleProgress = max(
+                activationProgress?.percentage ?? 0,
+                SavedMapArtifactMetadataStore.load(for: packURL)?.lastDeviceProgress ?? 0
+            )
+            resumeProgressFloor = min(max(lastVisibleProgress, 0), 100)
+        } else {
+            resumeProgressFloor = 0
+        }
         statusMessage = "preparing transfer"
         transferProgress = 0
-        activationProgress = nil
+        activationProgress = resumeProgressFloor > 0
+            ? MapActivationProgressPresentation(
+                step: 1,
+                stepCount: 3,
+                percentage: resumeProgressFloor
+            )
+            : nil
         if packURL.pathExtension.lowercased() == "bmap",
            let metadata = SavedMapArtifactMetadataStore.load(for: packURL),
            SavedMapStreamMigrationFallback.shouldUseLegacyArtifact(for: metadata) {
@@ -2117,7 +2183,8 @@ final class OfflineMapManager: ObservableObject {
             active: activeUploadActivity.descriptors,
             hasUnidentifiedActiveUpload: activeUploadActivity.hasUnidentifiedTask,
             mapID: expectedMapId,
-            sessionID: sessionId
+            sessionID: sessionId,
+            resumeRequested: resumePausedUpload
         ) {
         case .retainExisting:
             if case .stream = prepared {
@@ -2150,10 +2217,31 @@ final class OfflineMapManager: ObservableObject {
                 }
             }
             return
+        case .retireExisting:
+            break
         case .blockForOther:
             throw OfflineMapPlatformError.backgroundMapUploadInProgress
         case .begin:
             break
+        }
+        if resumePausedUpload {
+            guard await BackgroundMapUploadCoordinator.shared.retireActiveUpload(
+                mapID: expectedMapId,
+                sessionID: sessionId
+            ) else {
+                throw OfflineMapPlatformError.backgroundMapUploadInProgress
+            }
+            let remainingActivity = await BackgroundMapUploadCoordinator.shared
+                .activeUploadActivity()
+            hasActiveBackgroundUpload = remainingActivity.hasActiveTask
+            guard BackgroundMapUploadArbitration.evaluate(
+                active: remainingActivity.descriptors,
+                hasUnidentifiedActiveUpload: remainingActivity.hasUnidentifiedTask,
+                mapID: expectedMapId,
+                sessionID: sessionId
+            ) == .begin else {
+                throw OfflineMapPlatformError.backgroundMapUploadInProgress
+            }
         }
 #endif
 
@@ -2184,6 +2272,10 @@ final class OfflineMapManager: ObservableObject {
         }
 
         do {
+            if resumePausedUpload {
+                statusMessage = "restarting device transfer mode"
+                await deviceTransferManager.exitMapTransfer(bleManager: bleManager)
+            }
             let transferSession = try await deviceTransferManager.enterMapTransfer(
                 bleManager: bleManager
             ) { message in
@@ -2339,7 +2431,10 @@ final class OfflineMapManager: ObservableObject {
                     ) { completedBytes, totalBytes in
                         self.transferProgress = totalBytes == 0 ? 0 :
                             Double(completedBytes) / Double(totalBytes)
-                        let percent = Int((self.transferProgress * 100).rounded())
+                        let percent = max(
+                            resumeProgressFloor,
+                            Int((self.transferProgress * 100).rounded())
+                        )
                         self.activationProgress = MapActivationProgressPresentation(
                             step: 1,
                             stepCount: 3,

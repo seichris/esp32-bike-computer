@@ -235,7 +235,26 @@ private struct DownloadingMapsSettingsSection: View {
                 )
             }
 
-            if let activationProgress = manager.activationProgress {
+            if manager.hasPausedMapUpload {
+                Button {
+                    manager.resumePausedMapUpload(bleManager: bleManager)
+                } label: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        StatusValueRow(
+                            status: "Map upload paused. Tap to resume.",
+                            isBusy: false
+                        )
+                        if let activationProgress = manager.activationProgress {
+                            ProgressView(value: activationProgress.fraction)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(manager.isBusy || !bleManager.isNavigationReady)
+                .accessibilityLabel("Resume map upload")
+                .accessibilityHint("Reconnects to the device Wi-Fi and resumes the saved map")
+            } else if let activationProgress = manager.activationProgress {
                 VStack(alignment: .leading, spacing: 6) {
                     StatusValueRow(status: activationProgress.label, isBusy: false)
                     ProgressView(value: activationProgress.fraction)
@@ -432,6 +451,7 @@ private struct DownloadedMapRow: View {
             activeMapId: bleManager.mapTransferActiveMapId,
             activeSessionId: bleManager.mapTransferActiveSessionId
         )
+        let isPausedUpload = manager.isPausedMapUpload(packURL)
 
         HStack(spacing: 12) {
             if renameInteraction.editingFilename == packURL.lastPathComponent {
@@ -500,15 +520,24 @@ private struct DownloadedMapRow: View {
                     focusedPackFilename = nil
                     manager.transferCachedPack(at: packURL, bleManager: bleManager)
                 } label: {
-                    Image(systemName: "arrow.up.circle")
+                    Image(
+                        systemName: isPausedUpload
+                            ? "arrow.clockwise.circle"
+                            : "arrow.up.circle"
+                    )
                         .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.borderless)
                 .disabled(
-                    manager.isBusy || manager.hasActiveBackgroundUpload ||
+                    manager.isBusy ||
+                        (!isPausedUpload && manager.hasActiveBackgroundUpload) ||
                         !bleManager.isNavigationReady
                 )
-                .accessibilityLabel("Transfer \(displayName) to device")
+                .accessibilityLabel(
+                    isPausedUpload
+                        ? "Resume transferring \(displayName) to device"
+                        : "Transfer \(displayName) to device"
+                )
             }
 
             Button(role: .destructive) {

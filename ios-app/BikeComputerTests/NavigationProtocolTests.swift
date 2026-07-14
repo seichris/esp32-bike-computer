@@ -405,6 +405,7 @@ struct NavigationProtocolTests {
         testSavedMapArtifactMetadataRoundTrip()
         testBackgroundMapUploadRestorationState()
         testBackgroundMapUploadArbitration()
+        testPausedMapUploadResumePolicy()
         testBackgroundMapUploadResponseBufferIsBounded()
         testMapStreamBackgroundUploadRequest()
         await testDeviceTransferManagerWaitsForMapToken()
@@ -1550,6 +1551,16 @@ struct NavigationProtocolTests {
             BackgroundMapUploadArbitration.evaluate(
                 active: [current],
                 mapID: current.mapID,
+                sessionID: current.sessionID,
+                resumeRequested: true
+            ),
+            .retireExisting,
+            "an explicit resume retires only the matching restored upload"
+        )
+        assertEqual(
+            BackgroundMapUploadArbitration.evaluate(
+                active: [current],
+                mapID: current.mapID,
                 sessionID: current.sessionID
             ),
             .retainExisting,
@@ -1568,20 +1579,22 @@ struct NavigationProtocolTests {
             BackgroundMapUploadArbitration.evaluate(
                 active: [current, other],
                 mapID: current.mapID,
-                sessionID: current.sessionID
+                sessionID: current.sessionID,
+                resumeRequested: true
             ),
             .blockForOther,
-            "pre-existing cross-session collisions fail closed"
+            "resume never retires a cross-session collision"
         )
         assertEqual(
             BackgroundMapUploadArbitration.evaluate(
                 active: [],
                 hasUnidentifiedActiveUpload: true,
                 mapID: current.mapID,
-                sessionID: current.sessionID
+                sessionID: current.sessionID,
+                resumeRequested: true
             ),
             .blockForOther,
-            "a restored descriptorless upload reserves the device channel"
+            "resume never retires a descriptorless upload"
         )
         let legacy = BackgroundMapUploadDescriptor(
             mapID: "legacy-map",
@@ -1599,6 +1612,64 @@ struct NavigationProtocolTests {
             ),
             .blockForOther,
             "an active legacy upload blocks a stream transfer"
+        )
+    }
+
+    static func testPausedMapUploadResumePolicy() {
+        assert(
+            PausedMapUploadResumePolicy.isAvailable(
+                lastTransferOutcome: "unconfirmed",
+                lastTransferMapID: "map-a",
+                candidateMapID: "map-a",
+                lastDeviceState: "paused"
+            ),
+            "a paused matching transfer exposes the resume action"
+        )
+        assert(
+            PausedMapUploadResumePolicy.isAvailable(
+                lastTransferOutcome: "unconfirmed",
+                lastTransferMapID: "map-a",
+                candidateMapID: "map-a",
+                lastDeviceState: "idle"
+            ),
+            "an interrupted transfer that returned to the active map can restart"
+        )
+        assert(
+            PausedMapUploadResumePolicy.isAvailable(
+                lastTransferOutcome: "unconfirmed",
+                lastTransferMapID: "map-a",
+                candidateMapID: "map-a",
+                lastDeviceState: "receiving",
+                statusMessage: "Map upload paused. Tap Upload to resume."
+            ),
+            "a locally observed upload interruption exposes resume before BLE catches up"
+        )
+        assert(
+            !PausedMapUploadResumePolicy.isAvailable(
+                lastTransferOutcome: "unconfirmed",
+                lastTransferMapID: "map-a",
+                candidateMapID: "map-a",
+                lastDeviceState: "receiving"
+            ),
+            "a receiving transfer remains owned by its active background task"
+        )
+        assert(
+            !PausedMapUploadResumePolicy.isAvailable(
+                lastTransferOutcome: "unconfirmed",
+                lastTransferMapID: "map-a",
+                candidateMapID: "map-b",
+                lastDeviceState: "paused"
+            ),
+            "a paused transfer never enables resume on another saved map"
+        )
+        assert(
+            !PausedMapUploadResumePolicy.isAvailable(
+                lastTransferOutcome: "installed",
+                lastTransferMapID: "map-a",
+                candidateMapID: "map-a",
+                lastDeviceState: "paused"
+            ),
+            "a terminal transfer does not expose a stale resume action"
         )
     }
 
@@ -3620,8 +3691,14 @@ struct NavigationProtocolTests {
         assert(
             source.contains("if isInstalled {") &&
                 source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
-                source.contains("Image(systemName: \"arrow.up.circle\")"),
-            "each saved map shows installed status or upload as mutually exclusive actions"
+                source.contains("\"arrow.clockwise.circle\"") &&
+                source.contains("\"arrow.up.circle\""),
+            "each saved map shows installed status, resume, or upload as exclusive actions"
+        )
+        assert(
+            source.contains("manager.resumePausedMapUpload(bleManager: bleManager)") &&
+                source.contains("Map upload paused. Tap to resume."),
+            "the paused status row resumes the matching map transfer"
         )
         assert(
             source.contains(".alert(\"Already on Device\""),

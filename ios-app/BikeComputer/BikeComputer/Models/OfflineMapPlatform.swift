@@ -442,6 +442,26 @@ enum OfflineMapAutomaticRecoveryTrigger {
     }
 }
 
+nonisolated enum PausedMapUploadResumePolicy {
+    static func isAvailable(
+        lastTransferOutcome: String,
+        lastTransferMapID: String,
+        candidateMapID: String,
+        lastDeviceState: String?,
+        statusMessage: String = ""
+    ) -> Bool {
+        guard lastTransferOutcome == "unconfirmed",
+              !lastTransferMapID.isEmpty,
+              lastTransferMapID == candidateMapID else {
+            return false
+        }
+        return lastDeviceState == "paused" ||
+            lastDeviceState == "idle" ||
+            statusMessage == "Map upload paused. Tap Upload to resume." ||
+            statusMessage == "Activation paused. Tap Upload to resume."
+    }
+}
+
 struct OfflineMapJobGeometry: Decodable, Equatable {
     let mode: String
     let bounds: [Double]
@@ -1162,13 +1182,15 @@ nonisolated struct BackgroundMapUploadDescriptor: Codable, Equatable {
 nonisolated enum BackgroundMapUploadArbitration: Equatable {
     case begin
     case retainExisting
+    case retireExisting
     case blockForOther
 
     static func evaluate(
         active: [BackgroundMapUploadDescriptor],
         hasUnidentifiedActiveUpload: Bool = false,
         mapID: String,
-        sessionID: String
+        sessionID: String,
+        resumeRequested: Bool = false
     ) -> Self {
         guard !hasUnidentifiedActiveUpload else { return .blockForOther }
         guard !active.isEmpty else { return .begin }
@@ -1177,7 +1199,7 @@ nonisolated enum BackgroundMapUploadArbitration: Equatable {
         }) else {
             return .blockForOther
         }
-        return .retainExisting
+        return resumeRequested ? .retireExisting : .retainExisting
     }
 }
 
@@ -1362,6 +1384,7 @@ final class BackgroundMapUploadCoordinator: NSObject,
 
     private let lock = NSLock()
     private var pendingUploads: [Int: PendingUpload] = [:]
+    private var retiredTaskIDs: Set<Int> = []
     private var backgroundCompletionHandler: (() -> Void)?
 
     private lazy var session: URLSession = {
@@ -1473,12 +1496,59 @@ final class BackgroundMapUploadCoordinator: NSObject,
         await activeUploadActivity().descriptors
     }
 
+    func retireActiveUpload(mapID: String, sessionID: String) async -> Bool {
+        let tasks = await allTasks()
+        let matchingTasks = tasks.filter { task in
+            guard let descriptor = Self.descriptor(for: task) else {
+                return false
+            }
+            return descriptor.mapID == mapID && descriptor.sessionID == sessionID
+        }
+        markTasksRetired(matchingTasks.map(\.taskIdentifier))
+        for task in matchingTasks
+            where task.state == .running || task.state == .suspended {
+            task.cancel()
+        }
+        guard !matchingTasks.isEmpty else { return true }
+
+        for _ in 0..<20 {
+            let remaining = await activeUploadActivity()
+            if !remaining.hasUnidentifiedTask,
+               remaining.descriptors.allSatisfy({
+                   $0.mapID != mapID || $0.sessionID != sessionID
+               }) {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        unmarkTasksRetired(matchingTasks.map(\.taskIdentifier))
+        return false
+    }
+
     func hasActiveUpload(mapID: String, sessionID: String) async -> Bool {
         let activity = await activeUploadActivity()
         guard !activity.hasUnidentifiedTask else { return true }
         return activity.descriptors.contains {
             $0.mapID == mapID && $0.sessionID == sessionID
         }
+    }
+
+    private func allTasks() async -> [URLSessionTask] {
+        await withCheckedContinuation { continuation in
+            session.getAllTasks { continuation.resume(returning: $0) }
+        }
+    }
+
+    private func markTasksRetired(_ taskIDs: [Int]) {
+        lock.lock()
+        retiredTaskIDs.formUnion(taskIDs)
+        lock.unlock()
+    }
+
+    private func unmarkTasksRetired(_ taskIDs: [Int]) {
+        lock.lock()
+        retiredTaskIDs.subtract(taskIDs)
+        lock.unlock()
     }
 
     func urlSession(
@@ -1540,6 +1610,7 @@ final class BackgroundMapUploadCoordinator: NSObject,
     ) {
         lock.lock()
         let pending = pendingUploads.removeValue(forKey: task.taskIdentifier)
+        let wasRetiredForResume = retiredTaskIDs.remove(task.taskIdentifier) != nil
         lock.unlock()
         let descriptor = Self.descriptor(for: task)
         if let descriptor,
@@ -1568,7 +1639,8 @@ final class BackgroundMapUploadCoordinator: NSObject,
             name: BackgroundMapUploadStateStore.didChangeNotification,
             object: nil
         )
-        if let ssid = descriptor?.accessPointSSID,
+        if !wasRetiredForResume,
+           let ssid = descriptor?.accessPointSSID,
            !ssid.isEmpty,
            descriptor?.protocolVersion == 2 {
             removeAccessoryNetworkConfigurationIfUnused(
