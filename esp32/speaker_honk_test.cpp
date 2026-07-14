@@ -28,9 +28,6 @@ void setup() {
   delay(1500);
   Serial.println("Waveshare AMOLED production speaker smoke test");
 
-#ifdef WAVESHARE_AMOLED_175
-  waveshare_board::recoverI2CBus();
-#endif
   waveshare_board::i2c::configureBus();
 #ifdef WAVESHARE_AMOLED_175
   waveshare_board::enablePowerRails();

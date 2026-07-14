@@ -170,11 +170,11 @@ bool enableDisplayRails() { return setDisplayPower(true); }
 bool setPeripheralPower(bool enabled) {
   uint8_t value = currentLdoEnableValue(
       enabled ? AXP2101_KNOWN_GOOD_LDO_ENABLES
-              : AXP2101_MANAGED_PERIPHERAL_ENABLE_MASK);
+              : AXP2101_MANAGED_LDO_ENABLE_MASK);
   if (enabled) {
-    value |= AXP2101_MANAGED_PERIPHERAL_ENABLE_MASK;
+    value |= AXP2101_MANAGED_LDO_ENABLE_MASK;
   } else {
-    value &= ~AXP2101_MANAGED_PERIPHERAL_ENABLE_MASK;
+    value &= ~AXP2101_MANAGED_LDO_ENABLE_MASK;
   }
   return writeRegisterChecked(enabled ? "peripheral on" : "peripheral off",
                               AXP2101_LDO_ENABLE_REG, value);

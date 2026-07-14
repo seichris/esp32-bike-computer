@@ -501,6 +501,8 @@ Verified firmware behavior:
 - Enable register `0x90` should read back `0x9D` after display, peripheral, and
   codec analog rails are enabled. Bit 0 (ALDO1) supplies the ES8311 `AVDD`;
   leaving it clear makes speaker playback silent after a cold boot.
+- The normal peripheral shutdown path clears ALDO1 together with the other
+  managed 1.75 rails before deep sleep; it is enabled again during boot.
 - Voltage register readback can be noisy on this shared I2C bus; treat final
   enable-register readback and successful peripheral initialization as the
   stronger boot signal.
@@ -546,8 +548,12 @@ GPIO15/GPIO14. Keep the bus conservative:
 - Use the Waveshare shared I2C helper for new board devices.
 - Keep the FreeRTOS mutex around shared transactions; BLE callbacks can sync
   RTC time while LVGL/touch code is polling.
-- Use retries, short timeouts, counters, and bus recovery rather than rapid
-  unchecked polling.
+- Use retries, short timeouts, counters, and board-appropriate recovery rather
+  than rapid unchecked polling.
+- On the 1.75 target, retries deliberately avoid tearing down or bit-banging
+  the active controller after a failed transaction. Those recovery operations
+  caused shared-bus startup failures on the tested board; a reboot remains the
+  fallback for a persistent controller fault.
 - Avoid large burst reads on this bus unless tested on the connected board.
 
 ### 6. RTC (PCF85063)
