@@ -8,6 +8,7 @@ from map_platform.map_stream_build_identity import (
     load_map_stream_build_identity,
     producer_build_sha256,
     require_hashed_worker_runtime,
+    worker_source_inputs,
 )
 
 
@@ -91,6 +92,18 @@ class MapStreamBuildIdentityTests(unittest.TestCase):
         require_hashed_worker_runtime(repo_root, hashed_package)
         with self.assertRaisesRegex(ValueError, "hashed source tree"):
             require_hashed_worker_runtime(repo_root, installed_package)
+
+    def test_worker_identity_hashes_relocated_osm_extract_sources(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        logical_names = {name for name, _ in worker_source_inputs(repo_root)}
+
+        self.assertTrue(
+            any(name.startswith("tools/OSM_Extract/conf/") for name in logical_names)
+        )
+        self.assertTrue(
+            any(name.startswith("tools/OSM_Extract/scripts/") for name in logical_names)
+        )
+        self.assertFalse(any(name.startswith("OSM_Extract/") for name in logical_names))
 
 
 if __name__ == "__main__":

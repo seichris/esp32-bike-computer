@@ -37,7 +37,7 @@ class PipelinePaths:
 
     @property
     def osm_extract_root(self) -> Path:
-        return self.repo_root / "OSM_Extract"
+        return self.repo_root / "tools" / "OSM_Extract"
 
 
 @dataclass(frozen=True)
