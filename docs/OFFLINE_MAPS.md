@@ -68,3 +68,8 @@ Copy the generated map folders to the SD card under:
 The ESP32 firmware reads `.fmb` blocks from this layout for offline map
 rendering. The XIAO nRF52840 target has an experimental map-lite probe/render
 path that uses the same folder structure for hardware go/no-go testing.
+
+The iOS app needs an internet connection for route planning. For a fully
+offline, phone-free setup, flash [IceNav-v3](https://github.com/jgauchia/IceNav-v3)
+on a GPS-equipped board like the
+[Waveshare ESP32-S3-Touch-AMOLED-1.75 with GPS](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31264).
