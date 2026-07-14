@@ -2,6 +2,7 @@
 
 #include "i2c_bus.hpp"
 #include "speaker.hpp"
+#include "waveshare_board.hpp"
 
 namespace {
 
@@ -25,9 +26,12 @@ void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(1);
   delay(1500);
-  Serial.println("Waveshare AMOLED 2.06 production speaker smoke test");
+  Serial.println("Waveshare AMOLED production speaker smoke test");
 
   waveshare_board::i2c::configureBus();
+#ifdef WAVESHARE_AMOLED_175
+  waveshare_board::enablePowerRails();
+#endif
   if (!waveshare_board::speaker::begin()) {
     Serial.println("Speaker test: initialization failed");
     return;

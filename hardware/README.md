@@ -362,7 +362,8 @@ card, and factory firmware.
 | Touch Controller | CST9217 | I2C | 0x5A; interrupt on GPIO21 is a hint, not sole trigger |
 | I/O Expander | TCA9554 | I2C | 0x20; controls CST9217 reset on P0 |
 | RTC | PCF85063 | I2C | 0x51; on AXP2101 RTC rail, but no full power-removal retention on the tested board |
-| Audio Codec | ES8311 | I2C/I2S | Schematic shows codec nets; not detected in current firmware scan |
+| Audio Codec | ES8311 | I2C/I2S | Address 0x18; production playback verified |
+| Speaker Amplifier | NS4150B | Analog | Driven by ES8311; PA enable on GPIO46 |
 | IMU | QMI8658 | I2C | 0x6B primary, 0x6A fallback |
 | Display Driver | CO5300 | QSPI | 466x466 active AMOLED window |
 | SD Card Slot | SD1 | SPI | Dedicated HSPI bus in firmware |
@@ -421,15 +422,34 @@ This Waveshare model should be treated as no-GPS hardware. Do not add or debug
 a UART GPS feature for this target unless a different assembled variant is
 confirmed.
 
-### Audio (I2S) - TO BE VERIFIED
+### Audio (I2S) - VERIFIED WORKING
 
 | Signal | GPIO | Function |
 |---|---|---|
-| I2S_BCLK | TBD | Bit Clock |
-| I2S_WS | TBD | Word Select (LRCK) |
-| I2S_DOUT | TBD | Data Out (Speaker) |
-| I2S_DIN | TBD | Data In (Mic) |
-| ES8311_MCLK | TBD | Master Clock |
+| ES8311_MCLK | GPIO 42 | Master clock |
+| I2S_BCLK | GPIO 9 | Bit clock |
+| I2S_WS | GPIO 45 | Word select (LRCK) |
+| I2S_DOUT | GPIO 8 | ESP32 data out to ES8311 `DSDIN` |
+| I2S_DIN | GPIO 10 | ES8311 `ASDOUT` to ESP32 data in |
+| PA_CTRL | GPIO 46 | Active-high NS4150B amplifier enable |
+
+The production path uses the ES8311 codec and NS4150B amplifier with signed
+16-bit stereo PCM at 16 kHz. Embedded horn and bell assets are available in
+both the production `WAVESHARE_AMOLED_175` image and the standalone
+`WAVESHARE_AMOLED_175_SPEAKER_HONK` smoke-test image.
+
+The 1.75 schematic powers the NS4150B from `VCC3V3`, so the firmware models the
+PA and codec DAC rails as 3.3 V for volume calculations. This differs from the
+2.06 path, whose established audio configuration models a 5 V PA rail.
+The 1.75-specific volume curve maps the default `70%` setting to 0 dB DAC
+gain, `90%` to +4 dB, and caps `100%` at +6 dB. This avoids the +20 dB ceiling
+used by the separately calibrated 2.06 path.
+
+The tested external speaker is marked only `F3`. That marking is not a usable
+impedance or wattage rating, and neither the board schematic nor the speaker
+marking establishes the speaker's electrical limits. Do not infer 4/8 ohm or a
+power rating from `F3`; confirm the speaker datasheet or measure it before
+changing the amplifier or gain assumptions.
 
 ### User Buttons
 
@@ -462,12 +482,14 @@ confirmed.
 
 ### 2. Power Sequencing (AXP2101)
 
-The touch screen and display backlight are powered by the AXP2101 PMU. You **must** initialize the AXP2101 via I2C and enable the relevant ALDO/DLDO voltage rails before the screen or touch will respond.
+The display, touch peripherals, and ES8311 codec analog supply are powered by
+the AXP2101 PMU. You **must** initialize the AXP2101 via I2C and enable the
+relevant ALDO/DLDO voltage rails before these devices will respond.
 
 **Initialization sequence:**
 ```cpp
 Wire.beginTransmission(0x34);
-Wire.write(0x90); Wire.write(0x9C); // Enable DLDO1
+Wire.write(0x90); Wire.write(0x9D); // Enable ALDO1 plus display/peripheral rails
 Wire.endTransmission();
 // Enable ALDO1-4, BLDO1-2 similarly on registers 0x92-0x97
 ```
@@ -476,8 +498,11 @@ If the screen is black, it is likely an AXP2101 configuration issue, not a pinou
 
 Verified firmware behavior:
 - AXP2101 is found at `0x34`.
-- Enable register `0x90` should read back `0x9C` after display/peripheral
-  rails are enabled.
+- Enable register `0x90` should read back `0x9D` after display, peripheral, and
+  codec analog rails are enabled. Bit 0 (ALDO1) supplies the ES8311 `AVDD`;
+  leaving it clear makes speaker playback silent after a cold boot.
+- The normal peripheral shutdown path clears ALDO1 together with the other
+  managed 1.75 rails before deep sleep; it is enabled again during boot.
 - Voltage register readback can be noisy on this shared I2C bus; treat final
   enable-register readback and successful peripheral initialization as the
   stronger boot signal.
@@ -523,8 +548,12 @@ GPIO15/GPIO14. Keep the bus conservative:
 - Use the Waveshare shared I2C helper for new board devices.
 - Keep the FreeRTOS mutex around shared transactions; BLE callbacks can sync
   RTC time while LVGL/touch code is polling.
-- Use retries, short timeouts, counters, and bus recovery rather than rapid
-  unchecked polling.
+- Use retries, short timeouts, counters, and board-appropriate recovery rather
+  than rapid unchecked polling.
+- On the 1.75 target, retries deliberately avoid tearing down or bit-banging
+  the active controller after a failed transaction. Those recovery operations
+  caused shared-bus startup failures on the tested board; a reboot remains the
+  fallback for a persistent controller fault.
 - Avoid large burst reads on this bus unless tested on the connected board.
 
 ### 6. RTC (PCF85063)
@@ -608,6 +637,7 @@ When scanning the I2C bus, you should find:
 
 | Address | Device |
 |---|---|
+| 0x18 | ES8311 audio codec |
 | 0x20 | TCA9554 I/O Expander |
 | 0x34 | AXP2101 PMIC |
 | 0x51 | PCF85063 RTC |
@@ -626,7 +656,7 @@ When scanning the I2C bus, you should find:
 | RTC | ✅ Integrated | PCF85063 @ 0x51; invalid/voltage-low values rejected; BLE sync and warm-reset restore verified with battery present; full USB-removal retention still needs final battery retest |
 | IMU | ✅ Diagnostic | QMI8658 @ 0x6B primary / 0x6A fallback; low-rate diagnostic accel/gyro sampling only |
 | I/O Expander | ✅ Working | TCA9554 @ 0x20 controls touch reset; can be missed early but recovered by shared I2C retry/recovery |
-| Audio | ⏳ Untested | ES8311 not detected in scan; treat as separate future bring-up |
+| Audio | ⚠️ Working / calibration pending | ES8311 + NS4150B playback and BLE-triggered honk verified; the external `F3` speaker's rating and final volume calibration remain unknown |
 | GPS | ❌ Not populated | This board model should be treated as no-GPS hardware despite UART pads |
 
 ## Known Issue: I2C Bus Instability

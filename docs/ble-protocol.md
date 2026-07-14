@@ -148,7 +148,7 @@ settings characteristic (`2A73`) or the navigation fallback characteristic
 "SNDP" | SoundID: UInt8 | VolumePercent: UInt8
 ```
 
-Supported sound IDs on `WAVESHARE_AMOLED_206`:
+Supported sound IDs on `WAVESHARE_AMOLED_175` and `WAVESHARE_AMOLED_206`:
 
 | ID | Sound |
 | ---: | --- |
@@ -159,13 +159,14 @@ Supported sound IDs on `WAVESHARE_AMOLED_206`:
 
 `VolumePercent` must be in the inclusive range `0...100`. For compatibility,
 the firmware also accepts the older frame containing only `SoundID` and uses
-the default volume of `70`.
+the default volume of `70`. The 1.75 hardware profile maps `70%` to 0 dB DAC
+gain and caps `100%` at +6 dB; the established 2.06 curve is unchanged.
 
 Playback requests are queued by the firmware and run outside the BLE callback.
 Unsupported IDs, invalid volumes, and sound commands received before
 authentication are rejected.
 
-The app configures the 2.06 PWR button as a local honk control with another
+The app configures the Waveshare PWR button as a local honk control with another
 authenticated frame on the same command routes:
 
 ```text

@@ -432,7 +432,7 @@ void setup() {
                 esp_reset_reason());
 
 #ifdef WAVESHARE_AMOLED_175
-  waveshare_board::recoverI2CBus();
+  // Configure Wire directly below; do not preemptively bit-bang the shared bus.
 #endif
 #if defined(POWER_SAVE) || defined(WAVESHARE_AMOLED_175) ||                   \
     defined(WAVESHARE_AMOLED_206)
@@ -636,7 +636,7 @@ void setup() {
   log_i("Loading Splash Screen...");
   splashScreen();
 
-#ifdef WAVESHARE_AMOLED_206
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   waveshare_board::speaker::begin();
 #endif
 
@@ -715,7 +715,7 @@ void loop() {
   waveshare_board::imu::process();
   processWaveshareBootButton();
 #endif
-#ifdef WAVESHARE_AMOLED_206
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   waveshare_board::speaker::processPowerButtonHonk();
 #endif
 

@@ -13,6 +13,7 @@ jobs:
       matrix:
         target:
           - WAVESHARE_AMOLED_175
+          - WAVESHARE_AMOLED_175_SPEAKER_HONK
           - WAVESHARE_AMOLED_206
           - WAVESHARE_AMOLED_206_SPEAKER_HONK
     defaults:
