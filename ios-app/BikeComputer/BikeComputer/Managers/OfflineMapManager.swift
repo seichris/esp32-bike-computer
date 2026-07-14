@@ -2299,6 +2299,9 @@ final class OfflineMapManager: ObservableObject {
                        currentIosGitSha: MapStreamAppBuildIdentity.current?.gitSha,
                        currentIosBuildSha256:
                            MapStreamAppBuildIdentity.current?.componentSha256,
+                       compatibleArtifactAppIdentities:
+                           MapStreamAppArtifactCompatibilityPolicy
+                               .resumablePredecessorIdentities,
                        requiredFirmwareVersion: artifact.requiredFirmwareVersion,
                        requiredFirmwareBuild: artifact.requiredFirmwareBuild,
                        requiredFirmwareGitSha: artifact.requiredFirmwareGitSHA,

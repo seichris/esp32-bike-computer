@@ -1264,6 +1264,59 @@ struct NavigationProtocolTests {
             .legacyArtifactRequired,
             "a different app component cannot reuse the same bundle build approval"
         )
+        let resumablePredecessor = MapStreamAppArtifactCompatibilityPolicy
+            .resumablePredecessorIdentities[0]
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
+                requiredIosBuild: resumablePredecessor.build,
+                requiredIosGitSha: resumablePredecessor.gitSha,
+                requiredIosBuildSha256: resumablePredecessor.componentSha256,
+                currentIosBuild: "101",
+                currentIosGitSha: String(repeating: "a", count: 40),
+                currentIosBuildSha256: String(repeating: "b", count: 64),
+                compatibleArtifactAppIdentities: [resumablePredecessor],
+                requiredFirmwareVersion: stream.requiredFirmwareVersion,
+                requiredFirmwareBuild: stream.requiredFirmwareBuild,
+                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
+                deviceStatus: v2Status
+            ),
+            .streamV2,
+            "an exact reviewed predecessor artifact can resume after an app update"
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
+                requiredIosBuild: resumablePredecessor.build,
+                requiredIosGitSha: resumablePredecessor.gitSha,
+                requiredIosBuildSha256: String(repeating: "c", count: 64),
+                currentIosBuild: "101",
+                currentIosGitSha: String(repeating: "a", count: 40),
+                currentIosBuildSha256: String(repeating: "b", count: 64),
+                compatibleArtifactAppIdentities: [resumablePredecessor],
+                requiredFirmwareVersion: stream.requiredFirmwareVersion,
+                requiredFirmwareBuild: stream.requiredFirmwareBuild,
+                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
+                deviceStatus: v2Status
+            ),
+            .legacyArtifactRequired,
+            "a one-field predecessor identity mutation remains fail closed"
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
+                requiredIosBuild: resumablePredecessor.build,
+                requiredIosGitSha: resumablePredecessor.gitSha,
+                requiredIosBuildSha256: resumablePredecessor.componentSha256,
+                compatibleArtifactAppIdentities: [resumablePredecessor],
+                deviceStatus: v2Status
+            ),
+            .legacyArtifactRequired,
+            "an unidentified current app cannot use a predecessor exception"
+        )
         assertEqual(
             MapInstallProtocolSelector.select(
                 isBikeMapStream: true,

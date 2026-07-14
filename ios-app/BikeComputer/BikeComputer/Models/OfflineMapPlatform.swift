@@ -41,6 +41,20 @@ nonisolated struct MapStreamAppBuildIdentity: Codable, Equatable {
     }
 }
 
+nonisolated enum MapStreamAppArtifactCompatibilityPolicy {
+    // Stream artifacts are normally pinned to the exact app build that requested
+    // them. Keep exceptions exact and reviewed so an app update can resume a
+    // previously started transfer without accepting arbitrary older artifacts.
+    static let resumablePredecessorIdentities = [
+        MapStreamAppBuildIdentity(
+            schemaVersion: 1,
+            build: "202607132210",
+            gitSha: "4ee3aa43dd3026917ceca52c4779438867ee0e7a",
+            componentSha256: "271c2d9d17d4430548a46d5ea9ae677862ecf08c57b8e62f5a48c22ae8656002"
+        )
+    ]
+}
+
 struct OfflineMapBounds: Codable, Equatable {
     let minLon: Double
     let minLat: Double
@@ -631,6 +645,7 @@ nonisolated enum MapInstallProtocolSelector {
         currentIosBuild: String? = nil,
         currentIosGitSha: String? = nil,
         currentIosBuildSha256: String? = nil,
+        compatibleArtifactAppIdentities: [MapStreamAppBuildIdentity] = [],
         requiredFirmwareVersion: String? = nil,
         requiredFirmwareBuild: UInt32? = nil,
         requiredFirmwareGitSha: String? = nil,
@@ -654,11 +669,29 @@ nonisolated enum MapInstallProtocolSelector {
             requiredFirmwareGitSha
         )
         guard let requiredAppBuild = requirements.0,
-              currentIosBuild == requiredAppBuild,
               let requiredAppGitSHA = requirements.1,
-              currentIosGitSha == requiredAppGitSHA,
               let requiredAppBuildSHA256 = requirements.2,
-              currentIosBuildSha256 == requiredAppBuildSHA256 else {
+              let currentAppBuild = currentIosBuild,
+              let currentAppGitSHA = currentIosGitSha,
+              let currentAppBuildSHA256 = currentIosBuildSha256 else {
+            return .legacyArtifactRequired
+        }
+        let requiredAppIdentity = MapStreamAppBuildIdentity(
+            schemaVersion: 1,
+            build: requiredAppBuild,
+            gitSha: requiredAppGitSHA,
+            componentSha256: requiredAppBuildSHA256
+        )
+        let currentAppIdentity = MapStreamAppBuildIdentity(
+            schemaVersion: 1,
+            build: currentAppBuild,
+            gitSha: currentAppGitSHA,
+            componentSha256: currentAppBuildSHA256
+        )
+        guard requiredAppIdentity.isReleaseGrade,
+              currentAppIdentity.isReleaseGrade,
+              requiredAppIdentity == currentAppIdentity ||
+                  compatibleArtifactAppIdentities.contains(requiredAppIdentity) else {
             return .legacyArtifactRequired
         }
         let deviceRequirements = (requirements.3, requirements.4, requirements.5)
