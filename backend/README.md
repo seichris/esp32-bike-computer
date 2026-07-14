@@ -15,7 +15,7 @@ sources. It implements the production contract described in
   cached Geofabrik catalog fallback for any requested area covered by
   Geofabrik.
 - File-backed job storage for local/Coolify deployment.
-- Worker wrapper for `osmium extract` plus `OSM_Extract`.
+- Worker wrapper for `osmium extract` plus `tools/OSM_Extract`.
 - Map-pack manifest generation with file hashes and OSM attribution.
 - Deterministic signed `.bmap` generation behind an explicit rollout flag,
   alongside the compatible `.zip` artifact.

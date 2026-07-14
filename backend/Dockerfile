@@ -23,7 +23,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
 
 COPY backend /app/backend
 COPY config /app/config
-COPY OSM_Extract /app/OSM_Extract
+COPY tools/OSM_Extract /app/tools/OSM_Extract
 
 RUN python -m pip install '/app/backend[api,object-storage]' \
   && python -m pip install pillow shapely "matplotlib<3.6" pyyaml

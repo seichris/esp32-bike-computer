@@ -3,7 +3,7 @@
 This repo contains:
 - `esp32/`: ESP32-S3 firmware (PlatformIO + Arduino + LVGL + NimBLE), currently based on the local IceNav-v3 map-renderer snapshot.
 - `ios-app/`: iOS companion app (SwiftUI + MapKit + CoreBluetooth + HealthKit).
-- `OSM_Extract/`: offline vector-map build pipeline (Docker-based).
+- `tools/OSM_Extract/`: offline vector-map build pipeline (Docker-based).
 - `waveshare_test/`: hardware bring-up sketches for the Waveshare board.
 
 ## Quick commands
@@ -88,7 +88,6 @@ Healthy boot log checkpoints from the Waveshare board:
 ### iOS
 
 - Open: `ios-app/BikeComputer/BikeComputer.xcodeproj`
-- Real-device testing / trust / sharing notes: `ios-app/README.md`
 
 ## BLE contract
 
@@ -124,12 +123,12 @@ Highlights:
 ## Offline maps (OSM_Extract)
 
 Preferred workflow is Docker:
-- `cd OSM_Extract && docker compose run --rm tools bash`
-- Run scripts from `/scripts` in the container; outputs land in `OSM_Extract/maps/` on the host.
+- `cd tools/OSM_Extract && docker compose run --rm tools bash`
+- Run scripts from `/scripts` in the container; outputs land in `tools/OSM_Extract/maps/` on the host.
 
 Config:
-- feature selection: `OSM_Extract/conf/conf_extract.yaml`
-- styling: `OSM_Extract/conf/conf_styles.yaml`
+- feature selection: `tools/OSM_Extract/conf/conf_extract.yaml`
+- styling: `tools/OSM_Extract/conf/conf_styles.yaml`
 
 ## Change hygiene
 

@@ -11,13 +11,13 @@ Use BBBike Extract in PBF format: https://extract.bbbike.org/
 Save the resulting file to:
 
 ```text
-OSM_Extract/pbf/<your-area>.osm.pbf
+tools/OSM_Extract/pbf/<your-area>.osm.pbf
 ```
 
 ## 2. Run the extractor in Docker
 
 ```sh
-cd OSM_Extract
+cd tools/OSM_Extract
 docker compose run --rm tools bash
 ```
 
@@ -47,15 +47,15 @@ max_lat=...
 Outputs on the host machine:
 
 ```text
-OSM_Extract/maps/<output-name>/
+tools/OSM_Extract/maps/<output-name>/
 ```
 
 The output folder contains generated `.fmb` / `.fmp` vector map blocks.
 
 Config knobs:
 
-- Feature selection: `OSM_Extract/conf/conf_extract.yaml`
-- Styling: `OSM_Extract/conf/conf_styles.yaml`
+- Feature selection: `tools/OSM_Extract/conf/conf_extract.yaml`
+- Styling: `tools/OSM_Extract/conf/conf_styles.yaml`
 
 ## 3. Copy maps to SD card
 
