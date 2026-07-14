@@ -17,3 +17,20 @@ Ideas and feature requests are welcome—[open an issue](https://github.com/seic
 
 For code contributions, see
 [CONTRIBUTING.md](https://github.com/seichris/open-bike-computer/blob/main/CONTRIBUTING.md).
+
+## License
+
+Open Bike Computer uses an open source component model:
+
+- the network map backend and its configuration are AGPL-3.0-only;
+- the iOS app and other project-authored distributed or local software are
+  GPL-3.0-only; and
+- imported GPL components such as the ESP32 firmware base and map extraction
+  tools retain their existing license terms.
+
+Contributors retain copyright and contribute under the
+[Contributor License Agreement](CLA.md). The agreement keeps contributions
+available under the applicable public license while allowing the repository
+owner to offer separately licensed official builds, including App Store builds.
+
+See [LICENSES.md](LICENSES.md) for the exact path-by-path licensing boundaries.
