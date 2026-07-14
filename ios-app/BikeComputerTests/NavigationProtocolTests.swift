@@ -415,6 +415,7 @@ struct NavigationProtocolTests {
         testOfflineMapJobProgressAbsentFallback()
         testOfflineMapProgressPresentation()
         testMapActivationProgressPresentation()
+        testMapUploadProgressReconciliation()
         testOfflineMapDownloadingSectionPresentation()
         testOfflineMapActivityCounterOverlappingOperations()
         testOfflineMapJobPersistence()
@@ -2561,6 +2562,33 @@ struct NavigationProtocolTests {
             ),
             nil,
             "completed activation hides the in-progress presentation"
+        )
+    }
+
+    static func testMapUploadProgressReconciliation() {
+        assertEqual(
+            MapUploadProgressReconciler.percentage(
+                retryTransportPercentage: 10,
+                durableDevicePercentage: 32
+            ),
+            32,
+            "a retry does not display less than the durable device checkpoint"
+        )
+        assertEqual(
+            MapUploadProgressReconciler.percentage(
+                retryTransportPercentage: 40,
+                durableDevicePercentage: 32
+            ),
+            40,
+            "retry transport progress takes over after reaching the checkpoint"
+        )
+        assertEqual(
+            MapUploadProgressReconciler.percentage(
+                retryTransportPercentage: nil,
+                durableDevicePercentage: 32
+            ),
+            32,
+            "restoration can present a device checkpoint without a live task"
         )
     }
 

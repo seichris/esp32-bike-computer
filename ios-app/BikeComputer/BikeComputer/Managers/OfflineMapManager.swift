@@ -2102,7 +2102,7 @@ final class OfflineMapManager: ObservableObject {
         bleManager: BLEManager,
         resumePausedUpload: Bool = false
     ) async throws {
-        let resumeProgressFloor: Int
+        var resumeProgressFloor: Int
         if resumePausedUpload {
             let lastVisibleProgress = max(
                 activationProgress?.percentage ?? 0,
@@ -2287,6 +2287,24 @@ final class OfflineMapManager: ObservableObject {
                     sessionToken: transferSession.sessionToken
                 )
                 let initialDeviceStatus = try await client.status()
+                if case .stream = prepared,
+                   let activation = initialDeviceStatus.activation,
+                   activation.sessionId == sessionId,
+                   activation.step == 1,
+                   let deviceProgress = activation.progress {
+                    resumeProgressFloor = MapUploadProgressReconciler.percentage(
+                        retryTransportPercentage: resumeProgressFloor,
+                        durableDevicePercentage: deviceProgress
+                    ) ?? 0
+                    updateSavedMapDeviceState(
+                        mapID: expectedMapId,
+                        sequence: activation.sequence,
+                        state: activation.status ?? "paused",
+                        step: activation.step,
+                        stepCount: activation.steps,
+                        progress: deviceProgress
+                    )
+                }
                 if case .stream(let artifact, let metadata) = prepared,
                    MapInstallProtocolSelector.select(
                        isBikeMapStream: true,
@@ -2414,6 +2432,7 @@ final class OfflineMapManager: ObservableObject {
                     )
                 case .stream(let artifact, _):
                     activationMayBeInFlight = true
+                    let retryProgressFloor = resumeProgressFloor
                     try await client.uploadStreamInBackground(
                         artifact: artifact,
                         sessionId: sessionId,
@@ -2434,22 +2453,15 @@ final class OfflineMapManager: ObservableObject {
                     ) { completedBytes, totalBytes in
                         self.transferProgress = totalBytes == 0 ? 0 :
                             Double(completedBytes) / Double(totalBytes)
-                        let percent = max(
-                            resumeProgressFloor,
-                            Int((self.transferProgress * 100).rounded())
-                        )
+                        let percent = MapUploadProgressReconciler.percentage(
+                            retryTransportPercentage:
+                                Int((self.transferProgress * 100).rounded()),
+                            durableDevicePercentage: retryProgressFloor
+                        ) ?? 0
                         self.activationProgress = MapActivationProgressPresentation(
                             step: 1,
                             stepCount: 3,
                             percentage: percent
-                        )
-                        self.updateSavedMapDeviceState(
-                            mapID: expectedMapId,
-                            sequence: nil,
-                            state: "receiving",
-                            step: 1,
-                            stepCount: 3,
-                            progress: percent
                         )
                     }
                     transferProgress = 1
@@ -2986,7 +2998,10 @@ final class OfflineMapManager: ObservableObject {
                sessionID: sessionID,
                defaults: defaults
            ),
-           let percentage = upload.percentage {
+           let percentage = MapUploadProgressReconciler.percentage(
+               retryTransportPercentage: upload.percentage,
+               durableDevicePercentage: metadata.lastDeviceProgress
+           ) {
             activationProgress = MapActivationProgressPresentation(
                 step: 1,
                 stepCount: 3,

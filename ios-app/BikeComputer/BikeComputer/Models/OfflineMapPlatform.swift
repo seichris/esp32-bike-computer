@@ -445,6 +445,18 @@ struct MapActivationProgressPresentation: Equatable {
     }
 }
 
+nonisolated enum MapUploadProgressReconciler {
+    static func percentage(
+        retryTransportPercentage: Int?,
+        durableDevicePercentage: Int?
+    ) -> Int? {
+        [retryTransportPercentage, durableDevicePercentage]
+            .compactMap { $0 }
+            .map { min(max($0, 0), 100) }
+            .max()
+    }
+}
+
 enum OfflineMapAutomaticRecoveryTrigger {
     static func shouldResume(
         hasPendingInstall: Bool,
