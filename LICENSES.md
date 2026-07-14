@@ -29,12 +29,13 @@ version 3 terms as stated by their own notices. This licensing change does not
 alter whether those existing terms permit a later GPL version:
 
 - `esp32/` — see [`esp32/LICENSE`](esp32/LICENSE)
-- `OSM_Extract/` — see [`OSM_Extract/LICENSE`](OSM_Extract/LICENSE)
+- `tools/OSM_Extract/` — see
+  [`tools/OSM_Extract/LICENSE`](tools/OSM_Extract/LICENSE)
 
 The backend container image combines the AGPL-covered backend and configuration
-with the GPL-covered `OSM_Extract` tools. Section 13 of AGPLv3 permits that
-combination: the backend and configuration remain under AGPL-3.0-only, while
-`OSM_Extract` remains under its existing GPL version 3 terms.
+with the GPL-covered `tools/OSM_Extract` component. Section 13 of AGPLv3 permits
+that combination: the backend and configuration remain under AGPL-3.0-only,
+while `tools/OSM_Extract` remains under its existing GPL version 3 terms.
 
 ## Separate licenses and official distribution
 
