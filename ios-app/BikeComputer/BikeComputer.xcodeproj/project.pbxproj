@@ -68,6 +68,7 @@
 				83E6EF932EED853C00AE5F9B /* Sources */,
 				83E6EF942EED853C00AE5F9B /* Frameworks */,
 				83E6EF952EED853C00AE5F9B /* Resources */,
+				4D53545245414D4944454E54 /* Generate Map Stream Build Identity */,
 			);
 			buildRules = (
 			);
@@ -136,6 +137,28 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		4D53545245414D4944454E54 /* Generate Map Stream Build Identity */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/BikeComputer",
+				"$(SRCROOT)/BikeComputer.xcodeproj/project.pbxproj",
+				"$(SRCROOT)/../scripts/generate_map_stream_app_build_identity.py",
+			);
+			name = "Generate Map Stream Build Identity";
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/MapStreamBuildIdentity.json",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "/usr/bin/python3 \"$SRCROOT/../scripts/generate_map_stream_app_build_identity.py\" --repo-root \"$SRCROOT/../..\" --output \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/MapStreamBuildIdentity.json\" --build \"$CURRENT_PROJECT_VERSION\" --configuration \"$CONFIGURATION\" --platform \"$PLATFORM_NAME\" --architectures \"$ARCHS\" --xcode-version \"$XCODE_VERSION_ACTUAL\" --sdk-build \"${SDK_PRODUCT_BUILD_VERSION:-$SDK_VERSION}\" --swift-version \"$SWIFT_VERSION\" --deployment-target \"$IPHONEOS_DEPLOYMENT_TARGET\"";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
 		83E6EFA02EED853D00AE5F9B /* Debug */ = {
@@ -269,6 +292,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 4H5PK8686H;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = BikeComputer/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -311,6 +335,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 4H5PK8686H;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = BikeComputer/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

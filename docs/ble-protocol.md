@@ -285,6 +285,13 @@ payload: ASCII `MSTC`, a one-byte transfer id, zero-based chunk index, chunk
 count, and up to 13 JSON bytes (20 bytes total). The app reassembles chunks by
 transfer id and accepts both forms.
 
+The HTTP credential is not part of the map-status payload. After sending
+`MTRNenter`, iOS also sends the shared `DSTS` status request and waits for a new
+authenticated response whose `mode` is `map`, whose `baseUrl` matches the map
+status, and whose `sessionToken` is non-empty. A status cached before the enter
+request is not sufficient. The app sends that token as
+`X-BikeComputer-Transfer-Token` on every local HTTP request.
+
 Status responses should include:
 
 - `activeMapId`: map id from `/sdcard/VECTMAP/active-map.json`, if present.
@@ -292,11 +299,26 @@ Status responses should include:
   `active-map.json`, when installed by transfer-capable firmware. This
   distinguishes regenerated packs that intentionally reuse a stable map ID.
 - `enabled`: whether Wi-Fi/HTTP upload mode is enabled.
+- `firmwareVersion`, `firmwareBuild`, and `firmwareGitSha`: the exact running
+  firmware identity. The git identity must be the full 40-character lowercase
+  SHA from a clean source tree; dirty or unidentified builds fail closed and do
+  not advertise protocol v2. Promoted stream artifacts name the approved values
+  and iOS stays on protocol v1 when any field differs.
+- `protocols`: supported map-install protocol versions. Version `2` is present
+  only when SD storage is initialized and at least one production stream
+  verification key is compiled into firmware.
+- `streamFormatVersions`: accepted device-native stream versions when protocol
+  v2 is available.
+- `streamTrust`: exact production verification capabilities, each encoded as
+  `keyId=SHA256(X9.63 public key)`. iOS selects v2 only when the artifact's key
+  identity matches one of these entries; a device with an older or rotated-out
+  trust set stays on protocol v1.
 - `baseUrl`: temporary HTTP base URL when transfer mode is enabled.
 - `activation`: the latest activation `status`, monotonic boot-local
   `sequence`, `sessionId`, optional `mapId`, numbered `step`, total `steps`,
   integer `progress` percentage, and structured `error`, when present. Status
-  is `idle`, `activating`, `failed`, or `installed`. BLE uses a compact form
+  is `idle`, `receiving`, `paused`, `finalizing`, `ready`, `activating`,
+  `failed`, or `installed`. BLE uses a compact form
   that omits error messages and duplicate `lastError`; HTTP retains the full
   diagnostic text.
 - `lastError`: last installer/upload error code, when present. HTTP also includes
@@ -343,6 +365,7 @@ bulk upload:
 | --- | --- | --- |
 | `GET` | `/map-transfer/status` | Read transfer status and active map metadata. |
 | `PUT` | `/map-transfer/sessions/{sessionId}/pack.zip` | Store one complete archive, then start durable device-owned activation. |
+| `PUT` | `/map-transfer/sessions/{sessionId}/install-stream` | Stream one signed v2 artifact directly into an inactive root, then start durable device-owned activation. |
 | `PUT` | `/map-transfer/sessions/{sessionId}/manifest.json` | Upload the map pack manifest. |
 | `PUT` | `/map-transfer/sessions/{sessionId}/VECTMAP/{mapId}/{folder}/{file}` | Upload one `.fmb` or `.fmp` file. |
 | `POST` | `/map-transfer/sessions/{sessionId}/activate` | Validate and atomically activate the staged map. |
@@ -354,6 +377,49 @@ firmware resumes it after a board reset until activation reaches a terminal
 result. Firmware disables transfer mode after that activation finishes.
 The explicit activation route remains idempotent for the foreground per-file
 fallback and for clients that are still alive after the archive upload.
+
+The v2 stream route requires
+`Content-Type: application/vnd.openbikecomputer.map-stream`, an exact
+`Content-Length`, and the same short-lived transfer token as every other map
+endpoint. It does not retain the request artifact. Arbitrary network chunks are
+fed into the transport-independent signed-stream receiver, which validates
+every `.fmb` or legacy `.fmp` block while writing and hashing each new payload
+byte once into the inactive root. A successful response means the
+ready and pending markers are durable; Step 3 activation is then device-owned
+and is resumed after reboot. A truncated request remains paused at its durable
+checkpoint for a matching retry.
+Renderer validation also enforces a 2 MiB encoded block limit, at most 16,384
+features, at most 262,144 points, and at most 262,144 decoded polygon-grid
+entries per block. ASCII input is normalized for CRLF, must end with a physical
+newline, and uses the renderer's lowercase `0x` color and signed 16-bit
+coordinate grammar.
+
+All transfer requests use HTTP/1.1 with a five-second request-wide header
+deadline, at most 512 bytes per line, 8 KiB of request-line/header bytes, and 64
+lines. Over-limit or incomplete headers are rejected explicitly. Duplicate
+`Content-Length`, `Content-Type`, or transfer-token headers fail closed, and
+`Transfer-Encoding` is not accepted. The listener processes the body on one
+dedicated bounded worker so the device UI, BLE service, controls, and progress
+overlay remain responsive during a long upload. Disabling or switching the BLE
+transfer session invalidates an in-flight request generation; an incomplete v2
+body becomes paused and cannot queue activation after authorization is revoked.
+
+Protocol v2 is advertised only while the SD map namespace is mounted and
+accessible. Entering map-transfer mode and accepting a v2 body also require a
+successful writable probe. A blank mounted card creates the map namespace
+during that probe, and a removed/reinserted card is unmounted and remounted on
+the next authenticated enter request rather than requiring a device reboot.
+
+After the active pointer transaction, the final step remains nonterminal until
+the main loop locates and parses a renderer block from the new root. All blocks
+were already structurally validated during their unavoidable write/hash pass,
+so activation adds no full payload scan. Only that acknowledgement emits
+`installed` and closes
+transfer mode. A rejected renderer root restores the previous valid selection
+and emits `renderer_reload`. A completed v1 archive is an explicit fallback
+choice: before v1 activation, firmware removes any unselected ready or paused
+v2 root and its pending marker. Boot applies the same arbitration, so a stale
+v2 install cannot silently replace the archive after restart.
 
 An accepted activation returns HTTP 202 with the boot-local activation
 `sequence`. The app matches that acknowledgement to later HTTP/BLE terminal

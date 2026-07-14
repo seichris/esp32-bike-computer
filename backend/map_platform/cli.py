@@ -6,8 +6,14 @@ import os
 import time
 from pathlib import Path
 
+from .artifacts import create_artifact_store_from_environment
 from .geofabrik_sources import GeofabrikSourceProvider
 from .jobs import JobStore, MapJobService
+from .map_signing import load_map_artifact_signer_from_environment
+from .map_stream_build_identity import (
+    image_digest_from_reference,
+    verify_map_stream_build_identity,
+)
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
 from .source_cache import SourceCache
 from .sources import SourceIndex
@@ -39,14 +45,35 @@ def main() -> int:
     worker_loop.add_argument("--idle-sleep-seconds", type=float, default=10.0)
     worker_loop.add_argument("--max-jobs", type=int, default=None)
     worker_loop.add_argument(
+        "--heartbeat-path",
+        default=os.environ.get(
+            "MAP_PLATFORM_WORKER_HEARTBEAT_PATH",
+            str(Path(os.environ.get("MAP_PLATFORM_DATA_ROOT", "/data")) / "health" / "worker"),
+        ),
+    )
+
+    maintenance_loop = subparsers.add_parser("maintenance-loop")
+    maintenance_loop.add_argument(
         "--retention-days",
         type=int,
         default=int(os.environ.get("MAP_PLATFORM_JOB_RETENTION_DAYS", "30")),
     )
-    worker_loop.add_argument(
+    maintenance_loop.add_argument(
         "--maintenance-interval-seconds",
         type=float,
         default=float(os.environ.get("MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS", "3600")),
+    )
+    maintenance_loop.add_argument(
+        "--max-gc-items",
+        type=int,
+        default=int(os.environ.get("MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS", "100")),
+    )
+    maintenance_loop.add_argument(
+        "--heartbeat-path",
+        default=os.environ.get(
+            "MAP_PLATFORM_MAINTENANCE_HEARTBEAT_PATH",
+            str(Path(os.environ.get("MAP_PLATFORM_DATA_ROOT", "/data")) / "health" / "maintenance"),
+        ),
     )
 
     refresh_source = subparsers.add_parser("refresh-source")
@@ -70,6 +97,40 @@ def main() -> int:
     service = MapJobService(source_index, store)
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
 
+    def create_pipeline() -> MapBuildPipeline:
+        map_signer = load_map_artifact_signer_from_environment()
+        worker_image_reference = os.environ.get(
+            "MAP_PLATFORM_WORKER_IMAGE_REFERENCE",
+            "",
+        ).strip()
+        producer_image_digest = (
+            image_digest_from_reference(worker_image_reference)
+            if map_signer is not None
+            else None
+        )
+        build_identity = (
+            verify_map_stream_build_identity(
+                repo_root / "config" / "map-stream-build-identity.json",
+                repo_root,
+            )
+            if map_signer is not None
+            else None
+        )
+        return MapBuildPipeline(
+            PipelinePaths(
+                repo_root=repo_root,
+                work_root=data_root / "work",
+                pack_root=data_root / "packs",
+            ),
+            source_cache=source_cache,
+            artifact_store=create_artifact_store_from_environment(data_root),
+            map_signer=map_signer,
+            producer_build_sha256=(
+                build_identity.producer_build_sha256 if build_identity else None
+            ),
+            producer_image_digest=producer_image_digest,
+        )
+
     if args.command == "create-job":
         request = json.loads(args.request_json)
         print(json.dumps(service.create_job(request).to_dict(), indent=2, sort_keys=True))
@@ -78,17 +139,11 @@ def main() -> int:
         print(json.dumps(service.get_job(args.job_id).to_dict(), indent=2, sort_keys=True))
         return 0
     if args.command == "run-job":
-        pipeline = MapBuildPipeline(
-            PipelinePaths(repo_root=repo_root, work_root=data_root / "work", pack_root=data_root / "packs"),
-            source_cache=source_cache,
-        )
+        pipeline = create_pipeline()
         print(json.dumps(run_job(store, pipeline, args.job_id).to_dict(), indent=2, sort_keys=True))
         return 0
     if args.command == "run-next":
-        pipeline = MapBuildPipeline(
-            PipelinePaths(repo_root=repo_root, work_root=data_root / "work", pack_root=data_root / "packs"),
-            source_cache=source_cache,
-        )
+        pipeline = create_pipeline()
         result = MapWorker(store, pipeline).run_next()
         print(
             json.dumps(
@@ -103,10 +158,7 @@ def main() -> int:
         )
         return 0
     if args.command == "run-until-empty":
-        pipeline = MapBuildPipeline(
-            PipelinePaths(repo_root=repo_root, work_root=data_root / "work", pack_root=data_root / "packs"),
-            source_cache=source_cache,
-        )
+        pipeline = create_pipeline()
         results = MapWorker(store, pipeline).run_until_empty(max_jobs=args.max_jobs)
         print(
             json.dumps(
@@ -124,31 +176,19 @@ def main() -> int:
         )
         return 0
     if args.command == "worker-loop":
-        pipeline = MapBuildPipeline(
-            PipelinePaths(repo_root=repo_root, work_root=data_root / "work", pack_root=data_root / "packs"),
-            source_cache=source_cache,
-        )
-        worker = MapWorker(store, pipeline)
+        pipeline = create_pipeline()
+        heartbeat_path = Path(args.heartbeat_path)
+        heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+
+        def write_worker_heartbeat() -> None:
+            heartbeat_path.write_text(str(time.time()))
+
+        worker = MapWorker(store, pipeline, on_heartbeat=write_worker_heartbeat)
         processed = 0
-        next_maintenance_at = 0.0
         while args.max_jobs is None or processed < args.max_jobs:
-            now = time.monotonic()
-            if now >= next_maintenance_at:
-                expired = expire_ready_jobs(store, older_than_days=args.retention_days)
-                removed_work_dirs = cleanup_work_dirs(data_root / "work", store)
-                if expired or removed_work_dirs:
-                    print(
-                        json.dumps(
-                            {
-                                "maintenance": True,
-                                "expired": expired,
-                                "removedWorkDirs": removed_work_dirs,
-                            }
-                        ),
-                        flush=True,
-                    )
-                next_maintenance_at = now + max(args.maintenance_interval_seconds, 1.0)
+            write_worker_heartbeat()
             result = worker.run_next()
+            write_worker_heartbeat()
             if result.processed:
                 processed += 1
                 print(
@@ -158,6 +198,31 @@ def main() -> int:
                 continue
             time.sleep(args.idle_sleep_seconds)
         return 0
+    if args.command == "maintenance-loop":
+        artifact_store = create_artifact_store_from_environment(data_root)
+        heartbeat_path = Path(args.heartbeat_path)
+        heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+        while True:
+            heartbeat_path.write_text(str(time.time()))
+            expired = expire_ready_jobs(
+                store,
+                older_than_days=args.retention_days,
+                artifact_store=artifact_store,
+                max_gc_items=args.max_gc_items,
+            )
+            removed_work_dirs = cleanup_work_dirs(data_root / "work", store)
+            heartbeat_path.write_text(str(time.time()))
+            print(
+                json.dumps(
+                    {
+                        "maintenance": True,
+                        "expired": expired,
+                        "removedWorkDirs": removed_work_dirs,
+                    }
+                ),
+                flush=True,
+            )
+            time.sleep(max(args.maintenance_interval_seconds, 1.0))
     if args.command == "refresh-source":
         matches = [region for region in source_index.all_regions(include_dynamic=True) if region.id == args.region_id]
         if not matches:
@@ -178,7 +243,18 @@ def main() -> int:
         )
         return 0
     if args.command == "expire-ready":
-        print(json.dumps({"expired": expire_ready_jobs(store, older_than_days=args.older_than_days)}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "expired": expire_ready_jobs(
+                        store,
+                        older_than_days=args.older_than_days,
+                        artifact_store=create_artifact_store_from_environment(data_root),
+                    )
+                },
+                indent=2,
+            )
+        )
         return 0
     if args.command == "cleanup-work":
         print(json.dumps({"removed": cleanup_work_dirs(data_root / "work", store)}, indent=2))

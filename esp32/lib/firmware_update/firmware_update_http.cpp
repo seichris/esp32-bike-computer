@@ -385,7 +385,7 @@ bool FirmwareUpdateHttpServer::handleRequest(
     return true;
   }
   if (request.method == "POST" && request.path == kFinalizePath) {
-    handleFinalize(client);
+    handleFinalize(request, client);
     return true;
   }
   if (request.method == "POST" && request.path == kCancelPath) {
@@ -406,6 +406,11 @@ void FirmwareUpdateHttpServer::handleBegin(
   if (!device_transfer::readHttpBody(client, request.contentLength,
                                      kMaxBeginBodyBytes, body)) {
     fail(client, 413, "begin_body_invalid", "invalid begin request body");
+    return;
+  }
+  if (!transferServer_->isRequestAuthorized(request)) {
+    fail(client, 409, "transfer_cancelled",
+         "firmware transfer authorization was revoked");
     return;
   }
 
@@ -524,6 +529,13 @@ void FirmwareUpdateHttpServer::handleImage(
   uint64_t remaining = request.contentLength;
   uint32_t lastReadMs = millis();
   while (remaining > 0 && millis() - lastReadMs < 10000) {
+    if (!transferServer_->isRequestAuthorized(request)) {
+      mbedtls_sha256_free(&sha);
+      resetUploadState();
+      fail(client, 409, "transfer_cancelled",
+           "firmware transfer authorization was revoked");
+      return;
+    }
     int available = client.available();
     if (available <= 0) {
       delay(1);
@@ -550,6 +562,14 @@ void FirmwareUpdateHttpServer::handleImage(
     lockState();
     receivedBytes_ += static_cast<uint32_t>(bytesRead);
     unlockState();
+  }
+
+  if (!transferServer_->isRequestAuthorized(request)) {
+    mbedtls_sha256_free(&sha);
+    resetUploadState();
+    fail(client, 409, "transfer_cancelled",
+         "firmware transfer authorization was revoked");
+    return;
   }
 
   if (remaining != 0) {
@@ -580,7 +600,8 @@ void FirmwareUpdateHttpServer::handleImage(
   device_transfer::sendHttpJson(client, 200, statusJson());
 }
 
-void FirmwareUpdateHttpServer::handleFinalize(WiFiClient &client) {
+void FirmwareUpdateHttpServer::handleFinalize(
+    const device_transfer::HttpRequest &request, WiFiClient &client) {
   lockState();
   const bool ready = status_ == "received" && otaOpen_;
   const esp_ota_handle_t handle = otaHandle_;
@@ -601,6 +622,12 @@ void FirmwareUpdateHttpServer::handleFinalize(WiFiClient &client) {
          "verified firmware metadata is missing or inconsistent");
     return;
   }
+  if (!transferServer_->isRequestAuthorized(request)) {
+    resetUploadState();
+    fail(client, 409, "transfer_cancelled",
+         "firmware transfer authorization was revoked");
+    return;
+  }
 
   esp_err_t result = esp_ota_end(handle);
   lockState();
@@ -612,12 +639,25 @@ void FirmwareUpdateHttpServer::handleFinalize(WiFiClient &client) {
     fail(client, 400, "ota_end_failed", esp_err_to_name(result));
     return;
   }
+  if (!transferServer_->isRequestAuthorized(request)) {
+    resetUploadState();
+    fail(client, 409, "transfer_cancelled",
+         "firmware transfer authorization was revoked before activation");
+    return;
+  }
 
   esp_app_desc_t appDescription;
   result = esp_ota_get_partition_description(updatePartition, &appDescription);
   if (result != ESP_OK) {
     resetUploadState();
     fail(client, 400, "image_description_failed", esp_err_to_name(result));
+    return;
+  }
+
+  if (!transferServer_->isRequestAuthorized(request)) {
+    resetUploadState();
+    fail(client, 409, "transfer_cancelled",
+         "firmware transfer authorization was revoked before activation");
     return;
   }
 

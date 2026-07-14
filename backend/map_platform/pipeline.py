@@ -7,10 +7,24 @@ import shutil
 import subprocess
 import time
 import uuid
+from copy import deepcopy
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from .artifacts import (
+    BIKE_MAP_STREAM_FORMAT,
+    BIKE_MAP_STREAM_MEDIA_TYPE,
+    ZIP_MEDIA_TYPE,
+    ZIP_STORED_FORMAT,
+    ArtifactRecord,
+    map_stream_object_key,
+    sha256_file,
+    zip_object_key,
+)
 from .manifest import PipelineMetadata, build_manifest, stable_map_id, write_pack_archive
+from .map_stream import write_map_stream_artifact
 from .models import JobStatus, MapJob
 from .source_cache import SourceCache
 
@@ -24,6 +38,18 @@ class PipelinePaths:
     @property
     def osm_extract_root(self) -> Path:
         return self.repo_root / "OSM_Extract"
+
+
+@dataclass(frozen=True)
+class MapBuildResult:
+    map_id: str
+    legacy_archive_path: Path
+    artifacts: list[ArtifactRecord]
+    artifact_metrics: dict[str, Any] | None = None
+
+    def __iter__(self):
+        yield self.map_id
+        yield self.legacy_archive_path
 
 
 class CommandRunner:
@@ -103,12 +129,45 @@ class ProgressCoalescer:
 
 
 class MapBuildPipeline:
-    def __init__(self, paths: PipelinePaths, runner: CommandRunner | None = None, source_cache: SourceCache | None = None):
+    def __init__(
+        self,
+        paths: PipelinePaths,
+        runner: CommandRunner | None = None,
+        source_cache: SourceCache | None = None,
+        *,
+        artifact_store=None,
+        map_signer=None,
+        producer_build_sha256: str | None = None,
+        producer_image_digest: str | None = None,
+    ):
         self.paths = paths
         self.runner = runner or CommandRunner()
         self.source_cache = source_cache or SourceCache(paths.repo_root)
+        self.artifact_store = artifact_store
+        self.map_signer = map_signer
+        self.producer_build_sha256 = producer_build_sha256
+        self.producer_image_digest = producer_image_digest
+        if self.map_signer is not None and self.artifact_store is None:
+            raise ValueError("map stream generation requires durable artifact storage")
+        if self.map_signer is not None and not re.fullmatch(
+            r"[0-9a-f]{64}",
+            self.producer_build_sha256 or "",
+        ):
+            raise ValueError("map stream generation requires an immutable build identity")
+        if self.map_signer is not None and not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            self.producer_image_digest or "",
+        ):
+            raise ValueError("map stream generation requires an immutable worker image digest")
 
-    def build(self, job: MapJob, on_status=None, on_progress=None) -> tuple[str, Path]:
+    def build(
+        self,
+        job: MapJob,
+        on_status=None,
+        on_progress=None,
+        on_artifact_pending=None,
+        artifact_publication_lease=None,
+    ) -> MapBuildResult:
         map_id = stable_map_id(job)
         job.map_id = map_id
         attempt_id = re.sub(r"[^a-zA-Z0-9_-]", "-", job.worker_id or f"attempt-{job.attempts}")
@@ -140,7 +199,111 @@ class MapBuildPipeline:
 
         manifest = build_manifest(job, pack_root, self._pipeline_metadata())
         write_pack_archive(pack_root, manifest, archive_path)
-        return map_id, archive_path
+        artifacts: list[ArtifactRecord] = []
+        metrics: dict[str, Any] = {}
+        if self.artifact_store is not None:
+            hashing_started = time.perf_counter()
+            zip_sha256 = sha256_file(archive_path)
+            metrics["zipHashingSeconds"] = time.perf_counter() - hashing_started
+            zip_key = zip_object_key(map_id, zip_sha256)
+            lease = (
+                artifact_publication_lease(zip_key)
+                if artifact_publication_lease
+                else nullcontext()
+            )
+            with lease:
+                if on_artifact_pending:
+                    on_artifact_pending(zip_key)
+                storage_started = time.perf_counter()
+                self.artifact_store.put(
+                    archive_path,
+                    zip_key,
+                    sha256=zip_sha256,
+                    media_type=ZIP_MEDIA_TYPE,
+                )
+            metrics["zipStorageSeconds"] = time.perf_counter() - storage_started
+            artifacts.append(
+                ArtifactRecord(
+                    format=ZIP_STORED_FORMAT,
+                    media_type=ZIP_MEDIA_TYPE,
+                    filename=archive_path.name,
+                    object_key=zip_key,
+                    bytes=archive_path.stat().st_size,
+                    sha256=zip_sha256,
+                )
+            )
+
+        if self.map_signer is not None:
+            stream_path = job_dir / f"{map_id}.bmap"
+            stream_manifest = deepcopy(manifest)
+            stream_manifest["producer"] = {
+                "buildSha256": self.producer_build_sha256,
+                "imageDigest": self.producer_image_digest,
+            }
+            stream_build = write_map_stream_artifact(
+                pack_root,
+                stream_manifest,
+                self.map_signer,
+                stream_path,
+            )
+            stream_key = map_stream_object_key(
+                map_id,
+                stream_build.signed_manifest_receipt,
+                stream_build.signature_key_id,
+                self.map_signer.public_key_sha256,
+                self.producer_build_sha256,
+                self.producer_image_digest,
+            )
+            lease = (
+                artifact_publication_lease(stream_key)
+                if artifact_publication_lease
+                else nullcontext()
+            )
+            with lease:
+                if on_artifact_pending:
+                    on_artifact_pending(stream_key)
+                storage_started = time.perf_counter()
+                self.artifact_store.put(
+                    stream_path,
+                    stream_key,
+                    sha256=stream_build.sha256,
+                    media_type=BIKE_MAP_STREAM_MEDIA_TYPE,
+                )
+            metrics["streamStorageSeconds"] = time.perf_counter() - storage_started
+            metrics.update(
+                {f"stream{name[0].upper()}{name[1:]}": value for name, value in stream_build.timings.items()}
+            )
+            metrics.update(
+                {
+                    "streamFileCount": stream_build.file_count,
+                    "streamPayloadBytes": stream_build.payload_bytes,
+                    "streamArtifactBytes": stream_build.bytes,
+                    "streamSignatureKeyId": stream_build.signature_key_id,
+                }
+            )
+            artifacts.insert(
+                0,
+                ArtifactRecord(
+                    format=BIKE_MAP_STREAM_FORMAT,
+                    media_type=BIKE_MAP_STREAM_MEDIA_TYPE,
+                    filename=stream_path.name,
+                    object_key=stream_key,
+                    bytes=stream_build.bytes,
+                    sha256=stream_build.sha256,
+                    manifest_receipt=stream_build.manifest_receipt,
+                    signed_manifest_receipt=stream_build.signed_manifest_receipt,
+                    signature_key_id=stream_build.signature_key_id,
+                    signature_key_sha256=self.map_signer.public_key_sha256,
+                    producer_build_sha256=self.producer_build_sha256,
+                    producer_image_digest=self.producer_image_digest,
+                ),
+            )
+        return MapBuildResult(
+            map_id=map_id,
+            legacy_archive_path=archive_path,
+            artifacts=artifacts,
+            artifact_metrics=metrics or None,
+        )
 
     def published_archive_path(self, map_id: str, job_id: str) -> Path:
         return self.paths.pack_root / map_id / f"{job_id}.zip"
@@ -263,7 +426,20 @@ def run_job(store, pipeline: MapBuildPipeline, job_id: str, *, heartbeat_interva
             worker_id=worker_id,
             interval_seconds=heartbeat_interval_seconds,
         ):
-            map_id, archive_path = pipeline.build(job, on_status=update, on_progress=update_progress)
+            build_kwargs = {
+                "on_status": update,
+                "on_progress": update_progress,
+            }
+            if isinstance(pipeline, MapBuildPipeline):
+                build_kwargs["artifact_publication_lease"] = lambda object_key: (
+                    store.artifact_publication_lease(
+                        job_id,
+                        object_key,
+                        worker_id=worker_id,
+                    )
+                )
+            build_result = pipeline.build(job, **build_kwargs)
+            map_id, archive_path = build_result
         published_archive = (
             pipeline.published_archive_path(map_id, job.job_id)
             if hasattr(pipeline, "published_archive_path")
@@ -275,14 +451,28 @@ def run_job(store, pipeline: MapBuildPipeline, job_id: str, *, heartbeat_interva
             map_id=map_id,
             built_archive=archive_path,
             published_archive=published_archive,
+            artifacts=getattr(build_result, "artifacts", None),
+            artifact_metrics=getattr(build_result, "artifact_metrics", None),
         )
     except Exception as exc:
         current = store.get(job_id)
         if current.status == JobStatus.CANCELLED or current.worker_id != worker_id:
+            if (
+                current.status == JobStatus.CANCELLED
+                and isinstance(pipeline, MapBuildPipeline)
+                and pipeline.artifact_store is not None
+            ):
+                store.queue_terminal_pending_artifacts(job_id)
+                current = store.get(job_id)
             return current
-        return store.update_status_unless_cancelled(
+        failed = store.update_status_unless_cancelled(
             job_id,
             JobStatus.FAILED,
             error=str(exc),
+            error_code=getattr(exc, "code", "map_build_failed"),
             worker_id=worker_id,
         )
+        if isinstance(pipeline, MapBuildPipeline) and pipeline.artifact_store is not None:
+            store.queue_terminal_pending_artifacts(job_id)
+            failed = store.get(job_id)
+        return failed

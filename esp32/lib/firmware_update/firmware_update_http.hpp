@@ -65,7 +65,8 @@ private:
                    WiFiClient &client);
   void handleImage(const device_transfer::HttpRequest &request,
                    WiFiClient &client);
-  void handleFinalize(WiFiClient &client);
+  void handleFinalize(const device_transfer::HttpRequest &request,
+                      WiFiClient &client);
   void handleCancel(WiFiClient &client);
   void resetUploadState();
   void reject(WiFiClient &client, int httpStatus, const std::string &code,

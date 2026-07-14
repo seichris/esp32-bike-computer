@@ -95,9 +95,6 @@ struct SettingsView: View {
                     }
                 }
             }
-            .onTapGesture {
-                focusedSavedMapFilename = nil
-            }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
         }
@@ -238,7 +235,26 @@ private struct DownloadingMapsSettingsSection: View {
                 )
             }
 
-            if let activationProgress = manager.activationProgress {
+            if manager.hasPausedMapUpload {
+                Button {
+                    manager.resumePausedMapUpload(bleManager: bleManager)
+                } label: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        StatusValueRow(
+                            status: "Map upload paused. Tap to resume.",
+                            isBusy: false
+                        )
+                        if let activationProgress = manager.activationProgress {
+                            ProgressView(value: activationProgress.fraction)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(manager.isBusy || !bleManager.isNavigationReady)
+                .accessibilityLabel("Resume map upload")
+                .accessibilityHint("Reconnects to the device Wi-Fi and resumes the saved map")
+            } else if let activationProgress = manager.activationProgress {
                 VStack(alignment: .leading, spacing: 6) {
                     StatusValueRow(status: activationProgress.label, isBusy: false)
                     ProgressView(value: activationProgress.fraction)
@@ -328,6 +344,7 @@ private struct DownloadingMapsSettingsSection: View {
 }
 
 private struct SavedMapsSettingsSection: View {
+    @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
     @FocusState.Binding var focusedPackFilename: String?
@@ -351,10 +368,18 @@ private struct SavedMapsSettingsSection: View {
                 }
             }
 
-            Button(action: manager.beginMapAreaSelection) {
+            Button {
+                if let commit = renameInteraction.finish() {
+                    commitRename(commit)
+                }
+                focusedPackFilename = nil
+                manager.beginMapAreaSelection()
+                if manager.isMapAreaSelectionActive {
+                    dismiss()
+                }
+            } label: {
                 Label("Download a new Map", systemImage: "rectangle.dashed")
             }
-            .disabled(manager.isBusy || manager.hasPendingMapJob)
         }
         .onChange(of: focusedPackFilename) { newValue in
             scheduleRenameCommitIfNeeded(focusedFilename: newValue)
@@ -426,6 +451,7 @@ private struct DownloadedMapRow: View {
             activeMapId: bleManager.mapTransferActiveMapId,
             activeSessionId: bleManager.mapTransferActiveSessionId
         )
+        let isPausedUpload = manager.isPausedMapUpload(packURL)
 
         HStack(spacing: 12) {
             if renameInteraction.editingFilename == packURL.lastPathComponent {
@@ -494,12 +520,24 @@ private struct DownloadedMapRow: View {
                     focusedPackFilename = nil
                     manager.transferCachedPack(at: packURL, bleManager: bleManager)
                 } label: {
-                    Image(systemName: "arrow.up.circle")
+                    Image(
+                        systemName: isPausedUpload
+                            ? "arrow.clockwise.circle"
+                            : "arrow.up.circle"
+                    )
                         .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.borderless)
-                .disabled(manager.isBusy || !bleManager.isNavigationReady)
-                .accessibilityLabel("Transfer \(displayName) to device")
+                .disabled(
+                    manager.isBusy ||
+                        (!isPausedUpload && manager.hasActiveBackgroundUpload) ||
+                        !bleManager.isNavigationReady
+                )
+                .accessibilityLabel(
+                    isPausedUpload
+                        ? "Resume transferring \(displayName) to device"
+                        : "Transfer \(displayName) to device"
+                )
             }
 
             Button(role: .destructive) {
@@ -511,7 +549,7 @@ private struct DownloadedMapRow: View {
                     .frame(width: 32, height: 32)
             }
             .buttonStyle(.borderless)
-            .disabled(manager.isBusy)
+            .disabled(manager.isBusy || manager.hasActiveBackgroundUpload)
             .accessibilityLabel("Delete \(displayName)")
         }
         .alert("Already on Device", isPresented: $isShowingInstalledConfirmation) {

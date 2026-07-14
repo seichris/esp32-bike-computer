@@ -51,6 +51,19 @@ uint32_t build() { return static_cast<uint32_t>(REVISION); }
 
 const char *gitSha() { return GIT_SHA; }
 
+bool hasImmutableGitIdentity() {
+  const std::string value = gitSha();
+  if (value.size() != 40)
+    return false;
+  for (const char character : value) {
+    const bool decimal = character >= '0' && character <= '9';
+    const bool lowercaseHex = character >= 'a' && character <= 'f';
+    if (!decimal && !lowercaseHex)
+      return false;
+  }
+  return true;
+}
+
 const char *buildTimestamp() { return BUILD_TIMESTAMP; }
 
 std::string json() {

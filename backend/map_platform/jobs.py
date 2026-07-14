@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import os
 import re
 import threading
-import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .artifacts import ArtifactRecord
 from .geometry import GeometryError, normalize_geometry
 from .limits import JobLimits, LimitError
 from .models import JobStatus, MapJob, utc_now_iso
@@ -18,16 +20,26 @@ from .sources import SourceIndex, SourceResolutionError
 
 
 class JobStore:
+    _local_queue_locks_guard = threading.Lock()
+    _local_queue_locks: dict[str, threading.Lock] = {}
+    _local_artifact_locks_guard = threading.Lock()
+    _local_artifact_locks: dict[str, threading.Lock] = {}
+
     def __init__(self, root: str | Path, *, lock_stale_seconds: float = 300.0):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock_path = self.root / ".queue.lock"
+        self.artifact_lock_root = self.root / ".artifact-locks"
+        self.artifact_lock_root.mkdir(exist_ok=True)
+        self.artifact_gc_cursor_path = self.root / ".artifact-gc-cursor"
         self.lock_stale_seconds = lock_stale_seconds
 
     def save(self, job: MapJob) -> None:
         path = self._path(job.job_id)
         tmp_path = path.with_suffix(".json.tmp")
-        tmp_path.write_text(json.dumps(job.to_dict(), indent=2, sort_keys=True) + "\n")
+        tmp_path.write_text(
+            json.dumps(job.to_dict(include_internal=True), indent=2, sort_keys=True) + "\n"
+        )
         tmp_path.replace(path)
 
     def get(self, job_id: str) -> MapJob:
@@ -38,6 +50,12 @@ class JobStore:
 
     def list(self) -> list[MapJob]:
         return [MapJob.from_dict(json.loads(path.read_text())) for path in sorted(self.root.glob("*.json"))]
+
+    @contextmanager
+    def lock_artifact_references(self):
+        """Hold the queue lock while artifact references are inspected and pruned."""
+        with self._queue_lock():
+            yield self.list()
 
     def save_if_client_request_absent(self, job: MapJob) -> MapJob:
         if not job.client_installation_id or not job.client_request_id:
@@ -60,9 +78,12 @@ class JobStore:
         status: JobStatus,
         *,
         error: str | None = None,
+        error_code: str | None = None,
         map_id: str | None = None,
         pack_path: str | None = None,
         pack_bytes: int | None = None,
+        artifacts: list[ArtifactRecord] | None = None,
+        artifact_metrics: dict[str, Any] | None = None,
         worker_id: str | None = None,
         event: str | None = None,
         finished: bool = False,
@@ -72,9 +93,12 @@ class JobStore:
                 job_id,
                 status,
                 error=error,
+                error_code=error_code,
                 map_id=map_id,
                 pack_path=pack_path,
                 pack_bytes=pack_bytes,
+                artifacts=artifacts,
+                artifact_metrics=artifact_metrics,
                 worker_id=worker_id,
                 event=event,
                 finished=finished,
@@ -86,9 +110,12 @@ class JobStore:
         status: JobStatus,
         *,
         error: str | None = None,
+        error_code: str | None = None,
         map_id: str | None = None,
         pack_path: str | None = None,
         pack_bytes: int | None = None,
+        artifacts: list[ArtifactRecord] | None = None,
+        artifact_metrics: dict[str, Any] | None = None,
         worker_id: str | None = None,
         event: str | None = None,
         finished: bool = False,
@@ -103,9 +130,12 @@ class JobStore:
                 job_id,
                 status,
                 error=error,
+                error_code=error_code,
                 map_id=map_id,
                 pack_path=pack_path,
                 pack_bytes=pack_bytes,
+                artifacts=artifacts,
+                artifact_metrics=artifact_metrics,
                 worker_id=worker_id,
                 event=event,
                 finished=finished,
@@ -117,9 +147,14 @@ class JobStore:
         status: JobStatus,
         *,
         error: str | None = None,
+        error_code: str | None = None,
         map_id: str | None = None,
         pack_path: str | None = None,
         pack_bytes: int | None = None,
+        artifacts: list[ArtifactRecord] | None = None,
+        artifact_metrics: dict[str, Any] | None = None,
+        pending_artifact_keys: list[str] | None = None,
+        artifact_gc_keys: list[str] | None = None,
         worker_id: str | None = None,
         event: str | None = None,
         finished: bool = False,
@@ -129,6 +164,7 @@ class JobStore:
         job.status = status
         job.updated_at = utc_now_iso()
         job.error = error
+        job.error_code = error_code
         if previous_status != status and status in {JobStatus.QUEUED, JobStatus.VALIDATING}:
             job.progress_completed = None
             job.progress_total = None
@@ -144,6 +180,14 @@ class JobStore:
             job.pack_path = pack_path
         if pack_bytes is not None:
             job.pack_bytes = pack_bytes
+        if artifacts is not None:
+            job.artifacts = list(artifacts)
+        if artifact_metrics is not None:
+            job.artifact_metrics = dict(artifact_metrics)
+        if pending_artifact_keys is not None:
+            job.pending_artifact_keys = list(pending_artifact_keys)
+        if artifact_gc_keys is not None:
+            job.artifact_gc_keys = list(artifact_gc_keys)
         if worker_id is not None:
             job.worker_id = worker_id
         if event or previous_status != status:
@@ -181,6 +225,176 @@ class JobStore:
             self.save(job)
             return job
 
+    def add_pending_artifact_unless_cancelled(
+        self,
+        job_id: str,
+        object_key: str,
+        *,
+        worker_id: str,
+    ) -> MapJob:
+        with self._artifact_key_lock(object_key):
+            with self._queue_lock():
+                job = self.get(job_id)
+                if job.status == JobStatus.CANCELLED:
+                    raise RuntimeError("job was cancelled")
+                if job.worker_id != worker_id:
+                    raise RuntimeError("job is owned by another worker")
+                if object_key not in job.pending_artifact_keys:
+                    job.pending_artifact_keys.append(object_key)
+                    job.artifact_gc_keys = [
+                        key for key in job.artifact_gc_keys if key != object_key
+                    ]
+                    job.updated_at = utc_now_iso()
+                    self.save(job)
+                return job
+
+    @contextmanager
+    def artifact_publication_lease(
+        self,
+        job_id: str,
+        object_key: str,
+        *,
+        worker_id: str,
+    ):
+        """Fence publication against GC from registration through object PUT."""
+        with self._artifact_key_lock(object_key):
+            with self._queue_lock():
+                job = self.get(job_id)
+                if job.status == JobStatus.CANCELLED:
+                    raise RuntimeError("job was cancelled")
+                if job.worker_id != worker_id:
+                    raise RuntimeError("job is owned by another worker")
+                if object_key not in job.pending_artifact_keys:
+                    job.pending_artifact_keys.append(object_key)
+                job.artifact_gc_keys = [
+                    key for key in job.artifact_gc_keys if key != object_key
+                ]
+                job.updated_at = utc_now_iso()
+                self.save(job)
+            yield
+
+    def queue_terminal_pending_artifacts(self, job_id: str) -> int:
+        terminal_statuses = {JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.EXPIRED}
+        with self._queue_lock():
+            target = self.get(job_id)
+            if target.status not in terminal_statuses:
+                raise RuntimeError("pending artifacts may only be cleaned for a terminal job")
+            candidates = set(target.pending_artifact_keys) | set(target.artifact_gc_keys)
+            target.artifact_gc_keys = sorted(
+                set(target.artifact_gc_keys) | candidates
+            )
+            target.pending_artifact_keys = []
+            self.save(target)
+        return len(candidates)
+
+    def cleanup_artifact_garbage(
+        self,
+        artifact_store,
+        *,
+        object_keys=None,
+        max_items: int | None = None,
+    ) -> int:
+        """Retry durable object GC without holding the global job queue lock."""
+        if max_items is not None and max_items <= 0:
+            raise ValueError("artifact GC item limit must be positive")
+        terminal_statuses = {JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.EXPIRED}
+        with self._queue_lock():
+            jobs = self.list()
+            staging_budget = max_items
+            for job in jobs:
+                if staging_budget == 0:
+                    break
+                changed = False
+                if job.status in terminal_statuses and job.pending_artifact_keys:
+                    pending_to_stage = job.pending_artifact_keys[
+                        :staging_budget
+                    ] if staging_budget is not None else job.pending_artifact_keys
+                    job.artifact_gc_keys = sorted(
+                        set(job.artifact_gc_keys) | set(pending_to_stage)
+                    )
+                    job.pending_artifact_keys = job.pending_artifact_keys[
+                        len(pending_to_stage):
+                    ]
+                    if staging_budget is not None:
+                        staging_budget -= len(pending_to_stage)
+                    changed = True
+                if (
+                    job.status == JobStatus.EXPIRED
+                    and job.artifacts
+                    and staging_budget != 0
+                ):
+                    artifacts_to_stage = job.artifacts[
+                        :staging_budget
+                    ] if staging_budget is not None else job.artifacts
+                    expired_keys = {
+                        artifact.object_key for artifact in artifacts_to_stage
+                    }
+                    job.artifact_gc_keys = sorted(
+                        set(job.artifact_gc_keys) | expired_keys
+                    )
+                    job.artifacts = job.artifacts[len(artifacts_to_stage):]
+                    if staging_budget is not None:
+                        staging_budget -= len(artifacts_to_stage)
+                    changed = True
+                if changed:
+                    self.save(job)
+            durable_candidates = {
+                key for job in jobs for key in job.artifact_gc_keys
+            }
+            candidates = (
+                durable_candidates
+                if object_keys is None
+                else durable_candidates & set(object_keys)
+            )
+            ordered_candidates = sorted(candidates)
+            if max_items is not None and ordered_candidates:
+                try:
+                    cursor = self.artifact_gc_cursor_path.read_text().strip()
+                except OSError:
+                    cursor = ""
+                after_cursor = [key for key in ordered_candidates if key > cursor]
+                through_cursor = [key for key in ordered_candidates if key <= cursor]
+                ordered_candidates = (after_cursor + through_cursor)[:max_items]
+                self.artifact_gc_cursor_path.write_text(ordered_candidates[-1])
+
+        removed = 0
+        for object_key in ordered_candidates:
+            with self._artifact_key_lock(object_key):
+                with self._queue_lock():
+                    jobs = self.list()
+                    protected = any(
+                        object_key in job.pending_artifact_keys
+                        or (
+                            job.status != JobStatus.EXPIRED
+                            and any(
+                                artifact.object_key == object_key
+                                for artifact in job.artifacts
+                            )
+                        )
+                        for job in jobs
+                    )
+                    if protected:
+                        self._remove_gc_key_unlocked(jobs, object_key)
+                        continue
+                try:
+                    deleted = artifact_store.delete(object_key)
+                except Exception:
+                    continue
+                with self._queue_lock():
+                    self._remove_gc_key_unlocked(self.list(), object_key)
+                if deleted:
+                    removed += 1
+        return removed
+
+    def _remove_gc_key_unlocked(self, jobs: list[MapJob], object_key: str) -> None:
+        for job in jobs:
+            if object_key not in job.artifact_gc_keys:
+                continue
+            job.artifact_gc_keys = [
+                key for key in job.artifact_gc_keys if key != object_key
+            ]
+            self.save(job)
+
     def complete_job(
         self,
         job_id: str,
@@ -189,26 +403,61 @@ class JobStore:
         map_id: str,
         built_archive: Path,
         published_archive: Path,
+        artifacts: list[ArtifactRecord] | None = None,
+        artifact_metrics: dict[str, Any] | None = None,
     ) -> MapJob:
-        with self._queue_lock():
-            job = self.get(job_id)
-            if job.status == JobStatus.CANCELLED:
-                raise RuntimeError("job was cancelled")
-            if job.worker_id != worker_id:
-                raise RuntimeError("job is owned by another worker")
-            published_archive.parent.mkdir(parents=True, exist_ok=True)
-            if built_archive != published_archive:
-                built_archive.replace(published_archive)
-            return self._update_status_unlocked(
-                job_id,
-                JobStatus.READY,
-                map_id=map_id,
-                pack_path=str(published_archive),
-                pack_bytes=published_archive.stat().st_size,
-                worker_id=worker_id,
-                event="map pack ready",
-                finished=True,
-            )
+        with self._legacy_pack_lock(published_archive):
+            with self._queue_lock():
+                job = self.get(job_id)
+                if job.status == JobStatus.CANCELLED:
+                    raise RuntimeError("job was cancelled")
+                if job.worker_id != worker_id:
+                    raise RuntimeError("job is owned by another worker")
+                published_archive.parent.mkdir(parents=True, exist_ok=True)
+                if built_archive != published_archive:
+                    built_archive.replace(published_archive)
+                final_artifact_keys = {
+                    artifact.object_key for artifact in (artifacts or [])
+                }
+                obsolete_pending = set(job.pending_artifact_keys) - final_artifact_keys
+                artifact_gc_keys = sorted(
+                    (set(job.artifact_gc_keys) | obsolete_pending) - final_artifact_keys
+                )
+                return self._update_status_unlocked(
+                    job_id,
+                    JobStatus.READY,
+                    map_id=map_id,
+                    pack_path=str(published_archive),
+                    pack_bytes=published_archive.stat().st_size,
+                    artifacts=artifacts,
+                    artifact_metrics=artifact_metrics,
+                    pending_artifact_keys=[],
+                    artifact_gc_keys=artifact_gc_keys,
+                    worker_id=worker_id,
+                    event="map pack ready",
+                    finished=True,
+                )
+
+    def delete_expired_legacy_pack(self, pack_path: Path) -> bool:
+        with self._legacy_pack_lock(pack_path):
+            with self._queue_lock():
+                if any(
+                    job.pack_path == str(pack_path)
+                    and job.status != JobStatus.EXPIRED
+                    for job in self.list()
+                ):
+                    return False
+            try:
+                if not pack_path.exists():
+                    return False
+                pack_path.unlink()
+                try:
+                    pack_path.parent.rmdir()
+                except OSError:
+                    pass
+                return True
+            except OSError:
+                return False
 
     def cancel_if_active(self, job_id: str) -> MapJob:
         terminal_statuses = {
@@ -240,7 +489,14 @@ class JobStore:
             return job
 
     @contextmanager
-    def keep_worker_lease_alive(self, job_id: str, *, worker_id: str, interval_seconds: float = 30.0):
+    def keep_worker_lease_alive(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        interval_seconds: float = 30.0,
+        on_heartbeat=None,
+    ):
         if interval_seconds <= 0:
             raise ValueError("heartbeat interval must be positive")
         stop = threading.Event()
@@ -249,6 +505,8 @@ class JobStore:
             while not stop.wait(interval_seconds):
                 try:
                     self.heartbeat_unless_cancelled(job_id, worker_id=worker_id)
+                    if on_heartbeat is not None:
+                        on_heartbeat()
                 except (KeyError, RuntimeError):
                     return
 
@@ -311,6 +569,7 @@ class JobStore:
         job.worker_id = worker_id
         job.attempts += 1
         job.error = None
+        job.error_code = None
         job.progress_completed = None
         job.progress_total = None
         job.events.append(
@@ -360,31 +619,44 @@ class JobStore:
 
     @contextmanager
     def _queue_lock(self):
-        deadline = time.monotonic() + 30
-        fd: int | None = None
-        while fd is None:
+        local_key = str(self.lock_path.resolve())
+        with self._local_queue_locks_guard:
+            local_lock = self._local_queue_locks.setdefault(
+                local_key,
+                threading.Lock(),
+            )
+        with local_lock:
+            descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
             try:
-                fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, str(os.getpid()).encode("utf-8"))
-            except FileExistsError:
-                self._remove_stale_lock()
-                if time.monotonic() > deadline:
-                    raise TimeoutError("timed out waiting for job queue lock")
-                time.sleep(0.05)
-        try:
-            yield
-        finally:
-            if fd is not None:
-                os.close(fd)
-            self.lock_path.unlink(missing_ok=True)
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
 
-    def _remove_stale_lock(self) -> None:
-        try:
-            age_seconds = time.time() - self.lock_path.stat().st_mtime
-        except FileNotFoundError:
-            return
-        if age_seconds > self.lock_stale_seconds:
-            self.lock_path.unlink(missing_ok=True)
+    @contextmanager
+    def _artifact_key_lock(self, object_key: str):
+        digest = hashlib.sha256(object_key.encode("utf-8")).hexdigest()
+        lock_path = self.artifact_lock_root / f"{digest[:2]}.lock"
+        local_key = str(lock_path.resolve())
+        with self._local_artifact_locks_guard:
+            local_lock = self._local_artifact_locks.setdefault(
+                local_key,
+                threading.Lock(),
+            )
+        with local_lock:
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+    def _legacy_pack_lock(self, pack_path: Path):
+        return self._artifact_key_lock(
+            f"legacy-pack:{pack_path.resolve(strict=False)}"
+        )
 
 
 class MapJobService:

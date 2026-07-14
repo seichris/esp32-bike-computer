@@ -1,8 +1,8 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
-#include <array>
 #include <functional>
 #include <string>
 #include <vector>
@@ -19,6 +19,9 @@ struct ManifestFile {
 struct MapManifest {
   uint32_t schemaVersion = 0;
   std::string mapId;
+  std::string renderer;
+  uint32_t formatVersion = 0;
+  std::string minimumFirmwareVersion;
   std::vector<ManifestFile> files;
 };
 
@@ -45,6 +48,20 @@ struct ActiveMapSelection {
   std::string previousMapId;
   std::string previousSessionId;
   std::string previousRoot;
+  std::string previousManifestReceipt;
+  std::string previousSignedManifestReceipt;
+  std::string manifestReceipt;
+  std::string signedManifestReceipt;
+};
+
+struct ReadyStreamMap {
+  std::string sessionId;
+  std::string mapId;
+  std::string root;
+  std::string manifestReceipt;
+  std::string signedManifestReceipt;
+  uint32_t fileCount = 0;
+  uint64_t payloadBytes = 0;
 };
 
 class Sha256Hasher {
@@ -84,11 +101,12 @@ struct MapActivationSnapshot {
 
 class MapActivationState {
 public:
-  ActivationBeginResult begin(const std::string &sessionId);
+  ActivationBeginResult begin(const std::string &sessionId,
+                              uint8_t totalSteps = 5,
+                              uint32_t minimumSequence = 0);
   void updateProgress(const ActivationProgress &progress);
   void finish(const std::string &status, const std::string &mapId,
-              const std::string &errorCode,
-              const std::string &errorMessage);
+              const std::string &errorCode, const std::string &errorMessage);
   bool acceptsUploads() const;
   MapActivationSnapshot snapshot() const;
   std::string json(bool compact = false) const;
@@ -106,12 +124,12 @@ public:
                                      MapManifest &manifest) const;
   InstallStatus readStagedManifest(const std::string &sessionId,
                                    MapManifest &manifest) const;
-  InstallStatus validateStagedMap(const std::string &sessionId,
-                                  MapManifest &manifest,
-                                  const ActivationProgressCallback &onProgress = {}) const;
-  InstallStatus prepareStagedArchive(
-      const std::string &sessionId,
-      const ActivationProgressCallback &onProgress = {}) const;
+  InstallStatus
+  validateStagedMap(const std::string &sessionId, MapManifest &manifest,
+                    const ActivationProgressCallback &onProgress = {}) const;
+  InstallStatus
+  prepareStagedArchive(const std::string &sessionId,
+                       const ActivationProgressCallback &onProgress = {}) const;
   InstallStatus expectedStagedFile(const std::string &sessionId,
                                    const std::string &path,
                                    ManifestFile &file) const;
@@ -121,15 +139,27 @@ public:
                               const ManifestFile &file) const;
   void clearStagedFileVerification(const std::string &sessionId,
                                    const ManifestFile &file) const;
-  InstallStatus activateStagedMap(const std::string &sessionId,
-                                  const MapManifest &manifest,
-                                  const ActivationProgressCallback &onProgress = {}) const;
+  InstallStatus
+  activateStagedMap(const std::string &sessionId, const MapManifest &manifest,
+                    const ActivationProgressCallback &onProgress = {}) const;
   InstallStatus recoverInterruptedActivation() const;
+  InstallStatus activateReadyStreamMap(
+      const std::string &sessionId,
+      const ActivationProgressCallback &onProgress = {}) const;
+  InstallStatus recoverPendingStreamActivation(
+      const ActivationProgressCallback &onProgress = {}) const;
   bool hasInterruptedActivation() const;
   InstallStatus readActiveMap(ActiveMapSelection &selection) const;
   InstallStatus readActiveMapId(std::string &mapId) const;
+  InstallStatus rollbackActiveMap(const std::string &sessionId) const;
+  InstallStatus discardIncompleteStreamMap(
+      const std::string &sessionId) const;
+  InstallStatus discardUnselectedStreamMap(
+      const std::string &sessionId) const;
+  InstallStatus discardAllUnselectedStreamMaps() const;
   bool pruneStagingSessions(const std::string &keepSessionId) const;
-  bool pruneObsoleteInstalledMaps() const;
+  bool pruneObsoleteInstalledMaps(
+      const std::string &keepInstallingSessionId = "") const;
   bool markPendingArchiveActivation(const std::string &sessionId) const;
   bool readPendingArchiveActivation(std::string &sessionId) const;
   bool clearPendingArchiveActivation() const;
@@ -147,6 +177,7 @@ private:
 
   InstallStatus fail(const std::string &code, const std::string &message) const;
   bool safeId(const std::string &value) const;
+  bool safeMapId(const std::string &value) const;
   bool safeActiveRoot(const std::string &value) const;
   bool safeRelativePath(const std::string &path) const;
   bool mkdirs(const std::string &path) const;
@@ -171,6 +202,15 @@ private:
   bool installedMapContentsMatch(const std::string &root,
                                  const MapManifest &manifest) const;
   bool writeActiveMap(const ActiveMapSelection &selection) const;
+  InstallStatus readReadyStreamMap(const std::string &sessionId,
+                                   ReadyStreamMap &ready) const;
+  InstallStatus
+  recoverStreamActivationTransaction(const std::string &transaction) const;
+  bool clearPendingStreamActivation(const std::string &sessionId) const;
+  bool markStreamActivationConsumed(const ReadyStreamMap &ready) const;
+  bool rollbackRootMatches(const std::string &root, const std::string &mapId,
+                           const std::string &manifestReceipt,
+                           const std::string &signedManifestReceipt) const;
   bool activeRootExists(const std::string &root) const;
   bool fileExists(const std::string &path) const;
   bool dirExists(const std::string &path) const;

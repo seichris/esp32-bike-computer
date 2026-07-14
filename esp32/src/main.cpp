@@ -551,9 +551,31 @@ void setup() {
     map_transfer::InstallStatus activeStatus =
         mapInstaller.readActiveMap(activeMap);
     if (activeStatus.ok) {
-      mapView.setVectorMapFolder(std::string("/sdcard") + activeMap.root);
-      Serial.printf("MAP_TRANSFER: activeMapId=%s root=%s\n",
-                    activeMap.mapId.c_str(), activeMap.root.c_str());
+      const auto loadSelection =
+          [&](const map_transfer::ActiveMapSelection &selection) {
+            const std::string root = std::string("/sdcard") + selection.root;
+            return mapView.probeVectorMapFolder(root) &&
+                   mapView.setVectorMapFolder(root);
+          };
+      if (loadSelection(activeMap)) {
+        Serial.printf("MAP_TRANSFER: activeMapId=%s root=%s\n",
+                      activeMap.mapId.c_str(), activeMap.root.c_str());
+      } else if (!activeMap.sessionId.empty()) {
+        const map_transfer::InstallStatus rollback =
+            mapInstaller.rollbackActiveMap(activeMap.sessionId);
+        map_transfer::ActiveMapSelection restored;
+        const map_transfer::InstallStatus restoredStatus =
+            mapInstaller.readActiveMap(restored);
+        const bool restoredLoaded =
+            rollback.ok && restoredStatus.ok && loadSelection(restored);
+        Serial.printf("MAP_TRANSFER: boot renderer probe failed session=%s "
+                      "rollback=%s restored=%d\n",
+                      activeMap.sessionId.c_str(), rollback.code.c_str(),
+                      restoredLoaded);
+      } else {
+        Serial.printf("MAP_TRANSFER: legacy renderer probe failed root=%s\n",
+                      activeMap.root.c_str());
+      }
     } else {
       Serial.printf("MAP_TRANSFER: activeMap unavailable code=%s message=%s\n",
                     activeStatus.code.c_str(), activeStatus.message.c_str());
@@ -561,6 +583,10 @@ void setup() {
   }
   deviceTransferHttp.configure(8080, "BikeComputer-Transfer");
   mapTransferHttp.configure("/sdcard", 8080, &deviceTransferHttp);
+  mapTransferHttp.setStreamStorageProbe(
+      [] { return storage.getSdLoaded(); });
+  mapTransferHttp.setStreamStorageAvailable(sdResult == ESP_OK &&
+                                            storage.getSdLoaded());
   firmwareUpdateHttp.configure(&deviceTransferHttp);
 
   createGpxFolders();
@@ -633,7 +659,7 @@ void setup() {
 
   log_i("Setup Complete");
   firmwareUpdateHttp.markRunningAppValid();
-  mapTransferHttp.resumePendingArchiveActivation();
+  mapTransferHttp.resumePendingActivations();
 }
 
 /**
@@ -653,7 +679,10 @@ void loop() {
 
   std::string activatedMapRoot;
   if (mapTransferHttp.takeActivatedMapRoot(activatedMapRoot)) {
-    mapView.setVectorMapFolder(std::string("/sdcard") + activatedMapRoot);
+    const std::string rendererRoot = std::string("/sdcard") + activatedMapRoot;
+    const bool loaded = mapView.probeVectorMapFolder(rendererRoot) &&
+                        mapView.setVectorMapFolder(rendererRoot);
+    mapTransferHttp.acknowledgeActivatedMapRoot(activatedMapRoot, loaded);
   }
   if (mapTransferHttp.takeAutomaticExitRequest()) {
     const bool disabled = mapTransferHttp.setEnabled(false);

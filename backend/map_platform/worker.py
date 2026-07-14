@@ -27,12 +27,14 @@ class MapWorker:
         worker_id: str | None = None,
         interrupted_job_stale_seconds: float = 15 * 60,
         heartbeat_interval_seconds: float = 30.0,
+        on_heartbeat=None,
     ):
         self.store = store
         self.pipeline = pipeline
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
         self.interrupted_job_stale_seconds = interrupted_job_stale_seconds
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        self.on_heartbeat = on_heartbeat
 
     def run_next(self) -> WorkerResult:
         self.store.requeue_retryable_failures()
@@ -59,12 +61,22 @@ class MapWorker:
                 job.job_id,
                 worker_id=self.worker_id,
                 interval_seconds=self.heartbeat_interval_seconds,
+                on_heartbeat=self.on_heartbeat,
             ):
-                map_id, archive_path = self.pipeline.build(
-                    job,
-                    on_status=update,
-                    on_progress=update_progress,
-                )
+                build_kwargs = {
+                    "on_status": update,
+                    "on_progress": update_progress,
+                }
+                if isinstance(self.pipeline, MapBuildPipeline):
+                    build_kwargs["artifact_publication_lease"] = lambda object_key: (
+                        self.store.artifact_publication_lease(
+                            job.job_id,
+                            object_key,
+                            worker_id=self.worker_id,
+                        )
+                    )
+                build_result = self.pipeline.build(job, **build_kwargs)
+                map_id, archive_path = build_result
             published_archive = (
                 self.pipeline.published_archive_path(map_id, job.job_id)
                 if hasattr(self.pipeline, "published_archive_path")
@@ -76,16 +88,25 @@ class MapWorker:
                 map_id=map_id,
                 built_archive=archive_path,
                 published_archive=published_archive,
+                artifacts=getattr(build_result, "artifacts", None),
+                artifact_metrics=getattr(build_result, "artifact_metrics", None),
             )
             return WorkerResult(worker_id=self.worker_id, job=finished, processed=True)
         except Exception as exc:
             current = self.store.get(job.job_id)
             if current.status == JobStatus.CANCELLED or current.worker_id != self.worker_id:
+                if (
+                    current.status == JobStatus.CANCELLED
+                    and isinstance(self.pipeline, MapBuildPipeline)
+                    and self.pipeline.artifact_store is not None
+                ):
+                    self.store.queue_terminal_pending_artifacts(job.job_id)
                 return WorkerResult(worker_id=self.worker_id, job=current, processed=True)
             failed = self.store.update_status_unless_cancelled(
                 job.job_id,
                 JobStatus.FAILED,
                 error=str(exc),
+                error_code=getattr(exc, "code", "map_build_failed"),
                 worker_id=self.worker_id,
                 event=str(exc),
                 finished=True,
@@ -95,9 +116,13 @@ class MapWorker:
                     job.job_id,
                     JobStatus.QUEUED,
                     error=str(exc),
+                    error_code=getattr(exc, "code", "map_build_failed"),
                     worker_id=self.worker_id,
                     event="queued for retry",
                 )
+            elif isinstance(self.pipeline, MapBuildPipeline) and self.pipeline.artifact_store is not None:
+                self.store.queue_terminal_pending_artifacts(job.job_id)
+                failed = self.store.get(job.job_id)
             return WorkerResult(worker_id=self.worker_id, job=failed, processed=True)
 
     def run_until_empty(self, *, max_jobs: int | None = None) -> list[WorkerResult]:
@@ -110,7 +135,13 @@ class MapWorker:
         return results
 
 
-def expire_ready_jobs(store: JobStore, *, older_than_days: int) -> int:
+def expire_ready_jobs(
+    store: JobStore,
+    *,
+    older_than_days: int,
+    artifact_store=None,
+    max_gc_items: int | None = None,
+) -> int:
     if isinstance(older_than_days, bool) or not 1 <= older_than_days <= 3_650:
         raise ValueError("older_than_days must be between 1 and 3650")
     cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
@@ -123,31 +154,40 @@ def expire_ready_jobs(store: JobStore, *, older_than_days: int) -> int:
             continue
         store.update_status(job.job_id, JobStatus.EXPIRED, event="expired by retention policy", finished=True)
         count += 1
-    cleanup_expired_pack_artifacts(store)
+    cleanup_expired_pack_artifacts(
+        store,
+        artifact_store=artifact_store,
+        max_gc_items=max_gc_items,
+    )
     return count
 
 
-def cleanup_expired_pack_artifacts(store: JobStore) -> int:
-    jobs = store.list()
-    protected_paths = {
-        Path(job.pack_path)
-        for job in jobs
-        if job.pack_path and job.status != JobStatus.EXPIRED
-    }
+def cleanup_expired_pack_artifacts(
+    store: JobStore,
+    *,
+    artifact_store=None,
+    max_gc_items: int | None = None,
+) -> int:
     removed = 0
-    for pack_path in {
-        Path(job.pack_path)
-        for job in jobs
-        if job.pack_path and job.status == JobStatus.EXPIRED
-    }:
-        if pack_path in protected_paths or not pack_path.exists():
-            continue
-        pack_path.unlink()
-        removed += 1
-        try:
-            pack_path.parent.rmdir()
-        except OSError:
-            pass
+    with store.lock_artifact_references() as jobs:
+        protected_paths = {
+            Path(job.pack_path)
+            for job in jobs
+            if job.pack_path and job.status != JobStatus.EXPIRED
+        }
+        candidates = {
+            Path(job.pack_path)
+            for job in jobs
+            if job.pack_path and job.status == JobStatus.EXPIRED
+        } - protected_paths
+    for pack_path in candidates:
+        if store.delete_expired_legacy_pack(pack_path):
+            removed += 1
+    if artifact_store is not None:
+        removed += store.cleanup_artifact_garbage(
+            artifact_store,
+            max_items=max_gc_items,
+        )
     return removed
 
 

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "candidate": {
+    "gitSha": "0000000000000000000000000000000000000000",
+    "producerBuildSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "workerImageDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "firmwareVersion": "replace-with-tested-version",
+    "firmwareBuild": 1,
+    "firmwareGitSha": "0000000000000000000000000000000000000000",
+    "iosBuild": "replace-with-tested-build",
+    "iosGitSha": "0000000000000000000000000000000000000000",
+    "iosBuildSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "signingKeys": [
+      {
+        "keyId": "replace-with-trusted-key-id",
+        "publicKeySha256": "replace-with-sha256-of-exact-x963-public-key"
+      }
+    ]
+  },
+  "runs": [],
+  "approval": {
+    "approved": false,
+    "approvedAt": "",
+    "approvedBy": "",
+    "notes": "Copy this file outside the repository, record every required run with approved=false, review the complete matrix, then set approved=true and an approval timestamp later than every run before invoking the checker."
+  }
+}

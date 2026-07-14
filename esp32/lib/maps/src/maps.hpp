@@ -122,8 +122,8 @@ private:
   BBox parseBbox(String str);
   MapBlock *readMapBlock(String fileName);
   MapBlock *readMapBlockBinary(char *buffer, size_t fileSize);
-  void
-  buildPolygonGrid(MapBlock *mblock); // Build spatial grid for polygon culling
+  bool buildPolygonGrid(
+      MapBlock *mblock); // Build spatial grid for polygon culling
   void fillPolygon(const Polygon &p, lv_obj_t *canvas);
   void drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
                 int16_t y2, uint16_t color, uint8_t width);
@@ -198,7 +198,8 @@ public:
   MapTile getMapTile(double lon, double lat, uint8_t zoomLevel, int8_t offsetX,
                      int8_t offsetY);
   void initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull);
-  void setVectorMapFolder(const std::string &folder);
+  bool setVectorMapFolder(const std::string &folder);
+  bool probeVectorMapFolder(const std::string &folder);
   void deleteMapScrSprites();
   void createMapScrSprites();
   void generateRenderMap(uint8_t zoom);

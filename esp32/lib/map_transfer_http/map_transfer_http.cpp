@@ -1,11 +1,18 @@
 #include "map_transfer_http.hpp"
 
+#include "../firmware_metadata/firmware_metadata.hpp"
+#include "../maps/src/mapBlockFormat.hpp"
+#include "map_stream_compiled_trust.hpp"
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
+#include <fcntl.h>
+#include <memory>
+#include <new>
 #include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -16,6 +23,9 @@ namespace {
 
 constexpr const char *kStatusPath = "/map-transfer/status";
 constexpr const char *kSessionPrefix = "/map-transfer/sessions/";
+constexpr const char *kInstallStreamAction = "install-stream";
+constexpr const char *kMapStreamMediaType =
+    "application/vnd.openbikecomputer.map-stream";
 constexpr uint64_t kMaxUploadBytes = 128ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kMaxArchiveUploadBytes = 512ULL * 1024ULL * 1024ULL;
 
@@ -23,6 +33,7 @@ struct ActivationTaskContext {
   MapTransferHttpServer *server = nullptr;
   std::string sessionId;
   bool automaticExit = false;
+  bool streamProtocol = false;
 };
 
 static std::string joinPath(const std::string &a, const std::string &b) {
@@ -178,12 +189,90 @@ void MapTransferHttpServer::configure(
   if (!storageRoot_.empty() && storageRoot_.back() == '/')
     storageRoot_.pop_back();
   installer_ = MapTransferInstaller(storageRoot_);
+  streamTrustStore_ = compiledMapStreamTrustStore();
   if (stateMutex_ == nullptr)
     stateMutex_ = xSemaphoreCreateMutex();
   transferServer_ = sharedServer == nullptr ? &ownedTransferServer_ : sharedServer;
   if (sharedServer == nullptr)
     transferServer_->configure(port, "BikeComputer-Transfer");
   transferServer_->registerHandler("/map-transfer", this);
+}
+
+void MapTransferHttpServer::setStreamTrustStore(
+    MapStreamTrustStore trustStore) {
+  lockState();
+  streamTrustStore_ = std::move(trustStore);
+  unlockState();
+}
+
+void MapTransferHttpServer::setStreamStorageAvailable(bool available) {
+  lockState();
+  streamStorageAvailable_ = available;
+  unlockState();
+}
+
+void MapTransferHttpServer::setStreamStorageProbe(
+    std::function<bool()> probe) {
+  lockState();
+  streamStorageProbe_ = std::move(probe);
+  unlockState();
+}
+
+bool MapTransferHttpServer::streamStoragePathAccessible() const {
+  struct stat storage = {};
+  struct stat mapNamespace = {};
+  return ::stat(storageRoot_.c_str(), &storage) == 0 &&
+         S_ISDIR(storage.st_mode) &&
+         ::stat(joinPath(storageRoot_, "VECTMAP").c_str(), &mapNamespace) ==
+             0 &&
+         S_ISDIR(mapNamespace.st_mode);
+}
+
+bool MapTransferHttpServer::streamStoragePathWritable() const {
+  struct stat storage = {};
+  if (::stat(storageRoot_.c_str(), &storage) != 0 ||
+      !S_ISDIR(storage.st_mode))
+    return false;
+  const std::string mapNamespace = joinPath(storageRoot_, "VECTMAP");
+  if (!mkdirs(mapNamespace))
+    return false;
+  const std::string probePath =
+      joinPath(mapNamespace, ".stream-write-probe");
+  const int descriptor =
+      ::open(probePath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  if (descriptor < 0)
+    return false;
+  const uint8_t marker = 1;
+  const bool wrote = ::write(descriptor, &marker, sizeof(marker)) ==
+                     static_cast<ssize_t>(sizeof(marker));
+  const bool synced = wrote && ::fsync(descriptor) == 0;
+  const bool closed = ::close(descriptor) == 0;
+  const bool removed = ::unlink(probePath.c_str()) == 0;
+  return wrote && synced && closed && removed;
+}
+
+bool MapTransferHttpServer::refreshStreamStorageCapability(
+    bool requireWritable) {
+  lockState();
+  const std::function<bool()> probe = streamStorageProbe_;
+  unlockState();
+  const bool mounted = !probe || probe();
+  const bool available =
+      mounted && (requireWritable ? streamStoragePathWritable()
+                                  : streamStoragePathAccessible());
+  setStreamStorageAvailable(available);
+  return available;
+}
+
+bool MapTransferHttpServer::streamInstallSupported() const {
+  lockState();
+  const bool available = streamStorageAvailable_;
+  const bool trusted = streamTrustStore_.size() > 0;
+  const std::function<bool()> probe = streamStorageProbe_;
+  unlockState();
+  return firmware_metadata::hasImmutableGitIdentity() && available && trusted &&
+         (!probe || probe()) &&
+         streamStoragePathAccessible();
 }
 
 bool MapTransferHttpServer::setEnabled(bool enabled) {
@@ -203,13 +292,18 @@ HttpTransferStatus MapTransferHttpServer::status() const {
 
 bool MapTransferHttpServer::handleRequest(
     const device_transfer::HttpRequest &request, WiFiClient &client) {
-  if (request.method == "GET" && request.path == kStatusPath) {
-    handleStatus(client);
-    return true;
-  }
   if (status().mode != "map") {
     sendError(client, 403, "transfer_mode_mismatch",
               "map transfer mode is not active");
+    return true;
+  }
+  if (!transferServer_->isRequestAuthorized(request)) {
+    sendError(client, 401, "transfer_token_invalid",
+              "map transfer token is missing or invalid");
+    return true;
+  }
+  if (request.method == "GET" && request.path == kStatusPath) {
+    handleStatus(client);
     return true;
   }
   Serial.printf("MAP_TRANSFER_HTTP: %s %s length=%llu\n",
@@ -218,7 +312,10 @@ bool MapTransferHttpServer::handleRequest(
   if (request.method == "HEAD" && handleHead(request.path, client))
     return true;
   if (request.method == "PUT" &&
-      handlePut(request.path, request.contentLength, client))
+      handleInstallStream(request, client))
+    return true;
+  if (request.method == "PUT" &&
+      handlePut(request, client))
     return true;
   if (request.method == "POST" && handleActivate(request.path, client))
     return true;
@@ -307,9 +404,193 @@ bool MapTransferHttpServer::handleHead(const std::string &path,
   return true;
 }
 
-bool MapTransferHttpServer::handlePut(const std::string &path,
-                                      uint64_t contentLength,
-                                      WiFiClient &client) {
+bool MapTransferHttpServer::handleInstallStream(
+    const device_transfer::HttpRequest &request, WiFiClient &client) {
+  std::string sessionId;
+  std::string action;
+  if (!parseSessionPath(request.path, sessionId, action) ||
+      action != kInstallStreamAction) {
+    return false;
+  }
+  if (!refreshStreamStorageCapability(true)) {
+    sendError(client, 503, "stream_storage_unavailable",
+              "map stream storage is not mounted and writable");
+    return true;
+  }
+  if (!streamInstallSupported()) {
+    sendError(client, 503, "stream_capability_unavailable",
+              "map stream trust keys are not provisioned");
+    return true;
+  }
+  if (request.contentType != kMapStreamMediaType) {
+    sendError(client, 415, "stream_content_type",
+              "map stream content type is invalid");
+    return true;
+  }
+  constexpr uint64_t kMaximumStreamBytes =
+      MAP_STREAM_MAX_PAYLOAD_BYTES + MAP_STREAM_MAX_MANIFEST_BYTES + 1024;
+  if (!request.hasContentLength || request.contentLength == 0 ||
+      request.contentLength > kMaximumStreamBytes) {
+    sendError(client, 413, "stream_content_length",
+              "map stream content length is invalid");
+    return true;
+  }
+  lockState();
+  const bool acceptsUploads = activationState_.acceptsUploads();
+  MapStreamTrustStore trustStore = streamTrustStore_;
+  unlockState();
+  if (!acceptsUploads) {
+    sendError(client, 409, "activation_busy",
+              "map stream cannot change while activation is running");
+    return true;
+  }
+  InstallStatus recovered = installer_.recoverInterruptedActivation();
+  if (!recovered.ok) {
+    sendError(client, 503, recovered.code, recovered.message);
+    return true;
+  }
+  MapStreamInstallSnapshot recoverableStream;
+  const MapStreamRecoveryResult streamRecovery =
+      readRecoverableMapStreamInstall(storageRoot_, recoverableStream);
+  if (streamRecovery == MapStreamRecoveryResult::Invalid) {
+    const InstallStatus discarded =
+        installer_.discardAllUnselectedStreamMaps();
+    if (!discarded.ok) {
+      sendError(client, 503, discarded.code, discarded.message);
+      return true;
+    }
+    updateStreamInstallState(MapStreamInstallSnapshot(), false);
+  } else if (streamRecovery == MapStreamRecoveryResult::Ambiguous) {
+    sendError(client, 503, "stream_recovery_blocked",
+              "existing map stream state must be reconciled first");
+    return true;
+  }
+  if (streamRecovery == MapStreamRecoveryResult::Found &&
+      recoverableStream.state == MapStreamInstallState::Ready &&
+      recoverableStream.sessionId != sessionId) {
+    sendError(client, 409, "stream_ready_pending",
+              "another verified stream is pending activation");
+    return true;
+  }
+  if (!installer_.pruneObsoleteInstalledMaps(sessionId)) {
+    sendError(client, 500, "stream_prune",
+              "could not prune obsolete stream installations");
+    return true;
+  }
+
+  constexpr size_t kMaximumParserWorkingBytes = 6U * 1024U * 1024U;
+  constexpr uint64_t kProgressPublishBytes = 256U * 1024U;
+  constexpr uint32_t kProgressPublishMilliseconds = 500;
+  uint64_t lastPublishedBytes = 0;
+  uint32_t lastPublishedAt = millis();
+  uint8_t lastPublishedProgress = UINT8_MAX;
+  const auto publishProgress =
+      [this, &lastPublishedBytes, &lastPublishedAt, &lastPublishedProgress](
+          const MapStreamInstallSnapshot &snapshot) {
+        updateStreamInstallState(snapshot, true);
+        lastPublishedBytes = snapshot.receivedPayloadBytes;
+        lastPublishedAt = millis();
+        lastPublishedProgress = snapshot.progress();
+      };
+  auto receiver = std::unique_ptr<MapStreamReceiver>(
+      new (std::nothrow) MapStreamReceiver(
+          trustStore, storageRoot_, sessionId, request.contentLength,
+          firmware_metadata::version(), kMaximumParserWorkingBytes, {}, {}, {},
+          publishProgress));
+  if (!receiver) {
+    sendError(client, 503, "stream_resource_unavailable",
+              "could not allocate map stream receiver");
+    return true;
+  }
+  updateStreamInstallState(receiver->snapshot(), true);
+  std::array<uint8_t, 1024> buffer = {};
+  uint64_t remaining = request.contentLength;
+  uint32_t lastRead = millis();
+  bool cancelled = false;
+  while (remaining > 0 && !receiver->failed()) {
+    if (!transferServer_->isRequestAuthorized(request)) {
+      cancelled = true;
+      break;
+    }
+    const int available = client.available();
+    if (available <= 0) {
+      if (millis() - lastRead > 10000)
+        break;
+      delay(1);
+      continue;
+    }
+    const size_t count = static_cast<size_t>(std::min<uint64_t>(
+        std::min<uint64_t>(remaining, buffer.size()),
+        static_cast<uint64_t>(available)));
+    const int read = client.read(buffer.data(), count);
+    if (read <= 0)
+      continue;
+    if (!receiver->feed(buffer.data(), static_cast<size_t>(read)))
+      break;
+    remaining -= static_cast<uint64_t>(read);
+    lastRead = millis();
+    const MapStreamInstallSnapshot &snapshot = receiver->snapshot();
+    const uint8_t progress = snapshot.progress();
+    const uint32_t now = millis();
+    if (progress != lastPublishedProgress &&
+        (snapshot.receivedPayloadBytes - lastPublishedBytes >=
+             kProgressPublishBytes ||
+         now - lastPublishedAt >= kProgressPublishMilliseconds)) {
+      publishProgress(snapshot);
+    }
+    delay(0);
+  }
+  if (!cancelled && !transferServer_->isRequestAuthorized(request))
+    cancelled = true;
+  const MapStreamReceiveResult result = receiver->finish();
+  updateStreamInstallState(receiver->snapshot(), !result.ok);
+  if (cancelled) {
+    sendError(client, 409, "transfer_cancelled",
+              "map transfer authorization was revoked");
+    return true;
+  }
+  if (!result.ok) {
+    refreshStreamStorageCapability(true);
+    sendError(client, result.httpStatus, result.code, result.message);
+    return true;
+  }
+
+  const MapStreamInstallSnapshot completed = receiver->snapshot();
+  sendJson(client, 200,
+           std::string("{\"ok\":true,\"status\":\"ready\",\"sessionId\":\"") +
+               jsonEscape(sessionId) + "\",\"mapId\":\"" +
+               jsonEscape(completed.mapId) + "\",\"manifestReceipt\":\"" +
+               completed.manifestReceipt +
+               "\",\"signedManifestReceipt\":\"" +
+               completed.signedManifestReceipt + "\"}");
+
+  lockState();
+  const uint32_t minimumActivationSequence =
+      completed.sequence == UINT32_MAX ? UINT32_MAX : completed.sequence + 1;
+  const ActivationBeginResult beginResult =
+      activationState_.begin(sessionId, 3, minimumActivationSequence);
+  if (beginResult == ActivationBeginResult::Started)
+    activationState_.updateProgress({3, 3, 0, 1});
+  streamStatusActive_ = false;
+  unlockState();
+  if (beginResult == ActivationBeginResult::Started) {
+    startActivationTask(sessionId, true, true);
+  } else if (beginResult == ActivationBeginResult::AlreadyInstalled) {
+    const InstallStatus cleaned = installer_.activateReadyStreamMap(sessionId);
+    if (!cleaned.ok)
+      setLastError(cleaned.code, cleaned.message);
+    requestAutomaticExit();
+  } else if (beginResult == ActivationBeginResult::Busy) {
+    setLastError("activation_busy",
+                 "another map activation started after stream completion");
+  }
+  return true;
+}
+
+bool MapTransferHttpServer::handlePut(
+    const device_transfer::HttpRequest &request, WiFiClient &client) {
+  const std::string &path = request.path;
+  const uint64_t contentLength = request.contentLength;
   std::string sessionId;
   std::string relativePath;
   if (!parseSessionPath(path, sessionId, relativePath))
@@ -372,9 +653,26 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
 
   uint8_t buffer[1024];
   Sha256Hasher hasher;
+  std::unique_ptr<map_block_format::StreamValidator> rendererValidator;
+  if (!isManifest && !isArchive) {
+    rendererValidator.reset(
+        new (std::nothrow) map_block_format::StreamValidator(relativePath));
+    if (!rendererValidator || rendererValidator->failed()) {
+      output.close();
+      ::unlink(destination.c_str());
+      sendError(client, 400, "file_renderer_format",
+                "could not initialize map block validation");
+      return true;
+    }
+  }
   uint64_t remaining = contentLength;
   uint32_t lastRead = millis();
   while (remaining > 0) {
+    if (!transferServer_->isRequestAuthorized(request)) {
+      sendError(client, 409, "transfer_cancelled",
+                "map transfer authorization was revoked");
+      return true;
+    }
     int available = client.available();
     if (available <= 0) {
       if (millis() - lastRead > 10000) {
@@ -390,8 +688,16 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     int read = client.read(buffer, toRead);
     if (read <= 0)
       continue;
-    if (!isManifest && !isArchive)
+    if (!isManifest && !isArchive) {
       hasher.update(buffer, static_cast<size_t>(read));
+      if (!rendererValidator->feed(buffer, static_cast<size_t>(read))) {
+        output.close();
+        ::unlink(destination.c_str());
+        sendError(client, 400, "file_renderer_format",
+                  "uploaded map file is not renderer-compatible");
+        return true;
+      }
+    }
     output.write(reinterpret_cast<const char *>(buffer), read);
     if (!output) {
       sendError(client, 500, "write", "could not write staged file");
@@ -399,6 +705,11 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     }
     remaining -= static_cast<uint64_t>(read);
     lastRead = millis();
+  }
+  if (!transferServer_->isRequestAuthorized(request)) {
+    sendError(client, 409, "transfer_cancelled",
+              "map transfer authorization was revoked");
+    return true;
   }
   output.close();
   if (!output.good()) {
@@ -429,6 +740,12 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
       return true;
     }
   } else {
+    if (!rendererValidator->finish()) {
+      ::unlink(destination.c_str());
+      sendError(client, 400, "file_renderer_format",
+                "uploaded map file is not renderer-compatible");
+      return true;
+    }
     std::string actualSha = hasher.finalHex();
     std::string expectedSha = expectedFile.sha256;
     std::transform(expectedSha.begin(), expectedSha.end(), expectedSha.begin(),
@@ -467,6 +784,8 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     // therefore be device-owned instead of depending on a follow-up request.
     lockState();
     const ActivationBeginResult beginResult = activationState_.begin(sessionId);
+    if (beginResult == ActivationBeginResult::Started)
+      streamStatusActive_ = false;
     unlockState();
     if (beginResult == ActivationBeginResult::Started) {
       startActivationTask(sessionId, true);
@@ -493,6 +812,8 @@ bool MapTransferHttpServer::handleActivate(const std::string &path,
 
   lockState();
   ActivationBeginResult beginResult = activationState_.begin(sessionId);
+  if (beginResult == ActivationBeginResult::Started)
+    streamStatusActive_ = false;
   const uint32_t activationSequence = activationState_.snapshot().sequence;
   unlockState();
   const auto activatingResponse = [&]() {
@@ -526,16 +847,46 @@ bool MapTransferHttpServer::handleActivate(const std::string &path,
   return true;
 }
 
+InstallStatus MapTransferHttpServer::supersedeRecoverableStreamForArchive() {
+  MapStreamInstallSnapshot stream;
+  const MapStreamRecoveryResult recovery =
+      readRecoverableMapStreamInstall(storageRoot_, stream);
+  if (recovery == MapStreamRecoveryResult::None)
+    return {true, "stream_none", ""};
+  if (recovery != MapStreamRecoveryResult::Found) {
+    return installer_.discardAllUnselectedStreamMaps();
+  }
+  const InstallStatus discarded =
+      installer_.discardUnselectedStreamMap(stream.sessionId);
+  if (!discarded.ok)
+    return discarded;
+  updateStreamInstallState(MapStreamInstallSnapshot(), false);
+  return discarded;
+}
+
 void MapTransferHttpServer::handleStatus(WiFiClient &client) {
   ActiveMapSelection activeMap;
   InstallStatus active = installer_.readActiveMap(activeMap);
   HttpTransferStatus transferStatus = status();
+  const bool streamSupported = streamInstallSupported();
 
   std::string body = std::string("{\"configured\":") +
                      (transferStatus.configured ? "true" : "false") +
                      ",\"enabled\":" +
                      (transferStatus.enabled ? "true" : "false") +
-                     ",\"port\":" + std::to_string(transferStatus.port);
+                     ",\"port\":" + std::to_string(transferStatus.port) +
+                     ",\"firmwareVersion\":\"" +
+                     jsonEscape(firmware_metadata::version()) +
+                     "\",\"firmwareBuild\":" +
+                     std::to_string(firmware_metadata::build()) +
+                     ",\"firmwareGitSha\":\"" +
+                     jsonEscape(firmware_metadata::gitSha()) + "\"" +
+                     ",\"protocols\":[1" +
+                     (streamSupported ? ",2" : "") + "]";
+  if (streamSupported) {
+    body += ",\"streamFormatVersions\":[1],\"streamTrust\":" +
+            compiledMapStreamTrustCapabilitiesJson();
+  }
   if (!transferStatus.baseUrl.empty()) {
     body += ",\"baseUrl\":\"" + jsonEscape(transferStatus.baseUrl) + "\"";
   }
@@ -591,7 +942,10 @@ void MapTransferHttpServer::unlockState() const {
 
 std::string MapTransferHttpServer::activationStatusJson(bool compact) const {
   lockState();
-  std::string body = activationState_.json(compact);
+  const bool activationRunning = activationState_.snapshot().running;
+  std::string body = streamStatusActive_ && !activationRunning
+                         ? streamInstallState_.json(compact)
+                         : activationState_.json(compact);
   unlockState();
   return body;
 }
@@ -599,27 +953,99 @@ std::string MapTransferHttpServer::activationStatusJson(bool compact) const {
 MapActivationSnapshot MapTransferHttpServer::activationSnapshot() const {
   lockState();
   MapActivationSnapshot snapshot = activationState_.snapshot();
+  if (streamStatusActive_ && !snapshot.running) {
+    snapshot.running = streamInstallState_.state ==
+                           MapStreamInstallState::Receiving ||
+                       streamInstallState_.state ==
+                           MapStreamInstallState::Finalizing;
+    snapshot.sequence = streamInstallState_.sequence;
+    snapshot.status = mapStreamInstallStateCode(streamInstallState_.state);
+    snapshot.sessionId = streamInstallState_.sessionId;
+    snapshot.mapId = streamInstallState_.mapId;
+    snapshot.step = streamInstallState_.step();
+    snapshot.totalSteps = streamInstallState_.totalSteps();
+    snapshot.progress = streamInstallState_.progress();
+    snapshot.errorCode = streamInstallState_.errorCode;
+    snapshot.errorMessage = streamInstallState_.errorMessage;
+  }
   unlockState();
   return snapshot;
 }
 
 bool MapTransferHttpServer::activationHasError() const {
   lockState();
-  const bool hasError = !activationState_.snapshot().errorCode.empty();
+  const MapActivationSnapshot activation = activationState_.snapshot();
+  const bool hasError = streamStatusActive_ && !activation.running
+                            ? !streamInstallState_.errorCode.empty()
+                            : !activation.errorCode.empty();
   unlockState();
   return hasError;
 }
 
+void MapTransferHttpServer::updateStreamInstallState(
+    const MapStreamInstallSnapshot &snapshot, bool active) {
+  lockState();
+  streamInstallState_ = snapshot;
+  streamStatusActive_ = active;
+  unlockState();
+}
+
 bool MapTransferHttpServer::takeActivatedMapRoot(std::string &root) {
   lockState();
-  if (pendingMapRoot_.empty()) {
+  if (pendingMapRoot_.empty() ||
+      (pendingRendererAcknowledgement_ && pendingMapRootTaken_)) {
     unlockState();
     return false;
   }
   root = pendingMapRoot_;
-  pendingMapRoot_.clear();
+  if (pendingRendererAcknowledgement_)
+    pendingMapRootTaken_ = true;
+  else
+    pendingMapRoot_.clear();
   unlockState();
   return true;
+}
+
+void MapTransferHttpServer::acknowledgeActivatedMapRoot(
+    const std::string &root, bool loaded) {
+  lockState();
+  if (!pendingRendererAcknowledgement_ || !pendingMapRootTaken_ ||
+      pendingMapRoot_ != root) {
+    unlockState();
+    return;
+  }
+  const std::string sessionId = pendingMapSessionId_;
+  const std::string mapId = pendingMapId_;
+  const bool automaticExit = pendingRendererAutomaticExit_;
+  const bool streamProtocol = pendingRendererStreamProtocol_;
+  pendingMapRoot_.clear();
+  pendingMapSessionId_.clear();
+  pendingMapId_.clear();
+  pendingMapRootTaken_ = false;
+  pendingRendererAcknowledgement_ = false;
+  pendingRendererAutomaticExit_ = false;
+  pendingRendererStreamProtocol_ = false;
+  unlockState();
+
+  if (loaded) {
+    finishActivation("installed", mapId, "", "");
+  } else {
+    const InstallStatus rollback = installer_.rollbackActiveMap(sessionId);
+    const std::string message =
+        rollback.ok
+            ? std::string("renderer rejected the new map root; ") +
+                  rollback.message
+            : std::string("renderer rejected the new map root; rollback failed: ") +
+                  rollback.message;
+    finishActivation("failed", mapId, "renderer_reload", message);
+  }
+  if (!streamProtocol &&
+      !installer_.clearPendingArchiveActivation()) {
+    setLastError("activation_marker",
+                 "could not clear pending archive activation");
+  }
+  if (automaticExit)
+    requestAutomaticExit();
 }
 
 bool MapTransferHttpServer::takeAutomaticExitRequest() {
@@ -630,10 +1056,10 @@ bool MapTransferHttpServer::takeAutomaticExitRequest() {
   return requested;
 }
 
-void MapTransferHttpServer::resumePendingArchiveActivation() {
+bool MapTransferHttpServer::resumePendingArchiveActivation() {
   std::string sessionId;
   if (!installer_.readPendingArchiveActivation(sessionId))
-    return;
+    return false;
 
   ActiveMapSelection active;
   if (installer_.readActiveMap(active).ok && active.sessionId == sessionId) {
@@ -642,17 +1068,89 @@ void MapTransferHttpServer::resumePendingArchiveActivation() {
       setLastError("staging_cleanup",
                    "could not clean completed pending archive");
     }
-    return;
+    return false;
   }
 
   lockState();
   const ActivationBeginResult beginResult = activationState_.begin(sessionId);
+  if (beginResult == ActivationBeginResult::Started)
+    streamStatusActive_ = false;
   unlockState();
   if (beginResult == ActivationBeginResult::Started) {
     Serial.printf("MAP_TRANSFER_HTTP: resuming pending archive session=%s\n",
                   sessionId.c_str());
-    startActivationTask(sessionId, true);
+    return startActivationTask(sessionId, true);
   }
+  return false;
+}
+
+bool MapTransferHttpServer::resumePendingStreamActivation(
+    const MapStreamInstallSnapshot *recovered) {
+  MapStreamInstallSnapshot snapshot;
+  if (recovered != nullptr) {
+    snapshot = *recovered;
+  } else {
+    const MapStreamRecoveryResult recovery =
+        readRecoverableMapStreamInstall(storageRoot_, snapshot);
+    if (recovery != MapStreamRecoveryResult::Found)
+      return false;
+  }
+  updateStreamInstallState(snapshot, true);
+  if (snapshot.state != MapStreamInstallState::Ready)
+    return false;
+
+  lockState();
+  const ActivationBeginResult beginResult =
+      activationState_.begin(
+          snapshot.sessionId, 3,
+          snapshot.sequence == UINT32_MAX ? UINT32_MAX : snapshot.sequence + 1);
+  if (beginResult == ActivationBeginResult::Started) {
+    activationState_.updateProgress({3, 3, 0, 1});
+    streamStatusActive_ = false;
+  }
+  unlockState();
+  if (beginResult == ActivationBeginResult::Started) {
+    Serial.printf("MAP_TRANSFER_HTTP: resuming ready stream session=%s\n",
+                  snapshot.sessionId.c_str());
+    return startActivationTask(snapshot.sessionId, true, true);
+  }
+  return false;
+}
+
+void MapTransferHttpServer::resumePendingActivations() {
+  MapStreamInstallSnapshot streamSnapshot;
+  const MapStreamRecoveryResult streamRecovery =
+      readRecoverableMapStreamInstall(storageRoot_, streamSnapshot);
+  if (streamRecovery == MapStreamRecoveryResult::Found) {
+    updateStreamInstallState(streamSnapshot, true);
+  } else if (streamRecovery != MapStreamRecoveryResult::None) {
+    setLastError(streamRecovery == MapStreamRecoveryResult::Ambiguous
+                     ? "stream_recovery_ambiguous"
+                     : "stream_recovery_invalid",
+                 "map stream recovery state requires a new matching upload");
+  }
+
+  std::string archiveSessionId;
+  bool archivePending =
+      installer_.readPendingArchiveActivation(archiveSessionId);
+  bool readyStream = streamRecovery == MapStreamRecoveryResult::Found &&
+                     streamSnapshot.state == MapStreamInstallState::Ready;
+  if (archivePending && streamRecovery != MapStreamRecoveryResult::None) {
+    const InstallStatus discarded =
+        streamRecovery == MapStreamRecoveryResult::Found
+            ? installer_.discardUnselectedStreamMap(streamSnapshot.sessionId)
+            : installer_.discardAllUnselectedStreamMaps();
+    if (!discarded.ok) {
+      setLastError(discarded.code, discarded.message);
+      return;
+    }
+    updateStreamInstallState(MapStreamInstallSnapshot(), false);
+    readyStream = false;
+  }
+  if (archivePending && resumePendingArchiveActivation())
+    return;
+  if (readyStream)
+    resumePendingStreamActivation(&streamSnapshot);
 }
 
 void MapTransferHttpServer::requestAutomaticExit() {
@@ -681,9 +1179,10 @@ void MapTransferHttpServer::updateActivationProgress(
 }
 
 bool MapTransferHttpServer::startActivationTask(const std::string &sessionId,
-                                                bool automaticExit) {
-  auto *context =
-      new ActivationTaskContext{this, sessionId, automaticExit};
+                                                bool automaticExit,
+                                                bool streamProtocol) {
+  auto *context = new ActivationTaskContext{this, sessionId, automaticExit,
+                                            streamProtocol};
   BaseType_t created = xTaskCreate(activationTaskThunk, "map_activate", 16384,
                                    context, 1, nullptr);
   if (created != pdPASS) {
@@ -694,12 +1193,46 @@ bool MapTransferHttpServer::startActivationTask(const std::string &sessionId,
       requestAutomaticExit();
     return false;
   }
-  Serial.printf("MAP_TRANSFER_HTTP: activation queued session=%s automatic=%d\n",
-                sessionId.c_str(), automaticExit);
+  Serial.printf("MAP_TRANSFER_HTTP: activation queued session=%s automatic=%d "
+                "protocol=%d\n",
+                sessionId.c_str(), automaticExit, streamProtocol ? 2 : 1);
   return true;
 }
 
-void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
+bool MapTransferHttpServer::runStreamActivationTask(
+    const std::string &sessionId, bool automaticExit) {
+  const auto onProgress = [this](const ActivationProgress &progress) {
+    updateActivationProgress(progress);
+  };
+  InstallStatus activated = installer_.recoverPendingStreamActivation(onProgress);
+  if (!activated.ok) {
+    finishActivation("failed", "", activated.code, activated.message);
+    return false;
+  }
+  ActiveMapSelection selected;
+  InstallStatus active = installer_.readActiveMap(selected);
+  if (!active.ok || selected.sessionId != sessionId) {
+    finishActivation("failed", active.ok ? selected.mapId : "",
+                     active.ok ? "stream_activation_identity" : active.code,
+                     active.ok ? "activated stream session does not match"
+                               : active.message);
+    return false;
+  }
+  lockState();
+  pendingMapRoot_ = selected.root;
+  pendingMapSessionId_ = selected.sessionId;
+  pendingMapId_ = selected.mapId;
+  pendingMapRootTaken_ = false;
+  pendingRendererAcknowledgement_ = true;
+  pendingRendererAutomaticExit_ = automaticExit;
+  pendingRendererStreamProtocol_ = true;
+  activationState_.updateProgress({3, 3, 2, 3});
+  unlockState();
+  return true;
+}
+
+bool MapTransferHttpServer::runActivationTask(const std::string &sessionId,
+                                              bool automaticExit) {
   Serial.printf("MAP_TRANSFER_HTTP: activate start session=%s\n",
                 sessionId.c_str());
   InstallStatus recovery = installer_.recoverInterruptedActivation();
@@ -707,7 +1240,7 @@ void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
     Serial.printf("MAP_TRANSFER_HTTP: recovery failed code=%s message=%s\n",
                   recovery.code.c_str(), recovery.message.c_str());
     finishActivation("failed", "", recovery.code, recovery.message);
-    return;
+    return false;
   }
   const auto onProgress = [this](const ActivationProgress &progress) {
     updateActivationProgress(progress);
@@ -719,7 +1252,7 @@ void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
                   prepared.code.c_str(), prepared.message.c_str());
     finishActivation("failed", "", prepared.code, prepared.message);
     ::unlink(installer_.stagedArchivePath(sessionId).c_str());
-    return;
+    return false;
   }
 
   MapManifest manifest;
@@ -730,7 +1263,15 @@ void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
                   validated.code.c_str(), validated.message.c_str());
     finishActivation("failed", "", validated.code, validated.message);
     ::unlink(installer_.stagedArchivePath(sessionId).c_str());
-    return;
+    return false;
+  }
+
+  const InstallStatus superseded =
+      supersedeRecoverableStreamForArchive();
+  if (!superseded.ok) {
+    finishActivation("failed", manifest.mapId, superseded.code,
+                     superseded.message);
+    return false;
   }
 
   InstallStatus activated =
@@ -740,7 +1281,7 @@ void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
                   activated.code.c_str(), activated.message.c_str());
     finishActivation("failed", manifest.mapId, activated.code,
                      activated.message);
-    return;
+    return false;
   }
 
   Serial.printf("MAP_TRANSFER_HTTP: activated mapId=%s session=%s\n",
@@ -749,12 +1290,19 @@ void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
   InstallStatus active = installer_.readActiveMap(selected);
   if (!active.ok) {
     finishActivation("failed", manifest.mapId, active.code, active.message);
-    return;
+    return false;
   }
   lockState();
   pendingMapRoot_ = selected.root;
+  pendingMapSessionId_ = selected.sessionId;
+  pendingMapId_ = selected.mapId;
+  pendingMapRootTaken_ = false;
+  pendingRendererAcknowledgement_ = true;
+  pendingRendererAutomaticExit_ = automaticExit;
+  pendingRendererStreamProtocol_ = false;
+  activationState_.updateProgress({5, 5, 4, 5});
   unlockState();
-  finishActivation("installed", manifest.mapId, "", "");
+  return true;
 }
 
 void MapTransferHttpServer::activationTaskThunk(void *arg) {
@@ -763,14 +1311,23 @@ void MapTransferHttpServer::activationTaskThunk(void *arg) {
     MapTransferHttpServer *server = context->server;
     std::string sessionId = context->sessionId;
     const bool automaticExit = context->automaticExit;
+    const bool streamProtocol = context->streamProtocol;
     delete context;
-    server->runActivationTask(sessionId);
-    if (automaticExit) {
-      if (!server->installer_.clearPendingArchiveActivation()) {
+    bool waitingForRenderer = false;
+    if (streamProtocol)
+      waitingForRenderer =
+          server->runStreamActivationTask(sessionId, automaticExit);
+    else
+      waitingForRenderer =
+          server->runActivationTask(sessionId, automaticExit);
+    if (!waitingForRenderer) {
+      if (!streamProtocol &&
+          !server->installer_.clearPendingArchiveActivation()) {
         server->setLastError("activation_marker",
                              "could not clear pending archive activation");
       }
-      server->requestAutomaticExit();
+      if (automaticExit)
+        server->requestAutomaticExit();
     }
   } else {
     delete context;

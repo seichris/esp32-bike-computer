@@ -7,7 +7,9 @@ name = "open-bike-map-platform"
 version = "0.1.0"
 description = "Offline map generation backend for Open Bike Computer"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "cryptography>=43,<49"
+]
 
 [project.optional-dependencies]
 api = [
@@ -17,6 +19,9 @@ api = [
 test = [
   "fastapi>=0.115,<1",
   "httpx>=0.27,<1"
+]
+object-storage = [
+  "boto3>=1.37,<2"
 ]
 
 [project.scripts]

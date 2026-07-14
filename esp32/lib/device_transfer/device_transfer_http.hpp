@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 
 #include <array>
 #include <string>
@@ -26,7 +27,10 @@ struct HttpRequest {
   std::string method;
   std::string path;
   std::string transferToken;
+  std::string contentType;
   uint64_t contentLength = 0;
+  bool hasContentLength = false;
+  uint32_t transferGeneration = 0;
 };
 
 class HttpRequestHandler {
@@ -49,6 +53,7 @@ public:
   void process();
   HttpTransferStatus status() const;
   bool isRequestAuthorized(const HttpRequest &request) const;
+  bool waitUntilStopped(uint32_t timeoutMs);
 
 private:
   uint16_t port_ = 8080;
@@ -62,14 +67,18 @@ private:
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
   std::string lastErrorCode_;
   std::string lastErrorMessage_;
+  uint32_t transferGeneration_ = 0;
   struct HandlerRegistration {
     std::string pathPrefix;
     HttpRequestHandler *handler = nullptr;
   };
   std::array<HandlerRegistration, 4> handlers_{};
   size_t handlerCount_ = 0;
+  TaskHandle_t workerTask_ = nullptr;
 
   void handleClient(WiFiClient &client);
+  void runWorker();
+  static void workerTaskThunk(void *arg);
   HttpRequestHandler *handlerForPath(const std::string &path) const;
   std::string generateSessionToken() const;
   void sendError(WiFiClient &client, int status, const std::string &code,
