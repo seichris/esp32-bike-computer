@@ -22,8 +22,8 @@ WORKER_SOURCE_ROOTS = (
     "backend/pyproject.toml",
     "backend/Dockerfile",
     "backend/tools/generate_map_stream_build_identity.py",
-    "OSM_Extract/conf",
-    "OSM_Extract/scripts",
+    "tools/OSM_Extract/conf",
+    "tools/OSM_Extract/scripts",
 )
 
 

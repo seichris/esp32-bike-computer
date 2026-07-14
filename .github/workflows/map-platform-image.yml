@@ -5,8 +5,8 @@ on:
     paths:
       - ".github/workflows/map-platform-image.yml"
       - "backend/**"
-      - "OSM_Extract/conf/**"
-      - "OSM_Extract/scripts/**"
+      - "tools/OSM_Extract/conf/**"
+      - "tools/OSM_Extract/scripts/**"
       - "config/map-stream-trust.json"
   workflow_dispatch:
 

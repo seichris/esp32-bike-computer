@@ -17,6 +17,16 @@ class FakeStreamingRunner:
 
 
 class PipelineProgressTests(unittest.TestCase):
+    def test_pipeline_uses_relocated_osm_extract_tool(self):
+        repo_root = Path("/repo")
+        paths = PipelinePaths(
+            repo_root=repo_root,
+            work_root=repo_root / "work",
+            pack_root=repo_root / "packs",
+        )
+
+        self.assertEqual(paths.osm_extract_root, repo_root / "tools" / "OSM_Extract")
+
     def test_parse_map_progress(self):
         self.assertEqual(parse_map_progress("MAP_PROGRESS:24:100\n"), (24, 100))
         self.assertEqual(parse_map_progress("building\rMAP_PROGRESS:100:100\n"), (100, 100))

@@ -38,11 +38,11 @@ IceNav-v3/tools/*.png
 waveshare_test/.pio
 waveshare_test/
 
-# OSM_Extract/
-OSM_Extract/maps/
-OSM_Extract/pbf
-OSM_Extract/__pycache__
-OSM_Extract/conf/test*
+# tools/OSM_Extract/
+tools/OSM_Extract/maps/
+tools/OSM_Extract/pbf
+tools/OSM_Extract/__pycache__
+tools/OSM_Extract/conf/test*
 
 backend/.venv/
 *.egg-info/

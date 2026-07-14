@@ -13,7 +13,7 @@ map settings, and ride telemetry to a small handlebar display over BLE.
   protocol tests, and hardware-evidence checkers.
 - `ios-app/` - iOS companion app using SwiftUI, MapKit, CoreBluetooth,
   CoreLocation, and HealthKit.
-- `OSM_Extract/` - Dockerized OpenStreetMap extraction tools that generate
+- `tools/OSM_Extract/` - Dockerized OpenStreetMap extraction tools that generate
   vector map blocks (`.fmb` / `.fmp`) from PBF files. This is modified from
   [aresta/OSM_Extract](https://github.com/aresta/OSM_Extract).
 - `docs/` - protocol and implementation notes. The current BLE source of truth
@@ -105,9 +105,6 @@ Run the iOS app by opening:
 ```text
 ios-app/BikeComputer/BikeComputer.xcodeproj
 ```
-
-For physical iPhone setup, developer trust, and sharing notes, see
-[ios-app/README.md](ios-app/README.md).
 
 ## Hardware notes
 
