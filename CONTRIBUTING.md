@@ -168,11 +168,25 @@ in the same change.
 
 ## Licensing contributions
 
-This is a multi-license repository. By submitting a contribution, you agree to
-license it under the license that applies to the target component in
-[LICENSES.md](LICENSES.md). Contributions spanning components are licensed
-according to the destination of each changed file.
+This is a multi-license repository. Contributions to the network backend and
+its configuration are made available under AGPL-3.0-only. Contributions to the
+iOS app and other distributed or local project software are made available
+under GPL-3.0-only. Existing component-level and third-party notices continue
+to take priority. See [LICENSES.md](LICENSES.md) for the complete mapping.
 
-You must have the right to submit the contribution under those terms and must
-preserve applicable copyright, attribution, and third-party license notices.
-Submitting a contribution does not transfer your copyright to the project.
+Before an external contribution can be accepted, its contributor must read and
+agree to the [Contributor License Agreement](CLA.md) using the acknowledgement
+in the pull request template. The CLA:
+
+- leaves copyright ownership with the contributor;
+- grants the repository owner broad copyright and patent licenses, including
+  the right to sublicense; and
+- promises that accepted contributions remain available under the public
+  license that applied to their component when submitted, even if the
+  repository owner also offers them under separate App Store, commercial, or
+  proprietary terms.
+
+You must have the right to submit the contribution and must identify any
+third-party material and preserve all applicable copyright, attribution, and
+license notices. If an employer or another entity owns relevant rights, obtain
+its authorization before submitting.

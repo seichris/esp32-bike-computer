@@ -1,36 +1,55 @@
 # Licensing
 
-This is a multi-license repository. The license that applies depends on the
-component and on whether the material is project-authored or comes from a third
-party.
+Open Bike Computer is a multi-license open source repository. The license that
+applies depends on the component and on whether the material is
+project-authored or comes from a third party.
 
-## Project-authored software
+## Network service: AGPL-3.0-only
 
-Unless a component-level or file-level notice says otherwise, project-authored
-software source code, tests, scripts, and software configuration in the
-following paths are licensed under the [PolyForm Noncommercial License
-1.0.0](LICENSE):
+Unless a more specific notice applies, project-authored software source code,
+tests, scripts, and software configuration in these paths are licensed under
+the [GNU Affero General Public License version 3 only](LICENSES/AGPL-3.0-only.txt):
 
 - `backend/`
 - `config/`
-- `ios-app/`, excluding image assets and other non-software content
-- `tools/`
 
-PolyForm Noncommercial permits use, modification, and distribution only for
-the noncommercial purposes described in the license. This is a source-available
-license, not an Open Source Initiative-approved open source license.
+The AGPL applies its source-sharing requirements to modified versions that
+users interact with remotely over a network as well as to distributed copies.
 
-## GPL-covered components
+## Distributed and local software: GPL-3.0-only
 
-The following components retain their existing GNU General Public License
-version 3 terms and are not relicensed under PolyForm Noncommercial:
+Unless a more specific notice applies, all other project-authored software
+source code, tests, scripts, and software configuration are licensed under the
+[GNU General Public License version 3 only](LICENSE). This includes the iOS
+application, top-level tooling, GitHub workflows, and software such as the
+Python CAD generators.
+
+The following imported or derived components retain their existing GNU GPL
+version 3 terms as stated by their own notices. This licensing change does not
+alter whether those existing terms permit a later GPL version:
 
 - `esp32/` — see [`esp32/LICENSE`](esp32/LICENSE)
 - `OSM_Extract/` — see [`OSM_Extract/LICENSE`](OSM_Extract/LICENSE)
 
-GPL-covered components may be redistributed commercially when the GPL's terms
-are followed. The PolyForm license does not add restrictions to those
-components.
+The backend container image combines the AGPL-covered backend and configuration
+with the GPL-covered `OSM_Extract` tools. Section 13 of AGPLv3 permits that
+combination: the backend and configuration remain under AGPL-3.0-only, while
+`OSM_Extract` remains under its existing GPL version 3 terms.
+
+## Separate licenses and official distribution
+
+The repository owner may offer project-authored software under separate terms,
+including terms suitable for official App Store distribution or proprietary
+commercial integration. The public AGPL and GPL grants remain available and
+are not withdrawn by a separate license.
+
+The [Contributor License Agreement](CLA.md) gives the repository owner the
+rights needed to offer accepted contributions under separate terms while
+promising that each accepted contribution also remains available under the
+public license that applied to its component when it was submitted.
+
+These separate-licensing rights do not cover upstream or third-party material
+that the repository owner does not have the right to relicense.
 
 ## Third-party and other material
 
@@ -39,11 +58,10 @@ reference documents, map data, and other bundled material remain subject to
 their own notices and licenses. A component-level or file-level license takes
 priority over the repository-level license.
 
-Documentation, artwork, trademarks, hardware reference documents, CAD files,
-and other material not expressly listed as PolyForm-licensed above are not
-licensed by the root `LICENSE`. All rights in that material remain with their
-respective copyright or other rights holders unless a specific notice says
-otherwise.
+Documentation, artwork, trademarks, hardware reference documents, CAD models
+and exports, and other non-software material are not licensed by the software
+licenses above. All rights in that material remain with their respective
+copyright or other rights holders unless a specific notice says otherwise.
 
 The project name, logos, and other marks are not licensed for use as trademarks
 by any software license in this repository.

@@ -20,10 +20,17 @@ For code contributions, see
 
 ## License
 
-Project-authored software is available under the PolyForm Noncommercial License
-1.0.0, with component-level exceptions for GPL-covered firmware, map extraction
-tools, and other third-party material. This is a source-available project; the
-PolyForm-covered software may be used, modified, and distributed only for the
-noncommercial purposes described in the license.
+Open Bike Computer uses an open source component model:
+
+- the network map backend and its configuration are AGPL-3.0-only;
+- the iOS app and other project-authored distributed or local software are
+  GPL-3.0-only; and
+- imported GPL components such as the ESP32 firmware base and map extraction
+  tools retain their existing license terms.
+
+Contributors retain copyright and contribute under the
+[Contributor License Agreement](CLA.md). The agreement keeps contributions
+available under the applicable public license while allowing the repository
+owner to offer separately licensed official builds, including App Store builds.
 
 See [LICENSES.md](LICENSES.md) for the exact path-by-path licensing boundaries.
