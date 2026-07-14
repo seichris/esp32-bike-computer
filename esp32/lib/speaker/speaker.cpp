@@ -1,6 +1,6 @@
 #include "speaker.hpp"
 
-#if defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include "speaker_gain.h"
 #include "../waveshare_board/axp2101.hpp"
@@ -32,11 +32,21 @@ constexpr uint32_t SAMPLE_RATE = 16000;
 constexpr uint8_t CHANNELS = 2;
 constexpr uint8_t ES8311_I2C_ADDRESS = 0x18;
 
+#if defined(WAVESHARE_AMOLED_175)
+constexpr float PA_SUPPLY_VOLTAGE = 3.3f;
+constexpr gpio_num_t I2S_MCLK = GPIO_NUM_42;
+constexpr gpio_num_t I2S_BCLK = GPIO_NUM_9;
+constexpr gpio_num_t I2S_WS = GPIO_NUM_45;
+constexpr gpio_num_t I2S_DOUT = GPIO_NUM_8;
+constexpr gpio_num_t I2S_DIN = GPIO_NUM_10;
+#else
+constexpr float PA_SUPPLY_VOLTAGE = 5.0f;
 constexpr gpio_num_t I2S_MCLK = GPIO_NUM_16;
 constexpr gpio_num_t I2S_BCLK = GPIO_NUM_41;
 constexpr gpio_num_t I2S_WS = GPIO_NUM_45;
 constexpr gpio_num_t I2S_DOUT = GPIO_NUM_40;
 constexpr gpio_num_t I2S_DIN = GPIO_NUM_42;
+#endif
 constexpr gpio_num_t PA_ENABLE = GPIO_NUM_46;
 
 extern const uint8_t realBikeHornStart[]
@@ -327,7 +337,7 @@ bool initializeCodec() {
 
   configureWireControl();
   esp_codec_dev_hw_gain_t hardwareGain{};
-  hardwareGain.pa_voltage = 5.0f;
+  hardwareGain.pa_voltage = PA_SUPPLY_VOLTAGE;
   hardwareGain.codec_dac_voltage = 3.3f;
   codecHardwareGainDb = esp_codec_dev_col_calc_hw_gain(&hardwareGain);
 

@@ -148,7 +148,7 @@ settings characteristic (`2A73`) or the navigation fallback characteristic
 "SNDP" | SoundID: UInt8 | VolumePercent: UInt8
 ```
 
-Supported sound IDs on `WAVESHARE_AMOLED_206`:
+Supported sound IDs on `WAVESHARE_AMOLED_175` and `WAVESHARE_AMOLED_206`:
 
 | ID | Sound |
 | ---: | --- |
@@ -165,7 +165,7 @@ Playback requests are queued by the firmware and run outside the BLE callback.
 Unsupported IDs, invalid volumes, and sound commands received before
 authentication are rejected.
 
-The app configures the 2.06 PWR button as a local honk control with another
+The app configures the Waveshare PWR button as a local honk control with another
 authenticated frame on the same command routes:
 
 ```text
