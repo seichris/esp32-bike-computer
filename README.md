@@ -17,3 +17,13 @@ Ideas and feature requests are welcome—[open an issue](https://github.com/seic
 
 For code contributions, see
 [CONTRIBUTING.md](https://github.com/seichris/open-bike-computer/blob/main/CONTRIBUTING.md).
+
+## License
+
+Project-authored software is available under the PolyForm Noncommercial License
+1.0.0, with component-level exceptions for GPL-covered firmware, map extraction
+tools, and other third-party material. This is a source-available project; the
+PolyForm-covered software may be used, modified, and distributed only for the
+noncommercial purposes described in the license.
+
+See [LICENSES.md](LICENSES.md) for the exact path-by-path licensing boundaries.

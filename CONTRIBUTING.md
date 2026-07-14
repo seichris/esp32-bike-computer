@@ -165,3 +165,14 @@ characteristics and the fallback framing path.
 Before changing BLE formats, update the shared builders/parsers, iOS protocol
 tests, ESP32 firmware, XIAO native tests, and [docs/ble-protocol.md](docs/ble-protocol.md)
 in the same change.
+
+## Licensing contributions
+
+This is a multi-license repository. By submitting a contribution, you agree to
+license it under the license that applies to the target component in
+[LICENSES.md](LICENSES.md). Contributions spanning components are licensed
+according to the destination of each changed file.
+
+You must have the right to submit the contribution under those terms and must
+preserve applicable copyright, attribution, and third-party license notices.
+Submitting a contribution does not transfer your copyright to the project.
