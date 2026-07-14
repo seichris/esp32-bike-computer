@@ -106,9 +106,6 @@ Run the iOS app by opening:
 ios-app/BikeComputer/BikeComputer.xcodeproj
 ```
 
-For physical iPhone setup, developer trust, and sharing notes, see
-[ios-app/README.md](ios-app/README.md).
-
 ## Hardware notes
 
 Supported display targets:

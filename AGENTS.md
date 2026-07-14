@@ -88,7 +88,6 @@ Healthy boot log checkpoints from the Waveshare board:
 ### iOS
 
 - Open: `ios-app/BikeComputer/BikeComputer.xcodeproj`
-- Real-device testing / trust / sharing notes: `ios-app/README.md`
 
 ## BLE contract
 
