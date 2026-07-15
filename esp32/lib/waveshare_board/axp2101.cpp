@@ -18,6 +18,7 @@ bool pmuAvailable = false;
 
 constexpr uint8_t AXP2101_STATUS1_REG = 0x00;
 constexpr uint8_t AXP2101_STATUS2_REG = 0x01;
+constexpr uint8_t AXP2101_BATTERY_PERCENTAGE_REG = 0xA4;
 constexpr uint8_t AXP2101_VBUS_GOOD_MASK = 0x20;
 constexpr uint8_t AXP2101_BATTERY_PRESENT_MASK = 0x08;
 constexpr uint8_t AXP2101_BATTERY_CURRENT_DIRECTION_SHIFT = 5;
@@ -102,6 +103,36 @@ bool readPowerStatus(PowerStatus &status) {
   status.vindpmActive = (status.status2 & AXP2101_VINDPM_ACTIVE_MASK) != 0;
   status.chargingStatus = status.status2 & AXP2101_CHARGING_STATUS_MASK;
   return true;
+}
+
+bool readBatteryStatus(uint8_t &percentage, bool &charging) {
+  charging = false;
+  if (!pmuAvailable && !begin()) {
+    return false;
+  }
+
+  PowerStatus status;
+  if (!readPowerStatus(status) || !status.batteryPresent) {
+    return false;
+  }
+
+  uint8_t rawPercentage = 0;
+  if (!readRegister(AXP2101_BATTERY_PERCENTAGE_REG, rawPercentage) ||
+      rawPercentage > 100) {
+    return false;
+  }
+
+  percentage = rawPercentage;
+  // REG 01H[2:0] values 0-3 are trickle, pre-charge, constant-current,
+  // and constant-voltage charging. Require valid VBUS as well so a stale
+  // charge phase cannot leave the UI showing external power.
+  charging = status.vbusGood && status.chargingStatus <= 3;
+  return true;
+}
+
+bool readBatteryPercentage(uint8_t &percentage) {
+  bool charging = false;
+  return readBatteryStatus(percentage, charging);
 }
 
 bool setPowerButtonShortPressMonitoring(bool enabled) {

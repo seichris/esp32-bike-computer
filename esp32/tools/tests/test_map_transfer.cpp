@@ -933,7 +933,9 @@ static void testStoredArchivePreparesAndActivatesInBackgroundTransferPath() {
       "{\"schemaVersion\":1,\"mapId\":\"map-archive\",\"files\":[{"
       "\"path\":\"" +
       blockPath + "\",\"bytes\":" + std::to_string(blockData.size()) +
-      ",\"sha256\":\"" + sha(blockData) + "\"}]}\n";
+      ",\"sha256\":\"" + sha(blockData) +
+      "\"}],\"preview\":{\"type\":\"boundary-png\",\"path\":"
+      "\"preview.png\",\"width\":160,\"height\":96}}\n";
   assert(::system((std::string("mkdir -p ") + installer.stagingRoot(session))
                       .c_str()) == 0);
   writeStoredZip(installer.stagedArchivePath(session),

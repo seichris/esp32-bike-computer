@@ -15,6 +15,7 @@ __all__ = [
     "map_stream_rollout",
     "map_stream_trust_registry",
     "pipeline",
+    "preview",
     "source_cache",
     "sources",
     "strict_json",

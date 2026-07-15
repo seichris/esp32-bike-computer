@@ -63,6 +63,20 @@ func appendUInt32LE(_ value: UInt32, to data: inout Data) {
     data.append(UInt8((value >> 24) & 0xFF))
 }
 
+func zipCRC32(_ data: Data) -> UInt32 {
+    var crc = UInt32.max
+    for byte in data {
+        var value = (crc ^ UInt32(byte)) & 0xff
+        for _ in 0..<8 {
+            value = value & 1 == 1
+                ? (value >> 1) ^ 0xedb8_8320
+                : value >> 1
+        }
+        crc = (crc >> 8) ^ value
+    }
+    return crc ^ UInt32.max
+}
+
 private extension Data {
     init?(hex: String) {
         guard hex.count.isMultiple(of: 2) else { return nil }
@@ -87,7 +101,7 @@ func makeStoredZip(entries: [(String, Data)]) -> Data {
         appendUInt16LE(0, to: &zip)
         appendUInt16LE(0, to: &zip)
         appendUInt16LE(0, to: &zip)
-        appendUInt32LE(0, to: &zip)
+        appendUInt32LE(zipCRC32(body), to: &zip)
         appendUInt32LE(UInt32(body.count), to: &zip)
         appendUInt32LE(UInt32(body.count), to: &zip)
         appendUInt16LE(UInt16(name.count), to: &zip)
@@ -96,6 +110,24 @@ func makeStoredZip(entries: [(String, Data)]) -> Data {
         zip.append(body)
     }
     return zip
+}
+
+actor AsyncTestGate {
+    private var isOpen = false
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { continuation in
+            waiter = continuation
+        }
+    }
+
+    func open() {
+        isOpen = true
+        waiter?.resume()
+        waiter = nil
+    }
 }
 
 final class OfflineMapTestURLProtocol: URLProtocol {
@@ -368,6 +400,7 @@ struct NavigationProtocolTests {
         testDevicePacketRouting()
         testDeviceSoundProtocol()
         testDeviceCapabilitiesProtocol()
+        testBatteryStatusScreenCapabilityNegotiation()
         testMapProfileCapabilityNegotiation()
         testDeviceCapabilitySynchronizesPowerButtonHonkOnce()
         testDeviceCapabilityRetryPolicy()
@@ -439,6 +472,9 @@ struct NavigationProtocolTests {
         testOfflineMapManagerReconcilesAcknowledgedFirstInstall()
         testOfflineMapPolygonClosesRing()
         testOfflineMapStoredZipReader()
+        testOfflineMapPackPreviewReader()
+        testOfflineMapPreviewLoadRegistry()
+        await testOfflineMapCompatibilityArchiveCancellation()
         await testOfflineMapArchiveValidationCancellation()
         testCachedMapInstalledIdentityUsesManifestSession()
         testOfflineMapManifestDecoding()
@@ -497,6 +533,14 @@ struct NavigationProtocolTests {
         assertEqual(manifest, expectedManifest, "map stream stream embeds the golden manifest")
         assertEqual(envelopeData, expectedEnvelope, "map stream stream embeds the golden envelope")
         assertEqual(payload, expectedPayload, "map stream stream embeds payload in manifest order")
+        let expectedPreview = Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )!
+        assertEqual(
+            OfflineMapPackPreviewReader.imageData(fromManifestData: manifest),
+            expectedPreview,
+            "the shared signed stream exposes its inline boundary preview"
+        )
         assertEqual(parsedHeader.fileCount, 1, "map stream golden fixture file count")
         assertEqual(
             parsedHeader.payloadBytes,
@@ -3968,6 +4012,42 @@ struct NavigationProtocolTests {
             source.contains("manager.hasActiveBackgroundUpload"),
             "a restored upload disables conflicting saved-map upload and delete actions"
         )
+        assert(
+            source.contains("SavedMapThumbnail(") &&
+                source.contains("manager.previewImage(forCachedPack: packURL)") &&
+                source.contains("manager.loadPreviewIfNeeded(forCachedPack: packURL)") &&
+                source.contains(".frame(width: 52, height: 36)"),
+            "each saved map shows a fixed-size preview before its editable name"
+        )
+        let managerSourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift"
+        )
+        guard let managerSource = try? String(contentsOf: managerSourceURL, encoding: .utf8) else {
+            assert(false, "offline map manager source should be available to the integration test")
+            return
+        }
+        assert(
+            managerSource.contains("Task.detached(priority: .utility)") &&
+                !managerSource.contains("packURLs.forEach(cachePreviewIfAvailable)"),
+            "saved-map previews load lazily without scanning cached archives on the main actor"
+        )
+        assert(
+            managerSource.contains(
+                "refreshCachedPacks()\n#if canImport(UIKit)\n        loadPreviewIfNeeded(forCachedPack: destination)"
+            ),
+            "replacing a pack at the same URL explicitly reloads its invalidated preview"
+        )
+        assert(
+            managerSource.contains("OfflineMapPackCompatibilityArchive.make(") &&
+                managerSource.contains(
+                    "archiveURL: compatibilityArchiveURL ?? packURL"
+                ) &&
+                managerSource.contains("useForegroundTransfer = true") &&
+                managerSource.contains("allowLocalStorageFailure:") &&
+                managerSource.contains("catch is CancellationError") &&
+                managerSource.contains("OfflineMapPackCompatibilityArchive.remove("),
+            "preview ZIPs retain resumable background upload through a sanitized archive"
+        )
     }
 
     @MainActor
@@ -4098,6 +4178,10 @@ struct NavigationProtocolTests {
         assertEqual(archive.mapFileEntries.count, 1, "zip reader exposes VECTMAP file entries")
         assertEqual(archive.manifestEntry?.path, "manifest.json", "zip reader exposes manifest entry")
         assertEqual(try? archive.data(for: archive.mapFileEntries[0]), block, "zip reader reads entry data")
+        assert(
+            !MapArchiveUploadStrategy.requiresCompatibilityArchive(for: archive),
+            "legacy ZIPs without preview entries retain background archive transfer"
+        )
 
         let duplicateURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("offline-map-duplicate-test-\(UUID().uuidString).zip")
@@ -4126,6 +4210,259 @@ struct NavigationProtocolTests {
         } catch {
             assert(false, "duplicate map entries should produce invalidPack")
         }
+    }
+
+    static func testOfflineMapPackPreviewReader() {
+        let preview = Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )!
+        let previewMetadata: [String: Any] = [
+            "type": "boundary-png",
+            "path": "preview.png",
+            "width": 1,
+            "height": 1,
+            "background": "transparent",
+            "dataBase64": preview.base64EncodedString(),
+        ]
+        let manifest = try! JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 1,
+            "mapId": "map-1",
+            "preview": previewMetadata,
+        ])
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-preview-\(UUID().uuidString).zip")
+        try? makeStoredZip(entries: [
+            ("manifest.json", manifest),
+            ("ATTRIBUTION.txt", Data("OpenStreetMap contributors".utf8)),
+            ("LICENSES/OpenStreetMap-ODbL.txt", Data("ODbL".utf8)),
+            ("preview.png", preview),
+            ("VECTMAP/map-1/+0032+0008/123_456.fmb", Data("map-block".utf8)),
+        ]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        assertEqual(
+            OfflineMapPackPreviewReader.imageData(for: url),
+            preview,
+            "stored map packs expose their boundary preview"
+        )
+        guard let previewArchive = try? OfflineMapPackArchive(url: url) else {
+            assert(false, "preview ZIP should parse for transfer strategy")
+            return
+        }
+        assert(
+            MapArchiveUploadStrategy.requiresCompatibilityArchive(for: previewArchive),
+            "preview ZIPs require a device-compatible upload archive"
+        )
+        let compatibilityURL = try! OfflineMapPackCompatibilityArchive.make(
+            from: previewArchive
+        )
+        defer { OfflineMapPackCompatibilityArchive.remove(compatibilityURL) }
+        let compatibilityArchive = try! OfflineMapPackArchive(url: compatibilityURL)
+        let orphanURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bike-map-device-\(UUID().uuidString).zip")
+        try! Data("orphan".utf8).write(to: orphanURL)
+        OfflineMapPackCompatibilityArchive.removeOrphans()
+        assert(
+            FileManager.default.fileExists(atPath: compatibilityURL.path),
+            "orphan cleanup protects a compatibility archive in active preparation"
+        )
+        assert(
+            !FileManager.default.fileExists(atPath: orphanURL.path),
+            "orphan cleanup removes a compatibility archive left by a prior process"
+        )
+        assert(
+            !compatibilityArchive.entries.contains(where: { $0.path == "preview.png" }),
+            "device compatibility archive omits the local-only preview"
+        )
+        assert(
+            compatibilityArchive.entries.contains(where: {
+                $0.path == "ATTRIBUTION.txt"
+            }) && compatibilityArchive.entries.contains(where: {
+                $0.path == "LICENSES/OpenStreetMap-ODbL.txt"
+            }),
+            "device compatibility archive preserves attribution and license files"
+        )
+        assert(
+            !MapArchiveUploadStrategy.requiresCompatibilityArchive(
+                for: compatibilityArchive
+            ),
+            "sanitized ZIP remains on the resumable background upload path"
+        )
+        assertEqual(
+            try? compatibilityArchive.data(for: compatibilityArchive.manifestEntry!),
+            manifest,
+            "device compatibility archive preserves the manifest"
+        )
+        assertEqual(
+            try? compatibilityArchive.data(for: compatibilityArchive.mapFileEntries[0]),
+            Data("map-block".utf8),
+            "device compatibility archive preserves map payloads"
+        )
+        let compatibilityData = try! Data(contentsOf: compatibilityURL)
+        let endRecordOffset = compatibilityData.count - 22
+        assertEqual(
+            readUInt32LE(compatibilityData, offset: endRecordOffset),
+            0x0605_4B50,
+            "device compatibility archive writes a ZIP end record"
+        )
+        assertEqual(
+            readUInt16LE(compatibilityData, offset: endRecordOffset + 10),
+            UInt16(compatibilityArchive.entries.count),
+            "device compatibility archive indexes every retained entry"
+        )
+        let unzip = Process()
+        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        unzip.arguments = ["-t", compatibilityURL.path]
+        unzip.standardOutput = Pipe()
+        unzip.standardError = Pipe()
+        try! unzip.run()
+        unzip.waitUntilExit()
+        assertEqual(
+            unzip.terminationStatus,
+            0,
+            "device compatibility archive is structurally valid ZIP"
+        )
+        assertEqual(
+            OfflineMapPackPreviewReader.imageData(fromManifestData: manifest),
+            preview,
+            "stream manifests expose their inline signed boundary preview"
+        )
+        var stream = Data("BIKEMAP1".utf8)
+        func appendUInt16LE(_ value: UInt16) {
+            stream.append(UInt8(value & 0xff))
+            stream.append(UInt8(value >> 8))
+        }
+        func appendUInt32LE(_ value: UInt32) {
+            for shift in stride(from: 0, through: 24, by: 8) {
+                stream.append(UInt8((value >> UInt32(shift)) & 0xff))
+            }
+        }
+        func appendUInt64LE(_ value: UInt64) {
+            for shift in stride(from: 0, through: 56, by: 8) {
+                stream.append(UInt8((value >> UInt64(shift)) & 0xff))
+            }
+        }
+        appendUInt16LE(1)
+        appendUInt16LE(0)
+        appendUInt32LE(UInt32(manifest.count))
+        appendUInt16LE(5)
+        appendUInt16LE(0)
+        appendUInt32LE(1)
+        appendUInt64LE(1)
+        stream.append(manifest)
+        stream.append(Data(repeating: 0, count: 5))
+        stream.append(0)
+        let streamURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-preview-\(UUID().uuidString).bmap")
+        try? stream.write(to: streamURL)
+        defer { try? FileManager.default.removeItem(at: streamURL) }
+        assertEqual(
+            OfflineMapPackPreviewReader.imageData(for: streamURL),
+            preview,
+            "cached signed streams expose their inline boundary preview"
+        )
+
+        var corruptPreview = previewMetadata
+        corruptPreview["width"] = "wide"
+        let corruptManifest = try! JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 1,
+            "mapId": "map-1",
+            "preview": corruptPreview,
+        ])
+        let corruptURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-corrupt-preview-\(UUID().uuidString).zip")
+        try? makeStoredZip(entries: [
+            ("manifest.json", corruptManifest),
+            ("preview.png", Data("not-a-png".utf8)),
+            ("VECTMAP/map-1/+0032+0008/123_456.fmb", Data("map-block".utf8)),
+        ]).write(to: corruptURL)
+        defer { try? FileManager.default.removeItem(at: corruptURL) }
+
+        guard let archive = try? OfflineMapPackArchive(url: corruptURL),
+              let decodedManifest = try? archive.manifest() else {
+            assert(false, "a corrupt optional preview must not invalidate the map archive")
+            return
+        }
+        assertEqual(decodedManifest.preview, nil, "malformed preview metadata is ignored")
+        assertEqual(archive.mapFileEntries.count, 1, "map transfer entries remain available")
+        assertEqual(
+            OfflineMapPackPreviewReader.imageData(for: corruptURL),
+            nil,
+            "corrupt previews fall back without throwing"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapPreviewLoadRegistry() {
+        let registry = OfflineMapPreviewLoadRegistry()
+        let key = "/maps/shanghai.zip"
+        let stale = registry.begin(for: key)
+        registry.invalidate(key)
+        let current = registry.begin(for: key)
+
+        assert(
+            !registry.finishIfCurrent(stale, for: key),
+            "a stale preview completion cannot retire its replacement load"
+        )
+        assert(
+            registry.finishIfCurrent(current, for: key),
+            "the replacement preview load remains current and publishable"
+        )
+        let invalidated = registry.begin(for: key)
+        registry.removeAll()
+        assert(
+            !registry.finishIfCurrent(invalidated, for: key),
+            "cache reset invalidates every outstanding preview load"
+        )
+    }
+
+    static func testOfflineMapCompatibilityArchiveCancellation() async {
+        let sourceURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-compat-cancel-\(UUID().uuidString).zip")
+        let mapPath = "VECTMAP/map-1/+0032+0008/123_456.fmb"
+        try? makeStoredZip(entries: [
+            ("manifest.json", Data("{\"mapId\":\"map-1\"}".utf8)),
+            ("preview.png", Data("preview".utf8)),
+            (mapPath, Data(repeating: 0x5a, count: 2 * 1_048_576)),
+        ]).write(to: sourceURL)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        guard let archive = try? OfflineMapPackArchive(url: sourceURL) else {
+            assert(false, "compatibility cancellation archive should parse")
+            return
+        }
+        func temporaryCompatibilityPaths() -> Set<String> {
+            let files = (try? FileManager.default.contentsOfDirectory(
+                at: FileManager.default.temporaryDirectory,
+                includingPropertiesForKeys: nil
+            )) ?? []
+            return Set(files.filter {
+                $0.lastPathComponent.hasPrefix("bike-map-device-") &&
+                    $0.pathExtension.lowercased() == "zip"
+            }.map { $0.standardizedFileURL.path })
+        }
+
+        let pathsBefore = temporaryCompatibilityPaths()
+        let gate = AsyncTestGate()
+        let preparation = Task.detached {
+            await gate.wait()
+            return try OfflineMapPackCompatibilityArchive.make(from: archive)
+        }
+        preparation.cancel()
+        await gate.open()
+        do {
+            let unexpectedURL = try await preparation.value
+            OfflineMapPackCompatibilityArchive.remove(unexpectedURL)
+            assert(false, "cancelled compatibility preparation should not publish a ZIP")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            assert(false, "cancelled compatibility preparation should throw CancellationError")
+        }
+        assertEqual(
+            temporaryCompatibilityPaths(),
+            pathsBefore,
+            "cancelled compatibility preparation removes its registered partial ZIP"
+        )
     }
 
     static func testOfflineMapArchiveValidationCancellation() async {
@@ -4367,6 +4704,30 @@ struct NavigationProtocolTests {
             ),
             "device failures are not disguised as compatibility fallback"
         )
+        let outOfSpace = NSError(
+            domain: NSCocoaErrorDomain,
+            code: NSFileWriteOutOfSpaceError
+        )
+        assert(
+            MapArchiveUploadFallback.shouldUseForeground(
+                for: outOfSpace,
+                allowLocalStorageFailure: true
+            ),
+            "compatibility staging falls back when local storage is exhausted"
+        )
+        assert(
+            !MapArchiveUploadFallback.shouldUseForeground(
+                for: outOfSpace
+            ),
+            "ordinary archive failures do not broaden the compatibility fallback"
+        )
+        assert(
+            !MapArchiveUploadFallback.shouldUseForeground(
+                for: CancellationError(),
+                allowLocalStorageFailure: true
+            ),
+            "cancellation never becomes an implicit foreground transfer"
+        )
     }
 
     static func testMapTransferOutcomePolicy() {
@@ -4446,6 +4807,7 @@ struct NavigationProtocolTests {
         let secondBlock = Data("second-block".utf8)
         let zip = makeStoredZip(entries: [
             ("manifest.json", manifest),
+            ("preview.png", Data("preview-only-local".utf8)),
             ("VECTMAP/map-1/+0032+0008/001_001.fmb", firstBlock),
             ("VECTMAP/map-1/+0032+0008/002_002.fmb", secondBlock)
         ])
@@ -4524,6 +4886,10 @@ struct NavigationProtocolTests {
         assertEqual(manifestHeadAttempts, 3,
                     "resume waits through timeout and busy recovery responses")
         assertEqual(headPaths.count, 5, "resume checks every declared upload entry")
+        assert(
+            !headPaths.contains(where: { $0.hasSuffix("preview.png") }),
+            "foreground compatibility transfer never stages preview.png on older firmware"
+        )
         assertEqual(progress.map { $0.1 }, [false, false, true],
                     "verified entries are skipped while a missing receipt is reuploaded")
         assertEqual(putBodies.count, 1, "resume uploads only the unverified file")
@@ -5309,7 +5675,8 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask, 4, "PWR honk acknowledgement uses capability bit 2")
         assertEqual(DeviceBLEProtocol.independentMapProfilesCapabilityMask, 8, "independent map profiles use capability bit 3")
         assertEqual(DeviceBLEProtocol.extendedMapVisibilityCapabilityMask, 16, "extended map visibility uses capability bit 4")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 3, "capability version requests extended map visibility")
+        assertEqual(DeviceBLEProtocol.batteryStatusScreenCapabilityMask, 32, "Battery Status support uses capability bit 5")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 4, "capability version advertises Battery Status screen support")
         assertEqual(DeviceBLEProtocol.serviceRoadsVisibilityMask, 0x400, "service roads use visibility bit 10")
         assertEqual(DeviceBLEProtocol.tracksVisibilityMask, 0x800, "tracks use visibility bit 11")
         assertEqual(DeviceBLEProtocol.extendedVisibilityMarker, 0x1000, "extended visibility uses marker bit 12")
@@ -5324,14 +5691,27 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID, 20, "Map + Navigation visibility uses setting ID 20")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationStreetLineWidthBoostSettingID, 21, "Map + Navigation street width uses setting ID 21")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID, 22, "Map + Navigation marker scale uses setting ID 22")
+        assertEqual(DeviceBLEProtocol.phoneBatteryLevelSettingID, 23, "phone battery level uses firmware setting ID 23")
+        assertEqual(DeviceBLEProtocol.phoneBatteryChargingSettingID, 24, "phone charging state uses firmware setting ID 24")
+        assertEqual(DeviceBLEProtocol.currentScreenMaskMarker, 1 << 30, "current screen masks use bit 30 as a compatibility marker")
+        assertEqual(DeviceBLEProtocol.phoneBatteryPercentage(from: -1), nil, "unavailable iPhone battery levels stay unknown")
+        assertEqual(DeviceBLEProtocol.phoneBatteryPercentage(from: 0), 0, "empty iPhone battery maps to zero percent")
+        assertEqual(DeviceBLEProtocol.phoneBatteryPercentage(from: 0.735), 74, "iPhone battery levels round to whole percentages")
+        assertEqual(DeviceBLEProtocol.phoneBatteryPercentage(from: 1), 100, "full iPhone battery maps to 100 percent")
+        assertEqual(DeviceBLEProtocol.phoneBatteryChargingValue(isCharging: false), 0, "unplugged iPhones send not charging")
+        assertEqual(DeviceBLEProtocol.phoneBatteryChargingValue(isCharging: true), 1, "charging iPhones send charging")
         assertEqual(DeviceScreen.map.rawValue, 0, "Map screen protocol value stays stable")
         assertEqual(DeviceScreen.navigation.rawValue, 1, "Navigation screen protocol value stays stable")
         assertEqual(DeviceScreen.rideStats.rawValue, 2, "Ride Stats screen protocol value stays stable")
         assertEqual(DeviceScreen.mapPlusNavigation.rawValue, 3, "Map + Navigation screen protocol value stays stable")
+        assertEqual(DeviceScreen.batteryStatus.rawValue, 4, "Battery Status screen uses protocol value 4")
         assertEqual(DeviceScreen.mapPlusNavigation.title, "Map + Navigation", "combined map/navigation screen keeps user-facing label")
-        assertEqual(DeviceScreen.displayOrder[0], .mapPlusNavigation, "Map + Navigation is the first device screen in settings")
-        assertEqual(DeviceScreen.displayOrder[1], .rideStats, "Ride Stats is the second device screen in settings")
-        assertEqual(DeviceScreen.allScreensMask, 0x0F, "all supported device screens use the low four mask bits")
+        assertEqual(DeviceScreen.batteryStatus.title, "Battery Status", "battery screen has a user-facing label")
+        assertEqual(DeviceScreen.displayOrder,
+                    [.mapPlusNavigation, .rideStats, .map, .navigation, .batteryStatus],
+                    "Battery Status is the last device screen in settings and cycling order")
+        assertEqual(DeviceScreen.allScreensMask, 0x1F, "all supported device screens use the low five mask bits")
+        assertEqual(DeviceScreen.legacyScreensMask, 0x0F, "legacy firmware receives only the original four screen bits")
         assertEqual(DisconnectedSleepTimeout.oneMinute.settingValue, 60, "one-minute sleep timeout sends seconds")
         assertEqual(DisconnectedSleepTimeout.twoMinutes.settingValue, 120, "two-minute sleep timeout sends seconds")
         assertEqual(DisconnectedSleepTimeout.fiveMinutes.settingValue, 300, "five-minute sleep timeout sends seconds")
@@ -5343,6 +5723,10 @@ struct NavigationProtocolTests {
     static func testDeviceScreenValidation() {
         assertEqual(DeviceScreen.normalizedMask(0), DeviceScreen.allScreensMask, "zero screen mask falls back to all screens")
         assertEqual(DeviceScreen.normalizedMask(0xFF), DeviceScreen.allScreensMask, "unknown screen mask bits are ignored")
+        assertEqual(DeviceScreen.normalizedMask(DeviceScreen.batteryStatus.bit,
+                                                supportedMask: DeviceScreen.legacyScreensMask),
+                    DeviceScreen.legacyScreensMask,
+                    "a Battery-only mask falls back to all screens supported by legacy firmware")
 
         let rideStatsOnly = DeviceScreen.rideStats.bit
         assertEqual(DeviceScreen.fallbackDefault(for: DeviceScreen.mapPlusNavigation.rawValue, mask: rideStatsOnly),
@@ -5353,6 +5737,17 @@ struct NavigationProtocolTests {
         assertEqual(DeviceScreen.fallbackDefault(for: DeviceScreen.navigation.rawValue, mask: mapAndStats),
                     .rideStats,
                     "disabled default follows the device screen display order")
+
+        let batteryAndStats = DeviceScreen.batteryStatus.bit | DeviceScreen.rideStats.bit
+        assertEqual(DeviceScreen.fallbackDefault(for: DeviceScreen.map.rawValue, mask: batteryAndStats),
+                    .rideStats,
+                    "Battery Status remains last in fallback order")
+        assertEqual(DeviceScreen.fallbackDefault(
+            for: DeviceScreen.batteryStatus.rawValue,
+            mask: DeviceScreen.allScreensMask,
+            supportedMask: DeviceScreen.legacyScreensMask
+        ), .mapPlusNavigation,
+        "legacy firmware never receives Battery Status as its default")
     }
 
     static func testDeviceSoundProtocol() {
@@ -5516,6 +5911,83 @@ struct NavigationProtocolTests {
         UserDefaults.standard.removeObject(forKey: "deviceSettings.selectedSound")
         UserDefaults.standard.removeObject(forKey: "deviceSettings.soundVolumePercent")
         UserDefaults.standard.removeObject(forKey: "deviceSettings.powerButtonHonkEnabled")
+    }
+
+    static func testBatteryStatusScreenCapabilityNegotiation() {
+        func configuredManager() -> (BLEManager, () -> [Data]) {
+            let manager = BLEManager()
+            manager.isConnected = true
+            manager.isNavigationReady = true
+            manager.supportsDeviceSettings = true
+            manager.enabledDeviceScreensMask = DeviceScreen.allScreensMask
+            manager.defaultDeviceScreen = .batteryStatus
+            var packets: [Data] = []
+            manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+                maximumWriteLength: 20,
+                canSend: { true },
+                write: { packets.append($0) }
+            ))
+            return (manager, { packets })
+        }
+
+        func screenSettings(in packets: [Data]) -> [UInt8: Int32] {
+            var settings: [UInt8: Int32] = [:]
+            for packet in packets where packet.count == 9 &&
+                String(data: packet.prefix(4), encoding: .utf8) ==
+                    DeviceBLEProtocol.settingsFallbackPrefix {
+                let id = packet[4]
+                if id == DeviceBLEProtocol.enabledScreensSettingID ||
+                    id == DeviceBLEProtocol.defaultScreenSettingID {
+                    settings[id] = readInt32LE(packet, offset: 5)
+                }
+            }
+            return settings
+        }
+
+        let (legacyManager, legacyPackets) = configuredManager()
+        let legacyCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([0])
+        assert(legacyManager.handleDeviceCapabilitiesNotification(legacyCapabilities),
+               "legacy firmware capability response should be consumed")
+        assert(!legacyManager.supportsBatteryStatusScreen,
+               "firmware without bit 5 does not expose Battery Status")
+        assert(!legacyManager.availableDeviceScreens.contains(.batteryStatus),
+               "legacy firmware hides Battery Status from device settings")
+        let legacySettings = screenSettings(in: legacyPackets())
+        assertEqual(legacySettings[DeviceBLEProtocol.enabledScreensSettingID],
+                    Int32(DeviceScreen.legacyScreensMask),
+                    "legacy firmware receives a four-screen mask")
+        assertEqual(legacySettings[DeviceBLEProtocol.defaultScreenSettingID],
+                    Int32(DeviceScreen.mapPlusNavigation.rawValue),
+                    "legacy firmware receives a supported default screen")
+
+        let (currentManager, currentPackets) = configuredManager()
+        let currentCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.batteryStatusScreenCapabilityMask])
+        assert(currentManager.handleDeviceCapabilitiesNotification(currentCapabilities),
+               "Battery Status capability response should be consumed")
+        assert(currentManager.supportsBatteryStatusScreen,
+               "firmware bit 5 exposes Battery Status")
+        assert(currentManager.availableDeviceScreens.last == .batteryStatus,
+               "Battery Status remains the last available screen")
+        let currentSettings = screenSettings(in: currentPackets())
+        assertEqual(currentSettings[DeviceBLEProtocol.enabledScreensSettingID],
+                    Int32(DeviceScreen.allScreensMask) |
+                        DeviceBLEProtocol.currentScreenMaskMarker,
+                    "current firmware receives a marked five-screen mask")
+        assertEqual(currentSettings[DeviceBLEProtocol.defaultScreenSettingID],
+                    Int32(DeviceScreen.batteryStatus.rawValue),
+                    "current firmware may use Battery Status as its default")
+
+        let (fallbackManager, fallbackPackets) = configuredManager()
+        fallbackManager.useDeviceCapabilitiesFallback()
+        let fallbackSettings = screenSettings(in: fallbackPackets())
+        assertEqual(fallbackSettings[DeviceBLEProtocol.enabledScreensSettingID],
+                    Int32(DeviceScreen.legacyScreensMask),
+                    "a missing capability response falls back to the legacy mask")
+        assertEqual(fallbackSettings[DeviceBLEProtocol.defaultScreenSettingID],
+                    Int32(DeviceScreen.mapPlusNavigation.rawValue),
+                    "a missing capability response never selects Battery Status")
     }
 
     static func testMapProfileCapabilityNegotiation() {
@@ -6465,6 +6937,7 @@ struct NavigationProtocolTests {
             "deviceSettings.enabledScreensMask",
             "deviceSettings.defaultScreen",
             "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1",
+            "deviceSettings.enabledScreensMask.batteryStatus.v1",
             "deviceSettings.disconnectedSleepTimeoutSeconds"
         ]
         keys.forEach { defaults.removeObject(forKey: $0) }
@@ -6493,6 +6966,12 @@ struct NavigationProtocolTests {
                "fresh Map + Navigation profiles hide railways")
         assert(!freshManager.mapPlusNavigationShowOtherAreas,
                "fresh Map + Navigation profiles hide other areas")
+
+        defaults.set(0x0F, forKey: "deviceSettings.enabledScreensMask")
+        defaults.removeObject(forKey: "deviceSettings.enabledScreensMask.batteryStatus.v1")
+        let batteryScreenMigratedManager = BLEManager()
+        assert(batteryScreenMigratedManager.isDeviceScreenEnabled(.batteryStatus),
+               "existing four-screen installs enable Battery Status once")
 
         freshManager.isConnected = true
         freshManager.isNavigationReady = true

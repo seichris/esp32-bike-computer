@@ -26,7 +26,7 @@ COPY config /app/config
 COPY tools/OSM_Extract /app/tools/OSM_Extract
 
 RUN python -m pip install '/app/backend[api,object-storage]' \
-  && python -m pip install pillow shapely "matplotlib<3.6" pyyaml
+  && python -m pip install shapely "matplotlib<3.6" pyyaml
 
 ENV PYTHONPATH=/app/backend
 

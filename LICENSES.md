@@ -59,6 +59,10 @@ reference documents, map data, and other bundled material remain subject to
 their own notices and licenses. A component-level or file-level license takes
 priority over the repository-level license.
 
+The Battery Status screen's bicycle geometry in
+`esp32/lib/gui/src/batteryStatusScr.cpp` is adapted from the Lucide Bike icon
+and remains available under the [Lucide ISC license](LICENSES/Lucide-ISC.txt).
+
 Documentation, artwork, trademarks, hardware reference documents, CAD models
 and exports, and other non-software material are not licensed by the software
 licenses above. All rights in that material remain with their respective

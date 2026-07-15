@@ -454,6 +454,13 @@ private struct DownloadedMapRow: View {
         let isPausedUpload = manager.isPausedMapUpload(packURL)
 
         HStack(spacing: 12) {
+            SavedMapThumbnail(
+                image: manager.previewImage(forCachedPack: packURL)
+            )
+            .task(id: packURL) {
+                manager.loadPreviewIfNeeded(forCachedPack: packURL)
+            }
+
             if renameInteraction.editingFilename == packURL.lastPathComponent {
                 TextField(
                     "Map name",
@@ -473,6 +480,7 @@ private struct DownloadedMapRow: View {
                         }
                     })
                     .accessibilityLabel("Map name")
+                    .layoutPriority(1)
             } else {
                 Button {
                     if let commit = renameInteraction.begin(
@@ -493,6 +501,7 @@ private struct DownloadedMapRow: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Rename \(displayName)")
                 .accessibilityHint("Edits this saved map name")
+                .layoutPriority(1)
             }
 
             Spacer()
@@ -563,6 +572,35 @@ private struct DownloadedMapRow: View {
         if let commit = renameInteraction.finish() {
             onCommitRename(commit)
         }
+    }
+}
+
+private struct SavedMapThumbnail: View {
+    let image: UIImage?
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemFill))
+
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(4)
+            } else {
+                Image(systemName: "map")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 52, height: 36)
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(Color.secondary.opacity(0.16), lineWidth: 0.5)
+        }
+        .accessibilityHidden(true)
     }
 }
 
@@ -694,7 +732,7 @@ private struct DeviceScreensSettingsSection: View {
 
     var body: some View {
         Section(header: Text("Device Screens")) {
-            ForEach(DeviceScreen.displayOrder) { screen in
+            ForEach(bleManager.availableDeviceScreens) { screen in
                 Toggle(screen.title, isOn: Binding(
                     get: { bleManager.isDeviceScreenEnabled(screen) },
                     set: { bleManager.setDeviceScreen(screen, enabled: $0) }
@@ -702,16 +740,20 @@ private struct DeviceScreensSettingsSection: View {
                 .disabled(bleManager.isOnlyEnabledDeviceScreen(screen))
             }
 
-            Picker("Default Screen", selection: $bleManager.defaultDeviceScreen) {
+            Picker("Default Screen", selection: Binding(
+                get: { bleManager.effectiveDefaultDeviceScreen },
+                set: {
+                    bleManager.defaultDeviceScreen = $0
+                    bleManager.sendDefaultDeviceScreen()
+                }
+            )) {
                 ForEach(bleManager.enabledDeviceScreens) { screen in
                     Text(screen.title).tag(screen)
                 }
             }
-            .onChange(of: bleManager.defaultDeviceScreen) { _ in
-                bleManager.sendDefaultDeviceScreen()
-            }
         }
-        .disabled(!bleManager.supportsDeviceSettings)
+        .disabled(!bleManager.supportsDeviceSettings ||
+                  !bleManager.hasReceivedDeviceCapabilities)
     }
 }
 
