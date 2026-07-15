@@ -318,10 +318,12 @@ struct ContentView: View {
             onOfflineMapSelectionBoundsChanged: { bounds in
                 offlineMapManager.updateMapAreaSelection(bounds: bounds)
             },
-            onDestinationSelected: canSelectDestination ? { destination, mapLocation in
-                destinationStore.addRecent(destination)
-                coordinator.handleDestinationSelection(destination: destination, mapLocation: mapLocation)
-            } : nil
+            onDestinationSelected: canSelectDestination ? MapDestinationSelection.handler(
+                store: destinationStore,
+                navigate: { destination, mapLocation in
+                    coordinator.handleDestinationSelection(destination: destination, mapLocation: mapLocation)
+                }
+            ) : nil
         )
     }
 

@@ -244,3 +244,20 @@ final class SavedDestinationStore: ObservableObject {
         }
     }
 }
+
+/// The shared side effects for a destination chosen from the map. Keeping this
+/// in one production path lets the map interaction harness verify that a tap on
+/// Navigate Here both records the pin and forwards the exact destination to
+/// route calculation.
+@MainActor
+enum MapDestinationSelection {
+    static func handler(
+        store: SavedDestinationStore,
+        navigate: @escaping (SavedDestination, CLLocation?) -> Void
+    ) -> (SavedDestination, CLLocation?) -> Void {
+        { destination, mapLocation in
+            store.addRecent(destination)
+            navigate(destination, mapLocation)
+        }
+    }
+}

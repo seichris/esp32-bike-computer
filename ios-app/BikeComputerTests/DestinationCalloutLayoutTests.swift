@@ -12,6 +12,8 @@ struct OfflineMapBounds {
 @MainActor
 private final class RecordingMapView: MKMapView {
     private var recordedViews: [ObjectIdentifier: MKAnnotationView] = [:]
+    var annotationViewProvider: ((MKAnnotation) -> MKAnnotationView?)?
+    var convertedCoordinate: CLLocationCoordinate2D?
     private(set) var selectionCount = 0
     private(set) var deselectionCount = 0
 
@@ -21,14 +23,13 @@ private final class RecordingMapView: MKMapView {
             return recordedView
         }
 
-        let annotationView = MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: nil)
-        if let destinationAnnotation = annotation as? DestinationAnnotation {
-            annotationView.detailCalloutAccessoryView = DestinationCalloutLabel.make(
-                address: destinationAnnotation.calloutAddress
-            )
-        }
+        guard let annotationView = annotationViewProvider?(annotation) else { return nil }
         recordedViews[identifier] = annotationView
         return annotationView
+    }
+
+    override func convert(_ point: CGPoint, toCoordinateFrom view: UIView?) -> CLLocationCoordinate2D {
+        convertedCoordinate ?? super.convert(point, toCoordinateFrom: view)
     }
 
     override func selectAnnotation(_ annotation: MKAnnotation, animated: Bool) {
@@ -41,6 +42,27 @@ private final class RecordingMapView: MKMapView {
         if let annotation {
             view(for: annotation)?.setSelected(false, animated: false)
         }
+    }
+}
+
+@MainActor
+private final class RecordingLongPressGestureRecognizer: UILongPressGestureRecognizer {
+    private var recordedState: UIGestureRecognizer.State
+    private let recordedLocation: CGPoint
+
+    init(state: UIGestureRecognizer.State, location: CGPoint) {
+        recordedState = state
+        recordedLocation = location
+        super.init(target: nil, action: nil)
+    }
+
+    override var state: UIGestureRecognizer.State {
+        get { recordedState }
+        set { recordedState = newValue }
+    }
+
+    override func location(in view: UIView?) -> CGPoint {
+        recordedLocation
     }
 }
 
@@ -93,17 +115,30 @@ struct DestinationCalloutLayoutTests {
         let store = SavedDestinationStore(defaults: defaults)
         var callbackDestination: SavedDestination?
 
-        coordinator.onDestinationSelected = { destination, _ in
-            callbackDestination = destination
-            store.addRecent(destination)
+        coordinator.mapView = mapView
+        mapView.convertedCoordinate = coordinate
+        mapView.annotationViewProvider = { annotation in
+            coordinator.mapView(mapView, viewFor: annotation)
         }
-        coordinator.selectDestination(at: coordinate, on: mapView)
+        coordinator.onDestinationSelected = MapDestinationSelection.handler(store: store) { destination, _ in
+            callbackDestination = destination
+        }
+        let longPress = RecordingLongPressGestureRecognizer(
+            state: .began,
+            location: CGPoint(x: 195, y: 422)
+        )
+        coordinator.handleLongPress(longPress)
 
         guard let annotation = mapView.annotations.compactMap({ $0 as? DestinationAnnotation }).first,
               let annotationView = mapView.view(for: annotation),
-              let addressLabel = annotationView.detailCalloutAccessoryView as? UILabel else {
+              let addressLabel = annotationView.detailCalloutAccessoryView as? UILabel,
+              let navigateButton = annotationView.rightCalloutAccessoryView as? UIButton else {
             preconditionFailure("destination annotation and callout should be created")
         }
+        precondition(
+            navigateButton.image(for: .normal) != nil,
+            "the shipped destination annotation view should expose Navigate Here"
+        )
         let pendingSize = measuredSize(of: addressLabel)
 
         await coordinator.waitForReverseGeocodingForTesting()
@@ -121,7 +156,7 @@ struct DestinationCalloutLayoutTests {
         coordinator.mapView(
             mapView,
             annotationView: annotationView,
-            calloutAccessoryControlTapped: UIButton(type: .detailDisclosure)
+            calloutAccessoryControlTapped: navigateButton
         )
 
         guard let callbackDestination else {
@@ -145,6 +180,9 @@ struct DestinationCalloutLayoutTests {
         let coordinate = CLLocationCoordinate2D(latitude: 1.35210, longitude: 103.81980)
         let mapView = RecordingMapView()
         let coordinator = MapViewContainer.Coordinator(addressResolver: { _ in nil })
+        mapView.annotationViewProvider = { annotation in
+            coordinator.mapView(mapView, viewFor: annotation)
+        }
         coordinator.onDestinationSelected = { _, _ in }
 
         coordinator.selectDestination(at: coordinate, on: mapView)
@@ -163,20 +201,39 @@ struct DestinationCalloutLayoutTests {
         let firstCoordinate = CLLocationCoordinate2D(latitude: 31.10000, longitude: 121.40000)
         let secondCoordinate = CLLocationCoordinate2D(latitude: 31.20000, longitude: 121.50000)
         let mapView = RecordingMapView()
+        var firstResolverStarted = false
+        var firstResolverFinished = false
+        var firstResolverObservedCancellation = false
         let coordinator = MapViewContainer.Coordinator(addressResolver: { location in
             if location.coordinate.latitude == firstCoordinate.latitude {
-                try? await Task.sleep(nanoseconds: 50_000_000)
+                firstResolverStarted = true
+                do {
+                    try await Task.sleep(nanoseconds: 250_000_000)
+                } catch {
+                    firstResolverObservedCancellation = Task.isCancelled
+                }
+                firstResolverFinished = true
                 return "Stale Address"
             }
             return "Current Address"
         })
+        mapView.annotationViewProvider = { annotation in
+            coordinator.mapView(mapView, viewFor: annotation)
+        }
         coordinator.onDestinationSelected = { _, _ in }
 
         coordinator.selectDestination(at: firstCoordinate, on: mapView)
+        while !firstResolverStarted {
+            await Task.yield()
+        }
         coordinator.selectDestination(at: secondCoordinate, on: mapView)
         await coordinator.waitForReverseGeocodingForTesting()
+        while !firstResolverFinished {
+            await Task.yield()
+        }
 
         let annotations = mapView.annotations.compactMap { $0 as? DestinationAnnotation }
+        precondition(firstResolverObservedCancellation, "a replaced pin should cancel its reverse-geocoding task")
         precondition(annotations.count == 1, "a newer long press should replace the previous pin")
         precondition(annotations[0].calloutAddress == "Current Address", "stale geocoding must not replace the current address")
         assertCoordinate(
