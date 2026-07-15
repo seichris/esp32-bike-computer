@@ -289,6 +289,24 @@ static uint16_t mapGuidanceOverlayHeight(bool expanded) {
   return expanded ? (TFT_HEIGHT * 2) / 3 : TFT_HEIGHT / 3;
 }
 
+static bool mapGuidanceTapIsOutsideOverlay(lv_event_t *event) {
+  if (mapGuidanceOverlay == nullptr || event == nullptr) {
+    return false;
+  }
+
+  lv_indev_t *indev = lv_event_get_indev(event);
+  if (indev == nullptr) {
+    return false;
+  }
+
+  lv_point_t point;
+  lv_area_t overlayArea;
+  lv_indev_get_point(indev, &point);
+  lv_obj_get_coords(mapGuidanceOverlay, &overlayArea);
+  return point.x < overlayArea.x1 || point.x > overlayArea.x2 ||
+         point.y < overlayArea.y1 || point.y > overlayArea.y2;
+}
+
 static void applyMapGuidanceOverlayLayout() {
   if (!mapGuidanceOverlay || !mapGuidanceDestinationPicker ||
       !mapGuidanceCycleStrip) {
@@ -398,22 +416,29 @@ static void updateMapGuidanceOverlay() {
           lv_obj_set_size(row, LV_PCT(100), 64);
           lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
           lv_obj_clear_flag(row, LV_OBJ_FLAG_EVENT_BUBBLE);
+          lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+          lv_obj_add_flag(row, LV_OBJ_FLAG_PRESS_LOCK);
           lv_obj_set_style_pad_hor(row, 8, 0);
           lv_obj_set_style_pad_ver(row, 0, 0);
           lv_obj_add_event_cb(
               row,
               [](lv_event_t *event) {
-                if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+                if (lv_event_get_code(event) != LV_EVENT_RELEASED) {
                   return;
                 }
+                lv_event_stop_bubbling(event);
                 const auto *context = static_cast<const DestinationRowContext *>(
                     lv_event_get_user_data(event));
                 if (context != nullptr) {
-                  (void)requestDestinationRoute(context->generation,
-                                                context->token);
+                  const bool accepted = requestDestinationRoute(
+                      context->generation, context->token);
+                  log_i("UI: destination tapped generation=%lu token=%u "
+                        "accepted=%d",
+                        (unsigned long)context->generation, context->token,
+                        accepted ? 1 : 0);
                 }
               },
-              LV_EVENT_CLICKED, &mapGuidanceRowContexts[i]);
+              LV_EVENT_RELEASED, &mapGuidanceRowContexts[i]);
           mapGuidanceRowContexts[i].generation = catalog.generation;
           mapGuidanceRowContexts[i].token = destination.token;
 
@@ -838,7 +863,13 @@ void scrollMapEvent(lv_event_t *event) {
   if (!canScrollMap) {
     if (activeTile == MAP_GUIDANCE &&
         lv_event_get_code(event) == LV_EVENT_CLICKED) {
-      if (dismissMapGuidanceDestinationPicker()) {
+      if (mapGuidancePickerExpanded && !hasCurrentNavigationData()) {
+        // Only the exposed map above the two-thirds overlay dismisses it. This
+        // coordinate guard prevents a misdirected row touch from collapsing
+        // the picker instead of selecting its destination.
+        if (mapGuidanceTapIsOutsideOverlay(event)) {
+          (void)dismissMapGuidanceDestinationPicker();
+        }
         return;
       }
       if (mapRenderSettings.tapToSwitchScreens) {
@@ -1190,9 +1221,12 @@ static void createMapGuidanceOverlay() {
                         LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
   lv_obj_set_style_pad_all(mapGuidanceDestinationPicker, 4, 0);
   lv_obj_set_style_pad_row(mapGuidanceDestinationPicker, 4, 0);
-  lv_obj_set_scroll_dir(mapGuidanceDestinationPicker, LV_DIR_VER);
+  // A favorites-only catalog always fits in the expanded overlay. Keeping this
+  // container scrollable can turn small touch jitter into a scroll gesture and
+  // suppress the destination row's selection event.
+  lv_obj_clear_flag(mapGuidanceDestinationPicker, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_scrollbar_mode(mapGuidanceDestinationPicker,
-                            LV_SCROLLBAR_MODE_ACTIVE);
+                            LV_SCROLLBAR_MODE_OFF);
   lv_obj_clear_flag(mapGuidanceDestinationPicker, LV_OBJ_FLAG_EVENT_BUBBLE);
 
   mapGuidanceCycleStrip = lv_btn_create(mapGuidanceOverlay);
