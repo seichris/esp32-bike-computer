@@ -14,6 +14,7 @@ struct ContentView: View {
     
     @StateObject private var coordinator = BikeComputerCoordinator()
     @StateObject private var offlineMapManager = OfflineMapManager()
+    @StateObject private var destinationStore = SavedDestinationStore()
     
     @State private var sourceAddress = ""
     @State private var destinationAddress = ""
@@ -201,6 +202,7 @@ struct ContentView: View {
                     sourceAddress: $sourceAddress,
                     destinationAddress: $destinationAddress,
                     isExpanded: $isSearchPanelExpanded,
+                    destinationStore: destinationStore,
                     currentAddress: coordinator.currentAddress,
                     currentLocation: coordinator.currentLocation,
                     maxExpandedHeight: maxHeight,
@@ -311,8 +313,9 @@ struct ContentView: View {
             onOfflineMapSelectionBoundsChanged: { bounds in
                 offlineMapManager.updateMapAreaSelection(bounds: bounds)
             },
-            onDestinationSelected: canSelectDestination ? { coordinate, mapLocation in
-                coordinator.handleDestinationSelection(coordinate: coordinate, mapLocation: mapLocation)
+            onDestinationSelected: canSelectDestination ? { destination, mapLocation in
+                destinationStore.addRecent(destination)
+                coordinator.handleDestinationSelection(destination: destination, mapLocation: mapLocation)
             } : nil
         )
     }

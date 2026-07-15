@@ -11,10 +11,9 @@ import CoreLocation
 
 // MARK: - Destination Annotation
 
-class DestinationAnnotation: MKPointAnnotation {
-    var coordinate2D: CLLocationCoordinate2D {
-        return coordinate
-    }
+final class DestinationAnnotation: MKPointAnnotation {
+    var destination: SavedDestination?
+    var calloutAddress = ""
 }
 
 // MARK: - Simulated Position Annotation
@@ -32,7 +31,7 @@ struct MapViewContainer: UIViewRepresentable {
     let offlineMapSelectionFrame: CGRect?
     let onMapTapped: (() -> Void)?
     let onOfflineMapSelectionBoundsChanged: ((OfflineMapBounds) -> Void)?
-    let onDestinationSelected: ((CLLocationCoordinate2D, CLLocation?) -> Void)?
+    let onDestinationSelected: ((SavedDestination, CLLocation?) -> Void)?
     
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView()
@@ -197,12 +196,13 @@ struct MapViewContainer: UIViewRepresentable {
         var onMapTapped: (() -> Void)?
         var offlineMapSelectionFrame: CGRect?
         var onOfflineMapSelectionBoundsChanged: ((OfflineMapBounds) -> Void)?
-        var onDestinationSelected: ((CLLocationCoordinate2D, CLLocation?) -> Void)?
+        var onDestinationSelected: ((SavedDestination, CLLocation?) -> Void)?
         var hasSetInitialRegion = false
         private var compassButton: MKCompassButton?
         private var trackingButton: MKUserTrackingButton?
         private var lastNavigationCoordinate: CLLocationCoordinate2D?
         private var lastNavigationHeading: CLLocationDirection = 0
+        private var reverseGeocodingTask: Task<Void, Never>?
 
         func installMapControls(on mapView: MKMapView) {
             guard compassButton == nil else { return }
@@ -332,6 +332,9 @@ struct MapViewContainer: UIViewRepresentable {
             
             let touchPoint = gestureRecognizer.location(in: mapView)
             let coordinate = mapView.convert(touchPoint, toCoordinateFrom: mapView)
+
+            reverseGeocodingTask?.cancel()
+            reverseGeocodingTask = nil
             
             // Remove any existing destination annotations
             let existingAnnotations = mapView.annotations.filter { $0 is DestinationAnnotation }
@@ -340,13 +343,106 @@ struct MapViewContainer: UIViewRepresentable {
             // Add new annotation
             let annotation = DestinationAnnotation()
             annotation.coordinate = coordinate
-            annotation.title = "Navigate Here?"
-            annotation.subtitle = "Tap to start navigation"
+            annotation.title = "Navigate Here"
+            annotation.calloutAddress = "Finding address…"
+            annotation.destination = SavedDestination(
+                name: coordinateFallbackName(coordinate),
+                coordinate: coordinate
+            )
             
             mapView.addAnnotation(annotation)
             
             // Show the callout
             mapView.selectAnnotation(annotation, animated: true)
+
+            reverseGeocode(annotation, on: mapView)
+        }
+
+        private func reverseGeocode(_ annotation: DestinationAnnotation, on mapView: MKMapView) {
+            reverseGeocodingTask = Task { @MainActor [weak self, weak annotation, weak mapView] in
+                guard let self, let annotation else { return }
+                let location = CLLocation(
+                    latitude: annotation.coordinate.latitude,
+                    longitude: annotation.coordinate.longitude
+                )
+                let resolvedAddress: String?
+                if #available(iOS 26.0, *) {
+                    resolvedAddress = await self.modernAddress(for: location)
+                } else {
+                    resolvedAddress = await self.legacyAddress(for: location)
+                }
+
+                guard !Task.isCancelled,
+                      let mapView,
+                      mapView.annotations.contains(where: { $0 === annotation }) else { return }
+
+                let fallbackName = self.coordinateFallbackName(annotation.coordinate)
+                let address = resolvedAddress ?? fallbackName
+                annotation.destination = SavedDestination(name: address, coordinate: annotation.coordinate)
+                self.updateDestinationCallout(annotation, address: address, on: mapView)
+                self.reverseGeocodingTask = nil
+            }
+        }
+
+        @available(iOS 26.0, *)
+        private func modernAddress(for location: CLLocation) async -> String? {
+            guard let request = MKReverseGeocodingRequest(location: location),
+                  let mapItems = try? await request.mapItems else { return nil }
+            return mapItems.first.flatMap(displayAddress(for:))
+        }
+
+        @available(iOS, introduced: 5.0, obsoleted: 26.0)
+        private func legacyAddress(for location: CLLocation) async -> String? {
+            guard let placemark = try? await CLGeocoder().reverseGeocodeLocation(location).first else {
+                return nil
+            }
+
+            let components: [String?] = [
+                placemark.name,
+                placemark.locality,
+                placemark.administrativeArea,
+                placemark.postalCode,
+                placemark.country
+            ]
+            let normalizedComponents: [String] = components.compactMap { component -> String? in
+                guard let component = component?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !component.isEmpty else { return nil }
+                return component
+            }
+            let address = normalizedComponents.reduce(into: [String]()) { result, component in
+                guard !result.contains(where: { $0.caseInsensitiveCompare(component) == .orderedSame }) else { return }
+                result.append(component)
+            }
+            .joined(separator: ", ")
+            return address.isEmpty ? nil : address
+        }
+
+        @available(iOS 26.0, *)
+        private func displayAddress(for mapItem: MKMapItem) -> String? {
+            if let fullAddress = mapItem.addressRepresentations?
+                .fullAddress(includingRegion: true, singleLine: true)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !fullAddress.isEmpty {
+                return fullAddress
+            }
+
+            let name = mapItem.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return name?.isEmpty == false ? name : nil
+        }
+
+        private func coordinateFallbackName(_ coordinate: CLLocationCoordinate2D) -> String {
+            String(format: "Dropped Pin · %.5f, %.5f", coordinate.latitude, coordinate.longitude)
+        }
+
+        private func updateDestinationCallout(
+            _ annotation: DestinationAnnotation,
+            address: String,
+            on mapView: MKMapView
+        ) {
+            annotation.calloutAddress = address
+            guard let annotationView = mapView.view(for: annotation),
+                  let addressLabel = annotationView.detailCalloutAccessoryView as? UILabel else { return }
+            addressLabel.text = address
         }
 
         private func bearing(from start: CLLocationCoordinate2D, to end: CLLocationCoordinate2D) -> CLLocationDirection {
@@ -398,7 +494,7 @@ struct MapViewContainer: UIViewRepresentable {
             }
             
             // Handle destination annotation
-            if annotation is DestinationAnnotation {
+            if let destinationAnnotation = annotation as? DestinationAnnotation {
                 let identifier = "DestinationPin"
                 var annotationView = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? MKMarkerAnnotationView
                 
@@ -417,6 +513,13 @@ struct MapViewContainer: UIViewRepresentable {
                 } else {
                     annotationView?.annotation = annotation
                 }
+
+                let addressLabel = UILabel()
+                addressLabel.font = .preferredFont(forTextStyle: .subheadline)
+                addressLabel.numberOfLines = 0
+                addressLabel.text = destinationAnnotation.calloutAddress
+                addressLabel.preferredMaxLayoutWidth = 240
+                annotationView?.detailCalloutAccessoryView = addressLabel
                 
                 return annotationView
             }
@@ -426,9 +529,13 @@ struct MapViewContainer: UIViewRepresentable {
         
         func mapView(_ mapView: MKMapView, annotationView view: MKAnnotationView, calloutAccessoryControlTapped control: UIControl) {
             // Handle the callout button tap
-            if let destinationAnnotation = view.annotation as? DestinationAnnotation {
+            if let destinationAnnotation = view.annotation as? DestinationAnnotation,
+               let destination = destinationAnnotation.destination {
+                reverseGeocodingTask?.cancel()
+                reverseGeocodingTask = nil
+
                 // Pass the map's user location as fallback
-                onDestinationSelected?(destinationAnnotation.coordinate, mapView.userLocation.location)
+                onDestinationSelected?(destination, mapView.userLocation.location)
                 
                 // Remove the annotation after selection
                 mapView.removeAnnotation(destinationAnnotation)

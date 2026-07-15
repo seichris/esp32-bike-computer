@@ -54,6 +54,8 @@ struct RouteSearchPanel: View {
     @Binding var destinationAddress: String
     @Binding var isExpanded: Bool
 
+    @ObservedObject var destinationStore: SavedDestinationStore
+
     let currentAddress: String
     let currentLocation: CLLocation?
     let maxExpandedHeight: CGFloat
@@ -69,9 +71,7 @@ struct RouteSearchPanel: View {
     @State private var isEditingSource = false
     @State private var hasSelectedSource = false
     @State private var selectedTransportType: MKDirectionsTransportType = RouteTransportTypes.cycling
-    @State private var recentDestinationSearches: [String] = []
-
-    private let recentDestinationSearchesKey = "routeInput.recentDestinationSearches"
+    @State private var selectedDestination: SavedDestination?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -85,7 +85,6 @@ struct RouteSearchPanel: View {
         .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 8)
         .frame(maxHeight: isExpanded ? maxExpandedHeight : nil, alignment: .bottom)
         .onAppear {
-            recentDestinationSearches = loadRecentDestinationSearches()
             updateSearchRegions()
         }
         .onChange(of: currentLocation) { _ in
@@ -129,6 +128,7 @@ struct RouteSearchPanel: View {
             if hasSelectedDestination {
                 sourcePicker
                 transportControls
+                favoriteButton
             }
 
             searchResults
@@ -159,6 +159,7 @@ struct RouteSearchPanel: View {
                     }
 
                     destinationCompleter.search(query: newValue)
+                    selectedDestination = nil
                     if hasSelectedDestination {
                         hasSelectedDestination = false
                     }
@@ -288,58 +289,75 @@ struct RouteSearchPanel: View {
         } else if !hasSelectedDestination && !destinationCompleter.suggestions.isEmpty {
             suggestionsScroll(for: destinationCompleter.suggestions) { suggestion in
                 let fullAddress = formattedAddress(for: suggestion)
-                isSelectingFromSuggestion = true
-                destinationAddress = fullAddress
-                hasSelectedDestination = true
-                focusedField = nil
-                saveRecentDestinationSearch(fullAddress)
+                selectDestination(SavedDestination(name: fullAddress))
             }
-        } else if shouldShowRecentDestinationSearches {
-            recentDestinationScroll
+        } else if shouldShowSavedDestinations {
+            savedDestinationsScroll
         } else {
             Spacer(minLength: 0)
         }
     }
 
-    private var recentDestinationScroll: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Recent Searches")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 4)
-                .padding(.bottom, 6)
+    private var savedDestinationsScroll: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                if !destinationStore.favoriteDestinations.isEmpty {
+                    savedDestinationSectionHeader("Favorites")
 
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(recentDestinationSearches, id: \.self) { search in
-                        Button(action: {
-                            isSelectingFromSuggestion = true
-                            destinationAddress = search
-                            hasSelectedDestination = true
-                            focusedField = nil
-                            saveRecentDestinationSearch(search)
-                        }) {
-                            HStack(spacing: 12) {
-                                Image(systemName: "clock.arrow.circlepath")
-                                    .foregroundColor(.secondary)
+                    ForEach(destinationStore.favoriteDestinations) { destination in
+                        savedDestinationButton(destination, icon: "star.fill")
+                    }
+                }
 
-                                Text(search)
-                                    .font(.body)
-                                    .foregroundColor(.primary)
-                                    .lineLimit(2)
+                if !destinationStore.nonFavoriteRecentDestinations.isEmpty {
+                    savedDestinationSectionHeader("Recent Searches")
 
-                                Spacer()
-                            }
-                            .padding(.vertical, 12)
-                        }
-                        .buttonStyle(.plain)
-
-                        Divider()
+                    ForEach(destinationStore.nonFavoriteRecentDestinations) { destination in
+                        savedDestinationButton(destination, icon: "clock.arrow.circlepath")
                     }
                 }
             }
-            .frame(maxHeight: 260)
         }
+        .frame(maxHeight: 260)
+    }
+
+    private func savedDestinationSectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 4)
+            .padding(.top, 4)
+            .padding(.bottom, 6)
+    }
+
+    @ViewBuilder
+    private func savedDestinationButton(_ destination: SavedDestination, icon: String) -> some View {
+        Button(action: { selectDestination(destination) }) {
+            SavedDestinationRow(destination: destination, icon: icon)
+                .padding(.vertical, 12)
+        }
+        .buttonStyle(.plain)
+
+        Divider()
+    }
+
+    private var favoriteButton: some View {
+        Button(action: toggleSelectedDestinationFavorite) {
+            HStack(spacing: 10) {
+                Image(systemName: isSelectedDestinationFavorite ? "star.fill" : "star")
+                    .foregroundColor(isSelectedDestinationFavorite ? .yellow : .secondary)
+
+                Text(isSelectedDestinationFavorite ? "Saved to Favorites" : "Save to Favorites")
+                    .foregroundColor(.primary)
+
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isSelectedDestinationFavorite ? "Remove from favorites" : "Save to favorites")
     }
 
     private var goButton: some View {
@@ -348,8 +366,9 @@ struct RouteSearchPanel: View {
                 hasSelectedSource: hasSelectedSource,
                 sourceAddress: sourceAddress
             )
-            saveRecentDestinationSearch(destinationAddress)
-            onStartNavigation(sourceEndpoint, .query(destinationAddress), selectedTransportType)
+            guard let destination = activeDestination else { return }
+            destinationStore.addRecent(destination)
+            onStartNavigation(sourceEndpoint, destination.routeEndpoint, selectedTransportType)
         }) {
             Text("Go")
                 .font(.headline)
@@ -402,10 +421,10 @@ struct RouteSearchPanel: View {
         .frame(maxHeight: 300)
     }
 
-    private var shouldShowRecentDestinationSearches: Bool {
+    private var shouldShowSavedDestinations: Bool {
         !hasSelectedDestination &&
         destinationAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !recentDestinationSearches.isEmpty
+        (!destinationStore.favoriteDestinations.isEmpty || !destinationStore.recentDestinations.isEmpty)
     }
 
     private func expandForDestinationSearch() {
@@ -417,6 +436,7 @@ struct RouteSearchPanel: View {
         destinationAddress = ""
         destinationCompleter.search(query: "")
         hasSelectedDestination = false
+        selectedDestination = nil
         focusedField = .destination
     }
 
@@ -440,24 +460,39 @@ struct RouteSearchPanel: View {
         isEditingSource = false
         hasSelectedSource = false
         hasSelectedDestination = false
+        selectedDestination = nil
         destinationAddress = ""
         sourceAddress = ""
     }
 
-    private func loadRecentDestinationSearches() -> [String] {
-        UserDefaults.standard.stringArray(forKey: recentDestinationSearchesKey) ?? []
+    private var activeDestination: SavedDestination? {
+        let name = destinationAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+
+        if let selectedDestination,
+           selectedDestination.name.caseInsensitiveCompare(name) == .orderedSame {
+            return selectedDestination
+        }
+        return SavedDestination(name: name)
     }
 
-    private func saveRecentDestinationSearch(_ search: String) {
-        let normalized = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return }
+    private var isSelectedDestinationFavorite: Bool {
+        guard let destination = activeDestination else { return false }
+        return destinationStore.isFavorite(destination)
+    }
 
-        var searches = loadRecentDestinationSearches()
-        searches.removeAll { $0.caseInsensitiveCompare(normalized) == .orderedSame }
-        searches.insert(normalized, at: 0)
-        searches = Array(searches.prefix(5))
-        UserDefaults.standard.set(searches, forKey: recentDestinationSearchesKey)
-        recentDestinationSearches = searches
+    private func selectDestination(_ destination: SavedDestination) {
+        isSelectingFromSuggestion = true
+        selectedDestination = destination
+        destinationAddress = destination.name
+        hasSelectedDestination = true
+        focusedField = nil
+        destinationStore.addRecent(destination)
+    }
+
+    private func toggleSelectedDestinationFavorite() {
+        guard let destination = activeDestination else { return }
+        destinationStore.toggleFavorite(destination)
     }
 }
 
@@ -470,6 +505,8 @@ struct RouteInputView: View {
     @Binding var destinationAddress: String
     let currentAddress: String
     let currentLocation: CLLocation?  // User's exact GPS location for region-biased search
+
+    @ObservedObject var destinationStore: SavedDestinationStore
     
     var onStartNavigation: (RouteEndpoint, RouteEndpoint, MKDirectionsTransportType) -> Void
     
@@ -485,9 +522,7 @@ struct RouteInputView: View {
     @State private var hasSelectedSource = false
     
     @State private var selectedTransportType: MKDirectionsTransportType = RouteTransportTypes.cycling
-    @State private var recentDestinationSearches: [String] = []
-
-    private let recentDestinationSearchesKey = "routeInput.recentDestinationSearches"
+    @State private var selectedDestination: SavedDestination?
     
     var body: some View {
         NavigationView {
@@ -510,6 +545,7 @@ struct RouteInputView: View {
                                 }
                                 
                                 destinationCompleter.search(query: newValue)
+                                selectedDestination = nil
                                 if hasSelectedDestination {
                                     hasSelectedDestination = false
                                 }
@@ -619,7 +655,9 @@ struct RouteInputView: View {
                     }
                     .padding(.horizontal)
                     .transition(.move(edge: .top).combined(with: .opacity))
-                    
+
+                    favoriteButton
+                        .padding(.horizontal)
                 }
                 
                 // Suggestions List
@@ -642,15 +680,11 @@ struct RouteInputView: View {
                     // Show DESTINATION suggestions (if searching)
                     if !hasSelectedDestination && !destinationCompleter.suggestions.isEmpty {
                         suggestionsList(for: destinationCompleter.suggestions) { suggestion in
-                            let fullAddress = "\(suggestion.title), \(suggestion.subtitle)"
-                            isSelectingFromSuggestion = true
-                            destinationAddress = fullAddress
-                            hasSelectedDestination = true
-                            isDestinationFieldFocused = false
-                            saveRecentDestinationSearch(fullAddress)
+                            let fullAddress = formattedAddress(for: suggestion)
+                            selectDestination(SavedDestination(name: fullAddress))
                         }
-                    } else if shouldShowRecentDestinationSearches {
-                        recentDestinationList
+                    } else if shouldShowSavedDestinations {
+                        savedDestinationList
                     } else {
                         Spacer()
                     }
@@ -663,8 +697,9 @@ struct RouteInputView: View {
                             hasSelectedSource: hasSelectedSource,
                             sourceAddress: sourceAddress
                         )
-                        saveRecentDestinationSearch(destinationAddress)
-                        onStartNavigation(sourceEndpoint, .query(destinationAddress), selectedTransportType)
+                        guard let destination = activeDestination else { return }
+                        destinationStore.addRecent(destination)
+                        onStartNavigation(sourceEndpoint, destination.routeEndpoint, selectedTransportType)
                         dismiss()
                     }) {
                         Text("Go")
@@ -695,7 +730,6 @@ struct RouteInputView: View {
             .onAppear {
                 // Auto-focus destination field when view appears
                 isDestinationFieldFocused = true
-                recentDestinationSearches = loadRecentDestinationSearches()
                 
                 // Set search region based on user's current location for better results
                 if let location = currentLocation {
@@ -715,6 +749,7 @@ struct RouteInputView: View {
                 // Reset source state too? usually good idea.
                 isEditingSource = false
                 hasSelectedSource = false
+                selectedDestination = nil
             }
         }
     }
@@ -743,33 +778,29 @@ struct RouteInputView: View {
         .listStyle(.plain)
     }
 
-    private var shouldShowRecentDestinationSearches: Bool {
+    private var shouldShowSavedDestinations: Bool {
         !hasSelectedDestination &&
         destinationAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !recentDestinationSearches.isEmpty
+        (!destinationStore.favoriteDestinations.isEmpty || !destinationStore.recentDestinations.isEmpty)
     }
 
-    private var recentDestinationList: some View {
+    private var savedDestinationList: some View {
         List {
-            Section(header: Text("Recent Searches")) {
-                ForEach(recentDestinationSearches, id: \.self) { search in
-                    Button(action: {
-                        isSelectingFromSuggestion = true
-                        destinationAddress = search
-                        hasSelectedDestination = true
-                        isDestinationFieldFocused = false
-                        saveRecentDestinationSearch(search)
-                    }) {
-                        HStack(spacing: 12) {
-                            Image(systemName: "clock.arrow.circlepath")
-                                .foregroundColor(.secondary)
+            if !destinationStore.favoriteDestinations.isEmpty {
+                Section(header: Text("Favorites")) {
+                    ForEach(destinationStore.favoriteDestinations) { destination in
+                        Button(action: { selectDestination(destination) }) {
+                            SavedDestinationRow(destination: destination, icon: "star.fill")
+                        }
+                    }
+                }
+            }
 
-                            Text(search)
-                                .font(.body)
-                                .foregroundColor(.primary)
-                                .lineLimit(2)
-
-                            Spacer()
+            if !destinationStore.nonFavoriteRecentDestinations.isEmpty {
+                Section(header: Text("Recent Searches")) {
+                    ForEach(destinationStore.nonFavoriteRecentDestinations) { destination in
+                        Button(action: { selectDestination(destination) }) {
+                            SavedDestinationRow(destination: destination, icon: "clock.arrow.circlepath")
                         }
                     }
                 }
@@ -778,20 +809,76 @@ struct RouteInputView: View {
         .listStyle(.plain)
     }
 
-    private func loadRecentDestinationSearches() -> [String] {
-        UserDefaults.standard.stringArray(forKey: recentDestinationSearchesKey) ?? []
+    private var favoriteButton: some View {
+        Button(action: toggleSelectedDestinationFavorite) {
+            HStack(spacing: 10) {
+                Image(systemName: isSelectedDestinationFavorite ? "star.fill" : "star")
+                    .foregroundColor(isSelectedDestinationFavorite ? .yellow : .secondary)
+
+                Text(isSelectedDestinationFavorite ? "Saved to Favorites" : "Save to Favorites")
+                    .foregroundColor(.primary)
+
+                Spacer()
+            }
+            .padding()
+            .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isSelectedDestinationFavorite ? "Remove from favorites" : "Save to favorites")
     }
 
-    private func saveRecentDestinationSearch(_ search: String) {
-        let normalized = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return }
+    private var activeDestination: SavedDestination? {
+        let name = destinationAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
 
-        var searches = loadRecentDestinationSearches()
-        searches.removeAll { $0.caseInsensitiveCompare(normalized) == .orderedSame }
-        searches.insert(normalized, at: 0)
-        searches = Array(searches.prefix(5))
-        UserDefaults.standard.set(searches, forKey: recentDestinationSearchesKey)
-        recentDestinationSearches = searches
+        if let selectedDestination,
+           selectedDestination.name.caseInsensitiveCompare(name) == .orderedSame {
+            return selectedDestination
+        }
+        return SavedDestination(name: name)
+    }
+
+    private var isSelectedDestinationFavorite: Bool {
+        guard let destination = activeDestination else { return false }
+        return destinationStore.isFavorite(destination)
+    }
+
+    private func formattedAddress(for suggestion: MKLocalSearchCompletion) -> String {
+        suggestion.subtitle.isEmpty ? suggestion.title : "\(suggestion.title), \(suggestion.subtitle)"
+    }
+
+    private func selectDestination(_ destination: SavedDestination) {
+        isSelectingFromSuggestion = true
+        selectedDestination = destination
+        destinationAddress = destination.name
+        hasSelectedDestination = true
+        isDestinationFieldFocused = false
+        destinationStore.addRecent(destination)
+    }
+
+    private func toggleSelectedDestinationFavorite() {
+        guard let destination = activeDestination else { return }
+        destinationStore.toggleFavorite(destination)
+    }
+}
+
+private struct SavedDestinationRow: View {
+    let destination: SavedDestination
+    let icon: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .foregroundColor(icon == "star.fill" ? .yellow : .secondary)
+
+            Text(destination.name)
+                .font(.body)
+                .foregroundColor(.primary)
+                .lineLimit(2)
+
+            Spacer()
+        }
+        .contentShape(Rectangle())
     }
 }
 

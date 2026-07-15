@@ -358,6 +358,7 @@ struct NavigationProtocolTests {
         testChinaRouteCoordinatesRoundTripWithoutCalibrationNudge()
         testNonChinaCoordinatesPassThroughUnchanged()
         testSourceEndpointSelection()
+        testSavedDestinationStore()
         testRouteInitialLocationUsesResolvedSource()
         testRouteTransportTypes()
         testDeviceGPSPacketBuilder()
@@ -2014,6 +2015,61 @@ struct NavigationProtocolTests {
             assertEqual(query, "People's Square", "selected source should use query")
         default:
             assert(false, "selected source should use query endpoint")
+        }
+    }
+
+    @MainActor
+    static func testSavedDestinationStore() {
+        let suiteName = "SavedDestinationStoreTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            assert(false, "destination store test defaults should be available")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set([" Cafe ", "Park"], forKey: "routeInput.recentDestinationSearches")
+        let store = SavedDestinationStore(defaults: defaults, recentLimit: 2)
+        assertEqual(store.recentDestinations.map(\.name), ["Cafe", "Park"], "legacy recents migrate in order")
+
+        let coordinate = CLLocationCoordinate2D(latitude: 1.3521, longitude: 103.8198)
+        let droppedPin = SavedDestination(name: "1 Example Road, Singapore", coordinate: coordinate)
+        store.addRecent(droppedPin)
+        assertEqual(store.recentDestinations.map(\.name), [droppedPin.name, "Cafe"], "map pin joins bounded recents")
+        assertCoordinate(
+            store.recentDestinations[0].coordinate!,
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude,
+            "recent map pin retains its exact coordinate"
+        )
+
+        assert(store.toggleFavorite(droppedPin), "destination can be saved as a favorite")
+        assert(store.isFavorite(droppedPin), "saved destination reports favorite state")
+        assertEqual(store.nonFavoriteRecentDestinations.map(\.name), ["Cafe"], "favorites are not duplicated in recents UI")
+
+        let restoredStore = SavedDestinationStore(defaults: defaults, recentLimit: 2)
+        assertEqual(restoredStore.favoriteDestinations.map(\.name), [droppedPin.name], "favorites persist")
+        assertCoordinate(
+            restoredStore.favoriteDestinations[0].coordinate!,
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude,
+            "favorite retains its exact coordinate"
+        )
+
+        switch droppedPin.routeEndpoint {
+        case .mapItem(let item):
+            assertCoordinate(item.location.coordinate,
+                             latitude: coordinate.latitude,
+                             longitude: coordinate.longitude,
+                             "saved map pin routes by coordinate")
+        default:
+            assert(false, "saved map pin should produce a map item endpoint")
+        }
+
+        switch SavedDestination(name: "Marina Bay").routeEndpoint {
+        case .query(let query):
+            assertEqual(query, "Marina Bay", "searched destination routes by query")
+        default:
+            assert(false, "searched destination should produce a query endpoint")
         }
     }
 
