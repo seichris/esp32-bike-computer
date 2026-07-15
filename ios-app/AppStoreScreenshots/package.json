@@ -6,6 +6,7 @@
     "dev": "next dev -H 127.0.0.1",
     "build": "next build",
     "start": "next start -H 127.0.0.1",
+    "test": "tsx --test scripts/*.test.ts",
     "export:iphone": "tsx scripts/export-playwright.ts --url http://127.0.0.1:3000 --width 1242 --height 2688 --out exports/app-store-screenshots --locale en-US --device iphone-6.5 --theme shibuya-red",
     "validate": "tsx scripts/validate-exports.ts --dir exports/app-store-screenshots/screenshots --allow 1242x2688 --output exports/app-store-screenshots/_validation.txt"
   },

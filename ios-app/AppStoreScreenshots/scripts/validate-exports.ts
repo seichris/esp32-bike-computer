@@ -70,7 +70,7 @@ function normalizeSize(value: string): string {
 }
 
 async function walkFiles(root: string): Promise<string[]> {
-  const entries = await readdir(root, { withFileTypes: true });
+  const entries = (await readdir(root, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
   const files: string[] = [];
 
   for (const entry of entries) {
@@ -94,10 +94,48 @@ function readPngInfo(filePath: string, buf: Buffer): ImageInfo {
     throw new Error(`${filePath} is not a PNG`);
   }
 
-  const width = buf.readUInt32BE(16);
-  const height = buf.readUInt32BE(20);
-  const colorType = buf.readUInt8(25);
-  const hasTRNS = buf.includes(Buffer.from("tRNS"));
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  let colorType = -1;
+  let hasTRNS = false;
+  let sawIHDR = false;
+  let sawIEND = false;
+
+  while (offset + 12 <= buf.length) {
+    const length = buf.readUInt32BE(offset);
+    const chunkEnd = offset + 12 + length;
+    if (chunkEnd > buf.length) throw new Error(`${filePath} contains a truncated PNG chunk`);
+
+    const type = buf.subarray(offset + 4, offset + 8).toString("ascii");
+    const dataOffset = offset + 8;
+
+    if (!sawIHDR) {
+      if (type !== "IHDR" || length !== 13) throw new Error(`${filePath} does not start with a valid IHDR chunk`);
+      width = buf.readUInt32BE(dataOffset);
+      height = buf.readUInt32BE(dataOffset + 4);
+      colorType = buf.readUInt8(dataOffset + 9);
+      sawIHDR = true;
+    } else if (type === "IHDR") {
+      throw new Error(`${filePath} contains more than one IHDR chunk`);
+    }
+
+    if (type === "tRNS") hasTRNS = true;
+    if (type === "IEND") {
+      sawIEND = true;
+      break;
+    }
+
+    offset = chunkEnd;
+  }
+
+  if (!sawIHDR || !sawIEND || width <= 0 || height <= 0) {
+    throw new Error(`${filePath} does not contain a complete PNG structure`);
+  }
+
+  if (![0, 2, 3, 4, 6].includes(colorType)) {
+    throw new Error(`${filePath} uses unsupported PNG color type ${colorType}`);
+  }
 
   return {
     width,
@@ -114,10 +152,13 @@ function readJpegInfo(filePath: string, buf: Buffer): ImageInfo {
 
   let offset = 2;
   while (offset < buf.length) {
-    while (buf[offset] === 0xff) offset++;
+    while (offset < buf.length && buf[offset] !== 0xff) offset++;
+    while (offset < buf.length && buf[offset] === 0xff) offset++;
+    if (offset >= buf.length) break;
     const marker = buf[offset++];
 
     if (marker === 0xd9 || marker === 0xda) break;
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
     if (offset + 2 > buf.length) break;
 
     const length = buf.readUInt16BE(offset);
@@ -130,9 +171,14 @@ function readJpegInfo(filePath: string, buf: Buffer): ImageInfo {
       (marker >= 0xcd && marker <= 0xcf);
 
     if (isSof) {
+      if (length < 8) throw new Error(`${filePath} contains an invalid JPEG SOF segment`);
+      const height = buf.readUInt16BE(offset + 3);
+      const width = buf.readUInt16BE(offset + 5);
+      if (width <= 0 || height <= 0) throw new Error(`${filePath} has invalid JPEG dimensions`);
+
       return {
-        width: buf.readUInt16BE(offset + 7),
-        height: buf.readUInt16BE(offset + 5),
+        width,
+        height,
         format: "jpeg",
         hasAlphaChannel: false,
       };
@@ -204,7 +250,11 @@ async function main() {
   const imageFiles = allFiles.filter((file) => Boolean(extensionKind(file)));
   if (imageFiles.length === 0) throw new Error(`No .png/.jpg/.jpeg files found under ${root}`);
 
-  const results = await Promise.all(imageFiles.map((file) => validateImage(file, opts.allow)));
+  const reportRoot = path.dirname(root);
+  const results = (await Promise.all(imageFiles.map((file) => validateImage(file, opts.allow)))).map((result) => ({
+    ...result,
+    file: path.relative(reportRoot, result.file).split(path.sep).join(path.posix.sep),
+  }));
   const report = formatValidationReport(results);
 
   if (opts.output) await writeFile(path.resolve(opts.output), `${report}\n`);
@@ -215,7 +265,7 @@ async function main() {
   if (results.some((result) => result.status === "fail")) process.exitCode = 1;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.message : error);
     process.exit(1);

@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import JSZip from "jszip";
@@ -121,6 +121,25 @@ function escapeHtml(value: string): string {
     .replace(/"/g, "&quot;");
 }
 
+function portablePath(value: string): string {
+  return value.split(path.sep).join(path.posix.sep);
+}
+
+export function isLoopbackTarget(url: URL): boolean {
+  const hostname = url.hostname.toLowerCase();
+  return (
+    (url.protocol === "http:" || url.protocol === "https:") &&
+    (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1")
+  );
+}
+
+export function shouldAllowRequest(requestUrl: string, targetUrl: URL, allowExternal: boolean): boolean {
+  if (allowExternal) return true;
+
+  const request = new URL(requestUrl);
+  return request.protocol === "data:" || request.protocol === "blob:" || request.origin === targetUrl.origin;
+}
+
 async function waitForImages(page: Page) {
   await page.evaluate(async () => {
     await document.fonts.ready;
@@ -138,7 +157,7 @@ async function waitForImages(page: Page) {
   });
 }
 
-async function makeContactSheet(items: ExportManifestItem[], outPath: string) {
+async function makeContactSheet(items: ExportManifestItem[], outPath: string, rootDir: string) {
   const thumbW = 220;
   const thumbH = Math.max(160, Math.round((thumbW * items[0].height) / items[0].width));
   const cols = Math.min(4, Math.max(1, items.length));
@@ -148,7 +167,7 @@ async function makeContactSheet(items: ExportManifestItem[], outPath: string) {
 
   const cards = await Promise.all(
     items.map(async (item) => {
-      const buf = await readFile(item.path);
+      const buf = await readFile(path.resolve(rootDir, item.path));
       const dataUrl = `data:image/png;base64,${buf.toString("base64")}`;
       return `
         <figure>
@@ -215,23 +234,40 @@ async function createZip(rootDir: string, manifest: ExportManifestItem[], zipPat
     path.join(rootDir, "_manifest.json"),
     path.join(rootDir, "_validation.txt"),
     path.join(rootDir, "_contact-sheet.jpg"),
-    ...manifest.map((item) => item.path),
+    ...manifest.map((item) => path.resolve(rootDir, item.path)),
   ];
 
   for (const file of files) {
-    const relative = path.relative(rootDir, file);
+    const relative = portablePath(path.relative(rootDir, file));
     zip.file(relative, await readFile(file));
   }
 
   const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+  await mkdir(path.dirname(zipPath), { recursive: true });
   await writeFile(zipPath, buffer);
 }
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const targetUrl = new URL(opts.url);
+  if (!opts.allowExternal && !isLoopbackTarget(targetUrl)) {
+    throw new Error("--url must use localhost, 127.0.0.1, or [::1] unless --allow-external is set");
+  }
+
   const outRoot = path.resolve(opts.outDir);
   const screenshotDir = path.join(outRoot, "screenshots", slug(opts.locale), slug(opts.device));
+  const manifestPath = path.join(outRoot, "_manifest.json");
+  const validationPath = path.join(outRoot, "_validation.txt");
+  const contactSheetPath = path.join(outRoot, "_contact-sheet.jpg");
+  const zipPath = path.resolve(opts.zipPath || path.join(outRoot, `app-store-screenshots-${opts.width}x${opts.height}.zip`));
+
+  await rm(screenshotDir, { recursive: true, force: true });
+  await Promise.all([
+    rm(manifestPath, { force: true }),
+    rm(validationPath, { force: true }),
+    rm(contactSheetPath, { force: true }),
+    ...(opts.noZip ? [] : [rm(zipPath, { force: true })]),
+  ]);
   await mkdir(screenshotDir, { recursive: true });
 
   const browser = await chromium.launch();
@@ -248,14 +284,7 @@ async function main() {
     if (!opts.allowExternal) {
       await page.route("**/*", (route) => {
         const requestUrl = route.request().url();
-        if (
-          requestUrl.startsWith(targetUrl.origin) ||
-          requestUrl.startsWith("data:") ||
-          requestUrl.startsWith("blob:")
-        ) {
-          return route.continue();
-        }
-        return route.abort();
+        return shouldAllowRequest(requestUrl, targetUrl, opts.allowExternal) ? route.continue() : route.abort();
       });
     }
 
@@ -273,13 +302,17 @@ async function main() {
       const slideId = slug(rawId);
       const filename = `${String(i + 1).padStart(2, "0")}-${slideId}-${slug(opts.locale)}-${slug(opts.device)}-${opts.width}x${opts.height}.png`;
       const outPath = path.join(screenshotDir, filename);
+      const relativePath = portablePath(path.relative(outRoot, outPath));
 
       await slide.screenshot({ path: outPath, omitBackground: false });
-      const validation = await validateImage(outPath, allowedSizes);
+      const validation = {
+        ...(await validateImage(outPath, allowedSizes)),
+        file: relativePath,
+      };
 
       manifest.push({
         filename,
-        path: outPath,
+        path: relativePath,
         locale: opts.locale,
         device: opts.device,
         theme: opts.theme,
@@ -296,22 +329,18 @@ async function main() {
     await browser.close();
   }
 
-  const manifestPath = path.join(outRoot, "_manifest.json");
-  const validationPath = path.join(outRoot, "_validation.txt");
-  const contactSheetPath = path.join(outRoot, "_contact-sheet.jpg");
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   await writeFile(validationPath, `${formatValidationReport(manifest.map((item) => item.validation))}\n`);
-  await makeContactSheet(manifest, contactSheetPath);
+  await makeContactSheet(manifest, contactSheetPath, outRoot);
 
   if (!opts.noZip) {
-    const zipPath = path.resolve(opts.zipPath || path.join(outRoot, `app-store-screenshots-${opts.width}x${opts.height}.zip`));
     await createZip(outRoot, manifest, zipPath);
   }
 
   if (manifest.some((item) => item.validation.status === "fail")) process.exitCode = 1;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.message : error);
     process.exit(1);
