@@ -2313,14 +2313,14 @@ struct NavigationProtocolTests {
         )
         assertEqual(build.payload.version, 1, "destination catalog has an explicit schema version")
         assertEqual(build.payload.generation, 17, "destination catalog preserves its generation")
-        assertEqual(build.payload.items.count, 13, "destination catalog applies separate favorite and recent caps")
-        assertEqual(build.payload.items.prefix(8).map(\.kind),
-                    Array(repeating: .favorite, count: 8),
+        assertEqual(build.payload.items.count, 8, "destination catalog applies separate favorite and recent caps")
+        assertEqual(build.payload.items.prefix(3).map(\.kind),
+                    Array(repeating: .favorite, count: 3),
                     "favorites are kept first and preserve order")
         assertEqual(build.payload.items.suffix(5).map(\.kind),
                     Array(repeating: .recent, count: 5),
                     "favorites are excluded before recent destinations are capped")
-        assertEqual(build.destinationsByToken.count, 13,
+        assertEqual(build.destinationsByToken.count, 8,
                     "every visible token maps back to an exact saved destination")
         assert(build.payload.items[0].label.utf8.count <= 64,
                "multibyte destination labels are truncated at a valid UTF-8 boundary")

@@ -34,7 +34,7 @@ struct DeviceDestinationCatalogBuild {
 
 enum DeviceDestinationCatalogBuilder {
     static let version: UInt8 = 1
-    static let favoriteLimit = 8
+    static let favoriteLimit = 3
     static let recentLimit = 5
     static let labelMaxBytes = 64
 

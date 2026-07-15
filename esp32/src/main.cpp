@@ -186,7 +186,7 @@ static void processWaveshareBootButton() {
     waitingForRelease = true;
     releaseStartMs = 0;
     pressStartMs = now;
-    log_i("Waveshare BOOT pressed; cycling main screen");
+    log_i("Waveshare BOOT pressed; handling forward action");
     toggleNavigationScreen();
     return;
   }

@@ -232,7 +232,11 @@ class BikeComputerCoordinator: ObservableObject {
         .removeDuplicates()
         .sink { [weak self] isReady in
             guard isReady else { return }
-            self?.synchronizeDestinationCatalog(force: true)
+            // @Published emits from willSet. Defer until both BLE properties
+            // contain the negotiated values read by the guarded send.
+            DispatchQueue.main.async { [weak self] in
+                self?.synchronizeDestinationCatalog(force: true)
+            }
         }
         .store(in: &cancellables)
 
@@ -242,7 +246,11 @@ class BikeComputerCoordinator: ObservableObject {
         )
         .dropFirst()
         .sink { [weak self] _, _ in
-            self?.synchronizeDestinationCatalog()
+            // Read the destination store after its @Published properties have
+            // committed the newly emitted favorites/recents arrays.
+            DispatchQueue.main.async { [weak self] in
+                self?.synchronizeDestinationCatalog()
+            }
         }
         .store(in: &cancellables)
 

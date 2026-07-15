@@ -262,10 +262,16 @@ firmware and other board targets continue to use the existing navigation UI.
 ## Destination Picker
 
 The idle Map + Navigation overlay can mirror the companion app's saved
-destinations. iOS sends favorites first (up to 8), followed by recent searches
+destinations. iOS sends favorites first (up to 3), followed by recent searches
 (up to 5) after removing destinations already represented in favorites. Labels
 are non-empty UTF-8 strings of at most 64 bytes. Empty sections are omitted and
 an empty catalog is valid.
+
+When idle, the picker expands the bottom overlay to two-thirds of the display.
+It shows the three favorite rows first and keeps any recent-search rows
+available by vertical scrolling. Tapping the exposed map or pressing the
+BOOT/forward button dismisses the picker and restores the normal one-third
+guidance strip; a later forward press resumes normal screen cycling.
 
 The logical catalog is versioned JSON:
 

@@ -16,6 +16,10 @@ static std::vector<uint8_t> chunk(uint8_t transferId, uint8_t index,
 }
 
 int main() {
+  static_assert(destination_picker_protocol::MAX_FAVORITES == 3);
+  static_assert(destination_picker_protocol::MAX_RECENTS == 5);
+  static_assert(destination_picker_protocol::MAX_ITEMS == 8);
+
   CatalogReassembler reassembler;
   auto first = chunk(7, 0, 2, "{\"version\":1,");
   auto second = chunk(7, 1, 2, "\"items\":[]}");
