@@ -30,8 +30,8 @@ struct BatteryGauge {
 BatteryGauge deviceGauge;
 BatteryGauge phoneGauge;
 
-// Lucide Bike's 24x24 geometry, scaled 3x. Source:
-// https://lucide.dev/icons/bike
+// Lucide Bike's 24x24 geometry, scaled 3x. Source and license:
+// https://lucide.dev/icons/bike, LICENSES/Lucide-ISC.txt
 constexpr lv_point_precise_t LUCIDE_BIKE_PATH[] = {
     {36, 53}, {36, 42}, {27, 33}, {39, 24}, {45, 33}, {51, 33}};
 constexpr lv_point_precise_t CHARGING_BOLT_PATH[] = {

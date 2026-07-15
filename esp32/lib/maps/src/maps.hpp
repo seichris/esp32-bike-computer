@@ -117,7 +117,7 @@ private:
   uint32_t idx;
   int16_t parseInt16(char *file);
   void parseStrUntil(char *file, char terminator, char *str);
-  void parseCoords(char *file,
+  bool parseCoords(char *file,
                    std::vector<Point16, PsramAllocator<Point16>> &points);
   BBox parseBbox(String str);
   MapBlock *readMapBlock(String fileName);
@@ -130,7 +130,7 @@ private:
   void drawLineSegment(uint16_t *buf, int32_t buf_w, int32_t buf_h,
                        uint32_t stride_pixels, int16_t x1, int16_t y1,
                        int16_t x2, int16_t y2, uint16_t color);
-  void getMapBlocks(BBox &bbox, MemCache &memCache);
+  bool getMapBlocks(BBox &bbox, MemCache &memCache);
   bool readVectorMap(ViewPort &viewPort, MemCache &memCache, lv_obj_t *canvas,
                      uint8_t zoom, double rotation);
   void getPosition(double lat, double lon);

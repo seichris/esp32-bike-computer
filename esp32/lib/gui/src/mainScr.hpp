@@ -86,6 +86,9 @@ void showNextMainScreen();
 bool isMapScreenActive();
 bool isMapGuidanceScreenActive();
 bool shouldInterruptMapRenderForScreenCycle();
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+extern volatile bool waveshareBootScreenCyclePending;
+#endif
 
 void createMainScr();
 void toggleNavigationScreen();

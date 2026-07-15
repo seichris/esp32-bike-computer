@@ -150,35 +150,62 @@ static void updateMapActivationProgressOverlay() {
 }
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+volatile bool waveshareBootScreenCyclePending = false;
+static portMUX_TYPE waveshareBootButtonMux = portMUX_INITIALIZER_UNLOCKED;
+
+static void IRAM_ATTR latchWaveshareBootScreenCycle() {
+  portENTER_CRITICAL_ISR(&waveshareBootButtonMux);
+  waveshareBootScreenCyclePending = true;
+  portEXIT_CRITICAL_ISR(&waveshareBootButtonMux);
+}
+
+static bool takeWaveshareBootScreenCycle() {
+  portENTER_CRITICAL(&waveshareBootButtonMux);
+  const bool pending = waveshareBootScreenCyclePending;
+  waveshareBootScreenCyclePending = false;
+  portEXIT_CRITICAL(&waveshareBootButtonMux);
+  return pending;
+}
+
 static void processWaveshareBootButton() {
   constexpr uint32_t DEBOUNCE_MS = 50;
 
-  static bool lastPressed = false;
-  static bool stablePressed = false;
-  static uint32_t lastChangeMs = 0;
+  static bool waitingForRelease = false;
+  static uint32_t releaseStartMs = 0;
   static uint32_t pressStartMs = 0;
 
   const uint32_t now = millis();
   const bool pressed = digitalRead(BOARD_BOOT_PIN) == LOW;
+  const bool latchedPress = takeWaveshareBootScreenCycle();
 
-  if (pressed != lastPressed) {
-    lastPressed = pressed;
-    lastChangeMs = now;
-    return;
-  }
+  if (!waitingForRelease) {
+    if (!latchedPress && !pressed) {
+      return;
+    }
 
-  if (pressed == stablePressed || now - lastChangeMs < DEBOUNCE_MS) {
-    return;
-  }
-
-  stablePressed = pressed;
-  if (stablePressed) {
+    waitingForRelease = true;
+    releaseStartMs = 0;
     pressStartMs = now;
     log_i("Waveshare BOOT pressed; cycling main screen");
     toggleNavigationScreen();
     return;
   }
 
+  if (pressed) {
+    releaseStartMs = 0;
+    return;
+  }
+
+  if (releaseStartMs == 0) {
+    releaseStartMs = now;
+    return;
+  }
+
+  if (now - releaseStartMs < DEBOUNCE_MS) {
+    return;
+  }
+
+  waitingForRelease = false;
   const uint32_t pressDurationMs = now - pressStartMs;
   log_i("Waveshare BOOT released after %lu ms",
         static_cast<unsigned long>(pressDurationMs));
@@ -440,6 +467,10 @@ void setup() {
 #if defined(POWER_SAVE) || defined(WAVESHARE_AMOLED_175) ||                   \
     defined(WAVESHARE_AMOLED_206)
   pinMode(BOARD_BOOT_PIN, INPUT_PULLUP);
+#endif
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  attachInterrupt(digitalPinToInterrupt(BOARD_BOOT_PIN),
+                  latchWaveshareBootScreenCycle, FALLING);
 #endif
 #ifdef POWER_SAVE
 #ifdef ICENAV_BOARD

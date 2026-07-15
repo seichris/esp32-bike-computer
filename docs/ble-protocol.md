@@ -219,10 +219,11 @@ configuration:
 
 Version `2` advertises that the client understands independent Map and Map +
 Navigation profiles. Version `3` also requests the extended map visibility
-classes. Version `4` advertises Battery Status screen support so the device can
-distinguish a current screen mask from one sent by an older four-screen app;
-older app masks keep Battery Status enabled. Receiving a `CAPS` request alone
-does not switch the firmware's
+classes. Version `4` advertises that the client understands Battery Status
+screen settings so the device can distinguish a current screen mask from one
+sent by an older four-screen app; older app masks preserve the device's
+existing Battery Status preference. Receiving a `CAPS` request alone does not
+switch the firmware's
 setting semantics: a session switches to independent profiles only after the
 first setting ID in `16...22` is received. This keeps legacy IDs shared when a
 capability response is dropped.
@@ -243,7 +244,15 @@ the firmware mirrors it to Map + Navigation. Flag bit `4` reports separate
 service-road and track visibility. The app retries discovery after each
 connection, ignores retry timers from older BLE sessions, uses the sound-related
 bits to enable sound controls, and restores the device-persisted PWR
-configuration from versioned responses.
+configuration from versioned responses. Flag bit `5` reports firmware support
+for the Battery Status screen and phone-battery telemetry. The app waits for
+capability negotiation before sending screen IDs `13`/`14` or phone-battery IDs
+`23`/`24`; when bit `5` is absent, it sends only the legacy four-screen mask and
+never selects Battery Status as the device default. An authoritative
+five-screen value for setting ID `13` sets bit `30` as a version marker. The
+firmware removes that marker before persistence; unmarked masks from older apps
+or capability-fallback paths preserve the existing Battery Status bit. This
+also keeps the preference intact when a `CAPS` response is lost.
 
 ## OSM Map Blocks
 

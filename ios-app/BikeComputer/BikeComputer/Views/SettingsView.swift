@@ -694,7 +694,7 @@ private struct DeviceScreensSettingsSection: View {
 
     var body: some View {
         Section(header: Text("Device Screens")) {
-            ForEach(DeviceScreen.displayOrder) { screen in
+            ForEach(bleManager.availableDeviceScreens) { screen in
                 Toggle(screen.title, isOn: Binding(
                     get: { bleManager.isDeviceScreenEnabled(screen) },
                     set: { bleManager.setDeviceScreen(screen, enabled: $0) }
@@ -702,16 +702,20 @@ private struct DeviceScreensSettingsSection: View {
                 .disabled(bleManager.isOnlyEnabledDeviceScreen(screen))
             }
 
-            Picker("Default Screen", selection: $bleManager.defaultDeviceScreen) {
+            Picker("Default Screen", selection: Binding(
+                get: { bleManager.effectiveDefaultDeviceScreen },
+                set: {
+                    bleManager.defaultDeviceScreen = $0
+                    bleManager.sendDefaultDeviceScreen()
+                }
+            )) {
                 ForEach(bleManager.enabledDeviceScreens) { screen in
                     Text(screen.title).tag(screen)
                 }
             }
-            .onChange(of: bleManager.defaultDeviceScreen) { _ in
-                bleManager.sendDefaultDeviceScreen()
-            }
         }
-        .disabled(!bleManager.supportsDeviceSettings)
+        .disabled(!bleManager.supportsDeviceSettings ||
+                  !bleManager.hasReceivedDeviceCapabilities)
     }
 }
 

@@ -76,7 +76,8 @@ bool shouldInterruptMapRenderForScreenCycle() {
   // The BOOT button always cycles screens. On Map + Navigation, also use the
   // touch controller's interrupt hint so a new tap can pre-empt the synchronous
   // vector renderer before LVGL has had a chance to consume the touch event.
-  if (digitalRead(BOARD_BOOT_PIN) == LOW) {
+  if (waveshareBootScreenCyclePending ||
+      digitalRead(BOARD_BOOT_PIN) == LOW) {
     return true;
   }
   return mapRenderSettings.tapToSwitchScreens &&
@@ -656,9 +657,9 @@ void mapToolBarEvent(lv_event_t *event) {
 void scrollMapEvent(lv_event_t *event) {
   if (!canScrollMap) {
     if (activeTile == MAP_GUIDANCE &&
-        lv_event_get_code(event) == LV_EVENT_PRESSED &&
+        lv_event_get_code(event) == LV_EVENT_CLICKED &&
         mapRenderSettings.tapToSwitchScreens) {
-      log_i("MAP GUIDANCE PRESS: cycling main screen");
+      log_i("MAP GUIDANCE TAP: cycling main screen");
       showNextMainScreen();
     }
     return;
@@ -992,7 +993,7 @@ static void createMapGuidanceOverlay() {
   lv_obj_set_style_bg_color(mapGuidanceOverlay, lv_color_black(), 0);
   lv_obj_set_style_bg_opa(mapGuidanceOverlay, 230, 0);
   lv_obj_set_style_pad_all(mapGuidanceOverlay, 8, 0);
-  lv_obj_add_event_cb(mapGuidanceOverlay, tapCycleScreenEvent, LV_EVENT_PRESSED,
+  lv_obj_add_event_cb(mapGuidanceOverlay, tapCycleScreenEvent, LV_EVENT_CLICKED,
                       NULL);
 
   mapGuidanceArrow = lv_img_create(mapGuidanceOverlay);
@@ -1091,10 +1092,7 @@ static void tapCycleScreenEvent(lv_event_t *event) {
     return;
   }
 
-  const lv_event_code_t code = lv_event_get_code(event);
-  const bool mapGuidancePress =
-      activeTile == MAP_GUIDANCE && code == LV_EVENT_PRESSED;
-  if (!mapGuidancePress && code != LV_EVENT_CLICKED) {
+  if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
     return;
   }
 

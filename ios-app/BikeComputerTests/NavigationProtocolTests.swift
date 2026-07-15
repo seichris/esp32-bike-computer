@@ -367,6 +367,7 @@ struct NavigationProtocolTests {
         testDevicePacketRouting()
         testDeviceSoundProtocol()
         testDeviceCapabilitiesProtocol()
+        testBatteryStatusScreenCapabilityNegotiation()
         testMapProfileCapabilityNegotiation()
         testDeviceCapabilitySynchronizesPowerButtonHonkOnce()
         testDeviceCapabilityRetryPolicy()
@@ -5130,6 +5131,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask, 4, "PWR honk acknowledgement uses capability bit 2")
         assertEqual(DeviceBLEProtocol.independentMapProfilesCapabilityMask, 8, "independent map profiles use capability bit 3")
         assertEqual(DeviceBLEProtocol.extendedMapVisibilityCapabilityMask, 16, "extended map visibility uses capability bit 4")
+        assertEqual(DeviceBLEProtocol.batteryStatusScreenCapabilityMask, 32, "Battery Status support uses capability bit 5")
         assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 4, "capability version advertises Battery Status screen support")
         assertEqual(DeviceBLEProtocol.serviceRoadsVisibilityMask, 0x400, "service roads use visibility bit 10")
         assertEqual(DeviceBLEProtocol.tracksVisibilityMask, 0x800, "tracks use visibility bit 11")
@@ -5147,6 +5149,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID, 22, "Map + Navigation marker scale uses setting ID 22")
         assertEqual(DeviceBLEProtocol.phoneBatteryLevelSettingID, 23, "phone battery level uses firmware setting ID 23")
         assertEqual(DeviceBLEProtocol.phoneBatteryChargingSettingID, 24, "phone charging state uses firmware setting ID 24")
+        assertEqual(DeviceBLEProtocol.currentScreenMaskMarker, 1 << 30, "current screen masks use bit 30 as a compatibility marker")
         assertEqual(DeviceBLEProtocol.phoneBatteryPercentage(from: -1), nil, "unavailable iPhone battery levels stay unknown")
         assertEqual(DeviceBLEProtocol.phoneBatteryPercentage(from: 0), 0, "empty iPhone battery maps to zero percent")
         assertEqual(DeviceBLEProtocol.phoneBatteryPercentage(from: 0.735), 74, "iPhone battery levels round to whole percentages")
@@ -5164,6 +5167,7 @@ struct NavigationProtocolTests {
                     [.mapPlusNavigation, .rideStats, .map, .navigation, .batteryStatus],
                     "Battery Status is the last device screen in settings and cycling order")
         assertEqual(DeviceScreen.allScreensMask, 0x1F, "all supported device screens use the low five mask bits")
+        assertEqual(DeviceScreen.legacyScreensMask, 0x0F, "legacy firmware receives only the original four screen bits")
         assertEqual(DisconnectedSleepTimeout.oneMinute.settingValue, 60, "one-minute sleep timeout sends seconds")
         assertEqual(DisconnectedSleepTimeout.twoMinutes.settingValue, 120, "two-minute sleep timeout sends seconds")
         assertEqual(DisconnectedSleepTimeout.fiveMinutes.settingValue, 300, "five-minute sleep timeout sends seconds")
@@ -5175,6 +5179,10 @@ struct NavigationProtocolTests {
     static func testDeviceScreenValidation() {
         assertEqual(DeviceScreen.normalizedMask(0), DeviceScreen.allScreensMask, "zero screen mask falls back to all screens")
         assertEqual(DeviceScreen.normalizedMask(0xFF), DeviceScreen.allScreensMask, "unknown screen mask bits are ignored")
+        assertEqual(DeviceScreen.normalizedMask(DeviceScreen.batteryStatus.bit,
+                                                supportedMask: DeviceScreen.legacyScreensMask),
+                    DeviceScreen.legacyScreensMask,
+                    "a Battery-only mask falls back to all screens supported by legacy firmware")
 
         let rideStatsOnly = DeviceScreen.rideStats.bit
         assertEqual(DeviceScreen.fallbackDefault(for: DeviceScreen.mapPlusNavigation.rawValue, mask: rideStatsOnly),
@@ -5190,6 +5198,12 @@ struct NavigationProtocolTests {
         assertEqual(DeviceScreen.fallbackDefault(for: DeviceScreen.map.rawValue, mask: batteryAndStats),
                     .rideStats,
                     "Battery Status remains last in fallback order")
+        assertEqual(DeviceScreen.fallbackDefault(
+            for: DeviceScreen.batteryStatus.rawValue,
+            mask: DeviceScreen.allScreensMask,
+            supportedMask: DeviceScreen.legacyScreensMask
+        ), .mapPlusNavigation,
+        "legacy firmware never receives Battery Status as its default")
     }
 
     static func testDeviceSoundProtocol() {
@@ -5353,6 +5367,83 @@ struct NavigationProtocolTests {
         UserDefaults.standard.removeObject(forKey: "deviceSettings.selectedSound")
         UserDefaults.standard.removeObject(forKey: "deviceSettings.soundVolumePercent")
         UserDefaults.standard.removeObject(forKey: "deviceSettings.powerButtonHonkEnabled")
+    }
+
+    static func testBatteryStatusScreenCapabilityNegotiation() {
+        func configuredManager() -> (BLEManager, () -> [Data]) {
+            let manager = BLEManager()
+            manager.isConnected = true
+            manager.isNavigationReady = true
+            manager.supportsDeviceSettings = true
+            manager.enabledDeviceScreensMask = DeviceScreen.allScreensMask
+            manager.defaultDeviceScreen = .batteryStatus
+            var packets: [Data] = []
+            manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+                maximumWriteLength: 20,
+                canSend: { true },
+                write: { packets.append($0) }
+            ))
+            return (manager, { packets })
+        }
+
+        func screenSettings(in packets: [Data]) -> [UInt8: Int32] {
+            var settings: [UInt8: Int32] = [:]
+            for packet in packets where packet.count == 9 &&
+                String(data: packet.prefix(4), encoding: .utf8) ==
+                    DeviceBLEProtocol.settingsFallbackPrefix {
+                let id = packet[4]
+                if id == DeviceBLEProtocol.enabledScreensSettingID ||
+                    id == DeviceBLEProtocol.defaultScreenSettingID {
+                    settings[id] = readInt32LE(packet, offset: 5)
+                }
+            }
+            return settings
+        }
+
+        let (legacyManager, legacyPackets) = configuredManager()
+        let legacyCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([0])
+        assert(legacyManager.handleDeviceCapabilitiesNotification(legacyCapabilities),
+               "legacy firmware capability response should be consumed")
+        assert(!legacyManager.supportsBatteryStatusScreen,
+               "firmware without bit 5 does not expose Battery Status")
+        assert(!legacyManager.availableDeviceScreens.contains(.batteryStatus),
+               "legacy firmware hides Battery Status from device settings")
+        let legacySettings = screenSettings(in: legacyPackets())
+        assertEqual(legacySettings[DeviceBLEProtocol.enabledScreensSettingID],
+                    Int32(DeviceScreen.legacyScreensMask),
+                    "legacy firmware receives a four-screen mask")
+        assertEqual(legacySettings[DeviceBLEProtocol.defaultScreenSettingID],
+                    Int32(DeviceScreen.mapPlusNavigation.rawValue),
+                    "legacy firmware receives a supported default screen")
+
+        let (currentManager, currentPackets) = configuredManager()
+        let currentCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.batteryStatusScreenCapabilityMask])
+        assert(currentManager.handleDeviceCapabilitiesNotification(currentCapabilities),
+               "Battery Status capability response should be consumed")
+        assert(currentManager.supportsBatteryStatusScreen,
+               "firmware bit 5 exposes Battery Status")
+        assert(currentManager.availableDeviceScreens.last == .batteryStatus,
+               "Battery Status remains the last available screen")
+        let currentSettings = screenSettings(in: currentPackets())
+        assertEqual(currentSettings[DeviceBLEProtocol.enabledScreensSettingID],
+                    Int32(DeviceScreen.allScreensMask) |
+                        DeviceBLEProtocol.currentScreenMaskMarker,
+                    "current firmware receives a marked five-screen mask")
+        assertEqual(currentSettings[DeviceBLEProtocol.defaultScreenSettingID],
+                    Int32(DeviceScreen.batteryStatus.rawValue),
+                    "current firmware may use Battery Status as its default")
+
+        let (fallbackManager, fallbackPackets) = configuredManager()
+        fallbackManager.useDeviceCapabilitiesFallback()
+        let fallbackSettings = screenSettings(in: fallbackPackets())
+        assertEqual(fallbackSettings[DeviceBLEProtocol.enabledScreensSettingID],
+                    Int32(DeviceScreen.legacyScreensMask),
+                    "a missing capability response falls back to the legacy mask")
+        assertEqual(fallbackSettings[DeviceBLEProtocol.defaultScreenSettingID],
+                    Int32(DeviceScreen.mapPlusNavigation.rawValue),
+                    "a missing capability response never selects Battery Status")
     }
 
     static func testMapProfileCapabilityNegotiation() {

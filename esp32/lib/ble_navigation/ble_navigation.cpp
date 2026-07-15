@@ -6,6 +6,7 @@
  */
 
 #include "ble_navigation.hpp"
+#include "device_screen_protocol.hpp"
 #include "map_profile_persistence.hpp"
 #include "transfer_control_dispatch.hpp"
 #include "../gps/gps.hpp"
@@ -65,10 +66,9 @@ static volatile int16_t phoneBatteryLevelPercent = -1;
 static volatile bool phoneBatteryCharging = false;
 static bool bleSessionAuthenticated = false;
 static bool bleSessionUsesIndependentMapProfiles = false;
-static bool bleSessionSupportsBatteryStatusScreen = false;
 static constexpr uint8_t CAPABILITY_EXTENDED_MAP_VISIBILITY =
     map_profile_protocol::EXTENDED_VISIBILITY_CAPABILITY_MASK;
-static constexpr uint8_t BATTERY_STATUS_SCREEN_CLIENT_VERSION = 4;
+static constexpr uint8_t CAPABILITY_BATTERY_STATUS_SCREEN = 1 << 5;
 static char pendingAuthNonce[33] = "";
 static NimBLECharacteristic *authCharacteristic = nullptr;
 static NimBLECharacteristic *mapTransferStatusCharacteristic = nullptr;
@@ -415,7 +415,6 @@ static void handleAuthPayload(const std::string &value) {
     char response[112];
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
-    bleSessionSupportsBatteryStatusScreen = false;
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     snprintf(message, sizeof(message), "server|%s", nonce);
@@ -885,7 +884,8 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
               speakerAvailable, powerButtonHonkAvailable,
               powerButtonHonkAvailable) |
           map_profile_protocol::CAPABILITY_MASK |
-          CAPABILITY_EXTENDED_MAP_VISIBILITY),
+          CAPABILITY_EXTENDED_MAP_VISIBILITY |
+          CAPABILITY_BATTERY_STATUS_SCREEN),
   };
   size_t responseSize = 5;
   waveshare_board::speaker::PowerButtonHonkConfig config{};
@@ -938,8 +938,6 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
   if (requireAuthenticated(authLabel)) {
     const uint8_t clientVersion =
         value.length() == 5 ? static_cast<uint8_t>(value[4]) : 0;
-    bleSessionSupportsBatteryStatusScreen =
-        clientVersion >= BATTERY_STATUS_SCREEN_CLIENT_VERSION;
     const bool includePowerButtonConfig =
         clientVersion >= 1;
     notifyDeviceCapabilities(pChar, includePowerButtonConfig);
@@ -1261,10 +1259,9 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.printf("BLE Settings: tapToSwitchScreens = %d (saved)\n",
                   mapRenderSettings.tapToSwitchScreens);
     break;
-  case 13:
-    if (!bleSessionSupportsBatteryStatusScreen) {
-      settingValue |= deviceScreenBit(DEVICE_SCREEN_BATTERY_STATUS);
-    }
+  case 13: {
+    settingValue = device_screen_protocol::applyCompatibility(
+        settingValue, mapRenderSettings.enabledScreensMask);
     mapRenderSettings.enabledScreensMask =
         normalizedEnabledScreensMask(settingValue);
     mapRenderSettings.defaultScreen = normalizedDefaultScreen(
@@ -1277,6 +1274,7 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.printf("BLE Settings: enabledScreensMask = 0x%02X (saved)\n",
                   mapRenderSettings.enabledScreensMask);
     break;
+  }
   case 14:
     mapRenderSettings.defaultScreen = normalizedDefaultScreen(
         settingValue, mapRenderSettings.enabledScreensMask);
@@ -1457,7 +1455,6 @@ public:
     server->connected = true;
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
-    bleSessionSupportsBatteryStatusScreen = false;
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
@@ -1484,7 +1481,6 @@ public:
     server->connected = false;
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
-    bleSessionSupportsBatteryStatusScreen = false;
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;

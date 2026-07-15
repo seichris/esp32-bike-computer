@@ -31,6 +31,7 @@ const char *TAG PROGMEM = "Maps";
 #include "../../route_overlay/route_overlay.hpp"
 #include <esp_heap_caps.h>
 #include <cstdlib>
+#include <cstring>
 #include <dirent.h>
 #include <limits>
 #include <new>
@@ -76,6 +77,30 @@ bool findMapBlock(const std::string &directory, std::string &basePath,
   }
   ::closedir(handle);
   return found || (depth == 0 && !basePath.empty());
+}
+
+bool validateMapBlockCooperatively(const std::string &path,
+                                   const uint8_t *data, size_t size,
+                                   bool &interrupted) {
+  constexpr size_t VALIDATION_CHUNK_BYTES = 16 * 1024;
+  interrupted = false;
+  map_block_format::StreamValidator validator(path);
+  size_t offset = 0;
+  while (offset < size) {
+    if (shouldInterruptMapRenderForScreenCycle()) {
+      interrupted = true;
+      return false;
+    }
+    const size_t remaining = size - offset;
+    const size_t chunkSize = remaining < VALIDATION_CHUNK_BYTES
+                                 ? remaining
+                                 : VALIDATION_CHUNK_BYTES;
+    if (!validator.feed(data + offset, chunkSize)) {
+      return false;
+    }
+    offset += chunkSize;
+  }
+  return validator.finish();
 }
 
 } // namespace
@@ -254,9 +279,39 @@ static inline bool shouldBoostLineWidth(uint8_t typeId, uint8_t styleWidth) {
   return typeId == 0 && styleWidth >= 3;
 }
 
+static void *bufMapScreen = nullptr;
 static void *bufMapTemp = nullptr;
+static size_t bufMapCanvasSize = 0;
 static void *bufMapIcon = nullptr;
 static void *bufArrow = nullptr;
+
+static bool ensureMapCanvasBuffers(size_t requiredSize) {
+  if (bufMapScreen != nullptr && bufMapTemp != nullptr &&
+      bufMapCanvasSize >= requiredSize) {
+    return true;
+  }
+
+  void *newScreen = heap_caps_malloc(requiredSize, MALLOC_CAP_SPIRAM);
+  void *newTemp = heap_caps_malloc(requiredSize, MALLOC_CAP_SPIRAM);
+  if (newScreen == nullptr || newTemp == nullptr) {
+    if (newScreen != nullptr)
+      heap_caps_free(newScreen);
+    if (newTemp != nullptr)
+      heap_caps_free(newTemp);
+    ESP_LOGE(TAG, "MapBuff: double-buffer allocation failed size=%u",
+             (unsigned)requiredSize);
+    return false;
+  }
+
+  if (bufMapScreen != nullptr)
+    heap_caps_free(bufMapScreen);
+  if (bufMapTemp != nullptr)
+    heap_caps_free(bufMapTemp);
+  bufMapScreen = newScreen;
+  bufMapTemp = newTemp;
+  bufMapCanvasSize = requiredSize;
+  return true;
+}
 
 static void *ensureArrowBuffer() {
   if (bufArrow != nullptr)
@@ -768,12 +823,16 @@ void Maps::parseStrUntil(char *file, char terminator, char *str) {
  * @param file
  * @param points
  */
-void Maps::parseCoords(char *file,
+bool Maps::parseCoords(char *file,
                        std::vector<Point16, PsramAllocator<Point16>> &points) {
   char str[30];
   assert(points.size() == 0);
   Point16 point;
   while (true) {
+    if ((points.size() & 0x1F) == 0 &&
+        shouldInterruptMapRenderForScreenCycle()) {
+      return false;
+    }
     try {
       parseStrUntil(file, ',', str);
       if (str[0] == '\0')
@@ -789,6 +848,7 @@ void Maps::parseCoords(char *file,
     }
     points.push_back(point);
   }
+  return true;
 }
 
 /**
@@ -881,11 +941,33 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
     }
 
     const uint32_t readStartMs = MAPIO_TIME_MS();
-    ssize_t bytesRead = ::read(fd, file, fileSize);
+    constexpr size_t READ_CHUNK_BYTES = 16 * 1024;
+    size_t bytesRead = 0;
+    bool readInterrupted = false;
+    while (bytesRead < fileSize) {
+      if (shouldInterruptMapRenderForScreenCycle()) {
+        readInterrupted = true;
+        break;
+      }
+      const size_t remaining = fileSize - bytesRead;
+      const size_t requested =
+          remaining < READ_CHUNK_BYTES ? remaining : READ_CHUNK_BYTES;
+      const ssize_t chunkRead = ::read(fd, file + bytesRead, requested);
+      if (chunkRead <= 0) {
+        break;
+      }
+      bytesRead += static_cast<size_t>(chunkRead);
+    }
     ::close(fd);
     const uint32_t readMs = MAPIO_TIME_MS() - readStartMs;
 
-    if (bytesRead != (ssize_t)fileSize) {
+    if (readInterrupted) {
+      free(file);
+      Maps::isMapFound = false;
+      return mblock;
+    }
+
+    if (bytesRead != fileSize) {
       ESP_LOGE(TAG, "Failed to read file completely: got %d of %u bytes",
                bytesRead, fileSize);
       MAPIO_LOG("MAPIO: block-read ok=0 file=%s size=%u got=%d "
@@ -893,6 +975,12 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
                 filePath.c_str(), (unsigned)fileSize, (int)bytesRead,
                 (unsigned long)openMs, (unsigned long)statMs,
                 (unsigned long)readMs);
+      free(file);
+      Maps::isMapFound = false;
+      return mblock;
+    }
+
+    if (shouldInterruptMapRenderForScreenCycle()) {
       free(file);
       Maps::isMapFound = false;
       return mblock;
@@ -918,15 +1006,26 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
 
     size_t normalizedSize = 0;
     for (size_t index = 0; index < fileSize; ++index) {
+      if ((index & 0x0FFF) == 0 &&
+          shouldInterruptMapRenderForScreenCycle()) {
+        free(file);
+        Maps::isMapFound = false;
+        return mblock;
+      }
       if (file[index] != '\r')
         file[normalizedSize++] = file[index];
     }
     fileSize = normalizedSize;
     file[fileSize] = '\0';
-    map_block_format::StreamValidator asciiValidator(filePath);
-    if (!asciiValidator.feed(reinterpret_cast<const uint8_t *>(file),
-                             fileSize) ||
-        !asciiValidator.finish()) {
+    bool validationInterrupted = false;
+    if (!validateMapBlockCooperatively(
+            filePath, reinterpret_cast<const uint8_t *>(file), fileSize,
+            validationInterrupted)) {
+      if (validationInterrupted) {
+        free(file);
+        Maps::isMapFound = false;
+        return mblock;
+      }
       ESP_LOGE(TAG, "Invalid or unsupported ASCII map block");
       free(file);
       Maps::isMapFound = false;
@@ -965,6 +1064,11 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
     Polygon polygon;
     Point16 p;
     while (count > 0) {
+      if (shouldInterruptMapRenderForScreenCycle()) {
+        free(file);
+        Maps::isMapFound = false;
+        return mblock;
+      }
       Maps::parseStrUntil(file, '\n', str); // color
       if (str[0] != '0' || str[1] != 'x') {
         ESP_LOGE(TAG, "Expected hex color at line %i: %s", line, str);
@@ -1001,7 +1105,11 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
         break;
       }
 
-      Maps::parseCoords(file, polygon.points);
+      if (!Maps::parseCoords(file, polygon.points)) {
+        free(file);
+        Maps::isMapFound = false;
+        return mblock;
+      }
       line++;
       mblock->polygons.push_back(polygon);
       totalPoints += polygon.points.size();
@@ -1018,6 +1126,11 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
 
       Polyline polyline;
       while (count > 0) {
+        if (shouldInterruptMapRenderForScreenCycle()) {
+          free(file);
+          Maps::isMapFound = false;
+          return mblock;
+        }
         Maps::parseStrUntil(file, '\n', str); // color
         if (str[0] != '0' || str[1] != 'x')
           break;
@@ -1051,7 +1164,11 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
         Maps::parseStrUntil(file, ':', str);
         if (strcmp(str, "coords") != 0)
           break;
-        Maps::parseCoords(file, polyline.points);
+        if (!Maps::parseCoords(file, polyline.points)) {
+          free(file);
+          Maps::isMapFound = false;
+          return mblock;
+        }
         line++;
         mblock->polylines.push_back(polyline);
         totalPoints += polyline.points.size();
@@ -1061,6 +1178,12 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
     // Build spatial grid for polygon culling optimization
     const uint32_t gridStartMs = MAPIO_TIME_MS();
     if (!buildPolygonGrid(mblock)) {
+      if (shouldInterruptMapRenderForScreenCycle()) {
+        free(file);
+        Maps::isMapFound = false;
+        delete mblock;
+        return new MapBlock();
+      }
       ESP_LOGE(TAG, "Could not allocate bounded polygon grid");
       throw std::bad_alloc();
     }
@@ -1095,8 +1218,14 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
  */
 Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   const uint32_t parseStartMs = MAPIO_TIME_MS();
-  if (!map_block_format::validate(reinterpret_cast<const uint8_t *>(file),
-                                  fileSize)) {
+  bool validationInterrupted = false;
+  if (!validateMapBlockCooperatively(
+          "block.fmb", reinterpret_cast<const uint8_t *>(file), fileSize,
+          validationInterrupted)) {
+    if (validationInterrupted) {
+      Maps::isMapFound = false;
+      return new MapBlock();
+    }
     ESP_LOGE(TAG, "Invalid or unsupported binary map block");
     Maps::isMapFound = false;
     return new MapBlock();
@@ -1121,6 +1250,11 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   mblock->polygons.reserve(polyCount);
 
   for (int i = 0; i < polyCount; i++) {
+    if ((i & 0x1F) == 0 && shouldInterruptMapRenderForScreenCycle()) {
+      Maps::isMapFound = false;
+      delete mblock;
+      return new MapBlock();
+    }
     Polygon poly;
     poly.color = *(uint16_t *)(file + offset);
     offset += 2;
@@ -1158,6 +1292,11 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   mblock->polylines.reserve(lineCount);
 
   for (int i = 0; i < lineCount; i++) {
+    if ((i & 0x1F) == 0 && shouldInterruptMapRenderForScreenCycle()) {
+      Maps::isMapFound = false;
+      delete mblock;
+      return new MapBlock();
+    }
     Polyline line;
     line.color = *(uint16_t *)(file + offset);
     offset += 2;
@@ -1194,6 +1333,11 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   // Build spatial grid for polygon culling optimization
   const uint32_t gridStartMs = MAPIO_TIME_MS();
   if (!buildPolygonGrid(mblock)) {
+    if (shouldInterruptMapRenderForScreenCycle()) {
+      Maps::isMapFound = false;
+      delete mblock;
+      return new MapBlock();
+    }
     ESP_LOGE(TAG, "Could not allocate bounded polygon grid");
     throw std::bad_alloc();
   }
@@ -1231,6 +1375,10 @@ bool Maps::buildPolygonGrid(MapBlock *mblock) {
 
     size_t totalEntries = 0;
     for (uint16_t i = 0; i < mblock->polygons.size(); i++) {
+      if ((i & 0x1F) == 0 && shouldInterruptMapRenderForScreenCycle()) {
+        mblock->polygonGrid.clear();
+        return false;
+      }
       const auto &poly = mblock->polygons[i];
 
       // Calculate which grid cells this polygon's bounding box overlaps.
@@ -1479,8 +1627,11 @@ void Maps::drawLineSegment(uint16_t *buf, int32_t buf_w, int32_t buf_h,
  * @param memBlocks
  * @param bbox
  */
-void Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
+bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
   ESP_LOGI(TAG, "getMapBlocks %i", millis());
+  if (shouldInterruptMapRenderForScreenCycle()) {
+    return false;
+  }
   const uint32_t blocksStartMs = MAPIO_TIME_MS();
   uint16_t cacheHits = 0;
   uint16_t loadedBlocks = 0;
@@ -1521,6 +1672,10 @@ void Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
 
   // 3. Load missing blocks
   for (const auto &req : requiredOffsets) {
+    if (shouldInterruptMapRenderForScreenCycle()) {
+      return false;
+    }
+
     bool found = false;
     for (MapBlock *memblock : memCache.blocks) {
       if (memblock->offset.x == req.x && memblock->offset.y == req.y) {
@@ -1583,8 +1738,27 @@ void Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
 
       ESP_LOGI(TAG, "Block loaded: %p, offset(%d, %d)", newBlock, req.x, req.y);
       ESP_LOGI(TAG, "FreeHeap: %d", (int)esp_get_free_heap_size());
+    } else {
+      delete newBlock;
+    }
+
+    if (shouldInterruptMapRenderForScreenCycle()) {
+      return false;
     }
   }
+
+  // readMapBlock() reports the result of the most recent disk lookup through
+  // isMapFound. Recompute the aggregate state so a missing neighboring block,
+  // or an earlier interrupted load followed by cache-only hits, cannot hide
+  // valid map data that is already available for this viewport.
+  bool hasVisibleMapBlock = false;
+  for (const MapBlock *block : memCache.blocks) {
+    if (block->inView) {
+      hasVisibleMapBlock = true;
+      break;
+    }
+  }
+  Maps::isMapFound = hasVisibleMapBlock;
 
   ESP_LOGI(TAG, "memCache size: %i %i", memCache.blocks.size(), millis());
   MAPIO_LOG("MAPIO: blocks required=%u cacheHit=%u loaded=%u evicted=%u "
@@ -1593,6 +1767,7 @@ void Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
             (unsigned)loadedBlocks, (unsigned)evictedBlocks,
             (unsigned)memCache.blocks.size(),
             (unsigned long)(MAPIO_TIME_MS() - blocksStartMs));
+  return true;
 }
 
 /**
@@ -2218,12 +2393,6 @@ void Maps::initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull) {
   // Maps::mapTempSprite.deleteSprite();
   // Maps::mapTempSprite.createSprite(tileHeight, tileWidth);
 
-  // Allocate PSRAM buffer for temp map
-  if (bufMapTemp == nullptr) {
-    bufMapTemp = heap_caps_malloc(tileWidth * tileHeight * sizeof(lv_color_t),
-                                  MALLOC_CAP_SPIRAM);
-  }
-
   if (bufArrow == nullptr) {
     ensureArrowBuffer();
   }
@@ -2319,49 +2488,34 @@ void Maps::createMapScrSprites() {
   if (mapSet.mapFullScreen)
     h = Maps::mapScrFull;
 
-  Maps::canvasMap = lv_canvas_create(mapTile);
-  lv_obj_add_flag(Maps::canvasMap, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_flag(Maps::canvasMap, LV_OBJ_FLAG_EVENT_BUBBLE);
-
-  // Need buffer for screen canvas
-  // We should reallocate if size changes? For now assuming fixed alloc or
-  // simple.
-  static void *bufMapScr = nullptr;
-  static size_t bufMapScrSize = 0;
   // Use LVGL's stride calculation to ensure we match what LVGL expects
   // internally
   uint32_t stride_bytes =
       lv_draw_buf_width_to_stride(w, LV_COLOR_FORMAT_RGB565);
   size_t requiredSize = stride_bytes * h;
 
-  if (bufMapScrSize < requiredSize) {
-    if (bufMapScr)
-      heap_caps_free(bufMapScr);
-    bufMapScr = heap_caps_malloc(requiredSize, MALLOC_CAP_SPIRAM);
-    bufMapScrSize = requiredSize;
-  }
   ESP_LOGI(TAG, "MapBuff: W=%d H=%d Stride=%d Size=%d", w, h, stride_bytes,
            requiredSize);
-  if (bufMapScr == nullptr) {
-    ESP_LOGE(TAG, "MapBuff: screen buffer allocation failed");
+  if (!ensureMapCanvasBuffers(requiredSize)) {
     return;
   }
+  memset(bufMapScreen, 0, requiredSize);
+  memset(bufMapTemp, 0, requiredSize);
 
-  lv_canvas_set_buffer(Maps::canvasMap, bufMapScr, w, h,
+  Maps::canvasMap = lv_canvas_create(mapTile);
+  lv_obj_add_flag(Maps::canvasMap, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(Maps::canvasMap, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_canvas_set_buffer(Maps::canvasMap, bufMapScreen, w, h,
                        LV_COLOR_FORMAT_RGB565);
   lv_obj_center(Maps::canvasMap);
 
-  Maps::canvasMapTemp = lv_canvas_create(
-      NULL); // Invisible canvas, or just use it as buffer holder?
-  // We need an object to perform operations? Or just buffer?
-  // Actually we fill the buffer manually in readVectorMap (fillPolygon).
-  // But line drawing uses canvas object?
-  // Let's create it but not add to parent (NULL) works? No, needs parent?
-  // Just create hidden.
-  Maps::canvasMapTemp = lv_canvas_create(lv_scr_act());
+  // Vector rendering is synchronous. Draw into a hidden back buffer so an
+  // input-triggered abort can never expose a half-rendered frame.
+  Maps::canvasMapTemp = lv_canvas_create(mapTile);
   lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
-  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, tileWidth, tileHeight,
+  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, w, h,
                        LV_COLOR_FORMAT_RGB565);
+  lv_obj_center(Maps::canvasMapTemp);
 
   // Arrow Sprite (Canvas) - 48x48 for better visibility
   if (ensureArrowBuffer() != nullptr) {
@@ -2641,6 +2795,11 @@ void Maps::displayMap() {
  */
 bool Maps::generateVectorMap(uint8_t zoom) {
   const uint32_t generateStartMs = MAPIO_TIME_MS();
+  if (Maps::canvasMap == nullptr || Maps::canvasMapTemp == nullptr) {
+    ESP_LOGE(TAG, "Map render skipped: canvas double buffer is unavailable");
+    return false;
+  }
+
   Maps::mapTileSize = Maps::vectorMapTileSize;
   Maps::zoomLevel = zoom;
 
@@ -2672,7 +2831,10 @@ bool Maps::generateVectorMap(uint8_t zoom) {
 
   // Get Map Blocks
   const uint32_t blocksStartMs = MAPIO_TIME_MS();
-  Maps::getMapBlocks(Maps::viewPort.bbox, Maps::memCache);
+  if (!Maps::getMapBlocks(Maps::viewPort.bbox, Maps::memCache)) {
+    log_i("Map block loading interrupted to service a screen-cycle input");
+    return false;
+  }
   const uint32_t blocksMs = MAPIO_TIME_MS() - blocksStartMs;
 
   ESP_LOGI(TAG,
@@ -2683,7 +2845,7 @@ bool Maps::generateVectorMap(uint8_t zoom) {
 
   // Read Vector Map to Canvas (Pass calculated rotation)
   const uint32_t drawStartMs = MAPIO_TIME_MS();
-  if (!Maps::readVectorMap(Maps::viewPort, Maps::memCache, Maps::canvasMap,
+  if (!Maps::readVectorMap(Maps::viewPort, Maps::memCache, Maps::canvasMapTemp,
                            zoom, rotationRad)) {
     log_i("Map render interrupted to service a screen-cycle input");
     return false;
@@ -2710,7 +2872,7 @@ bool Maps::generateVectorMap(uint8_t zoom) {
     // fullscreen mode
     uint16_t canvasHeight =
         mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
-    routeOverlay.drawRoute(Maps::canvasMap, Maps::viewPort.center.x,
+    routeOverlay.drawRoute(Maps::canvasMapTemp, Maps::viewPort.center.x,
                            Maps::viewPort.center.y, zoom, Maps::mapScrWidth,
                            canvasHeight, rotationRad,
                            mapAnchorXForWidth(Maps::mapScrWidth),
@@ -2723,6 +2885,24 @@ bool Maps::generateVectorMap(uint8_t zoom) {
     ESP_LOGI(TAG, "No route overlay to draw (no route data)");
   }
   const uint32_t routeMs = MAPIO_TIME_MS() - routeStartMs;
+
+  if (shouldInterruptMapRenderForScreenCycle()) {
+    log_i("Map render interrupted before presenting completed frame");
+    return false;
+  }
+
+  // Atomically present the completed back buffer. The old front buffer becomes
+  // the next render target; interrupted renders never touch the visible frame.
+  void *completedFrame = bufMapTemp;
+  bufMapTemp = bufMapScreen;
+  bufMapScreen = completedFrame;
+  const uint16_t canvasHeight =
+      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+  lv_canvas_set_buffer(Maps::canvasMap, bufMapScreen, Maps::mapScrWidth,
+                       canvasHeight, LV_COLOR_FORMAT_RGB565);
+  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, Maps::mapScrWidth,
+                       canvasHeight, LV_COLOR_FORMAT_RGB565);
+
   MAPIO_LOG("MAPIO: generate zoom=%u blocksMs=%lu drawMs=%lu "
             "routeMs=%lu totalMs=%lu cache=%u hasRoute=%d\n",
             zoom, (unsigned long)blocksMs, (unsigned long)drawMs,
