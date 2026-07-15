@@ -438,6 +438,13 @@ The production path uses the ES8311 codec and NS4150B amplifier with signed
 both the production `WAVESHARE_AMOLED_175` image and the standalone
 `WAVESHARE_AMOLED_175_SPEAKER_HONK` smoke-test image.
 
+This verified status supersedes older bring-up notes that described the 1.75"
+audio path as TBD/untested or reported that the ES8311 was not detected. The
+current status is backed by the checked-in [1.75 schematic](<reference/1.75 - esp32-s3-touch-amoled-1.75-schematic.pdf>),
+Waveshare's [`08_ES8311` playback example](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75/tree/main/examples/arduino/08_ES8311),
+the board-specific [production speaker driver](../esp32/lib/speaker/speaker.cpp),
+and the dedicated smoke-test environment in [PlatformIO](../esp32/platformio.ini).
+
 The 1.75 schematic powers the NS4150B from `VCC3V3`, so the firmware models the
 PA and codec DAC rails as 3.3 V for volume calculations. This differs from the
 2.06 path, whose established audio configuration models a 5 V PA rail.
