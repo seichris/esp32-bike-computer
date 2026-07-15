@@ -258,9 +258,15 @@ class BikeComputerCoordinator: ObservableObject {
         selectedView = 0
     }
 
-    func handleDestinationSelection(coordinate: CLLocationCoordinate2D, mapLocation: CLLocation?) {
+    func handleDestinationSelection(destination: SavedDestination, mapLocation: CLLocation?) {
         guard let sourceLocation = currentLocation ?? mapLocation else {
             alert.message = "Unable to determine your current location. Please enable location services."
+            alert.isShowing = true
+            return
+        }
+
+        guard let coordinate = destination.coordinate else {
+            alert.message = "Unable to use the selected map location. Please choose another destination."
             alert.isShowing = true
             return
         }
@@ -269,10 +275,10 @@ class BikeComputerCoordinator: ObservableObject {
         let source = MKMapItem(placemark: MKPlacemark(coordinate: routeSourceLocation.coordinate))
         source.name = "Current Location"
 
-        let destination = MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
-        destination.name = "Selected Location"
+        let destinationItem = MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
+        destinationItem.name = destination.name
         transportType = RouteTransportTypes.cycling
-        calculateRoute(from: .mapItem(source), to: .mapItem(destination))
+        calculateRoute(from: .mapItem(source), to: .mapItem(destinationItem))
     }
 
     // MARK: - Public API: Workout

@@ -390,6 +390,7 @@ struct NavigationProtocolTests {
         testChinaRouteCoordinatesRoundTripWithoutCalibrationNudge()
         testNonChinaCoordinatesPassThroughUnchanged()
         testSourceEndpointSelection()
+        testSavedDestinationStore()
         testRouteInitialLocationUsesResolvedSource()
         testRouteTransportTypes()
         testDeviceGPSPacketBuilder()
@@ -2059,6 +2060,210 @@ struct NavigationProtocolTests {
             assertEqual(query, "People's Square", "selected source should use query")
         default:
             assert(false, "selected source should use query endpoint")
+        }
+    }
+
+    @MainActor
+    static func testSavedDestinationStore() {
+        let migrationSuiteName = "SavedDestinationStoreTests.Migration.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: migrationSuiteName) else {
+            assert(false, "destination store test defaults should be available")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: migrationSuiteName) }
+
+        defaults.set([" Cafe ", "Park"], forKey: "routeInput.recentDestinationSearches")
+        let store = SavedDestinationStore(defaults: defaults, recentLimit: 2)
+        assertEqual(store.recentDestinations.map(\.name), ["Cafe", "Park"], "legacy recents migrate in order")
+
+        let coordinate = CLLocationCoordinate2D(latitude: 1.3521, longitude: 103.8198)
+        let droppedPin = SavedDestination(name: "1 Example Road, Singapore", coordinate: coordinate)
+        store.addRecent(droppedPin)
+        assertEqual(store.recentDestinations.map(\.name), [droppedPin.name, "Cafe"], "map pin joins bounded recents")
+        assertCoordinate(
+            store.recentDestinations[0].coordinate!,
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude,
+            "recent map pin retains its exact coordinate"
+        )
+
+        assert(store.toggleFavorite(droppedPin), "destination can be saved as a favorite")
+        assert(store.isFavorite(droppedPin), "saved destination reports favorite state")
+        assertEqual(store.nonFavoriteRecentDestinations.map(\.name), ["Cafe"], "favorites are not duplicated in recents UI")
+
+        let restoredStore = SavedDestinationStore(defaults: defaults, recentLimit: 2)
+        assertEqual(restoredStore.favoriteDestinations.map(\.name), [droppedPin.name], "favorites persist")
+        assertCoordinate(
+            restoredStore.recentDestinations[0].coordinate!,
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude,
+            "recent map pin coordinate persists"
+        )
+        assertCoordinate(
+            restoredStore.favoriteDestinations[0].coordinate!,
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude,
+            "favorite retains its exact coordinate"
+        )
+
+        restoredStore.addRecent(SavedDestination(name: "Cafe"))
+        restoredStore.addRecent(droppedPin)
+        assertEqual(
+            restoredStore.recentDestinations.map(\.name),
+            [droppedPin.name, "Cafe"],
+            "reusing a destination promotes it without creating a duplicate"
+        )
+
+        defaults.set(["Library", droppedPin.name], forKey: "routeInput.recentDestinationSearches")
+        let upgradedStore = SavedDestinationStore(defaults: defaults, recentLimit: 2)
+        assertEqual(
+            upgradedStore.recentDestinations.map(\.name),
+            ["Library", droppedPin.name],
+            "a newer legacy write survives app downgrade and re-upgrade"
+        )
+        assertCoordinate(
+            upgradedStore.recentDestinations[1].coordinate!,
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude,
+            "legacy reconciliation preserves the stored exact coordinate"
+        )
+
+        assert(!upgradedStore.toggleFavorite(droppedPin), "favorite can be removed")
+        let unfavoritedStore = SavedDestinationStore(defaults: defaults, recentLimit: 2)
+        assert(!unfavoritedStore.isFavorite(droppedPin), "favorite removal persists")
+        assertEqual(
+            unfavoritedStore.nonFavoriteRecentDestinations.map(\.name),
+            ["Library", droppedPin.name],
+            "removed favorites reappear in recent destinations"
+        )
+
+        let identitySuiteName = "SavedDestinationStoreTests.Identity.\(UUID().uuidString)"
+        guard let identityDefaults = UserDefaults(suiteName: identitySuiteName) else {
+            assert(false, "destination identity test defaults should be available")
+            return
+        }
+        defer { identityDefaults.removePersistentDomain(forName: identitySuiteName) }
+
+        let firstEntrance = SavedDestination(
+            name: "Central Plaza Entrance",
+            coordinate: CLLocationCoordinate2D(latitude: 31.23040, longitude: 121.47370)
+        )
+        let secondEntrance = SavedDestination(
+            name: "Central Plaza Entrance",
+            coordinate: CLLocationCoordinate2D(latitude: 31.23140, longitude: 121.47470)
+        )
+        let identityStore = SavedDestinationStore(defaults: identityDefaults, recentLimit: 3)
+        identityStore.addRecent(firstEntrance)
+        identityStore.addRecent(secondEntrance)
+        assertEqual(identityStore.recentDestinations.count, 2, "same-name exact pins coexist in recents")
+        assertCoordinate(
+            identityStore.recentDestinations[0].coordinate!,
+            latitude: secondEntrance.coordinate!.latitude,
+            longitude: secondEntrance.coordinate!.longitude,
+            "newer same-name pin keeps its own coordinate"
+        )
+        assertCoordinate(
+            identityStore.recentDestinations[1].coordinate!,
+            latitude: firstEntrance.coordinate!.latitude,
+            longitude: firstEntrance.coordinate!.longitude,
+            "older same-name pin keeps its own coordinate"
+        )
+
+        assert(identityStore.toggleFavorite(firstEntrance), "first same-name pin can be favorited")
+        assert(identityStore.toggleFavorite(secondEntrance), "second same-name pin can be favorited independently")
+        assertEqual(identityStore.favoriteDestinations.count, 2, "same-name exact pins coexist in favorites")
+        assert(!identityStore.toggleFavorite(secondEntrance), "second same-name favorite can be removed independently")
+        assert(identityStore.isFavorite(firstEntrance), "removing one same-name favorite keeps the other")
+        assert(!identityStore.isFavorite(secondEntrance), "removed same-name favorite stays removed")
+        assertEqual(
+            identityDefaults.stringArray(forKey: "routeInput.recentDestinationSearches"),
+            [firstEntrance.name],
+            "legacy history remains duplicate-free for app downgrades"
+        )
+
+        let restoredIdentityStore = SavedDestinationStore(defaults: identityDefaults, recentLimit: 3)
+        assertEqual(
+            restoredIdentityStore.recentDestinations.count,
+            2,
+            "same-name exact pins both persist in structured recents"
+        )
+        assertCoordinate(
+            restoredIdentityStore.recentDestinations[0].coordinate!,
+            latitude: secondEntrance.coordinate!.latitude,
+            longitude: secondEntrance.coordinate!.longitude,
+            "newer same-name pin coordinate persists"
+        )
+        assertCoordinate(
+            restoredIdentityStore.recentDestinations[1].coordinate!,
+            latitude: firstEntrance.coordinate!.latitude,
+            longitude: firstEntrance.coordinate!.longitude,
+            "older same-name pin coordinate persists"
+        )
+        assertEqual(
+            restoredIdentityStore.nonFavoriteRecentDestinations.count,
+            1,
+            "only the unfavorited exact pin appears in recent destinations"
+        )
+        assertCoordinate(
+            restoredIdentityStore.nonFavoriteRecentDestinations[0].coordinate!,
+            latitude: secondEntrance.coordinate!.latitude,
+            longitude: secondEntrance.coordinate!.longitude,
+            "the correct same-name pin reappears in recents"
+        )
+
+        switch restoredIdentityStore.nonFavoriteRecentDestinations[0].routeEndpoint {
+        case .mapItem(let item):
+            assertCoordinate(
+                item.location.coordinate,
+                latitude: secondEntrance.coordinate!.latitude,
+                longitude: secondEntrance.coordinate!.longitude,
+                "same-name saved pin routes to its own exact coordinate"
+            )
+        default:
+            assert(false, "same-name saved pin should produce a map item endpoint")
+        }
+
+        let queryDestination = SavedDestination(name: firstEntrance.name)
+        restoredIdentityStore.addRecent(queryDestination)
+        assertEqual(
+            restoredIdentityStore.recentDestinations.count,
+            3,
+            "query-only and exact same-name destinations remain independent"
+        )
+        assert(restoredIdentityStore.isFavorite(firstEntrance), "query insertion keeps the exact favorite")
+        assert(!restoredIdentityStore.isFavorite(queryDestination), "query-only destination is not conflated with exact favorite")
+        assertEqual(
+            restoredIdentityStore.nonFavoriteRecentDestinations.count,
+            2,
+            "query-only and unfavorited exact pins both remain visible"
+        )
+        assertEqual(
+            firstEntrance.coordinateSubtitle,
+            "31.23040, 121.47370",
+            "exact pins expose a stable visible coordinate disambiguator"
+        )
+        assert(queryDestination.coordinateSubtitle == nil, "query-only destinations omit the coordinate subtitle")
+
+        assert(restoredIdentityStore.toggleFavorite(queryDestination), "query-only favorite can coexist with exact favorite")
+        assertEqual(restoredIdentityStore.favoriteDestinations.count, 2, "mixed-representation favorites coexist")
+        assert(!restoredIdentityStore.toggleFavorite(queryDestination), "query-only favorite removes independently")
+        assert(restoredIdentityStore.isFavorite(firstEntrance), "removing query-only favorite preserves exact favorite")
+
+        switch droppedPin.routeEndpoint {
+        case .mapItem(let item):
+            assertCoordinate(item.location.coordinate,
+                             latitude: coordinate.latitude,
+                             longitude: coordinate.longitude,
+                             "saved map pin routes by coordinate")
+        default:
+            assert(false, "saved map pin should produce a map item endpoint")
+        }
+
+        switch SavedDestination(name: "Marina Bay").routeEndpoint {
+        case .query(let query):
+            assertEqual(query, "Marina Bay", "searched destination routes by query")
+        default:
+            assert(false, "searched destination should produce a query endpoint")
         }
     }
 
