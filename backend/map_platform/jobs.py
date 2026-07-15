@@ -8,6 +8,7 @@ import re
 import threading
 import uuid
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -190,6 +191,19 @@ class JobStore:
             job.artifact_gc_keys = list(artifact_gc_keys)
         if worker_id is not None:
             job.worker_id = worker_id
+        should_drop_preview_geometry = status in {
+            JobStatus.READY,
+            JobStatus.EXPIRED,
+            JobStatus.CANCELLED,
+        } or (
+            status == JobStatus.FAILED
+            and job.attempts >= job.max_attempts
+        )
+        if should_drop_preview_geometry and job.source_region.preview_geometry is not None:
+            job.source_region = replace(
+                job.source_region,
+                preview_geometry=None,
+            )
         if event or previous_status != status:
             job.events.append(
                 {

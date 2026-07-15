@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from map_platform.jobs import JobStore, MapJobService
 from map_platform.limits import JobLimits
-from map_platform.models import Bounds, MapJob, SourceRegion
+from map_platform.models import Bounds, JobStatus, MapJob, SourceRegion
 from map_platform.sources import SourceIndex, SourceResolutionError
 
 
@@ -106,6 +106,153 @@ class SourceAndJobTests(unittest.TestCase):
 
         self.assertEqual(source.id, "geofabrik-japan")
         self.assertEqual(source.local_path, "backend/data/source-pbf/geofabrik/japan-latest.osm.pbf")
+        self.assertEqual(source.preview_geometry["type"], "Polygon")
+
+    def test_static_geofabrik_preview_geometry_is_deferred_to_catalog_provider(self):
+        from map_platform.geofabrik_sources import GeofabrikSourceProvider
+
+        geometry = {
+            "type": "Polygon",
+            "coordinates": [[[98, -1.8], [120.2, -1.8], [120.2, 7.6], [98, 7.6], [98, -1.8]]],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog_path = Path(tmp) / "geofabrik-index-v1.json"
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "type": "FeatureCollection",
+                        "features": [
+                            {
+                                "type": "Feature",
+                                "properties": {
+                                    "id": "asia/malaysia-singapore-brunei",
+                                    "name": "Malaysia, Singapore, and Brunei",
+                                    "urls": {
+                                        "pbf": (
+                                            "https://download.geofabrik.de/asia/"
+                                            "malaysia-singapore-brunei-latest.osm.pbf"
+                                        )
+                                    },
+                                },
+                                "geometry": geometry,
+                            }
+                        ],
+                    }
+                )
+            )
+            provider = GeofabrikSourceProvider(catalog_path.as_uri(), cache_path=Path(tmp) / "cache.json")
+            source_index_path = Path(__file__).resolve().parents[1] / "config" / "source-regions.json"
+            index = SourceIndex.from_json(source_index_path, fallback_provider=provider)
+
+            source = index.resolve_for_bounds(Bounds(103.75, 1.24, 103.93, 1.37))
+            preview_geometry = provider.preview_geometry_for_source(source)
+
+        self.assertEqual(source.id, "geofabrik-asia-malaysia-singapore-brunei")
+        self.assertEqual(source.local_path, "backend/data/source-pbf/malaysia-singapore-brunei-latest.osm.pbf")
+        self.assertIsNone(source.preview_geometry)
+        self.assertEqual(preview_geometry, geometry)
+
+    def test_static_source_resolution_does_not_query_preview_catalog(self):
+        class UnavailableProvider:
+            calls = 0
+
+            def source_regions(self):
+                self.calls += 1
+                raise SourceResolutionError("catalog unavailable")
+
+            def resolve_for_bounds(self, bounds):
+                self.calls += 1
+                raise SourceResolutionError("catalog unavailable")
+
+        provider = UnavailableProvider()
+        index = SourceIndex([self.singapore], fallback_provider=provider)
+
+        source = index.resolve_for_bounds(Bounds(103.75, 1.24, 103.93, 1.37))
+
+        self.assertEqual(source, self.singapore)
+        self.assertEqual(provider.calls, 0)
+
+    def test_geofabrik_preview_geometry_is_persisted_but_not_public(self):
+        source = SourceRegion(
+            id="geofabrik-sg",
+            provider="geofabrik",
+            name="Singapore",
+            url="https://example.invalid/sg.osm.pbf",
+            bounds=Bounds(103.0, 1.0, 104.5, 1.8),
+            preview_geometry={
+                "type": "Polygon",
+                "coordinates": [[[103, 1], [104.5, 1], [104.5, 1.8], [103, 1.8], [103, 1]]],
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            service = MapJobService(SourceIndex([source]), store)
+            job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+            )
+
+            persisted = service.get_job(job.job_id)
+            stored = json.loads((Path(tmp) / f"{job.job_id}.json").read_text())
+
+        self.assertEqual(persisted.source_region.preview_geometry, source.preview_geometry)
+        self.assertEqual(stored["sourceRegion"]["previewGeometry"], source.preview_geometry)
+        self.assertNotIn("previewGeometry", job.to_dict()["sourceRegion"])
+
+    def test_terminal_job_drops_internal_preview_geometry(self):
+        source = SourceRegion(
+            id="geofabrik-sg",
+            provider="geofabrik",
+            name="Singapore",
+            url="https://example.invalid/sg.osm.pbf",
+            bounds=Bounds(103.0, 1.0, 104.5, 1.8),
+            preview_geometry={
+                "type": "Polygon",
+                "coordinates": [[[103, 1], [104.5, 1], [104.5, 1.8], [103, 1]]],
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            job = MapJobService(SourceIndex([source]), store).create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+
+            retryable = store.update_status(
+                job.job_id,
+                JobStatus.FAILED,
+                finished=True,
+            )
+            self.assertEqual(
+                retryable.source_region.preview_geometry,
+                source.preview_geometry,
+            )
+            terminal = store.update_status(
+                job.job_id,
+                JobStatus.CANCELLED,
+                finished=True,
+            )
+            stored = json.loads((Path(tmp) / f"{job.job_id}.json").read_text())
+
+            exhausted = MapJobService(SourceIndex([source]), store).create_job(
+                {"mode": "custom_bbox", "bbox": [103.70, 1.20, 103.90, 1.35]}
+            )
+            exhausted.attempts = exhausted.max_attempts
+            store.save(exhausted)
+            terminal_failure = store.update_status(
+                exhausted.job_id,
+                JobStatus.FAILED,
+                finished=True,
+            )
+            stored_failure = json.loads(
+                (Path(tmp) / f"{exhausted.job_id}.json").read_text()
+            )
+
+        self.assertIsNone(terminal.source_region.preview_geometry)
+        self.assertNotIn("previewGeometry", stored["sourceRegion"])
+        self.assertIsNone(terminal_failure.source_region.preview_geometry)
+        self.assertNotIn("previewGeometry", stored_failure["sourceRegion"])
 
     def test_create_job_persists_request(self):
         with tempfile.TemporaryDirectory() as tmp:

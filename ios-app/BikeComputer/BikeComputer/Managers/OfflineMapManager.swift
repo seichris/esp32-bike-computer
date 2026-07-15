@@ -8,6 +8,9 @@
 import CoreLocation
 import Combine
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 #if os(iOS)
 import Security
 #endif
@@ -198,15 +201,78 @@ nonisolated enum MapActivationTransport {
 }
 
 nonisolated enum MapArchiveUploadFallback {
-    static func shouldUseForeground(for error: Error) -> Bool {
-        guard let platformError = error as? OfflineMapPlatformError,
-              case .serverStatus(let status, _) = platformError else {
+    static func shouldUseForeground(
+        for error: Error,
+        allowLocalStorageFailure: Bool = false
+    ) -> Bool {
+        if let platformError = error as? OfflineMapPlatformError,
+           case .serverStatus(let status, _) = platformError,
+           status == 400 || status == 413 {
+            // Older firmware rejects pack.zip as an unknown path (400).
+            // Current firmware caps a single archive at 512 MiB (413), while
+            // its per-file protocol can still accept the same valid map.
+            return true
+        }
+        return allowLocalStorageFailure && isLocalStorageFailure(error)
+    }
+
+    private static func isLocalStorageFailure(
+        _ error: Error,
+        depth: Int = 0
+    ) -> Bool {
+        guard depth < 4 else { return false }
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain &&
+            nsError.code == NSFileWriteOutOfSpaceError {
+            return true
+        }
+        if nsError.domain == NSURLErrorDomain && [
+            URLError.Code.fileDoesNotExist.rawValue,
+            URLError.Code.noPermissionsToReadFile.rawValue,
+            URLError.Code.cannotOpenFile.rawValue,
+            URLError.Code.cannotCreateFile.rawValue,
+            URLError.Code.dataLengthExceedsMaximum.rawValue,
+        ].contains(nsError.code) {
+            return true
+        }
+        if nsError.domain == NSPOSIXErrorDomain && nsError.code == 28 {
+            return true
+        }
+        guard let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? Error else {
             return false
         }
-        // Older firmware rejects pack.zip as an unknown path (400). Current
-        // firmware caps a single archive at 512 MiB (413), while its per-file
-        // protocol can still accept the same valid map.
-        return status == 400 || status == 413
+        return isLocalStorageFailure(underlying, depth: depth + 1)
+    }
+}
+
+nonisolated enum MapArchiveUploadStrategy {
+    static func requiresCompatibilityArchive(for archive: OfflineMapPackArchive) -> Bool {
+        archive.entries.contains { $0.path == "preview.png" }
+    }
+}
+
+@MainActor
+final class OfflineMapPreviewLoadRegistry {
+    private var tokens: [String: UUID] = [:]
+
+    func begin(for key: String) -> UUID {
+        let token = UUID()
+        tokens[key] = token
+        return token
+    }
+
+    func finishIfCurrent(_ token: UUID, for key: String) -> Bool {
+        guard tokens[key] == token else { return false }
+        tokens.removeValue(forKey: key)
+        return true
+    }
+
+    func invalidate(_ key: String) {
+        tokens.removeValue(forKey: key)
+    }
+
+    func removeAll() {
+        tokens.removeAll()
     }
 }
 
@@ -895,6 +961,12 @@ final class OfflineMapManager: ObservableObject {
     private var activationReconciliationTask: Task<Void, Never>?
     private var backgroundUploadObserver: AnyCancellable?
     private var activityCounter = OfflineMapActivityCounter()
+#if canImport(UIKit)
+    @Published private var packPreviewImages: [String: UIImage] = [:]
+    private var unavailablePackPreviews: Set<String> = []
+    private var previewLoadTasks: [String: Task<Void, Never>] = [:]
+    private let previewLoadRegistry = OfflineMapPreviewLoadRegistry()
+#endif
 
     init(
         defaults: UserDefaults = .standard,
@@ -910,6 +982,7 @@ final class OfflineMapManager: ObservableObject {
             )
         }
     ) {
+        OfflineMapPackCompatibilityArchive.removeOrphans()
         self.defaults = defaults
         self.mapPlatformSession = mapPlatformSession
         self.packDownload = packDownload
@@ -1230,6 +1303,7 @@ final class OfflineMapManager: ObservableObject {
             if FileManager.default.fileExists(atPath: packURL.path) {
                 try FileManager.default.removeItem(at: packURL)
             }
+            invalidateCachedPreview(for: packURL)
             try SavedMapArtifactMetadataStore.delete(for: packURL)
             try deleteCompatibilityArtifacts(mapID: mapID)
             packDisplayNames.removeValue(forKey: packURL.lastPathComponent)
@@ -1258,6 +1332,49 @@ final class OfflineMapManager: ObservableObject {
         }
         return packURL.deletingPathExtension().lastPathComponent
     }
+
+#if canImport(UIKit)
+    func previewImage(forCachedPack packURL: URL) -> UIImage? {
+        packPreviewImages[previewCacheKey(for: packURL)]
+    }
+
+    func loadPreviewIfNeeded(forCachedPack packURL: URL) {
+        let key = previewCacheKey(for: packURL)
+        guard packPreviewImages[key] == nil,
+              !unavailablePackPreviews.contains(key),
+              previewLoadTasks[key] == nil else {
+            return
+        }
+        let token = previewLoadRegistry.begin(for: key)
+        previewLoadTasks[key] = Task { [weak self] in
+            let data = await Task.detached(priority: .utility) {
+                OfflineMapPackPreviewReader.imageData(for: packURL)
+            }.value
+            guard let self else { return }
+            guard self.previewLoadRegistry.finishIfCurrent(
+                token,
+                for: key
+            ) else { return }
+            self.previewLoadTasks.removeValue(forKey: key)
+            guard !Task.isCancelled,
+                  self.cachedPackURLs.contains(where: {
+                      self.previewCacheKey(for: $0) == key
+                  }) else {
+                return
+            }
+            guard let data,
+                  let image = UIImage(data: data),
+                  image.size.width > 0,
+                  image.size.height > 0,
+                  image.size.width <= 512,
+                  image.size.height <= 512 else {
+                self.unavailablePackPreviews.insert(key)
+                return
+            }
+            self.packPreviewImages[key] = image
+        }
+    }
+#endif
 
     @discardableResult
     func renameCachedPack(at packURL: URL, to proposedName: String) -> String {
@@ -1876,6 +1993,7 @@ final class OfflineMapManager: ObservableObject {
                 try? FileManager.default.removeItem(at: obsolete)
                 try? SavedMapArtifactMetadataStore.delete(for: obsolete)
                 packDisplayNames.removeValue(forKey: obsolete.lastPathComponent)
+                invalidateCachedPreview(for: obsolete)
             }
             if backedUpArtifact { try? FileManager.default.removeItem(at: backup) }
             if backedUpMetadata { try? FileManager.default.removeItem(at: metadataBackup) }
@@ -1892,6 +2010,7 @@ final class OfflineMapManager: ObservableObject {
             downloadURL = nil
             throw error
         }
+        invalidateCachedPreview(for: destination)
         downloadedPackURL = destination
         OfflineMapJobPersistence.markPackDownloaded(
             jobId: job.jobId,
@@ -1904,6 +2023,9 @@ final class OfflineMapManager: ObservableObject {
         }
         persistPackDisplayNames()
         refreshCachedPacks()
+#if canImport(UIKit)
+        loadPreviewIfNeeded(forCachedPack: destination)
+#endif
         downloadProgress = 1
         downloadByteProgress = nil
         transferProgress = 0
@@ -2381,34 +2503,83 @@ final class OfflineMapManager: ObservableObject {
 
                 switch prepared {
                 case .archive(let archive, _, _):
-                    do {
-                        try await client.uploadArchiveInBackground(
-                            archiveURL: packURL,
-                            sessionId: sessionId,
-                            descriptor: BackgroundMapUploadDescriptor(
-                                mapID: expectedMapId,
-                                sessionID: sessionId,
-                                protocolVersion: 1,
-                                streamFormatVersion: nil,
-                                artifactFilename: packURL.lastPathComponent,
-                                accessPointSSID: transferSession.accessPointSSID
-                            ),
-                            onTaskStarted: { taskID in
-                                self.recordBackgroundUploadTask(
-                                    taskID,
-                                    mapID: expectedMapId
-                                )
+                    var compatibilityArchiveURL: URL?
+                    var useForegroundTransfer = false
+                    if MapArchiveUploadStrategy.requiresCompatibilityArchive(
+                        for: archive
+                    ) {
+                        statusMessage = "preparing compatible map transfer"
+                        let sourceURL = packURL
+                        let preparation = Task.detached(priority: .utility) {
+                            try Task.checkCancellation()
+                            let sourceArchive = try OfflineMapPackArchive(url: sourceURL)
+                            return try OfflineMapPackCompatibilityArchive.make(
+                                from: sourceArchive
+                            )
+                        }
+                        do {
+                            compatibilityArchiveURL = try await withTaskCancellationHandler {
+                                try await preparation.value
+                            } onCancel: {
+                                preparation.cancel()
                             }
-                        ) { completedBytes, totalBytes in
-                            self.transferProgress = totalBytes == 0 ? 0 :
-                                Double(completedBytes) / Double(totalBytes)
-                            let percent = Int((self.transferProgress * 100).rounded())
-                            self.statusMessage = "uploading \(self.displayName(forMapId: expectedMapId)): \(percent)%"
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch {
+                            useForegroundTransfer = true
                         }
-                    } catch {
-                        guard MapArchiveUploadFallback.shouldUseForeground(for: error) else {
-                            throw error
+                    }
+                    defer {
+                        if let compatibilityArchiveURL {
+                            OfflineMapPackCompatibilityArchive.remove(
+                                compatibilityArchiveURL
+                            )
                         }
+                    }
+                    try Task.checkCancellation()
+
+                    if !useForegroundTransfer {
+                        do {
+                            try await client.uploadArchiveInBackground(
+                                archiveURL: compatibilityArchiveURL ?? packURL,
+                                sessionId: sessionId,
+                                descriptor: BackgroundMapUploadDescriptor(
+                                    mapID: expectedMapId,
+                                    sessionID: sessionId,
+                                    protocolVersion: 1,
+                                    streamFormatVersion: nil,
+                                    artifactFilename: packURL.lastPathComponent,
+                                    accessPointSSID: transferSession.accessPointSSID
+                                ),
+                                onTaskStarted: { taskID in
+                                    self.recordBackgroundUploadTask(
+                                        taskID,
+                                        mapID: expectedMapId
+                                    )
+                                    if let compatibilityArchiveURL {
+                                        OfflineMapPackCompatibilityArchive.remove(
+                                            compatibilityArchiveURL
+                                        )
+                                    }
+                                }
+                            ) { completedBytes, totalBytes in
+                                self.transferProgress = totalBytes == 0 ? 0 :
+                                    Double(completedBytes) / Double(totalBytes)
+                                let percent = Int((self.transferProgress * 100).rounded())
+                                self.statusMessage = "uploading \(self.displayName(forMapId: expectedMapId)): \(percent)%"
+                            }
+                        } catch {
+                            guard MapArchiveUploadFallback.shouldUseForeground(
+                                for: error,
+                                allowLocalStorageFailure:
+                                    compatibilityArchiveURL != nil
+                            ) else {
+                                throw error
+                            }
+                            useForegroundTransfer = true
+                        }
+                    }
+                    if useForegroundTransfer {
                         statusMessage = "device uses foreground map transfer"
                         try await client.upload(
                             archive: archive,
@@ -3291,12 +3462,48 @@ final class OfflineMapManager: ObservableObject {
                 let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
                 return lhsDate > rhsDate
             }
+#if canImport(UIKit)
+            let activePreviewKeys = Set(packURLs.map(previewCacheKey))
+            for key in Array(packPreviewImages.keys) where !activePreviewKeys.contains(key) {
+                packPreviewImages.removeValue(forKey: key)
+            }
+            for key in Array(previewLoadTasks.keys) where !activePreviewKeys.contains(key) {
+                previewLoadTasks.removeValue(forKey: key)?.cancel()
+                previewLoadRegistry.invalidate(key)
+            }
+            unavailablePackPreviews.formIntersection(activePreviewKeys)
+#endif
             cacheMissingDisplayNames(for: packURLs)
             cachedPackURLs = packURLs
         } catch {
+#if canImport(UIKit)
+            for task in previewLoadTasks.values {
+                task.cancel()
+            }
+            previewLoadTasks.removeAll()
+            previewLoadRegistry.removeAll()
+            packPreviewImages.removeAll()
+            unavailablePackPreviews.removeAll()
+#endif
             cachedPackURLs = []
         }
     }
+
+#if canImport(UIKit)
+    private func previewCacheKey(for packURL: URL) -> String {
+        packURL.standardizedFileURL.path
+    }
+
+    private func invalidateCachedPreview(for packURL: URL) {
+        let key = previewCacheKey(for: packURL)
+        previewLoadRegistry.invalidate(key)
+        previewLoadTasks.removeValue(forKey: key)?.cancel()
+        packPreviewImages.removeValue(forKey: key)
+        unavailablePackPreviews.remove(key)
+    }
+#else
+    private func invalidateCachedPreview(for packURL: URL) {}
+#endif
 
     private func cacheMissingDisplayNames(for packURLs: [URL]) {
         var didChange = false

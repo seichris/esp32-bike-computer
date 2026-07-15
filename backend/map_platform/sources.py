@@ -58,7 +58,6 @@ class SourceIndex:
             )
         raise SourceResolutionError("no configured source region covers the requested area")
 
-
 def contains_bounds(container: Bounds, child: Bounds) -> bool:
     return (
         container.min_lon <= child.min_lon

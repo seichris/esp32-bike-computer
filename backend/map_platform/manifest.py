@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -9,6 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from .models import MapJob
+from .preview import (
+    DEFAULT_PREVIEW_HEIGHT,
+    DEFAULT_PREVIEW_PATH,
+    DEFAULT_PREVIEW_TYPE,
+    DEFAULT_PREVIEW_WIDTH,
+    render_boundary_preview,
+)
 
 ALLOWED_PACK_FILE_RE = re.compile(r"VECTMAP/[A-Za-z0-9._-]+/[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\.fm[bp]")
 MAX_PACK_MAP_ID_BYTES = 64
@@ -92,6 +100,13 @@ def validate_pack_path(relative_path: str) -> None:
 def build_manifest(job: MapJob, map_root: Path, pipeline: PipelineMetadata) -> dict[str, Any]:
     map_id = job.map_id or stable_map_id(job)
     files = collect_map_files(map_root, map_id)
+    preview_bytes = render_boundary_preview(
+        job.source_region.preview_geometry or job.geometry.geometry,
+        job.geometry.bounds,
+    )
+    preview_path = map_root / DEFAULT_PREVIEW_PATH
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+    preview_path.write_bytes(preview_bytes)
     return {
         "schemaVersion": 1,
         "mapId": map_id,
@@ -118,14 +133,28 @@ def build_manifest(job: MapJob, map_root: Path, pipeline: PipelineMetadata) -> d
             "configRevision": pipeline.config_revision,
             "imageDigest": pipeline.image_digest,
         },
+        "preview": {
+            "type": DEFAULT_PREVIEW_TYPE,
+            "path": DEFAULT_PREVIEW_PATH,
+            "width": DEFAULT_PREVIEW_WIDTH,
+            "height": DEFAULT_PREVIEW_HEIGHT,
+            "background": "transparent",
+            "dataBase64": base64.b64encode(preview_bytes).decode("ascii"),
+        },
         "files": files,
     }
 
 
 def write_pack_archive(map_root: Path, manifest: dict[str, Any], archive_path: Path) -> Path:
     archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_manifest = dict(manifest)
+    preview = manifest.get("preview")
+    if isinstance(preview, dict):
+        archive_manifest["preview"] = {
+            key: value for key, value in preview.items() if key != "dataBase64"
+        }
     manifest_path = map_root / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    manifest_path.write_text(json.dumps(archive_manifest, indent=2, sort_keys=True) + "\n")
     attribution_path = map_root / "ATTRIBUTION.txt"
     attribution_path.write_text(
         "Map data from OpenStreetMap contributors. OpenStreetMap data is available under the ODbL.\n"
@@ -142,6 +171,8 @@ def write_pack_archive(map_root: Path, manifest: dict[str, Any], archive_path: P
         "LICENSES/OpenStreetMap-ODbL.txt",
         *(file["path"] for file in manifest["files"]),
     }
+    if isinstance(preview, dict) and preview.get("path") == DEFAULT_PREVIEW_PATH:
+        archived_paths.add(DEFAULT_PREVIEW_PATH)
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
         for relative in sorted(archived_paths):
             path = map_root / relative
