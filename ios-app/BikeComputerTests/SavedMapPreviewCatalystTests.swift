@@ -146,6 +146,27 @@ private func cropFixtureImage() -> UIImage {
     }
 }
 
+private func variedSnapshotPNG() -> Data {
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    format.opaque = true
+    let image = UIGraphicsImageRenderer(
+        size: CGSize(width: 160, height: 96),
+        format: format
+    ).image { context in
+        UIColor(red: 0.88, green: 0.86, blue: 0.75, alpha: 1).setFill()
+        context.cgContext.fill(CGRect(x: 0, y: 0, width: 160, height: 96))
+        UIColor(red: 0.28, green: 0.66, blue: 0.78, alpha: 1).setFill()
+        context.cgContext.fill(CGRect(x: 70, y: 0, width: 18, height: 96))
+        UIColor(red: 0.45, green: 0.43, blue: 0.40, alpha: 1).setFill()
+        context.cgContext.fill(CGRect(x: 0, y: 38, width: 160, height: 7))
+    }
+    guard let data = image.pngData() else {
+        fail("varied test snapshot should encode as PNG")
+    }
+    return data
+}
+
 private func pixel(
     in image: UIImage,
     x: Int,
@@ -166,38 +187,19 @@ private func pixel(
     )
 }
 
-private func hasMeaningfulVisualVariation(_ image: UIImage) -> Bool {
-    guard let source = image.cgImage,
-          let pixels = rgbaPixels(image) else {
-        return false
-    }
-    let pixelCount = source.width * source.height
-    let sampleStride = max(1, pixelCount / 4_096)
-    var quantizedColors = Set<UInt32>()
-    var minimum = [UInt8](repeating: .max, count: 3)
-    var maximum = [UInt8](repeating: .min, count: 3)
-    for index in stride(from: 0, to: pixelCount, by: sampleStride) {
-        let offset = index * 4
-        guard pixels[offset + 3] >= 128 else { continue }
-        let red = pixels[offset]
-        let green = pixels[offset + 1]
-        let blue = pixels[offset + 2]
-        minimum[0] = min(minimum[0], red)
-        minimum[1] = min(minimum[1], green)
-        minimum[2] = min(minimum[2], blue)
-        maximum[0] = max(maximum[0], red)
-        maximum[1] = max(maximum[1], green)
-        maximum[2] = max(maximum[2], blue)
-        quantizedColors.insert(
-            UInt32(red >> 4) << 8 |
-                UInt32(green >> 4) << 4 |
-                UInt32(blue >> 4)
-        )
-    }
-    let widestChannelRange = zip(minimum, maximum)
-        .map { Int($0.1) - Int($0.0) }
-        .max() ?? 0
-    return quantizedColors.count >= 3 && widestChannelRange >= 24
+private func coordinatesMatch(
+    _ lhs: CLLocationCoordinate2D,
+    _ rhs: CLLocationCoordinate2D
+) -> Bool {
+    abs(lhs.latitude - rhs.latitude) < 0.000_000_001 &&
+        abs(lhs.longitude - rhs.longitude) < 0.000_000_001
+}
+
+private func mapRectsMatch(_ lhs: MKMapRect, _ rhs: MKMapRect) -> Bool {
+    abs(lhs.origin.x - rhs.origin.x) < 0.001 &&
+        abs(lhs.origin.y - rhs.origin.y) < 0.001 &&
+        abs(lhs.size.width - rhs.size.width) < 0.001 &&
+        abs(lhs.size.height - rhs.size.height) < 0.001
 }
 
 @main
@@ -270,7 +272,7 @@ struct SavedMapPreviewCatalystTests {
         }
 
         let outlinePNG = solidPNG(color: .systemBlue)
-        let snapshotPNG = solidPNG(color: .systemOrange)
+        let snapshotPNG = variedSnapshotPNG()
         let snapshotMapID = "custom-map-snapshot"
         let snapshotPackURL = cacheDirectory
             .appendingPathComponent("\(snapshotMapID).zip")
@@ -321,6 +323,35 @@ struct SavedMapPreviewCatalystTests {
         }
         guard SavedMapSnapshotPreviewStore.imageData(for: snapshotPackURL) == nil else {
             fail("an embedded boundary fallback should not be persisted as a map snapshot")
+        }
+
+        let uniformSnapshotPNG = solidPNG(color: .systemGray)
+        var uniformSnapshotReturned = false
+        let uniformSnapshotManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { _ in
+                uniformSnapshotReturned = true
+                return uniformSnapshotPNG
+            }
+        )
+        uniformSnapshotManager.loadPreviewIfNeeded(forCachedPack: snapshotPackURL)
+        let uniformDeadline = Date().addingTimeInterval(3)
+        while !uniformSnapshotReturned && Date() < uniformDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard uniformSnapshotReturned else {
+            fail("uniform snapshot negative control should finish")
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        guard imageMatchesPNG(
+            uniformSnapshotManager.previewImage(forCachedPack: snapshotPackURL),
+            data: outlinePNG
+        ) else {
+            fail("a uniform snapshot should not replace the embedded boundary fallback")
+        }
+        guard SavedMapSnapshotPreviewStore.imageData(for: snapshotPackURL) == nil else {
+            fail("a uniform snapshot should not be persisted")
         }
 
         var generatedBounds: OfflineMapPreviewBounds?
@@ -524,22 +555,75 @@ struct SavedMapPreviewCatalystTests {
             fail("a late snapshot must not persist after its map was deleted")
         }
 
-        let northWest = MKMapPoint(CLLocationCoordinate2D(
+        let northWestCoordinate = CLLocationCoordinate2D(
             latitude: expectedBounds.maxLatitude,
             longitude: expectedBounds.minLongitude
-        ))
-        let southEast = MKMapPoint(CLLocationCoordinate2D(
+        )
+        let southEastCoordinate = CLLocationCoordinate2D(
             latitude: expectedBounds.minLatitude,
             longitude: expectedBounds.maxLongitude
-        ))
+        )
+        let northWest = MKMapPoint(northWestCoordinate)
+        let southEast = MKMapPoint(southEastCoordinate)
+        let expectedMapRect = MKMapRect(
+            x: min(northWest.x, southEast.x),
+            y: min(northWest.y, southEast.y),
+            width: abs(southEast.x - northWest.x),
+            height: abs(southEast.y - northWest.y)
+        )
         let expectedAspectRatio = abs(southEast.x - northWest.x) /
             abs(southEast.y - northWest.y)
-        guard let croppedFixture = OfflineMapSnapshotPreviewRenderer.croppedImage(
-            from: cropFixtureImage(),
-            northWestPoint: CGPoint(x: 30, y: 0),
-            southEastPoint: CGPoint(x: 130, y: 96)
-        ) else {
-            fail("production crop helper should crop a deterministic snapshot fixture")
+        var capturedMapRect: MKMapRect?
+        var capturedSize: CGSize?
+        var capturedScale: CGFloat?
+        var mappedCoordinates: [CLLocationCoordinate2D] = []
+        let deterministicSnapshotData: Data
+        do {
+            guard let data = try await OfflineMapSnapshotPreviewRenderer.pngData(
+                for: expectedBounds,
+                snapshot: { options in
+                    capturedMapRect = options.mapRect
+                    capturedSize = options.size
+                    capturedScale = options.scale
+                    return OfflineMapSnapshotPreviewRenderer.SnapshotResult(
+                        image: cropFixtureImage(),
+                        pointForCoordinate: { coordinate in
+                            mappedCoordinates.append(coordinate)
+                            if coordinatesMatch(coordinate, northWestCoordinate) {
+                                return CGPoint(x: 30, y: 0)
+                            }
+                            if coordinatesMatch(coordinate, southEastCoordinate) {
+                                return CGPoint(x: 130, y: 96)
+                            }
+                            return .zero
+                        }
+                    )
+                }
+            ) else {
+                fail("production renderer should process a deterministic snapshot fixture")
+            }
+            deterministicSnapshotData = data
+        } catch {
+            fail("deterministic production renderer should complete: \(error)")
+        }
+        guard let capturedMapRect,
+              mapRectsMatch(capturedMapRect, expectedMapRect),
+              capturedSize == CGSize(width: 160, height: 96),
+              (capturedScale ?? 0) > 0 else {
+            fail(
+                "production renderer should request the exact projected map bounds " +
+                    "(rect: \(String(describing: capturedMapRect)), " +
+                    "size: \(String(describing: capturedSize)), " +
+                    "scale: \(String(describing: capturedScale)))"
+            )
+        }
+        guard mappedCoordinates.count == 2,
+              coordinatesMatch(mappedCoordinates[0], northWestCoordinate),
+              coordinatesMatch(mappedCoordinates[1], southEastCoordinate) else {
+            fail("production renderer should crop using the requested bounds coordinates")
+        }
+        guard let croppedFixture = UIImage(data: deterministicSnapshotData) else {
+            fail("deterministic production renderer output should decode")
         }
         guard croppedFixture.size == CGSize(width: 100, height: 96),
               let bluePixel = pixel(in: croppedFixture, x: 5, y: 20),
@@ -552,19 +636,73 @@ struct SavedMapPreviewCatalystTests {
               whitePixel.red > 220,
               whitePixel.green > 220,
               whitePixel.blue > 220 else {
-            fail("production crop helper should return only the selected fixture area")
+            fail("production renderer should return only the selected fixture area")
         }
-        guard OfflineMapSnapshotPreviewRenderer.croppedImage(
-            from: cropFixtureImage(),
-            northWestPoint: CGPoint(x: 40, y: 40),
-            southEastPoint: CGPoint(x: 40, y: 40)
-        ) == nil else {
-            fail("production crop helper should reject an empty selected area")
+        guard OfflineMapSnapshotPreviewRenderer.hasMeaningfulVisualVariation(croppedFixture) else {
+            fail("production renderer output should contain varied map content")
         }
-        guard hasMeaningfulVisualVariation(croppedFixture),
-              let blankImage = UIImage(data: solidPNG(color: .systemGray)),
-              !hasMeaningfulVisualVariation(blankImage) else {
-            fail("map content validation should reject uniform placeholder images")
+
+        do {
+            let emptyCropData = try await OfflineMapSnapshotPreviewRenderer.pngData(
+                for: expectedBounds,
+                snapshot: { _ in
+                    OfflineMapSnapshotPreviewRenderer.SnapshotResult(
+                        image: cropFixtureImage(),
+                        pointForCoordinate: { _ in CGPoint(x: 40, y: 40) }
+                    )
+                }
+            )
+            guard emptyCropData == nil else {
+                fail("production renderer should reject an empty selected area")
+            }
+            let blankImage = UIImage(data: uniformSnapshotPNG)!
+            let blankSnapshotData = try await OfflineMapSnapshotPreviewRenderer.pngData(
+                for: expectedBounds,
+                snapshot: { _ in
+                    OfflineMapSnapshotPreviewRenderer.SnapshotResult(
+                        image: blankImage,
+                        pointForCoordinate: { coordinate in
+                            coordinatesMatch(coordinate, northWestCoordinate)
+                                ? CGPoint(x: 30, y: 0)
+                                : CGPoint(x: 130, y: 96)
+                        }
+                    )
+                }
+            )
+            guard blankSnapshotData == nil else {
+                fail("production renderer should reject a uniform placeholder image")
+            }
+        } catch {
+            fail("production renderer negative controls should complete: \(error)")
+        }
+
+        let alternateBounds = OfflineMapPreviewBounds(
+            coordinates: [10.0, 20.0, 11.0, 21.0]
+        )!
+        var alternateMapRect: MKMapRect?
+        do {
+            guard try await OfflineMapSnapshotPreviewRenderer.pngData(
+                for: alternateBounds,
+                snapshot: { options in
+                    alternateMapRect = options.mapRect
+                    return OfflineMapSnapshotPreviewRenderer.SnapshotResult(
+                        image: cropFixtureImage(),
+                        pointForCoordinate: { coordinate in
+                            coordinate.latitude == alternateBounds.maxLatitude
+                                ? CGPoint(x: 30, y: 0)
+                                : CGPoint(x: 130, y: 96)
+                        }
+                    )
+                }
+            ) != nil else {
+                fail("alternate-bounds renderer fixture should produce output")
+            }
+        } catch {
+            fail("alternate-bounds renderer fixture should complete: \(error)")
+        }
+        guard let alternateMapRect,
+              !mapRectsMatch(alternateMapRect, expectedMapRect) else {
+            fail("production renderer request should change for a different geographic region")
         }
 
         if ProcessInfo.processInfo.environment["RUN_LIVE_MAPKIT_SNAPSHOT_TESTS"] == "1" {
@@ -595,7 +733,9 @@ struct SavedMapPreviewCatalystTests {
             }
             guard liveSnapshotImage.size.width <= 160,
                   liveSnapshotImage.size.height <= 96,
-                  hasMeaningfulVisualVariation(liveSnapshotImage) else {
+                  OfflineMapSnapshotPreviewRenderer.hasMeaningfulVisualVariation(
+                      liveSnapshotImage
+                  ) else {
                 fail(
                     "production MapKit renderer should return varied map content within " +
                         "thumbnail limits (size: \(liveSnapshotImage.size))"

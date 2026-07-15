@@ -46,8 +46,44 @@ private enum OfflineMapDefaults {
 
 @MainActor
 enum OfflineMapSnapshotPreviewRenderer {
+#if canImport(UIKit) && canImport(MapKit)
+    struct Request {
+        let options: MKMapSnapshotter.Options
+        let northWestCoordinate: CLLocationCoordinate2D
+        let southEastCoordinate: CLLocationCoordinate2D
+    }
+
+    struct SnapshotResult {
+        let image: UIImage
+        let pointForCoordinate: @MainActor (CLLocationCoordinate2D) -> CGPoint
+    }
+
+    typealias SnapshotOperation = @MainActor (
+        MKMapSnapshotter.Options
+    ) async throws -> SnapshotResult
+#endif
+
     static func pngData(for bounds: OfflineMapPreviewBounds) async throws -> Data? {
 #if canImport(UIKit) && canImport(MapKit)
+        try await pngData(for: bounds) { options in
+            let snapshotter = MKMapSnapshotter(options: options)
+            let snapshot = try await withTaskCancellationHandler {
+                try await snapshotter.start()
+            } onCancel: {
+                snapshotter.cancel()
+            }
+            return SnapshotResult(
+                image: snapshot.image,
+                pointForCoordinate: { snapshot.point(for: $0) }
+            )
+        }
+#else
+        nil
+#endif
+    }
+
+#if canImport(UIKit) && canImport(MapKit)
+    static func request(for bounds: OfflineMapPreviewBounds) -> Request {
         let options = MKMapSnapshotter.Options()
         let northWestCoordinate = CLLocationCoordinate2D(
             latitude: bounds.maxLatitude,
@@ -73,29 +109,79 @@ enum OfflineMapSnapshotPreviewRenderer {
         } else {
             options.mapType = .standard
         }
+        return Request(
+            options: options,
+            northWestCoordinate: northWestCoordinate,
+            southEastCoordinate: southEastCoordinate
+        )
+    }
 
-        let snapshotter = MKMapSnapshotter(options: options)
-        let snapshot = try await withTaskCancellationHandler {
-            try await snapshotter.start()
-        } onCancel: {
-            snapshotter.cancel()
-        }
+    static func pngData(
+        for bounds: OfflineMapPreviewBounds,
+        snapshot: SnapshotOperation
+    ) async throws -> Data? {
+        let request = request(for: bounds)
+        let result = try await snapshot(request.options)
         try Task.checkCancellation()
         guard let croppedImage = croppedImage(
-            from: snapshot.image,
-            northWestPoint: snapshot.point(for: northWestCoordinate),
-            southEastPoint: snapshot.point(for: southEastCoordinate)
-        ) else {
+            from: result.image,
+            request: request,
+            pointForCoordinate: result.pointForCoordinate
+        ), hasMeaningfulVisualVariation(croppedImage) else {
             return nil
         }
         return croppedImage.pngData()
-#else
-        return nil
-#endif
     }
 
-#if canImport(UIKit) && canImport(MapKit)
     static func croppedImage(
+        from image: UIImage,
+        request: Request,
+        pointForCoordinate: @MainActor (CLLocationCoordinate2D) -> CGPoint
+    ) -> UIImage? {
+        croppedImage(
+            from: image,
+            northWestPoint: pointForCoordinate(request.northWestCoordinate),
+            southEastPoint: pointForCoordinate(request.southEastCoordinate)
+        )
+    }
+
+    static func hasMeaningfulVisualVariation(_ image: UIImage) -> Bool {
+        guard let source = image.cgImage else { return false }
+        let width = source.width
+        let height = source.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let rendered = pixels.withUnsafeMutableBytes { bytes -> Bool in
+            guard let context = CGContext(
+                data: bytes.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else {
+                return false
+            }
+            context.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard rendered else { return false }
+
+        var minimum = [UInt8](repeating: .max, count: 3)
+        var maximum = [UInt8](repeating: .min, count: 3)
+        for offset in stride(from: 0, to: pixels.count, by: 4)
+            where pixels[offset + 3] >= 128 {
+            for channel in 0..<3 {
+                minimum[channel] = min(minimum[channel], pixels[offset + channel])
+                maximum[channel] = max(maximum[channel], pixels[offset + channel])
+            }
+        }
+        return zip(minimum, maximum).contains { minimum, maximum in
+            Int(maximum) - Int(minimum) >= 8
+        }
+    }
+
+    private static func croppedImage(
         from image: UIImage,
         northWestPoint: CGPoint,
         southEastPoint: CGPoint
@@ -1596,7 +1682,7 @@ final class OfflineMapManager: ObservableObject {
                 )
             }.value
             guard let self else { return }
-            if let image = self.usablePreviewImage(from: loaded.snapshotData) {
+            if let image = self.usableSnapshotImage(from: loaded.snapshotData) {
                 guard self.previewLoadRegistry.finishIfCurrent(token, for: key) else {
                     return
                 }
@@ -1666,7 +1752,7 @@ final class OfflineMapManager: ObservableObject {
                   }) else {
                 return
             }
-            if let image = self.usablePreviewImage(from: generatedSnapshotData),
+            if let image = self.usableSnapshotImage(from: generatedSnapshotData),
                let generatedSnapshotData {
                 try? SavedMapSnapshotPreviewStore.save(
                     generatedSnapshotData,
@@ -1688,6 +1774,14 @@ final class OfflineMapManager: ObservableObject {
               image.size.height > 0,
               image.size.width <= 512,
               image.size.height <= 512 else {
+            return nil
+        }
+        return image
+    }
+
+    private func usableSnapshotImage(from data: Data?) -> UIImage? {
+        guard let image = usablePreviewImage(from: data),
+              OfflineMapSnapshotPreviewRenderer.hasMeaningfulVisualVariation(image) else {
             return nil
         }
         return image
