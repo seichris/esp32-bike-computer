@@ -11,7 +11,7 @@ navigation-ready.
 
 | UUID | Direction | Format | Purpose |
 | --- | --- | --- | --- |
-| `2A6E` | iOS -> ESP32 | UTF-8 `IconID|DistanceMeters|Instruction` | Current maneuver for the instruction view. |
+| `2A6E` | bidirectional | Navigation text plus framed control packets | Current maneuver for the instruction view and device-originated destination requests. |
 | `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002` | bidirectional | UTF-8 auth messages | Local pairing/auth handshake. |
 | `2A6F` | iOS -> ESP32 | Binary route geometry | Upcoming route polyline for the device map view. |
 | `2A72` | iOS -> ESP32 | Binary GPS position | Current device position and heading for the map view. |
@@ -222,7 +222,8 @@ Navigation profiles. Version `3` also requests the extended map visibility
 classes. Version `4` advertises that the client understands Battery Status
 screen settings so the device can distinguish a current screen mask from one
 sent by an older four-screen app; older app masks preserve the device's
-existing Battery Status preference. Receiving a `CAPS` request alone does not
+existing Battery Status preference. Version `5` advertises destination-catalog
+and device-originated route-request support. Receiving a `CAPS` request alone does not
 switch the firmware's
 setting semantics: a session switches to independent profiles only after the
 first setting ID in `16...22` is received. This keeps legacy IDs shared when a
@@ -253,6 +254,72 @@ five-screen value for setting ID `13` sets bit `30` as a version marker. The
 firmware removes that marker before persistence; unmarked masks from older apps
 or capability-fallback paths preserve the existing Battery Status bit. This
 also keeps the preference intact when a `CAPS` response is lost.
+
+Flag bit `6` reports firmware support for the destination picker described
+below. iOS does not send destination data until this bit is present, so older
+firmware and other board targets continue to use the existing navigation UI.
+
+## Destination Picker
+
+The idle Map + Navigation overlay can mirror the companion app's saved
+destinations. iOS sends favorites first (up to 8), followed by recent searches
+(up to 5) after removing destinations already represented in favorites. Labels
+are non-empty UTF-8 strings of at most 64 bytes. Empty sections are omitted and
+an empty catalog is valid.
+
+The logical catalog is versioned JSON:
+
+```json
+{"version":1,"generation":17,"items":[{"token":1,"kind":"favorite","label":"Home"},{"token":2,"kind":"recent","label":"Cafe"}]}
+```
+
+`generation` is a non-zero `UInt32`. Each item has a unique non-zero `UInt16`
+token. `kind` is `favorite` or `recent`, and all favorite items must precede all
+recent items. Coordinates and search queries remain private to the app; iOS
+keeps the token-to-`SavedDestination` mapping so an exact saved coordinate is
+used when available.
+
+iOS chunks the JSON over either authenticated command route:
+
+```text
+"DLST" | TransferID: UInt8 | ChunkIndex: UInt8 | ChunkCount: UInt8 | JSON bytes
+```
+
+Chunks are zero-indexed, sequential, individually bounded by the negotiated
+write length, and use at most 160 chunks / 4096 reassembled bytes. The firmware
+commits a catalog only after every chunk arrives in order and the complete JSON
+passes schema, ordering, count, token, and label validation. An interrupted,
+oversized, malformed, out-of-order, or five-second-stale transfer is discarded
+without replacing the last committed catalog.
+
+When a row is tapped, firmware notifies iOS on `2A6E`:
+
+```text
+"DREQ" | Generation: UInt32LE | Token: UInt16LE
+```
+
+The device immediately displays `Starting navigation...` and suppresses repeat
+requests while one is pending. iOS accepts the request only when generation and
+token match its active catalog, the device is authenticated, navigation is
+idle, and current location is available. It calculates a cycling route from
+the current location to the exact saved endpoint and replies on either command
+route:
+
+```text
+"DNST" | Generation: UInt32LE | Token: UInt16LE | State: UInt8 | Message: UTF-8
+```
+
+State `1` is calculating, `2` started, `3` failed, and `4` stale. Messages are
+at most 64 UTF-8 bytes. Terminal status returns the overlay to the picker after
+five seconds; a request with no terminal response fails locally after 15
+seconds. Active maneuver data always takes precedence over the picker. The
+last valid catalog remains in RAM across disconnects, while tapping it without
+an authenticated app connection shows `Open app to start navigation`.
+
+iOS republishes the catalog after authenticated capability negotiation, any
+favorite/recent change, reconnect, and navigation stop. The logical catalog is
+queued atomically on iOS so write-queue pressure cannot expose a partial new
+generation.
 
 ## OSM Map Blocks
 

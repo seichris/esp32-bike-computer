@@ -12,6 +12,11 @@ import MapKit
 import Combine
 import CoreLocation
 
+enum NavigationStartOutcome: Equatable {
+    case started
+    case failed(String)
+}
+
 /// Main coordinator for the Bike Computer app
 /// Manages BLE, Navigation, Location, and HealthKit subsystems
 @MainActor
@@ -21,6 +26,7 @@ class BikeComputerCoordinator: ObservableObject {
 
     let bleManager = BLEManager()  // Accessible for settings view
     let firmwareUpdateManager = FirmwareUpdateManager()
+    let destinationStore: SavedDestinationStore
     private let navEngine = NavigationEngine()
     private let locationManager = CurrentLocationManager()
     private let healthKitManager = HealthKitManager()
@@ -77,10 +83,25 @@ class BikeComputerCoordinator: ObservableObject {
     private var ongoingDirections: MKDirections?
     private var transportType: MKDirectionsTransportType = RouteTransportTypes.cycling
     private var deviceCapabilityRefreshGeneration: UInt = 0
+    private var routeCalculationGeneration: UInt = 0
+    private var pendingNavigationStart: (
+        generation: UInt,
+        completion: (NavigationStartOutcome) -> Void
+    )?
+    private var destinationCatalogGeneration: UInt32 = 0
+    private var destinationCatalogFingerprint = ""
+    private var destinationCatalogByToken: [UInt16: SavedDestination] = [:]
+    private var destinationCatalogRetryWorkItem: DispatchWorkItem?
+    private var wasNavigating = false
 
     // MARK: - Initialization
 
-    init() {
+    convenience init() {
+        self.init(destinationStore: SavedDestinationStore())
+    }
+
+    init(destinationStore: SavedDestinationStore) {
+        self.destinationStore = destinationStore
         setupManagerBindings()
         setupManagers()
     }
@@ -107,6 +128,11 @@ class BikeComputerCoordinator: ObservableObject {
                 guard let self = self else { return }
                 self.isNavigating = navigating
                 self.locationManager.setNavigating(navigating && !self.navEngine.isSimulationMode)
+                let didStopNavigation = self.wasNavigating && !navigating
+                self.wasNavigating = navigating
+                if didStopNavigation {
+                    self.synchronizeDestinationCatalog(force: true)
+                }
             }
             .store(in: &cancellables)
 
@@ -198,6 +224,28 @@ class BikeComputerCoordinator: ObservableObject {
             }
             .store(in: &cancellables)
 
+        Publishers.CombineLatest(
+            bleManager.$isNavigationReady,
+            bleManager.$supportsDestinationPicker
+        )
+        .map { $0 && $1 }
+        .removeDuplicates()
+        .sink { [weak self] isReady in
+            guard isReady else { return }
+            self?.synchronizeDestinationCatalog(force: true)
+        }
+        .store(in: &cancellables)
+
+        Publishers.CombineLatest(
+            destinationStore.$favoriteDestinations,
+            destinationStore.$recentDestinations
+        )
+        .dropFirst()
+        .sink { [weak self] _, _ in
+            self?.synchronizeDestinationCatalog()
+        }
+        .store(in: &cancellables)
+
         locationManager.$currentLocation
             .compactMap { $0 }
             .combineLatest(bleManager.$isNavigationReady)
@@ -220,6 +268,11 @@ class BikeComputerCoordinator: ObservableObject {
     private func setupManagers() {
         // Wire up inter-manager dependencies
         navEngine.setBLEManager(bleManager)
+        bleManager.onDestinationRequest = { [weak self] request in
+            Task { @MainActor in
+                self?.handleDestinationRequest(request)
+            }
+        }
         locationManager.healthKitManager = healthKitManager
         healthKitManager.locationManager = locationManager
 
@@ -242,9 +295,20 @@ class BikeComputerCoordinator: ObservableObject {
 
     // MARK: - Public API: Navigation
 
-    func startNavigation(from source: RouteEndpoint, to destination: RouteEndpoint, transportType: MKDirectionsTransportType, isTestMode: Bool = false) {
+    func startNavigation(
+        from source: RouteEndpoint,
+        to destination: RouteEndpoint,
+        transportType: MKDirectionsTransportType,
+        isTestMode: Bool = false,
+        completion: ((NavigationStartOutcome) -> Void)? = nil
+    ) {
         self.transportType = transportType
-        calculateRoute(from: source, to: destination, isTestMode: isTestMode)
+        calculateRoute(
+            from: source,
+            to: destination,
+            isTestMode: isTestMode,
+            completion: completion
+        )
     }
 
     func startNavigation(from source: String, to destination: String, transportType: MKDirectionsTransportType, isTestMode: Bool = false) {
@@ -373,44 +437,183 @@ class BikeComputerCoordinator: ObservableObject {
         selectedView = view
         locationManager.setViewingMap(view == 0)
     }
+
+    private func synchronizeDestinationCatalog(force: Bool = false) {
+        guard bleManager.isNavigationReady,
+              bleManager.supportsDestinationPicker else { return }
+
+        var nextGeneration = destinationCatalogGeneration &+ 1
+        if nextGeneration == 0 { nextGeneration = 1 }
+        let build = DeviceDestinationCatalogBuilder.build(
+            favorites: destinationStore.favoriteDestinations,
+            recents: destinationStore.nonFavoriteRecentDestinations,
+            generation: nextGeneration
+        )
+        guard force || build.sourceFingerprint != destinationCatalogFingerprint else {
+            destinationCatalogRetryWorkItem?.cancel()
+            destinationCatalogRetryWorkItem = nil
+            return
+        }
+        guard bleManager.sendDestinationCatalog(build.payload) else {
+            scheduleDestinationCatalogRetry()
+            return
+        }
+
+        destinationCatalogRetryWorkItem?.cancel()
+        destinationCatalogRetryWorkItem = nil
+        destinationCatalogGeneration = nextGeneration
+        destinationCatalogFingerprint = build.sourceFingerprint
+        destinationCatalogByToken = build.destinationsByToken
+    }
+
+    private func scheduleDestinationCatalogRetry() {
+        guard destinationCatalogRetryWorkItem == nil else { return }
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.destinationCatalogRetryWorkItem = nil
+            self.synchronizeDestinationCatalog()
+        }
+        destinationCatalogRetryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: workItem)
+    }
+
+    private func handleDestinationRequest(_ request: DeviceDestinationRequest) {
+        guard request.generation == destinationCatalogGeneration,
+              let destination = destinationCatalogByToken[request.token] else {
+            bleManager.sendDestinationStatus(
+                generation: request.generation,
+                token: request.token,
+                status: .stale,
+                message: "Destination list changed"
+            )
+            synchronizeDestinationCatalog(force: true)
+            return
+        }
+
+        guard !isNavigating, !routeCalculation.isCalculating else {
+            bleManager.sendDestinationStatus(
+                generation: request.generation,
+                token: request.token,
+                status: .failed,
+                message: "Navigation is already active"
+            )
+            return
+        }
+        guard currentLocation != nil else {
+            bleManager.sendDestinationStatus(
+                generation: request.generation,
+                token: request.token,
+                status: .failed,
+                message: "Current location unavailable"
+            )
+            return
+        }
+
+        bleManager.sendDestinationStatus(
+            generation: request.generation,
+            token: request.token,
+            status: .calculating,
+            message: "Starting navigation..."
+        )
+        startNavigation(
+            from: .currentLocation,
+            to: destination.routeEndpoint,
+            transportType: RouteTransportTypes.cycling
+        ) { [weak self] outcome in
+            guard let self else { return }
+            switch outcome {
+            case .started:
+                self.bleManager.sendDestinationStatus(
+                    generation: request.generation,
+                    token: request.token,
+                    status: .started,
+                    message: "Navigation started"
+                )
+                self.destinationStore.addRecent(destination)
+            case .failed(let message):
+                self.bleManager.sendDestinationStatus(
+                    generation: request.generation,
+                    token: request.token,
+                    status: .failed,
+                    message: message
+                )
+            }
+        }
+    }
 }
 
 // MARK: - Route Calculation (Private Implementation)
 
 extension BikeComputerCoordinator {
 
-    private func calculateRoute(from source: RouteEndpoint, to destination: RouteEndpoint, isTestMode: Bool = false) {
+    private func calculateRoute(
+        from source: RouteEndpoint,
+        to destination: RouteEndpoint,
+        isTestMode: Bool = false,
+        completion: ((NavigationStartOutcome) -> Void)? = nil
+    ) {
         print("Starting route calculation")
 
         // Cancel any ongoing searches
+        if let pendingNavigationStart {
+            pendingNavigationStart.completion(.failed("Route request replaced"))
+            self.pendingNavigationStart = nil
+        }
         ongoingSourceSearch?.cancel()
         ongoingDestinationSearch?.cancel()
         ongoingDirections?.cancel()
+        routeCalculationGeneration &+= 1
+        let generation = routeCalculationGeneration
+        if let completion {
+            pendingNavigationStart = (generation, completion)
+        }
 
         routeCalculation.isCalculating = true
         routeCalculation.status = "Searching for locations..."
 
-        resolveEndpoint(source, role: "Starting location") { [weak self] sourceItem in
-            guard let self = self, let sourceItem = sourceItem else { return }
+        resolveEndpoint(source, role: "Starting location", generation: generation) { [weak self] sourceItem in
+            guard let self, self.routeCalculationGeneration == generation else { return }
+            guard let sourceItem else {
+                self.completeNavigationStart(.failed(self.routeCalculation.status.isEmpty
+                    ? "Starting location unavailable"
+                    : self.routeCalculation.status), generation: generation)
+                return
+            }
 
             self.routeCalculation.status = "Finding destination..."
-            self.resolveEndpoint(destination, role: "Destination") { [weak self] destinationItem in
-                guard let self = self, let destinationItem = destinationItem else { return }
+            self.resolveEndpoint(destination, role: "Destination", generation: generation) { [weak self] destinationItem in
+                guard let self, self.routeCalculationGeneration == generation else { return }
+                guard let destinationItem else {
+                    self.completeNavigationStart(.failed(self.routeCalculation.status.isEmpty
+                        ? "Destination unavailable"
+                        : self.routeCalculation.status), generation: generation)
+                    return
+                }
 
                 self.routeCalculation.status = "Calculating route..."
-                self.requestDirections(from: sourceItem, to: destinationItem, isTestMode: isTestMode)
+                self.requestDirections(
+                    from: sourceItem,
+                    to: destinationItem,
+                    isTestMode: isTestMode,
+                    generation: generation
+                )
             }
         }
     }
 
-    private func resolveEndpoint(_ endpoint: RouteEndpoint, role: String, completion: @escaping (MKMapItem?) -> Void) {
+    private func resolveEndpoint(
+        _ endpoint: RouteEndpoint,
+        role: String,
+        generation: UInt,
+        completion: @escaping (MKMapItem?) -> Void
+    ) {
         switch endpoint {
         case .currentLocation:
             guard let currentLoc = currentLocation else {
                 routeCalculation.status = "Current location unavailable"
                 alert.message = "Unable to determine your current location. Please enable location services."
                 alert.isShowing = true
-                finishRouteCalculationAfterDelay()
+                finishRouteCalculationAfterDelay(generation: generation)
                 completion(nil)
                 return
             }
@@ -445,7 +648,7 @@ extension BikeComputerCoordinator {
             }
 
             search.start { [weak self] response, error in
-                guard let self = self else { return }
+                guard let self, self.routeCalculationGeneration == generation else { return }
 
                 if role == "Starting location" {
                     self.ongoingSourceSearch = nil
@@ -456,7 +659,7 @@ extension BikeComputerCoordinator {
                 if let error = error {
                     print("Error searching for \(role): \(error.localizedDescription)")
                     self.routeCalculation.status = "\(role) not found"
-                    self.finishRouteCalculationAfterDelay()
+                    self.finishRouteCalculationAfterDelay(generation: generation)
                     completion(nil)
                     return
                 }
@@ -464,7 +667,7 @@ extension BikeComputerCoordinator {
                 guard let item = response?.mapItems.first else {
                     print("No results for \(role)")
                     self.routeCalculation.status = "\(role) not found"
-                    self.finishRouteCalculationAfterDelay()
+                    self.finishRouteCalculationAfterDelay(generation: generation)
                     completion(nil)
                     return
                 }
@@ -475,14 +678,20 @@ extension BikeComputerCoordinator {
         }
     }
 
-    private func finishRouteCalculationAfterDelay() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+    private func finishRouteCalculationAfterDelay(generation: UInt) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, self.routeCalculationGeneration == generation else { return }
             self.routeCalculation.isCalculating = false
             self.routeCalculation.status = ""
         }
     }
 
-    private func requestDirections(from sourceItem: MKMapItem, to destinationItem: MKMapItem, isTestMode: Bool) {
+    private func requestDirections(
+        from sourceItem: MKMapItem,
+        to destinationItem: MKMapItem,
+        isTestMode: Bool,
+        generation: UInt
+    ) {
         let request = MKDirections.Request()
         request.source = sourceItem
         request.destination = destinationItem
@@ -493,57 +702,86 @@ extension BikeComputerCoordinator {
 
         let directions = MKDirections(request: request)
         self.ongoingDirections = directions
+        let initialLocation = RouteInitialLocation.location(
+            for: sourceItem.placemark.coordinate
+        )
         directions.calculate { [weak self] response, error in
-            guard let self = self else { return }
-            self.ongoingDirections = nil
+            // MapKit documents this callback as main-thread-only, but its
+            // imported @Sendable signature is not MainActor-annotated.
+            MainActor.assumeIsolated {
+                guard let self, self.routeCalculationGeneration == generation else { return }
+                self.ongoingDirections = nil
 
-            if let error = error {
-                print("Error calculating route: \(error.localizedDescription)")
-                // SHOW ERROR ON SCREEN
-                self.routeCalculation.status = "Err: \(error.localizedDescription)"
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                if let error = error {
+                    print("Error calculating route: \(error.localizedDescription)")
+                    // SHOW ERROR ON SCREEN
+                    self.routeCalculation.status = "Err: \(error.localizedDescription)"
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                        guard self.routeCalculationGeneration == generation else { return }
+                        self.routeCalculation.isCalculating = false
+                        self.routeCalculation.status = ""
+                    }
+                    self.completeNavigationStart(
+                        .failed(error.localizedDescription),
+                        generation: generation
+                    )
+                    return
+                }
+
+                guard let route = response?.routes.first else {
+                    print("No routes found")
+                    self.routeCalculation.status = "No route available"
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        guard self.routeCalculationGeneration == generation else { return }
+                        self.routeCalculation.isCalculating = false
+                        self.routeCalculation.status = ""
+                    }
+                    self.completeNavigationStart(
+                        .failed("No route available"),
+                        generation: generation
+                    )
+                    return
+                }
+
+                print("Route calculated successfully!")
+                print("Distance: \(route.distance)m, ETA: \(route.expectedTravelTime)s")
+                print("Steps: \(route.steps.count)")
+
+                self.routeCalculation.status = "Starting navigation..."
+
+                // Store the route for map display
+                self.currentRoute = route
+
+                // Start navigation from the same source MapKit used to calculate the route.
+                self.navEngine.startNavigation(
+                    with: route,
+                    isTestMode: isTestMode,
+                    initialLocation: initialLocation
+                )
+
+                // Enable location tracking for navigation
+                self.locationManager.setNavigating(!isTestMode)
+
+                // Show navigation+workout view
+                self.selectedView = 1
+                self.completeNavigationStart(.started, generation: generation)
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    guard self.routeCalculationGeneration == generation else { return }
                     self.routeCalculation.isCalculating = false
                     self.routeCalculation.status = ""
                 }
-                return
-            }
-
-            guard let route = response?.routes.first else {
-                print("No routes found")
-                self.routeCalculation.status = "No route available"
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                    self.routeCalculation.isCalculating = false
-                    self.routeCalculation.status = ""
-                }
-                return
-            }
-
-            print("Route calculated successfully!")
-            print("Distance: \(route.distance)m, ETA: \(route.expectedTravelTime)s")
-            print("Steps: \(route.steps.count)")
-
-            self.routeCalculation.status = "Starting navigation..."
-
-            // Store the route for map display
-            self.currentRoute = route
-
-            // Start navigation from the same source MapKit used to calculate the route.
-            self.navEngine.startNavigation(
-                with: route,
-                isTestMode: isTestMode,
-                initialLocation: RouteInitialLocation.location(for: sourceItem.placemark.coordinate)
-            )
-
-            // Enable location tracking for navigation
-            self.locationManager.setNavigating(!isTestMode)
-
-            // Show navigation+workout view
-            self.selectedView = 1
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                self.routeCalculation.isCalculating = false
-                self.routeCalculation.status = ""
             }
         }
+    }
+
+    private func completeNavigationStart(
+        _ outcome: NavigationStartOutcome,
+        generation: UInt
+    ) {
+        guard let pendingNavigationStart,
+              pendingNavigationStart.generation == generation else { return }
+        self.pendingNavigationStart = nil
+        pendingNavigationStart.completion(outcome)
     }
 }

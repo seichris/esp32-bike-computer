@@ -26,10 +26,12 @@
 #endif
 #include <NimBLEDevice.h>
 #include <Preferences.h>
+#include <ArduinoJson.h>
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <esp_system.h>
+#include <freertos/semphr.h>
 #include <host/ble_hs_id.h>
 #include <mbedtls/md.h>
 #include <WiFi.h>
@@ -76,6 +78,15 @@ static BLEDebugStats bleDebugStats;
 static uint16_t activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
 static bool unauthTimeoutDisconnectRequested = false;
 static ble_transfer::PendingRequest pendingTransferControl;
+static portMUX_TYPE destinationPickerMux = portMUX_INITIALIZER_UNLOCKED;
+static DestinationCatalogSnapshot destinationCatalog;
+static DestinationPickerStatusSnapshot destinationPickerStatus;
+static destination_picker_protocol::CatalogReassembler destinationCatalogReassembler;
+static StaticSemaphore_t destinationCatalogReassemblerMutexStorage;
+static SemaphoreHandle_t destinationCatalogReassemblerMutex = nullptr;
+static bool destinationRequestPending = false;
+static uint32_t destinationRequestStartedMs = 0;
+static uint32_t destinationStatusUpdatedMs = 0;
 
 NavigationData getCurrentNavigationData() { return currentNavData; }
 
@@ -85,6 +96,147 @@ bool hasCurrentNavigationData() {
 
 int16_t getPhoneBatteryLevelPercent() { return phoneBatteryLevelPercent; }
 bool isPhoneBatteryCharging() { return phoneBatteryCharging; }
+
+DestinationCatalogSnapshot getDestinationCatalogSnapshot() {
+  portENTER_CRITICAL(&destinationPickerMux);
+  DestinationCatalogSnapshot snapshot = destinationCatalog;
+  portEXIT_CRITICAL(&destinationPickerMux);
+  return snapshot;
+}
+
+DestinationPickerStatusSnapshot getDestinationPickerStatusSnapshot() {
+  portENTER_CRITICAL(&destinationPickerMux);
+  DestinationPickerStatusSnapshot snapshot = destinationPickerStatus;
+  portEXIT_CRITICAL(&destinationPickerMux);
+  return snapshot;
+}
+
+static void setDestinationPickerStatus(DestinationPickerStatusCode code,
+                                       uint32_t generation, uint16_t token,
+                                       const char *message) {
+  const uint32_t nowMs = millis();
+  portENTER_CRITICAL(&destinationPickerMux);
+  destinationPickerStatus.code = code;
+  destinationPickerStatus.generation = generation;
+  destinationPickerStatus.token = token;
+  destinationPickerStatus.revision++;
+  strncpy(destinationPickerStatus.message, message == nullptr ? "" : message,
+          sizeof(destinationPickerStatus.message) - 1);
+  destinationPickerStatus.message[sizeof(destinationPickerStatus.message) - 1] =
+      '\0';
+  destinationStatusUpdatedMs = nowMs;
+  portEXIT_CRITICAL(&destinationPickerMux);
+}
+
+static bool beginDestinationRequest(uint32_t nowMs) {
+  portENTER_CRITICAL(&destinationPickerMux);
+  if (destinationRequestPending) {
+    portEXIT_CRITICAL(&destinationPickerMux);
+    return false;
+  }
+  destinationRequestPending = true;
+  destinationRequestStartedMs = nowMs;
+  portEXIT_CRITICAL(&destinationPickerMux);
+  return true;
+}
+
+static bool applyDestinationResponseIfPending(
+    DestinationPickerStatusCode code, uint32_t generation, uint16_t token,
+    const char *message) {
+  const uint32_t nowMs = millis();
+  portENTER_CRITICAL(&destinationPickerMux);
+  const bool matches = destinationRequestPending &&
+                       destinationPickerStatus.generation == generation &&
+                       destinationPickerStatus.token == token;
+  if (matches) {
+    destinationPickerStatus.code = code;
+    destinationPickerStatus.revision++;
+    strncpy(destinationPickerStatus.message, message == nullptr ? "" : message,
+            sizeof(destinationPickerStatus.message) - 1);
+    destinationPickerStatus
+        .message[sizeof(destinationPickerStatus.message) - 1] = '\0';
+    destinationStatusUpdatedMs = nowMs;
+    if (code != DestinationPickerStatusCode::Calculating) {
+      destinationRequestPending = false;
+    }
+  }
+  portEXIT_CRITICAL(&destinationPickerMux);
+  return matches;
+}
+
+static bool finishDestinationRequestIfPending() {
+  portENTER_CRITICAL(&destinationPickerMux);
+  const bool wasPending = destinationRequestPending;
+  destinationRequestPending = false;
+  portEXIT_CRITICAL(&destinationPickerMux);
+  return wasPending;
+}
+
+static bool destinationRequestTimedOut(uint32_t nowMs) {
+  portENTER_CRITICAL(&destinationPickerMux);
+  const bool timedOut = destinationRequestPending &&
+                        static_cast<uint32_t>(nowMs -
+                                              destinationRequestStartedMs) >
+                            15000;
+  if (timedOut) {
+    destinationRequestPending = false;
+  }
+  portEXIT_CRITICAL(&destinationPickerMux);
+  return timedOut;
+}
+
+static bool destinationStatusShouldExpire(uint32_t nowMs) {
+  portENTER_CRITICAL(&destinationPickerMux);
+  const bool shouldExpire =
+      !destinationRequestPending &&
+      destinationPickerStatus.code != DestinationPickerStatusCode::Idle &&
+      static_cast<uint32_t>(nowMs - destinationStatusUpdatedMs) > 5000;
+  portEXIT_CRITICAL(&destinationPickerMux);
+  return shouldExpire;
+}
+
+static bool destinationCatalogContains(uint32_t generation, uint16_t token) {
+  bool found = false;
+  portENTER_CRITICAL(&destinationPickerMux);
+  if (destinationCatalog.generation == generation) {
+    for (uint8_t i = 0; i < destinationCatalog.count; i++) {
+      if (destinationCatalog.items[i].token == token) {
+        found = true;
+        break;
+      }
+    }
+  }
+  portEXIT_CRITICAL(&destinationPickerMux);
+  return found;
+}
+
+bool requestDestinationRoute(uint32_t generation, uint16_t token) {
+  if (!destinationCatalogContains(generation, token)) {
+    setDestinationPickerStatus(DestinationPickerStatusCode::Stale, generation,
+                               token, "Destination list changed");
+    return false;
+  }
+  if (!bleNavServer.isConnected() || !bleSessionAuthenticated ||
+      mapTransferStatusCharacteristic == nullptr) {
+    setDestinationPickerStatus(DestinationPickerStatusCode::Failed, generation,
+                               token, "Open app to start navigation");
+    return false;
+  }
+  if (!beginDestinationRequest(millis())) {
+    return false;
+  }
+
+  uint8_t request[10] = {'D', 'R', 'E', 'Q'};
+  destination_picker_protocol::writeUInt32LE(generation, request + 4);
+  destination_picker_protocol::writeUInt16LE(token, request + 8);
+  setDestinationPickerStatus(DestinationPickerStatusCode::Calculating,
+                             generation, token, "Starting navigation...");
+  mapTransferStatusCharacteristic->setValue(request, sizeof(request));
+  mapTransferStatusCharacteristic->notify();
+  Serial.printf("BLE Destination: requested generation=%lu token=%u\n",
+                (unsigned long)generation, token);
+  return true;
+}
 
 static uint8_t deviceScreenBit(uint8_t screen) {
   return (screen <= DEVICE_SCREEN_BATTERY_STATUS) ? (1 << screen) : 0;
@@ -885,7 +1037,8 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
               powerButtonHonkAvailable) |
           map_profile_protocol::CAPABILITY_MASK |
           CAPABILITY_EXTENDED_MAP_VISIBILITY |
-          CAPABILITY_BATTERY_STATUS_SCREEN),
+          CAPABILITY_BATTERY_STATUS_SCREEN |
+          destination_picker_protocol::CAPABILITY_MASK),
   };
   size_t responseSize = 5;
   waveshare_board::speaker::PowerButtonHonkConfig config{};
@@ -942,6 +1095,187 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
         clientVersion >= 1;
     notifyDeviceCapabilities(pChar, includePowerButtonConfig);
   }
+  return true;
+}
+
+static bool commitDestinationCatalog(const std::string &json) {
+  JsonDocument document;
+  const DeserializationError error = deserializeJson(document, json);
+  if (error) {
+    Serial.printf("BLE Destination: rejected catalog JSON: %s\n",
+                  error.c_str());
+    return false;
+  }
+  if (!document["version"].is<uint8_t>() ||
+      document["version"].as<uint8_t>() !=
+          destination_picker_protocol::CATALOG_VERSION ||
+      !document["generation"].is<uint32_t>() ||
+      document["generation"].as<uint32_t>() == 0 ||
+      !document["items"].is<JsonArrayConst>()) {
+    Serial.println("BLE Destination: rejected catalog envelope");
+    return false;
+  }
+
+  const JsonArrayConst items = document["items"].as<JsonArrayConst>();
+  if (items.size() > destination_picker_protocol::MAX_ITEMS) {
+    Serial.println("BLE Destination: rejected oversized catalog");
+    return false;
+  }
+
+  DestinationCatalogSnapshot candidate{};
+  candidate.generation = document["generation"].as<uint32_t>();
+  bool sawRecent = false;
+  uint8_t favoriteCount = 0;
+  uint8_t recentCount = 0;
+  for (JsonVariantConst entryVariant : items) {
+    if (!entryVariant.is<JsonObjectConst>()) {
+      Serial.println("BLE Destination: rejected non-object item");
+      return false;
+    }
+    const JsonObjectConst entry = entryVariant.as<JsonObjectConst>();
+    if (!entry["token"].is<uint16_t>() ||
+        !entry["kind"].is<const char *>() ||
+        !entry["label"].is<const char *>()) {
+      Serial.println("BLE Destination: rejected malformed item");
+      return false;
+    }
+
+    DeviceDestination item{};
+    item.token = entry["token"].as<uint16_t>();
+    const JsonString kindString = entry["kind"].as<JsonString>();
+    const JsonString labelString = entry["label"].as<JsonString>();
+    const char *kind = kindString.c_str();
+    const char *label = labelString.c_str();
+    const size_t labelLength = labelString.size();
+    if (item.token == 0 || labelLength == 0 ||
+        labelLength > destination_picker_protocol::MAX_LABEL_BYTES ||
+        memchr(label, '\0', labelLength) != nullptr ||
+        !destination_picker_protocol::isValidUtf8(label, labelLength)) {
+      Serial.println("BLE Destination: rejected invalid token or label");
+      return false;
+    }
+    for (uint8_t i = 0; i < candidate.count; i++) {
+      if (candidate.items[i].token == item.token) {
+        Serial.println("BLE Destination: rejected duplicate token");
+        return false;
+      }
+    }
+
+    if (kindString.size() == 8 && memcmp(kind, "favorite", 8) == 0) {
+      if (sawRecent || ++favoriteCount >
+                           destination_picker_protocol::MAX_FAVORITES) {
+        Serial.println("BLE Destination: rejected favorite ordering/count");
+        return false;
+      }
+      item.kind = DestinationKind::Favorite;
+    } else if (kindString.size() == 6 && memcmp(kind, "recent", 6) == 0) {
+      sawRecent = true;
+      if (++recentCount > destination_picker_protocol::MAX_RECENTS) {
+        Serial.println("BLE Destination: rejected recent count");
+        return false;
+      }
+      item.kind = DestinationKind::Recent;
+    } else {
+      Serial.println("BLE Destination: rejected unknown item kind");
+      return false;
+    }
+    memcpy(item.label, label, labelLength);
+    item.label[labelLength] = '\0';
+    candidate.items[candidate.count++] = item;
+  }
+
+  portENTER_CRITICAL(&destinationPickerMux);
+  candidate.revision = destinationCatalog.revision + 1;
+  destinationCatalog = candidate;
+  portEXIT_CRITICAL(&destinationPickerMux);
+  Serial.printf("BLE Destination: committed generation=%lu items=%u\n",
+                (unsigned long)candidate.generation, candidate.count);
+  return true;
+}
+
+static bool handleDestinationPickerPayload(const std::string &value,
+                                           const char *authLabel) {
+  if (hasPrefix(value, "DLST")) {
+    if (!requireAuthenticated(authLabel)) {
+      return true;
+    }
+    if (destinationCatalogReassemblerMutex == nullptr ||
+        xSemaphoreTake(destinationCatalogReassemblerMutex,
+                       pdMS_TO_TICKS(100)) != pdTRUE) {
+      Serial.println("BLE Destination: catalog reassembler unavailable");
+      return true;
+    }
+    const auto result = destinationCatalogReassembler.consume(
+        reinterpret_cast<const uint8_t *>(value.data()), value.size(),
+        millis());
+    std::string catalogJson;
+    if (result == destination_picker_protocol::ChunkResult::Complete) {
+      catalogJson = destinationCatalogReassembler.payload();
+      destinationCatalogReassembler.reset();
+    }
+    xSemaphoreGive(destinationCatalogReassemblerMutex);
+    if (result == destination_picker_protocol::ChunkResult::Rejected) {
+      Serial.println("BLE Destination: rejected catalog chunk");
+      return true;
+    }
+    if (result == destination_picker_protocol::ChunkResult::Complete) {
+      (void)commitDestinationCatalog(catalogJson);
+    }
+    return true;
+  }
+
+  if (!hasPrefix(value, "DNST")) {
+    return false;
+  }
+  if (!requireAuthenticated(authLabel)) {
+    return true;
+  }
+  if (value.size() < 11) {
+    Serial.println("BLE Destination: rejected short status");
+    return true;
+  }
+  const uint8_t *data = reinterpret_cast<const uint8_t *>(value.data());
+  const uint32_t generation =
+      destination_picker_protocol::readUInt32LE(data + 4);
+  const uint16_t token = destination_picker_protocol::readUInt16LE(data + 8);
+  const auto code = static_cast<DestinationPickerStatusCode>(data[10]);
+  if (code < DestinationPickerStatusCode::Calculating ||
+      code > DestinationPickerStatusCode::Stale) {
+    Serial.println("BLE Destination: rejected unknown status");
+    return true;
+  }
+
+  std::string message = value.substr(11);
+  if (message.size() > destination_picker_protocol::MAX_LABEL_BYTES ||
+      !destination_picker_protocol::isValidUtf8(message.data(),
+                                                message.size())) {
+    Serial.println("BLE Destination: rejected oversized status message");
+    return true;
+  }
+  if (message.empty()) {
+    switch (code) {
+    case DestinationPickerStatusCode::Calculating:
+      message = "Starting navigation...";
+      break;
+    case DestinationPickerStatusCode::Started:
+      message = "Navigation started";
+      break;
+    case DestinationPickerStatusCode::Stale:
+      message = "Destination list changed";
+      break;
+    case DestinationPickerStatusCode::Failed:
+    default:
+      message = "Could not start navigation";
+      break;
+    }
+  }
+  if (!applyDestinationResponseIfPending(code, generation, token,
+                                         message.c_str())) {
+    Serial.println("BLE Destination: ignored status for inactive request");
+    return true;
+  }
+  Serial.printf("BLE Destination: status=%u generation=%lu token=%u\n",
+                static_cast<unsigned>(code), (unsigned long)generation, token);
   return true;
 }
 
@@ -1463,6 +1797,12 @@ public:
     bleDebugStats.connectCount++;
     bleDebugStats.lastConnectMs = millis();
     pendingAuthNonce[0] = '\0';
+    if (destinationCatalogReassemblerMutex != nullptr &&
+        xSemaphoreTake(destinationCatalogReassemblerMutex,
+                       pdMS_TO_TICKS(100)) == pdTRUE) {
+      destinationCatalogReassembler.reset();
+      xSemaphoreGive(destinationCatalogReassemblerMutex);
+    }
     Serial.println("BLE: iOS client connected!");
     // Stop advertising when connected
     NimBLEDevice::stopAdvertising();
@@ -1490,6 +1830,13 @@ public:
     bleDebugStats.disconnectCount++;
     bleDebugStats.lastDisconnectMs = millis();
     pendingAuthNonce[0] = '\0';
+    if (finishDestinationRequestIfPending()) {
+      const DestinationPickerStatusSnapshot status =
+          getDestinationPickerStatusSnapshot();
+      setDestinationPickerStatus(DestinationPickerStatusCode::Failed,
+                                 status.generation, status.token,
+                                 "Open app to start navigation");
+    }
     Serial.println("BLE: iOS client disconnected");
     // Restart advertising
     Serial.println("BLE: Restarting advertising...");
@@ -1502,6 +1849,10 @@ public:
   void onWrite(NimBLECharacteristic *pChar) override {
     std::string value = pChar->getValue();
     if (value.empty()) {
+      return;
+    }
+
+    if (handleDestinationPickerPayload(value, "destination picker")) {
       return;
     }
 
@@ -1628,6 +1979,10 @@ class MySettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
     std::string value = pChar->getValue();
+
+    if (handleDestinationPickerPayload(value, "native destination picker")) {
+      return;
+    }
 
     if (hasPrefix(value, "MTRN")) {
       if (!requireAuthenticated("native map transfer control")) {
@@ -1768,6 +2123,11 @@ void BLENavigationServer::init(const char *deviceName) {
 
   Serial.println("BLE: Initializing NimBLE server...");
 
+  if (destinationCatalogReassemblerMutex == nullptr) {
+    destinationCatalogReassemblerMutex = xSemaphoreCreateMutexStatic(
+        &destinationCatalogReassemblerMutexStorage);
+  }
+
   initBleIdentityAndSecurity(deviceName);
   NimBLEDevice::setPower(ESP_PWR_LVL_P9); // Maximum power
   NimBLEDevice::setMTU(512);              // Increase MTU for route geometry
@@ -1836,6 +2196,28 @@ void BLENavigationServer::init(const char *deviceName) {
 
 void BLENavigationServer::process() {
   processPendingTransferControl();
+  const uint32_t nowMs = millis();
+  if (destinationCatalogReassemblerMutex != nullptr &&
+      xSemaphoreTake(destinationCatalogReassemblerMutex, 0) == pdTRUE) {
+    const bool expired = destinationCatalogReassembler.expire(nowMs);
+    xSemaphoreGive(destinationCatalogReassemblerMutex);
+    if (expired) {
+      Serial.println(
+          "BLE Destination: discarded incomplete catalog after timeout");
+    }
+  }
+  if (destinationRequestTimedOut(nowMs)) {
+    const DestinationPickerStatusSnapshot status =
+        getDestinationPickerStatusSnapshot();
+    setDestinationPickerStatus(DestinationPickerStatusCode::Failed,
+                               status.generation, status.token,
+                               "Open app to start navigation");
+  } else if (destinationStatusShouldExpire(nowMs)) {
+    const DestinationPickerStatusSnapshot status =
+        getDestinationPickerStatusSnapshot();
+    setDestinationPickerStatus(DestinationPickerStatusCode::Idle,
+                               status.generation, status.token, "");
+  }
 
   static uint32_t lastLog = 0;
   if (connected && !bleSessionAuthenticated &&

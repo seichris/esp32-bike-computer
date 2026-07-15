@@ -13,6 +13,7 @@
  */
 
 #include <Arduino.h>
+#include "destination_picker_protocol.hpp"
 #include "map_profile_protocol.hpp"
 
 // Forward declarations - actual NimBLE includes only in .cpp
@@ -118,6 +119,44 @@ NavigationData getCurrentNavigationData();
 bool hasCurrentNavigationData();
 int16_t getPhoneBatteryLevelPercent();
 bool isPhoneBatteryCharging();
+
+enum class DestinationKind : uint8_t {
+  Favorite = 1,
+  Recent = 2,
+};
+
+struct DeviceDestination {
+  uint16_t token = 0;
+  DestinationKind kind = DestinationKind::Recent;
+  char label[destination_picker_protocol::MAX_LABEL_BYTES + 1] = "";
+};
+
+struct DestinationCatalogSnapshot {
+  uint32_t generation = 0;
+  uint32_t revision = 0;
+  uint8_t count = 0;
+  DeviceDestination items[destination_picker_protocol::MAX_ITEMS]{};
+};
+
+enum class DestinationPickerStatusCode : uint8_t {
+  Idle = 0,
+  Calculating = 1,
+  Started = 2,
+  Failed = 3,
+  Stale = 4,
+};
+
+struct DestinationPickerStatusSnapshot {
+  uint32_t generation = 0;
+  uint32_t revision = 0;
+  uint16_t token = 0;
+  DestinationPickerStatusCode code = DestinationPickerStatusCode::Idle;
+  char message[destination_picker_protocol::MAX_LABEL_BYTES + 1] = "";
+};
+
+DestinationCatalogSnapshot getDestinationCatalogSnapshot();
+DestinationPickerStatusSnapshot getDestinationPickerStatusSnapshot();
+bool requestDestinationRoute(uint32_t generation, uint16_t token);
 
 struct BLEDebugStats {
   bool initialized = false;
