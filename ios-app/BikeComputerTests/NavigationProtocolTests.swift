@@ -2299,28 +2299,17 @@ struct NavigationProtocolTests {
         favorites.append(contentsOf: (1..<10).map {
             SavedDestination(name: "Favorite \($0)")
         })
-        var recents = [
-            SavedDestination(name: "Duplicate favorite", coordinate: favoriteCoordinate)
-        ]
-        recents.append(contentsOf: (0..<7).map {
-            SavedDestination(name: "Recent \($0)")
-        })
-
         let build = DeviceDestinationCatalogBuilder.build(
             favorites: favorites,
-            recents: recents,
             generation: 17
         )
         assertEqual(build.payload.version, 1, "destination catalog has an explicit schema version")
         assertEqual(build.payload.generation, 17, "destination catalog preserves its generation")
-        assertEqual(build.payload.items.count, 8, "destination catalog applies separate favorite and recent caps")
-        assertEqual(build.payload.items.prefix(3).map(\.kind),
+        assertEqual(build.payload.items.count, 3, "destination catalog is capped to three favorites")
+        assertEqual(build.payload.items.map(\.kind),
                     Array(repeating: .favorite, count: 3),
-                    "favorites are kept first and preserve order")
-        assertEqual(build.payload.items.suffix(5).map(\.kind),
-                    Array(repeating: .recent, count: 5),
-                    "favorites are excluded before recent destinations are capped")
-        assertEqual(build.destinationsByToken.count, 8,
+                    "the device catalog contains favorites only")
+        assertEqual(build.destinationsByToken.count, 3,
                     "every visible token maps back to an exact saved destination")
         assert(build.payload.items[0].label.utf8.count <= 64,
                "multibyte destination labels are truncated at a valid UTF-8 boundary")

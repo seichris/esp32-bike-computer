@@ -240,19 +240,16 @@ class BikeComputerCoordinator: ObservableObject {
         }
         .store(in: &cancellables)
 
-        Publishers.CombineLatest(
-            destinationStore.$favoriteDestinations,
-            destinationStore.$recentDestinations
-        )
-        .dropFirst()
-        .sink { [weak self] _, _ in
-            // Read the destination store after its @Published properties have
-            // committed the newly emitted favorites/recents arrays.
-            DispatchQueue.main.async { [weak self] in
-                self?.synchronizeDestinationCatalog()
+        destinationStore.$favoriteDestinations
+            .dropFirst()
+            .sink { [weak self] _ in
+                // Read the destination store after its @Published property has
+                // committed the newly emitted favorites array.
+                DispatchQueue.main.async { [weak self] in
+                    self?.synchronizeDestinationCatalog()
+                }
             }
-        }
-        .store(in: &cancellables)
+            .store(in: &cancellables)
 
         locationManager.$currentLocation
             .compactMap { $0 }
@@ -454,7 +451,6 @@ class BikeComputerCoordinator: ObservableObject {
         if nextGeneration == 0 { nextGeneration = 1 }
         let build = DeviceDestinationCatalogBuilder.build(
             favorites: destinationStore.favoriteDestinations,
-            recents: destinationStore.nonFavoriteRecentDestinations,
             generation: nextGeneration
         )
         guard force || build.sourceFingerprint != destinationCatalogFingerprint else {

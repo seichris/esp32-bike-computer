@@ -35,29 +35,20 @@ struct DeviceDestinationCatalogBuild {
 enum DeviceDestinationCatalogBuilder {
     static let version: UInt8 = 1
     static let favoriteLimit = 3
-    static let recentLimit = 5
     static let labelMaxBytes = 64
 
     static func build(
         favorites: [SavedDestination],
-        recents: [SavedDestination],
         generation: UInt32
     ) -> DeviceDestinationCatalogBuild {
         var selected: [(DeviceDestinationKind, SavedDestination)] = []
         var seenIdentities = Set<String>()
 
-        func append(_ destinations: [SavedDestination], kind: DeviceDestinationKind, limit: Int) {
-            var added = 0
-            for destination in destinations where added < limit {
-                let identity = destinationIdentity(destination)
-                guard !destination.name.isEmpty, seenIdentities.insert(identity).inserted else { continue }
-                selected.append((kind, destination))
-                added += 1
-            }
+        for destination in favorites where selected.count < favoriteLimit {
+            let identity = destinationIdentity(destination)
+            guard !destination.name.isEmpty, seenIdentities.insert(identity).inserted else { continue }
+            selected.append((.favorite, destination))
         }
-
-        append(favorites, kind: .favorite, limit: favoriteLimit)
-        append(recents, kind: .recent, limit: recentLimit)
 
         var destinationsByToken: [UInt16: SavedDestination] = [:]
         let items = selected.enumerated().map { index, entry in

@@ -261,29 +261,28 @@ firmware and other board targets continue to use the existing navigation UI.
 
 ## Destination Picker
 
-The idle Map + Navigation overlay can mirror the companion app's saved
-destinations. iOS sends favorites first (up to 3), followed by recent searches
-(up to 5) after removing destinations already represented in favorites. Labels
-are non-empty UTF-8 strings of at most 64 bytes. Empty sections are omitted and
-an empty catalog is valid.
+The idle Map + Navigation overlay mirrors up to three favorites from the
+companion app. Recent searches are not sent or displayed. Labels are non-empty
+UTF-8 strings of at most 64 bytes, and an empty catalog is valid.
 
 When idle, the picker expands the bottom overlay to two-thirds of the display.
-It shows the three favorite rows first and keeps any recent-search rows
-available by vertical scrolling. Tapping the exposed map or pressing the
-BOOT/forward button dismisses the picker and restores the normal one-third
-guidance strip; a later forward press resumes normal screen cycling.
+It shows large, transparent destination rows with a small yellow star before
+each label. Tapping the exposed map or pressing the BOOT/forward button
+dismisses the picker and restores the normal one-third guidance strip; a later
+forward press resumes normal screen cycling.
 
 The logical catalog is versioned JSON:
 
 ```json
-{"version":1,"generation":17,"items":[{"token":1,"kind":"favorite","label":"Home"},{"token":2,"kind":"recent","label":"Cafe"}]}
+{"version":1,"generation":17,"items":[{"token":1,"kind":"favorite","label":"Home"},{"token":2,"kind":"favorite","label":"Work"}]}
 ```
 
 `generation` is a non-zero `UInt32`. Each item has a unique non-zero `UInt16`
-token. `kind` is `favorite` or `recent`, and all favorite items must precede all
-recent items. Coordinates and search queries remain private to the app; iOS
-keeps the token-to-`SavedDestination` mapping so an exact saved coordinate is
-used when available.
+token and uses `kind: favorite`. For schema-v1 compatibility, firmware still
+accepts correctly ordered `recent` items from older apps but does not render
+them. Coordinates and search queries remain private to the app; iOS keeps the
+token-to-`SavedDestination` mapping so an exact saved coordinate is used when
+available.
 
 iOS chunks the JSON over either authenticated command route:
 
@@ -323,8 +322,8 @@ last valid catalog remains in RAM across disconnects, while tapping it without
 an authenticated app connection shows `Open app to start navigation`.
 
 iOS republishes the catalog after authenticated capability negotiation, any
-favorite/recent change, reconnect, and navigation stop. The logical catalog is
-queued atomically on iOS so write-queue pressure cannot expose a partial new
+favorite change, reconnect, and navigation stop. The logical catalog is queued
+atomically on iOS so write-queue pressure cannot expose a partial new
 generation.
 
 ## OSM Map Blocks
