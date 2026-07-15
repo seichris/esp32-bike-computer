@@ -55,7 +55,13 @@ static void setDistanceLabel(lv_obj_t *label, uint32_t meters) {
   if (meters >= 10000) {
     lv_label_set_text_fmt(label, "%lu km", (unsigned long)(meters / 1000));
   } else if (meters >= 1000) {
-    lv_label_set_text_fmt(label, "%.1f km", meters / 1000.0f);
+    // LVGL's built-in formatter has float support disabled in lv_conf.h.
+    // Format tenths using integers so 1-9.9 km does not render as a literal
+    // "f" from the unsupported %.1f conversion.
+    const uint32_t roundedDeciKilometers = (meters + 50U) / 100U;
+    lv_label_set_text_fmt(label, "%lu.%lu km",
+                          (unsigned long)(roundedDeciKilometers / 10U),
+                          (unsigned long)(roundedDeciKilometers % 10U));
   } else {
     lv_label_set_text_fmt(label, "%lu m", (unsigned long)meters);
   }
