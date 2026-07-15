@@ -63,6 +63,20 @@ func appendUInt32LE(_ value: UInt32, to data: inout Data) {
     data.append(UInt8((value >> 24) & 0xFF))
 }
 
+func zipCRC32(_ data: Data) -> UInt32 {
+    var crc = UInt32.max
+    for byte in data {
+        var value = (crc ^ UInt32(byte)) & 0xff
+        for _ in 0..<8 {
+            value = value & 1 == 1
+                ? (value >> 1) ^ 0xedb8_8320
+                : value >> 1
+        }
+        crc = (crc >> 8) ^ value
+    }
+    return crc ^ UInt32.max
+}
+
 private extension Data {
     init?(hex: String) {
         guard hex.count.isMultiple(of: 2) else { return nil }
@@ -87,7 +101,7 @@ func makeStoredZip(entries: [(String, Data)]) -> Data {
         appendUInt16LE(0, to: &zip)
         appendUInt16LE(0, to: &zip)
         appendUInt16LE(0, to: &zip)
-        appendUInt32LE(0, to: &zip)
+        appendUInt32LE(zipCRC32(body), to: &zip)
         appendUInt32LE(UInt32(body.count), to: &zip)
         appendUInt32LE(UInt32(body.count), to: &zip)
         appendUInt16LE(UInt16(name.count), to: &zip)
@@ -96,6 +110,24 @@ func makeStoredZip(entries: [(String, Data)]) -> Data {
         zip.append(body)
     }
     return zip
+}
+
+actor AsyncTestGate {
+    private var isOpen = false
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { continuation in
+            waiter = continuation
+        }
+    }
+
+    func open() {
+        isOpen = true
+        waiter?.resume()
+        waiter = nil
+    }
 }
 
 final class OfflineMapTestURLProtocol: URLProtocol {
@@ -439,6 +471,8 @@ struct NavigationProtocolTests {
         testOfflineMapPolygonClosesRing()
         testOfflineMapStoredZipReader()
         testOfflineMapPackPreviewReader()
+        testOfflineMapPreviewLoadRegistry()
+        await testOfflineMapCompatibilityArchiveCancellation()
         await testOfflineMapArchiveValidationCancellation()
         testCachedMapInstalledIdentityUsesManifestSession()
         testOfflineMapManifestDecoding()
@@ -3823,6 +3857,17 @@ struct NavigationProtocolTests {
             ),
             "replacing a pack at the same URL explicitly reloads its invalidated preview"
         )
+        assert(
+            managerSource.contains("OfflineMapPackCompatibilityArchive.make(") &&
+                managerSource.contains(
+                    "archiveURL: compatibilityArchiveURL ?? packURL"
+                ) &&
+                managerSource.contains("useForegroundTransfer = true") &&
+                managerSource.contains("allowLocalStorageFailure:") &&
+                managerSource.contains("catch is CancellationError") &&
+                managerSource.contains("OfflineMapPackCompatibilityArchive.remove("),
+            "preview ZIPs retain resumable background upload through a sanitized archive"
+        )
     }
 
     @MainActor
@@ -3954,7 +3999,7 @@ struct NavigationProtocolTests {
         assertEqual(archive.manifestEntry?.path, "manifest.json", "zip reader exposes manifest entry")
         assertEqual(try? archive.data(for: archive.mapFileEntries[0]), block, "zip reader reads entry data")
         assert(
-            !MapArchiveUploadStrategy.requiresForegroundUpload(for: archive),
+            !MapArchiveUploadStrategy.requiresCompatibilityArchive(for: archive),
             "legacy ZIPs without preview entries retain background archive transfer"
         )
 
@@ -4008,6 +4053,8 @@ struct NavigationProtocolTests {
             .appendingPathComponent("offline-map-preview-\(UUID().uuidString).zip")
         try? makeStoredZip(entries: [
             ("manifest.json", manifest),
+            ("ATTRIBUTION.txt", Data("OpenStreetMap contributors".utf8)),
+            ("LICENSES/OpenStreetMap-ODbL.txt", Data("ODbL".utf8)),
             ("preview.png", preview),
             ("VECTMAP/map-1/+0032+0008/123_456.fmb", Data("map-block".utf8)),
         ]).write(to: url)
@@ -4023,8 +4070,77 @@ struct NavigationProtocolTests {
             return
         }
         assert(
-            MapArchiveUploadStrategy.requiresForegroundUpload(for: previewArchive),
-            "preview ZIPs use per-file transfer so older firmware never receives preview.png"
+            MapArchiveUploadStrategy.requiresCompatibilityArchive(for: previewArchive),
+            "preview ZIPs require a device-compatible upload archive"
+        )
+        let compatibilityURL = try! OfflineMapPackCompatibilityArchive.make(
+            from: previewArchive
+        )
+        defer { OfflineMapPackCompatibilityArchive.remove(compatibilityURL) }
+        let compatibilityArchive = try! OfflineMapPackArchive(url: compatibilityURL)
+        let orphanURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bike-map-device-\(UUID().uuidString).zip")
+        try! Data("orphan".utf8).write(to: orphanURL)
+        OfflineMapPackCompatibilityArchive.removeOrphans()
+        assert(
+            FileManager.default.fileExists(atPath: compatibilityURL.path),
+            "orphan cleanup protects a compatibility archive in active preparation"
+        )
+        assert(
+            !FileManager.default.fileExists(atPath: orphanURL.path),
+            "orphan cleanup removes a compatibility archive left by a prior process"
+        )
+        assert(
+            !compatibilityArchive.entries.contains(where: { $0.path == "preview.png" }),
+            "device compatibility archive omits the local-only preview"
+        )
+        assert(
+            compatibilityArchive.entries.contains(where: {
+                $0.path == "ATTRIBUTION.txt"
+            }) && compatibilityArchive.entries.contains(where: {
+                $0.path == "LICENSES/OpenStreetMap-ODbL.txt"
+            }),
+            "device compatibility archive preserves attribution and license files"
+        )
+        assert(
+            !MapArchiveUploadStrategy.requiresCompatibilityArchive(
+                for: compatibilityArchive
+            ),
+            "sanitized ZIP remains on the resumable background upload path"
+        )
+        assertEqual(
+            try? compatibilityArchive.data(for: compatibilityArchive.manifestEntry!),
+            manifest,
+            "device compatibility archive preserves the manifest"
+        )
+        assertEqual(
+            try? compatibilityArchive.data(for: compatibilityArchive.mapFileEntries[0]),
+            Data("map-block".utf8),
+            "device compatibility archive preserves map payloads"
+        )
+        let compatibilityData = try! Data(contentsOf: compatibilityURL)
+        let endRecordOffset = compatibilityData.count - 22
+        assertEqual(
+            readUInt32LE(compatibilityData, offset: endRecordOffset),
+            0x0605_4B50,
+            "device compatibility archive writes a ZIP end record"
+        )
+        assertEqual(
+            readUInt16LE(compatibilityData, offset: endRecordOffset + 10),
+            UInt16(compatibilityArchive.entries.count),
+            "device compatibility archive indexes every retained entry"
+        )
+        let unzip = Process()
+        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        unzip.arguments = ["-t", compatibilityURL.path]
+        unzip.standardOutput = Pipe()
+        unzip.standardError = Pipe()
+        try! unzip.run()
+        unzip.waitUntilExit()
+        assertEqual(
+            unzip.terminationStatus,
+            0,
+            "device compatibility archive is structurally valid ZIP"
         )
         assertEqual(
             OfflineMapPackPreviewReader.imageData(fromManifestData: manifest),
@@ -4093,6 +4209,79 @@ struct NavigationProtocolTests {
             OfflineMapPackPreviewReader.imageData(for: corruptURL),
             nil,
             "corrupt previews fall back without throwing"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapPreviewLoadRegistry() {
+        let registry = OfflineMapPreviewLoadRegistry()
+        let key = "/maps/shanghai.zip"
+        let stale = registry.begin(for: key)
+        registry.invalidate(key)
+        let current = registry.begin(for: key)
+
+        assert(
+            !registry.finishIfCurrent(stale, for: key),
+            "a stale preview completion cannot retire its replacement load"
+        )
+        assert(
+            registry.finishIfCurrent(current, for: key),
+            "the replacement preview load remains current and publishable"
+        )
+        let invalidated = registry.begin(for: key)
+        registry.removeAll()
+        assert(
+            !registry.finishIfCurrent(invalidated, for: key),
+            "cache reset invalidates every outstanding preview load"
+        )
+    }
+
+    static func testOfflineMapCompatibilityArchiveCancellation() async {
+        let sourceURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-compat-cancel-\(UUID().uuidString).zip")
+        let mapPath = "VECTMAP/map-1/+0032+0008/123_456.fmb"
+        try? makeStoredZip(entries: [
+            ("manifest.json", Data("{\"mapId\":\"map-1\"}".utf8)),
+            ("preview.png", Data("preview".utf8)),
+            (mapPath, Data(repeating: 0x5a, count: 2 * 1_048_576)),
+        ]).write(to: sourceURL)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        guard let archive = try? OfflineMapPackArchive(url: sourceURL) else {
+            assert(false, "compatibility cancellation archive should parse")
+            return
+        }
+        func temporaryCompatibilityPaths() -> Set<String> {
+            let files = (try? FileManager.default.contentsOfDirectory(
+                at: FileManager.default.temporaryDirectory,
+                includingPropertiesForKeys: nil
+            )) ?? []
+            return Set(files.filter {
+                $0.lastPathComponent.hasPrefix("bike-map-device-") &&
+                    $0.pathExtension.lowercased() == "zip"
+            }.map { $0.standardizedFileURL.path })
+        }
+
+        let pathsBefore = temporaryCompatibilityPaths()
+        let gate = AsyncTestGate()
+        let preparation = Task.detached {
+            await gate.wait()
+            return try OfflineMapPackCompatibilityArchive.make(from: archive)
+        }
+        preparation.cancel()
+        await gate.open()
+        do {
+            let unexpectedURL = try await preparation.value
+            OfflineMapPackCompatibilityArchive.remove(unexpectedURL)
+            assert(false, "cancelled compatibility preparation should not publish a ZIP")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            assert(false, "cancelled compatibility preparation should throw CancellationError")
+        }
+        assertEqual(
+            temporaryCompatibilityPaths(),
+            pathsBefore,
+            "cancelled compatibility preparation removes its registered partial ZIP"
         )
     }
 
@@ -4334,6 +4523,30 @@ struct NavigationProtocolTests {
                 for: OfflineMapPlatformError.serverStatus(500, "write failed")
             ),
             "device failures are not disguised as compatibility fallback"
+        )
+        let outOfSpace = NSError(
+            domain: NSCocoaErrorDomain,
+            code: NSFileWriteOutOfSpaceError
+        )
+        assert(
+            MapArchiveUploadFallback.shouldUseForeground(
+                for: outOfSpace,
+                allowLocalStorageFailure: true
+            ),
+            "compatibility staging falls back when local storage is exhausted"
+        )
+        assert(
+            !MapArchiveUploadFallback.shouldUseForeground(
+                for: outOfSpace
+            ),
+            "ordinary archive failures do not broaden the compatibility fallback"
+        )
+        assert(
+            !MapArchiveUploadFallback.shouldUseForeground(
+                for: CancellationError(),
+                allowLocalStorageFailure: true
+            ),
+            "cancellation never becomes an implicit foreground transfer"
         )
     }
 

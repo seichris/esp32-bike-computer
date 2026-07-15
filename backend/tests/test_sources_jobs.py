@@ -219,6 +219,15 @@ class SourceAndJobTests(unittest.TestCase):
                 {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
             )
 
+            retryable = store.update_status(
+                job.job_id,
+                JobStatus.FAILED,
+                finished=True,
+            )
+            self.assertEqual(
+                retryable.source_region.preview_geometry,
+                source.preview_geometry,
+            )
             terminal = store.update_status(
                 job.job_id,
                 JobStatus.CANCELLED,
@@ -226,8 +235,24 @@ class SourceAndJobTests(unittest.TestCase):
             )
             stored = json.loads((Path(tmp) / f"{job.job_id}.json").read_text())
 
+            exhausted = MapJobService(SourceIndex([source]), store).create_job(
+                {"mode": "custom_bbox", "bbox": [103.70, 1.20, 103.90, 1.35]}
+            )
+            exhausted.attempts = exhausted.max_attempts
+            store.save(exhausted)
+            terminal_failure = store.update_status(
+                exhausted.job_id,
+                JobStatus.FAILED,
+                finished=True,
+            )
+            stored_failure = json.loads(
+                (Path(tmp) / f"{exhausted.job_id}.json").read_text()
+            )
+
         self.assertIsNone(terminal.source_region.preview_geometry)
         self.assertNotIn("previewGeometry", stored["sourceRegion"])
+        self.assertIsNone(terminal_failure.source_region.preview_geometry)
+        self.assertNotIn("previewGeometry", stored_failure["sourceRegion"])
 
     def test_create_job_persists_request(self):
         with tempfile.TemporaryDirectory() as tmp:

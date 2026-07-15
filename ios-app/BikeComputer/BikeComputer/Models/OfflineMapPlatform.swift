@@ -578,6 +578,7 @@ struct OfflineMapPackEntry: Equatable {
     let path: String
     let offset: UInt64
     let byteCount: Int
+    let crc32: UInt32
 }
 
 nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
@@ -890,6 +891,7 @@ struct OfflineMapPackArchive {
 
             let flags = header.uint16LE(at: 2)
             let compression = header.uint16LE(at: 4)
+            let crc32 = header.uint32LE(at: 10)
             let compressedSize = UInt64(header.uint32LE(at: 14))
             let uncompressedSize = UInt64(header.uint32LE(at: 18))
             let nameLength = Int(header.uint16LE(at: 22))
@@ -926,7 +928,8 @@ struct OfflineMapPackArchive {
                 entries.append(OfflineMapPackEntry(
                     path: path,
                     offset: dataOffset,
-                    byteCount: Int(compressedSize)
+                    byteCount: Int(compressedSize),
+                    crc32: crc32
                 ))
             }
             offset = dataOffset + compressedSize
@@ -955,6 +958,209 @@ struct OfflineMapPackArchive {
         return path.split(separator: "/").allSatisfy { part in
             !part.isEmpty && part != "." && part != ".." && !part.hasPrefix(".")
         }
+    }
+}
+
+nonisolated enum OfflineMapPackCompatibilityArchive {
+    private static let filenamePrefix = "bike-map-device-"
+    private static let activePathsLock = NSLock()
+    nonisolated(unsafe) private static var activePaths: Set<String> = []
+
+    private struct CentralDirectoryEntry {
+        let name: Data
+        let byteCount: UInt32
+        let crc32: UInt32
+        let localHeaderOffset: UInt32
+    }
+
+    static func make(from archive: OfflineMapPackArchive) throws -> URL {
+        let entries = archive.entries.filter { $0.path != "preview.png" }
+        guard entries.contains(where: { $0.path == "manifest.json" }),
+              entries.contains(where: { $0.path.hasPrefix("VECTMAP/") }),
+              Set(entries.map(\.path)).count == entries.count,
+              entries.count <= Int(UInt16.max) else {
+            throw OfflineMapPlatformError.invalidPack(
+                "compatibility archive has invalid entries"
+            )
+        }
+
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(filenamePrefix)\(UUID().uuidString).zip")
+        activePathsLock.lock()
+        let created = FileManager.default.createFile(
+            atPath: outputURL.path,
+            contents: nil
+        )
+        if created {
+            activePaths.insert(outputURL.standardizedFileURL.path)
+        }
+        activePathsLock.unlock()
+        guard created else {
+            throw OfflineMapPlatformError.invalidPack(
+                "compatibility archive could not be created"
+            )
+        }
+
+        do {
+            let input = try FileHandle(forReadingFrom: archive.url)
+            let output = try FileHandle(forWritingTo: outputURL)
+            defer {
+                try? input.close()
+                try? output.close()
+            }
+
+            var outputOffset: UInt64 = 0
+            var directoryEntries: [CentralDirectoryEntry] = []
+            directoryEntries.reserveCapacity(entries.count)
+
+            for entry in entries {
+                try Task.checkCancellation()
+                let name = Data(entry.path.utf8)
+                guard !name.isEmpty,
+                      name.count <= Int(UInt16.max),
+                      entry.byteCount >= 0,
+                      UInt64(entry.byteCount) <= UInt64(UInt32.max),
+                      outputOffset <= UInt64(UInt32.max) else {
+                    throw OfflineMapPlatformError.invalidPack(
+                        "compatibility archive entry is too large"
+                    )
+                }
+
+                let byteCount = UInt32(entry.byteCount)
+                var localHeader = Data()
+                appendUInt32LE(0x0403_4B50, to: &localHeader)
+                appendUInt16LE(20, to: &localHeader)
+                appendUInt16LE(0, to: &localHeader)
+                appendUInt16LE(0, to: &localHeader)
+                appendUInt16LE(0, to: &localHeader)
+                appendUInt16LE(0, to: &localHeader)
+                appendUInt32LE(entry.crc32, to: &localHeader)
+                appendUInt32LE(byteCount, to: &localHeader)
+                appendUInt32LE(byteCount, to: &localHeader)
+                appendUInt16LE(UInt16(name.count), to: &localHeader)
+                appendUInt16LE(0, to: &localHeader)
+                try output.write(contentsOf: localHeader)
+                try output.write(contentsOf: name)
+
+                let localHeaderOffset = UInt32(outputOffset)
+                outputOffset += UInt64(localHeader.count + name.count)
+                try input.seek(toOffset: entry.offset)
+                var remaining = entry.byteCount
+                while remaining > 0 {
+                    try Task.checkCancellation()
+                    let chunk = try input.read(
+                        upToCount: min(remaining, 1_048_576)
+                    ) ?? Data()
+                    guard !chunk.isEmpty else {
+                        throw OfflineMapPlatformError.invalidPack(
+                            "truncated entry \(entry.path)"
+                        )
+                    }
+                    try output.write(contentsOf: chunk)
+                    remaining -= chunk.count
+                    outputOffset += UInt64(chunk.count)
+                }
+
+                directoryEntries.append(CentralDirectoryEntry(
+                    name: name,
+                    byteCount: byteCount,
+                    crc32: entry.crc32,
+                    localHeaderOffset: localHeaderOffset
+                ))
+            }
+
+            guard outputOffset <= UInt64(UInt32.max) else {
+                throw OfflineMapPlatformError.invalidPack(
+                    "compatibility archive is too large"
+                )
+            }
+            let directoryOffset = UInt32(outputOffset)
+            for entry in directoryEntries {
+                try Task.checkCancellation()
+                var centralHeader = Data()
+                appendUInt32LE(0x0201_4B50, to: &centralHeader)
+                appendUInt16LE(0x0314, to: &centralHeader)
+                appendUInt16LE(20, to: &centralHeader)
+                appendUInt16LE(0, to: &centralHeader)
+                appendUInt16LE(0, to: &centralHeader)
+                appendUInt16LE(0, to: &centralHeader)
+                appendUInt16LE(0, to: &centralHeader)
+                appendUInt32LE(entry.crc32, to: &centralHeader)
+                appendUInt32LE(entry.byteCount, to: &centralHeader)
+                appendUInt32LE(entry.byteCount, to: &centralHeader)
+                appendUInt16LE(UInt16(entry.name.count), to: &centralHeader)
+                appendUInt16LE(0, to: &centralHeader)
+                appendUInt16LE(0, to: &centralHeader)
+                appendUInt16LE(0, to: &centralHeader)
+                appendUInt16LE(0, to: &centralHeader)
+                appendUInt32LE(UInt32(0o100644) << 16, to: &centralHeader)
+                appendUInt32LE(entry.localHeaderOffset, to: &centralHeader)
+                try output.write(contentsOf: centralHeader)
+                try output.write(contentsOf: entry.name)
+                outputOffset += UInt64(centralHeader.count + entry.name.count)
+            }
+
+            let directorySize = outputOffset - UInt64(directoryOffset)
+            guard directorySize <= UInt64(UInt32.max),
+                  outputOffset <= UInt64(UInt32.max) else {
+                throw OfflineMapPlatformError.invalidPack(
+                    "compatibility archive directory is too large"
+                )
+            }
+            var endRecord = Data()
+            appendUInt32LE(0x0605_4B50, to: &endRecord)
+            appendUInt16LE(0, to: &endRecord)
+            appendUInt16LE(0, to: &endRecord)
+            appendUInt16LE(UInt16(directoryEntries.count), to: &endRecord)
+            appendUInt16LE(UInt16(directoryEntries.count), to: &endRecord)
+            appendUInt32LE(UInt32(directorySize), to: &endRecord)
+            appendUInt32LE(directoryOffset, to: &endRecord)
+            appendUInt16LE(0, to: &endRecord)
+            try output.write(contentsOf: endRecord)
+            try output.synchronize()
+        } catch {
+            remove(outputURL)
+            throw error
+        }
+        return outputURL
+    }
+
+    static func remove(_ url: URL) {
+        activePathsLock.lock()
+        activePaths.remove(url.standardizedFileURL.path)
+        activePathsLock.unlock()
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    static func removeOrphans() {
+        let fileManager = FileManager.default
+        let temporaryDirectory = fileManager.temporaryDirectory
+        let candidates = (try? fileManager.contentsOfDirectory(
+            at: temporaryDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        activePathsLock.lock()
+        let protectedPaths = activePaths
+        activePathsLock.unlock()
+        for candidate in candidates where
+            candidate.lastPathComponent.hasPrefix(filenamePrefix) &&
+            candidate.pathExtension.lowercased() == "zip" &&
+            !protectedPaths.contains(candidate.standardizedFileURL.path) {
+            try? fileManager.removeItem(at: candidate)
+        }
+    }
+
+    private static func appendUInt16LE(_ value: UInt16, to data: inout Data) {
+        data.append(UInt8(value & 0xff))
+        data.append(UInt8(value >> 8))
+    }
+
+    private static func appendUInt32LE(_ value: UInt32, to data: inout Data) {
+        data.append(UInt8(value & 0xff))
+        data.append(UInt8((value >> 8) & 0xff))
+        data.append(UInt8((value >> 16) & 0xff))
+        data.append(UInt8((value >> 24) & 0xff))
     }
 }
 
