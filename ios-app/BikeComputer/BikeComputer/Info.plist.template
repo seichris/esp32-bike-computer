@@ -2,6 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+
 	<!-- 
 	Info.plist Configuration Template for BikeComputer
 	
@@ -47,10 +50,6 @@
 		<key>Navigation</key>
 		<string>BikeComputer needs precise location for accurate turn-by-turn navigation.</string>
 	</dict>
-	
-	<!-- Required Background Fetch -->
-	<key>UIApplicationExitsOnSuspend</key>
-	<false/>
 	
 	<!-- Supported Interface Orientations -->
 	<key>UISupportedInterfaceOrientations</key>
