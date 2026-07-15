@@ -236,6 +236,15 @@ typealias OfflineMapSnapshotOperation = @MainActor (
     OfflineMapPreviewBounds
 ) async throws -> Data?
 
+nonisolated struct OfflineMapPreviewLoadResult: Sendable {
+    let snapshotData: Data?
+    let packContent: OfflineMapPackPreviewContent?
+}
+
+typealias OfflineMapPreviewLoadOperation = @MainActor (
+    URL
+) async -> OfflineMapPreviewLoadResult
+
 #if canImport(UIKit)
 nonisolated enum SavedMapSnapshotPreviewStore {
     static let maximumImageBytes = 1_048_576
@@ -1255,6 +1264,7 @@ final class OfflineMapManager: ObservableObject {
     private let defaults: UserDefaults
     private let mapPlatformSession: URLSession
     private let packDownload: PackDownloadOperation
+    private let previewLoad: OfflineMapPreviewLoadOperation
     private let mapSnapshot: OfflineMapSnapshotOperation
     private let cacheDirectoryOverride: URL?
     private let installationCredentialStore: OfflineMapInstallationCredentialStore
@@ -1290,6 +1300,19 @@ final class OfflineMapManager: ObservableObject {
                 onByteProgress: onByteProgress
             )
         },
+        previewLoad: @escaping OfflineMapPreviewLoadOperation = { packURL in
+            await Task.detached(priority: .utility) {
+#if canImport(UIKit)
+                let snapshotData = SavedMapSnapshotPreviewStore.imageData(for: packURL)
+#else
+                let snapshotData: Data? = nil
+#endif
+                return OfflineMapPreviewLoadResult(
+                    snapshotData: snapshotData,
+                    packContent: OfflineMapPackPreviewReader.content(for: packURL)
+                )
+            }.value
+        },
         mapSnapshot: @escaping OfflineMapSnapshotOperation = { bounds in
             try await OfflineMapSnapshotPreviewRenderer.pngData(for: bounds)
         }
@@ -1298,6 +1321,7 @@ final class OfflineMapManager: ObservableObject {
         self.defaults = defaults
         self.mapPlatformSession = mapPlatformSession
         self.packDownload = packDownload
+        self.previewLoad = previewLoad
         self.mapSnapshot = mapSnapshot
         self.cacheDirectoryOverride = cacheDirectory
         self.installationCredentialStore = OfflineMapInstallationCredentialStore(defaults: defaults)
@@ -1674,13 +1698,9 @@ final class OfflineMapManager: ObservableObject {
             return
         }
         let token = previewLoadRegistry.begin(for: key)
+        let previewLoad = self.previewLoad
         previewLoadTasks[key] = Task { [weak self] in
-            let loaded = await Task.detached(priority: .utility) {
-                (
-                    snapshotData: SavedMapSnapshotPreviewStore.imageData(for: packURL),
-                    packContent: OfflineMapPackPreviewReader.content(for: packURL)
-                )
-            }.value
+            let loaded = await previewLoad(packURL)
             guard let self else { return }
             if let image = self.usableSnapshotImage(from: loaded.snapshotData) {
                 guard self.previewLoadRegistry.finishIfCurrent(token, for: key) else {
@@ -1696,16 +1716,15 @@ final class OfflineMapManager: ObservableObject {
                 self.packPreviewImages[key] = image
                 return
             }
-            if loaded.snapshotData != nil {
-                try? SavedMapSnapshotPreviewStore.delete(for: packURL)
-            }
-
             guard self.previewLoadRegistry.isCurrent(token, for: key),
                   !Task.isCancelled,
                   self.cachedPackURLs.contains(where: {
                       self.previewCacheKey(for: $0) == key
                   }) else {
                 return
+            }
+            if loaded.snapshotData != nil {
+                try? SavedMapSnapshotPreviewStore.delete(for: packURL)
             }
             var publishedFallback = false
             if let image = self.usablePreviewImage(from: loaded.packContent?.imageData) {

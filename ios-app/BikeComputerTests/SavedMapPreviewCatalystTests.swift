@@ -354,6 +354,84 @@ struct SavedMapPreviewCatalystTests {
             fail("a uniform snapshot should not be persisted")
         }
 
+        let staleMapID = "custom-map-stale-preview"
+        let stalePackURL = cacheDirectory.appendingPathComponent("\(staleMapID).zip")
+        do {
+            let staleManifest = try JSONSerialization.data(withJSONObject: [
+                "schemaVersion": 1,
+                "mapId": staleMapID,
+                "bounds": [120.90, 30.70, 121.95, 31.55],
+            ])
+            try storedZip(entries: [
+                ("manifest.json", staleManifest),
+                (
+                    "VECTMAP/\(staleMapID)/+0000+0000/1.fmb",
+                    Data("map-block".utf8)
+                ),
+            ]).write(to: stalePackURL)
+            try SavedMapSnapshotPreviewStore.save(
+                uniformSnapshotPNG,
+                for: stalePackURL
+            )
+        } catch {
+            fail("stale preview race fixture should write: \(error)")
+        }
+        guard let staleSnapshotData = SavedMapSnapshotPreviewStore.imageData(
+            for: stalePackURL
+        ) else {
+            fail("stale preview race should capture its invalid snapshot")
+        }
+        let staleLoadResult = OfflineMapPreviewLoadResult(
+            snapshotData: staleSnapshotData,
+            packContent: OfflineMapPackPreviewReader.content(for: stalePackURL)
+        )
+        var staleLoadStarted = false
+        var staleLoadReturned = false
+        var staleLoadContinuation: CheckedContinuation<
+            OfflineMapPreviewLoadResult,
+            Never
+        >?
+        let staleLoadManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            previewLoad: { _ in
+                staleLoadStarted = true
+                let result = await withCheckedContinuation { continuation in
+                    staleLoadContinuation = continuation
+                }
+                staleLoadReturned = true
+                return result
+            },
+            mapSnapshot: { _ in nil }
+        )
+        staleLoadManager.loadPreviewIfNeeded(forCachedPack: stalePackURL)
+        let staleStartedDeadline = Date().addingTimeInterval(3)
+        while !staleLoadStarted && Date() < staleStartedDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard staleLoadStarted, let continuation = staleLoadContinuation else {
+            fail("stale preview load should start")
+        }
+        staleLoadManager.deleteCachedPack(at: stalePackURL)
+        do {
+            try SavedMapSnapshotPreviewStore.save(snapshotPNG, for: stalePackURL)
+        } catch {
+            fail("replacement snapshot should save during stale-load race: \(error)")
+        }
+        staleLoadContinuation = nil
+        continuation.resume(returning: staleLoadResult)
+        let staleReturnedDeadline = Date().addingTimeInterval(3)
+        while !staleLoadReturned && Date() < staleReturnedDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard staleLoadReturned else {
+            fail("non-cooperative stale preview load should return")
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        guard SavedMapSnapshotPreviewStore.imageData(for: stalePackURL) == snapshotPNG else {
+            fail("a stale invalid-preview load must not delete a replacement snapshot")
+        }
+
         var generatedBounds: OfflineMapPreviewBounds?
         var snapshotContinuation: CheckedContinuation<Data?, Never>?
         var gatedSnapshotStarted = false
