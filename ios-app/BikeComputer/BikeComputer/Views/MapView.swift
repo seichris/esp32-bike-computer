@@ -442,7 +442,18 @@ struct MapViewContainer: UIViewRepresentable {
             annotation.calloutAddress = address
             guard let annotationView = mapView.view(for: annotation),
                   let addressLabel = annotationView.detailCalloutAccessoryView as? UILabel else { return }
+
+            let calloutWasVisible = annotationView.isSelected
             addressLabel.text = address
+            addressLabel.invalidateIntrinsicContentSize()
+
+            // MapKit measures the standard callout when it first appears. The
+            // placeholder is one line tall, so rebuild a visible callout after
+            // reverse geocoding supplies a multiline address.
+            if calloutWasVisible {
+                mapView.deselectAnnotation(annotation, animated: false)
+                mapView.selectAnnotation(annotation, animated: false)
+            }
         }
 
         private func bearing(from start: CLLocationCoordinate2D, to end: CLLocationCoordinate2D) -> CLLocationDirection {
@@ -516,9 +527,12 @@ struct MapViewContainer: UIViewRepresentable {
 
                 let addressLabel = UILabel()
                 addressLabel.font = .preferredFont(forTextStyle: .subheadline)
+                addressLabel.adjustsFontForContentSizeCategory = true
                 addressLabel.numberOfLines = 0
+                addressLabel.lineBreakMode = .byWordWrapping
                 addressLabel.text = destinationAnnotation.calloutAddress
                 addressLabel.preferredMaxLayoutWidth = 240
+                addressLabel.setContentCompressionResistancePriority(.required, for: .vertical)
                 annotationView?.detailCalloutAccessoryView = addressLabel
                 
                 return annotationView
