@@ -89,9 +89,16 @@ enum DeviceDestinationCatalogBuilder {
 
     static func utf8Prefix(_ value: String, maxBytes: Int) -> String {
         guard maxBytes > 0 else { return "" }
-        var result = value
-            .replacingOccurrences(of: "\0", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var sanitized = ""
+        for scalar in value.unicodeScalars {
+            if scalar.value == 0 {
+                continue
+            }
+            sanitized.unicodeScalars.append(
+                CharacterSet.controlCharacters.contains(scalar) ? " " : scalar
+            )
+        }
+        var result = sanitized.trimmingCharacters(in: .whitespacesAndNewlines)
         while result.utf8.count > maxBytes && !result.isEmpty {
             result.removeLast()
         }
@@ -110,6 +117,7 @@ enum DeviceDestinationCatalogBuilder {
 enum DeviceDestinationCatalogChunker {
     static let headerSize = 7
     static let maxChunkCount = 160
+    static let maxCatalogBytes = 4096
 
     static func frames(
         payload: DeviceDestinationCatalogPayload,
@@ -119,6 +127,7 @@ enum DeviceDestinationCatalogChunker {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         guard let data = try? encoder.encode(payload),
+              data.count <= maxCatalogBytes,
               maximumWriteLength > headerSize else {
             return nil
         }

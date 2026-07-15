@@ -2328,6 +2328,8 @@ struct NavigationProtocolTests {
                "UTF-8 truncation retains a useful destination label")
         assertEqual(DeviceDestinationCatalogBuilder.utf8Prefix("A\0B", maxBytes: 64),
                     "AB", "destination labels remove embedded nulls")
+        assertEqual(DeviceDestinationCatalogBuilder.utf8Prefix("A\nB", maxBytes: 64),
+                    "A B", "destination labels normalize embedded controls")
 
         guard let frames = DeviceDestinationCatalogChunker.frames(
             payload: build.payload,
@@ -2361,6 +2363,20 @@ struct NavigationProtocolTests {
             transferID: 1,
             maximumWriteLength: 7
         ) == nil, "a transport too small for the chunk header is rejected")
+        let oversizedPayload = DeviceDestinationCatalogPayload(
+            version: 1,
+            generation: 18,
+            items: [DeviceDestinationCatalogItem(
+                token: 1,
+                kind: .favorite,
+                label: String(repeating: "x", count: 5000)
+            )]
+        )
+        assert(DeviceDestinationCatalogChunker.frames(
+            payload: oversizedPayload,
+            transferID: 1,
+            maximumWriteLength: 64
+        ) == nil, "the sender enforces the firmware reassembly byte limit")
 
         var requestData = Data(DeviceBLEProtocol.destinationRequestPrefix.utf8)
         appendUInt32LE(17, to: &requestData)
