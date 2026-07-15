@@ -11,6 +11,9 @@ import Combine
 import CoreBluetooth
 import CryptoKit
 import Security
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct NavigationWriteEndpoint {
     let maximumWriteLength: Int
@@ -48,7 +51,8 @@ enum DeviceBLEProtocol {
     static let powerButtonHonkAcknowledgementCapabilityMask: UInt8 = 1 << 2
     static let independentMapProfilesCapabilityMask: UInt8 = 1 << 3
     static let extendedMapVisibilityCapabilityMask: UInt8 = 1 << 4
-    static let deviceCapabilitiesVersion: UInt8 = 3
+    static let batteryStatusScreenCapabilityMask: UInt8 = 1 << 5
+    static let deviceCapabilitiesVersion: UInt8 = 4
     static let fallbackWriteQueueCapacity = 32
 
     static let serviceRoadsVisibilityMask: Int32 = 1 << 10
@@ -66,6 +70,9 @@ enum DeviceBLEProtocol {
     static let mapPlusNavigationVisibilityMaskSettingID: UInt8 = 20
     static let mapPlusNavigationStreetLineWidthBoostSettingID: UInt8 = 21
     static let mapPlusNavigationPositionMarkerScaleSettingID: UInt8 = 22
+    static let phoneBatteryLevelSettingID: UInt8 = 23
+    static let phoneBatteryChargingSettingID: UInt8 = 24
+    static let currentScreenMaskMarker: Int32 = 1 << 30
 
     static var serviceUUID: CBUUID { CBUUID(string: serviceUUIDString) }
     static var navigationCharacteristicUUID: CBUUID { CBUUID(string: navigationCharacteristicUUIDString) }
@@ -78,6 +85,15 @@ enum DeviceBLEProtocol {
     static var firmwareRevisionCharacteristicUUID: CBUUID { CBUUID(string: firmwareRevisionCharacteristicUUIDString) }
     static var hardwareRevisionCharacteristicUUID: CBUUID { CBUUID(string: hardwareRevisionCharacteristicUUIDString) }
     static var manufacturerNameCharacteristicUUID: CBUUID { CBUUID(string: manufacturerNameCharacteristicUUIDString) }
+
+    static func phoneBatteryPercentage(from batteryLevel: Float) -> Int32? {
+        guard batteryLevel >= 0, batteryLevel <= 1 else { return nil }
+        return Int32((batteryLevel * 100).rounded())
+    }
+
+    static func phoneBatteryChargingValue(isCharging: Bool) -> Int32 {
+        isCharging ? 1 : 0
+    }
 
     static func hardwareLabel(model: String?, hardware: String?) -> String {
         if let model, !model.isEmpty {
@@ -177,6 +193,7 @@ enum DeviceScreen: Int, CaseIterable, Identifiable {
     case navigation = 1
     case rideStats = 2
     case mapPlusNavigation = 3
+    case batteryStatus = 4
 
     var id: Int { rawValue }
     var bit: Int { 1 << rawValue }
@@ -191,6 +208,8 @@ enum DeviceScreen: Int, CaseIterable, Identifiable {
             return "Ride Stats"
         case .mapPlusNavigation:
             return "Map + Navigation"
+        case .batteryStatus:
+            return "Battery Status"
         }
     }
 
@@ -198,17 +217,32 @@ enum DeviceScreen: Int, CaseIterable, Identifiable {
         allCases.reduce(0) { $0 | $1.bit }
     }
 
+    static var legacyScreensMask: Int {
+        allScreensMask & ~batteryStatus.bit
+    }
+
     static var displayOrder: [DeviceScreen] {
-        [.mapPlusNavigation, .rideStats, .map, .navigation]
+        [.mapPlusNavigation, .rideStats, .map, .navigation, .batteryStatus]
     }
 
     static func normalizedMask(_ rawMask: Int) -> Int {
-        let mask = rawMask & allScreensMask
-        return mask == 0 ? allScreensMask : mask
+        normalizedMask(rawMask, supportedMask: allScreensMask)
+    }
+
+    static func normalizedMask(_ rawMask: Int, supportedMask: Int) -> Int {
+        let availableMask = supportedMask & allScreensMask
+        let mask = rawMask & availableMask
+        return mask == 0 ? availableMask : mask
     }
 
     static func fallbackDefault(for rawDefault: Int, mask rawMask: Int) -> DeviceScreen {
-        let mask = normalizedMask(rawMask)
+        fallbackDefault(for: rawDefault, mask: rawMask, supportedMask: allScreensMask)
+    }
+
+    static func fallbackDefault(for rawDefault: Int,
+                                mask rawMask: Int,
+                                supportedMask: Int) -> DeviceScreen {
+        let mask = normalizedMask(rawMask, supportedMask: supportedMask)
         let candidate = DeviceScreen(rawValue: rawDefault) ?? .mapPlusNavigation
         if mask & candidate.bit != 0 {
             return candidate
@@ -372,6 +406,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var supportsPowerButtonHonkAcknowledgement: Bool = false
     @Published private(set) var supportsIndependentMapProfiles: Bool = false
     @Published private(set) var supportsExtendedMapVisibility: Bool = false
+    @Published private(set) var supportsBatteryStatusScreen: Bool = false
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
@@ -526,7 +561,10 @@ class BLEManager: NSObject, ObservableObject {
     private var powerButtonHonkFailureRetryDelay: TimeInterval = 0.1
     private var hasSentMapProfileForConnection = false
     private var hasSentMapNavigationProfileForConnection = false
+    private var hasSentScreenSettingsForConnection = false
     private var isSendingNegotiatedMapProfiles = false
+    private var lastSentPhoneBatteryPercent: Int32?
+    private var lastSentPhoneBatteryCharging: Bool?
     private var shouldPairAfterDisconnect: Bool = false
     private var suppressNextReconnect: Bool = false
     private var hasActiveBLESession: Bool {
@@ -565,6 +603,7 @@ class BLEManager: NSObject, ObservableObject {
         static let enabledDeviceScreensMask = "deviceSettings.enabledScreensMask"
         static let defaultDeviceScreen = "deviceSettings.defaultScreen"
         static let defaultDeviceScreenMigrated = "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1"
+        static let batteryStatusScreenMigrated = "deviceSettings.enabledScreensMask.batteryStatus.v1"
         static let deviceBrightnessPercent = "deviceSettings.brightnessPercent"
         static let disconnectedSleepTimeoutSeconds = "deviceSettings.disconnectedSleepTimeoutSeconds"
         static let selectedDeviceSound = "deviceSettings.selectedSound"
@@ -590,7 +629,20 @@ class BLEManager: NSObject, ObservableObject {
     // MARK: - Initialization
     override init() {
         super.init()
-#if !HOST_TESTING
+#if canImport(UIKit) && !HOST_TESTING
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(phoneBatteryStatusDidChange(_:)),
+            name: UIDevice.batteryLevelDidChangeNotification,
+            object: UIDevice.current
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(phoneBatteryStatusDidChange(_:)),
+            name: UIDevice.batteryStateDidChangeNotification,
+            object: UIDevice.current
+        )
         centralManager = CBCentralManager(delegate: self, queue: nil)
 #endif
         loadSettings()
@@ -598,6 +650,27 @@ class BLEManager: NSObject, ObservableObject {
         updateTrustedPeripheralDescription()
         log("BLE debug session started")
     }
+
+    deinit {
+#if canImport(UIKit) && !HOST_TESTING
+        NotificationCenter.default.removeObserver(
+            self,
+            name: UIDevice.batteryLevelDidChangeNotification,
+            object: UIDevice.current
+        )
+        NotificationCenter.default.removeObserver(
+            self,
+            name: UIDevice.batteryStateDidChangeNotification,
+            object: UIDevice.current
+        )
+#endif
+    }
+
+#if canImport(UIKit) && !HOST_TESTING
+    @objc private func phoneBatteryStatusDidChange(_ notification: Notification) {
+        sendPhoneBatteryStatus()
+    }
+#endif
     
     private func loadSettings() {
         let defaults = UserDefaults.standard
@@ -616,9 +689,14 @@ class BLEManager: NSObject, ObservableObject {
         }
         zoomLevel = defaults.object(forKey: SettingsKeys.zoomLevel) as? Int ?? 2
         tapToSwitchScreens = defaults.object(forKey: SettingsKeys.tapToSwitchScreens) as? Bool ?? false
-        enabledDeviceScreensMask = DeviceScreen.normalizedMask(
-            defaults.object(forKey: SettingsKeys.enabledDeviceScreensMask) as? Int ?? DeviceScreen.allScreensMask
-        )
+        var storedScreensMask = defaults.object(forKey: SettingsKeys.enabledDeviceScreensMask) as? Int
+            ?? DeviceScreen.allScreensMask
+        if !defaults.bool(forKey: SettingsKeys.batteryStatusScreenMigrated) {
+            storedScreensMask |= DeviceScreen.batteryStatus.bit
+            defaults.set(storedScreensMask, forKey: SettingsKeys.enabledDeviceScreensMask)
+            defaults.set(true, forKey: SettingsKeys.batteryStatusScreenMigrated)
+        }
+        enabledDeviceScreensMask = DeviceScreen.normalizedMask(storedScreensMask)
         let storedDefaultScreen = defaults.object(forKey: SettingsKeys.defaultDeviceScreen) as? Int
         let shouldMigrateDefaultScreen = !defaults.bool(forKey: SettingsKeys.defaultDeviceScreenMigrated)
         let rawDefaultScreen = shouldMigrateDefaultScreen && storedDefaultScreen == DeviceScreen.map.rawValue
@@ -1022,39 +1100,73 @@ class BLEManager: NSObject, ObservableObject {
             log("Independent map setting id=\(id) not sent: connected firmware does not advertise support")
             return
         }
-        guard isConnected, isNavigationReady else {
+        guard sendSettingPacket(id: id, value: value, label: "setting id=\(id)") else {
             log("Settings characteristic unsupported; saved local setting id=\(id), value=\(value)")
             return
         }
+    }
+
+    @discardableResult
+    private func sendSettingPacket(id: UInt8, value: Int32, label: String) -> Bool {
+        guard isConnected, isNavigationReady else { return false }
 
         var data = Data()
         data.append(id)
         withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
 
-        if let peripheral = connectedPeripheral,
-           let characteristic = settingsCharacteristic,
-           let endpoint = navigationWriteEndpoint {
-            enqueueNavigationWrite(
-                data,
-                endpoint: endpoint,
-                label: "native setting id=\(id)",
-                transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
-                    guard let self, let peripheral, let characteristic else { return }
-                    self.writeDeviceData(payload, to: characteristic, on: peripheral)
+        var fallback = Data(DeviceBLEProtocol.settingsFallbackPrefix.utf8)
+        fallback.append(data)
+
+        return DevicePacketRouting.sendPreferredThenFallback(
+            preferred: {
+                sendNativeMapTransferPacket(data, label: label)
+            },
+            fallback: {
+                guard fallback.count <= (navigationWriteEndpoint?.maximumWriteLength ?? 0) else {
+                    log("Cannot send \(label): write limit exceeded")
+                    return false
                 }
-            )
-            log("Queued native setting: id=\(id), value=\(value)")
+                return sendFallbackMapPacket(fallback, label: label)
+            }
+        )
+    }
+
+#if canImport(UIKit) && !HOST_TESTING
+    private func sendPhoneBatteryStatus(force: Bool = false) {
+        guard isConnected,
+              isNavigationReady,
+              hasReceivedDeviceCapabilities,
+              supportsBatteryStatusScreen,
+              let percentage = DeviceBLEProtocol.phoneBatteryPercentage(
+                from: UIDevice.current.batteryLevel
+              ) else {
             return
         }
 
-        var fallback = Data(DeviceBLEProtocol.settingsFallbackPrefix.utf8)
-        fallback.append(data)
-        guard fallback.count <= (navigationWriteEndpoint?.maximumWriteLength ?? 0) else {
-            log("Cannot send fallback setting: write limit exceeded")
-            return
+        if (force || percentage != lastSentPhoneBatteryPercent),
+           sendSettingPacket(
+            id: DeviceBLEProtocol.phoneBatteryLevelSettingID,
+            value: percentage,
+            label: "phone battery level"
+           ) {
+            lastSentPhoneBatteryPercent = percentage
         }
-        sendFallbackMapPacket(fallback, label: "setting id=\(id)")
+
+        let isCharging = UIDevice.current.batteryState == .charging
+        if (force || isCharging != lastSentPhoneBatteryCharging),
+           sendSettingPacket(
+            id: DeviceBLEProtocol.phoneBatteryChargingSettingID,
+            value: DeviceBLEProtocol.phoneBatteryChargingValue(
+                isCharging: isCharging
+            ),
+            label: "phone charging state"
+           ) {
+            lastSentPhoneBatteryCharging = isCharging
+        }
     }
+#else
+    private func sendPhoneBatteryStatus(force: Bool = false) {}
+#endif
 
     private static func isLegacyMapProfileSetting(_ id: UInt8) -> Bool {
         id == 1 || id == 2 || id == 3 || id == 7 || id == 8 || id == 9 || id == 10
@@ -1143,8 +1255,10 @@ class BLEManager: NSObject, ObservableObject {
         guard isConnected, isNavigationReady, !hasReceivedDeviceCapabilities else { return }
         supportsIndependentMapProfiles = false
         supportsExtendedMapVisibility = false
+        supportsBatteryStatusScreen = false
         hasReceivedDeviceCapabilities = true
         log("Device capabilities unavailable; using baseline feature visibility")
+        sendScreenSettingsAfterCapabilityNegotiation()
         sendMapProfilesAfterCapabilityNegotiation()
     }
     
@@ -1191,7 +1305,7 @@ class BLEManager: NSObject, ObservableObject {
                 mask |= DeviceBLEProtocol.extendedVisibilityMarker
             }
             settingID = DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID
-        case .navigation, .rideStats:
+        case .navigation, .rideStats, .batteryStatus:
             return
         }
 
@@ -1200,16 +1314,21 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     func isDeviceScreenEnabled(_ screen: DeviceScreen) -> Bool {
-        DeviceScreen.normalizedMask(enabledDeviceScreensMask) & screen.bit != 0
+        effectiveEnabledDeviceScreensMask & screen.bit != 0
     }
 
     func isOnlyEnabledDeviceScreen(_ screen: DeviceScreen) -> Bool {
         guard isDeviceScreenEnabled(screen) else { return false }
-        return DeviceScreen.displayOrder.filter { isDeviceScreenEnabled($0) }.count == 1
+        return availableDeviceScreens.filter { isDeviceScreenEnabled($0) }.count == 1
     }
 
     func setDeviceScreen(_ screen: DeviceScreen, enabled: Bool) {
-        var mask = DeviceScreen.normalizedMask(enabledDeviceScreensMask)
+        guard availableDeviceScreens.contains(screen) else { return }
+
+        var mask = effectiveEnabledDeviceScreensMask
+        if !supportsBatteryStatusScreen {
+            mask |= enabledDeviceScreensMask & DeviceScreen.batteryStatus.bit
+        }
         if enabled {
             mask |= screen.bit
         } else {
@@ -1231,7 +1350,19 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     var enabledDeviceScreens: [DeviceScreen] {
-        DeviceScreen.displayOrder.filter { isDeviceScreenEnabled($0) }
+        availableDeviceScreens.filter { isDeviceScreenEnabled($0) }
+    }
+
+    var availableDeviceScreens: [DeviceScreen] {
+        DeviceScreen.displayOrder.filter { supportedDeviceScreensMask & $0.bit != 0 }
+    }
+
+    var effectiveDefaultDeviceScreen: DeviceScreen {
+        DeviceScreen.fallbackDefault(
+            for: defaultDeviceScreen.rawValue,
+            mask: effectiveEnabledDeviceScreensMask,
+            supportedMask: supportedDeviceScreensMask
+        )
     }
 
     func sendEnabledDeviceScreensMask() {
@@ -1240,8 +1371,12 @@ class BLEManager: NSObject, ObservableObject {
             for: defaultDeviceScreen.rawValue,
             mask: enabledDeviceScreensMask
         )
+        var outgoingMask = Int32(effectiveEnabledDeviceScreensMask)
+        if supportsBatteryStatusScreen {
+            outgoingMask |= DeviceBLEProtocol.currentScreenMaskMarker
+        }
         sendSetting(id: DeviceBLEProtocol.enabledScreensSettingID,
-                    value: Int32(enabledDeviceScreensMask))
+                    value: outgoingMask)
     }
 
     func sendDefaultDeviceScreen() {
@@ -1250,7 +1385,35 @@ class BLEManager: NSObject, ObservableObject {
             mask: enabledDeviceScreensMask
         )
         sendSetting(id: DeviceBLEProtocol.defaultScreenSettingID,
-                    value: Int32(defaultDeviceScreen.rawValue))
+                    value: Int32(effectiveDefaultDeviceScreen.rawValue))
+    }
+
+    private var supportedDeviceScreensMask: Int {
+        guard hasReceivedDeviceCapabilities else { return DeviceScreen.allScreensMask }
+        return supportsBatteryStatusScreen
+            ? DeviceScreen.allScreensMask
+            : DeviceScreen.legacyScreensMask
+    }
+
+    private var effectiveEnabledDeviceScreensMask: Int {
+        DeviceScreen.normalizedMask(
+            enabledDeviceScreensMask,
+            supportedMask: supportedDeviceScreensMask
+        )
+    }
+
+    private func sendScreenSettingsAfterCapabilityNegotiation() {
+        guard supportsDeviceSettings,
+              hasReceivedDeviceCapabilities,
+              !hasSentScreenSettingsForConnection else {
+            return
+        }
+        hasSentScreenSettingsForConnection = true
+        sendEnabledDeviceScreensMask()
+        sendDefaultDeviceScreen()
+        if supportsBatteryStatusScreen {
+            sendPhoneBatteryStatus(force: true)
+        }
     }
 
     @discardableResult
@@ -1557,6 +1720,8 @@ class BLEManager: NSObject, ObservableObject {
         pendingAuthNonce = nil
         authWriteState = .idle
         navigationWriteQueue.removeAll()
+        lastSentPhoneBatteryPercent = nil
+        lastSentPhoneBatteryCharging = nil
         authRetryTimer?.invalidate()
         authRetryTimer = nil
         authTimeoutTimer?.invalidate()
@@ -1623,6 +1788,8 @@ class BLEManager: NSObject, ObservableObject {
         pendingAuthNonce = nil
         authWriteState = .idle
         navigationWriteQueue.removeAll()
+        lastSentPhoneBatteryPercent = nil
+        lastSentPhoneBatteryCharging = nil
         navigationFlushRetryTimer?.invalidate()
         navigationFlushRetryTimer = nil
         lastNavigationQueuePendingLogAt = .distantPast
@@ -1673,10 +1840,12 @@ class BLEManager: NSObject, ObservableObject {
         supportsPowerButtonHonkAcknowledgement = false
         supportsIndependentMapProfiles = false
         supportsExtendedMapVisibility = false
+        supportsBatteryStatusScreen = false
         powerButtonHonkConfigurationError = nil
         hasReceivedDeviceCapabilities = false
         hasSentMapProfileForConnection = false
         hasSentMapNavigationProfileForConnection = false
+        hasSentScreenSettingsForConnection = false
         isSendingNegotiatedMapProfiles = false
         clearPendingPowerButtonHonkConfiguration()
     }
@@ -1890,8 +2059,6 @@ class BLEManager: NSObject, ObservableObject {
         sendSetting(id: 4, value: Int32(displayRotation))
         sendSetting(id: 6, value: Int32(mapRotationMode))
         sendSetting(id: 11, value: tapToSwitchScreens ? 1 : 0)
-        sendEnabledDeviceScreensMask()
-        sendDefaultDeviceScreen()
         sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(deviceBrightnessPercent))
         sendSetting(id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
                     value: disconnectedSleepTimeout.settingValue)
@@ -2163,6 +2330,8 @@ extension BLEManager: CBCentralManagerDelegate {
         isConnecting = false
         isConnected = false
         isNavigationReady = false
+        lastSentPhoneBatteryPercent = nil
+        lastSentPhoneBatteryCharging = nil
         peripheralName = peripheral.name ?? "BikeComputer"
         startMonitoringRSSI()
         startAuthenticationTimeout(for: peripheral)
@@ -2203,6 +2372,8 @@ extension BLEManager: CBCentralManagerDelegate {
         pendingAuthNonce = nil
         authWriteState = .idle
         navigationWriteQueue.removeAll()
+        lastSentPhoneBatteryPercent = nil
+        lastSentPhoneBatteryCharging = nil
         connectionTimeoutTimer?.invalidate()
         connectionTimeoutTimer = nil
         stopMonitoringRSSI()
@@ -2485,7 +2656,9 @@ extension BLEManager: CBPeripheralDelegate {
             supportsPowerButtonHonkAcknowledgement = false
             supportsIndependentMapProfiles = false
             supportsExtendedMapVisibility = false
+            supportsBatteryStatusScreen = false
             hasReceivedDeviceCapabilities = false
+            hasSentScreenSettingsForConnection = false
             clearPendingPowerButtonHonkConfiguration()
             log("Received invalid device capabilities payload")
             return true
@@ -2501,6 +2674,8 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.independentMapProfilesCapabilityMask != 0
         let hasExtendedMapVisibility =
             flags & DeviceBLEProtocol.extendedMapVisibilityCapabilityMask != 0
+        let hasBatteryStatusScreen =
+            flags & DeviceBLEProtocol.batteryStatusScreenCapabilityMask != 0
         let hasDevicePowerButtonConfig = data.count == 8
         if hasDevicePowerButtonConfig {
             guard hasPowerButtonHonk,
@@ -2512,7 +2687,9 @@ extension BLEManager: CBPeripheralDelegate {
                 supportsPowerButtonHonkAcknowledgement = false
                 supportsIndependentMapProfiles = false
                 supportsExtendedMapVisibility = false
+                supportsBatteryStatusScreen = false
                 hasReceivedDeviceCapabilities = false
+                hasSentScreenSettingsForConnection = false
                 clearPendingPowerButtonHonkConfiguration()
                 log("Received invalid device capabilities configuration")
                 return true
@@ -2540,16 +2717,22 @@ extension BLEManager: CBPeripheralDelegate {
             hasSentMapProfileForConnection = false
             hasSentMapNavigationProfileForConnection = false
         }
+        if hasReceivedDeviceCapabilities &&
+            supportsBatteryStatusScreen != hasBatteryStatusScreen {
+            hasSentScreenSettingsForConnection = false
+        }
         supportsDeviceSounds = hasDeviceSounds
         supportsPowerButtonHonk = hasPowerButtonHonk
         supportsPowerButtonHonkAcknowledgement = hasPowerButtonHonkAcknowledgement
         supportsIndependentMapProfiles = hasIndependentMapProfiles
         supportsExtendedMapVisibility = hasExtendedMapVisibility
+        supportsBatteryStatusScreen = hasBatteryStatusScreen
         if !hasPowerButtonHonkAcknowledgement {
             clearPendingPowerButtonHonkConfiguration()
         }
         hasReceivedDeviceCapabilities = true
         log("Device capabilities: flags=0x\(String(format: "%02X", flags))")
+        sendScreenSettingsAfterCapabilityNegotiation()
         sendMapProfilesAfterCapabilityNegotiation()
         if shouldSynchronizePowerButtonHonk {
             // @Published updates in willSet. Defer until the support flag is

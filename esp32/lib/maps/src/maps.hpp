@@ -117,21 +117,21 @@ private:
   uint32_t idx;
   int16_t parseInt16(char *file);
   void parseStrUntil(char *file, char terminator, char *str);
-  void parseCoords(char *file,
+  bool parseCoords(char *file,
                    std::vector<Point16, PsramAllocator<Point16>> &points);
   BBox parseBbox(String str);
   MapBlock *readMapBlock(String fileName);
   MapBlock *readMapBlockBinary(char *buffer, size_t fileSize);
   bool buildPolygonGrid(
       MapBlock *mblock); // Build spatial grid for polygon culling
-  void fillPolygon(const Polygon &p, lv_obj_t *canvas);
+  bool fillPolygon(const Polygon &p, lv_obj_t *canvas);
   void drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
                 int16_t y2, uint16_t color, uint8_t width);
   void drawLineSegment(uint16_t *buf, int32_t buf_w, int32_t buf_h,
                        uint32_t stride_pixels, int16_t x1, int16_t y1,
                        int16_t x2, int16_t y2, uint16_t color);
-  void getMapBlocks(BBox &bbox, MemCache &memCache);
-  void readVectorMap(ViewPort &viewPort, MemCache &memCache, lv_obj_t *canvas,
+  bool getMapBlocks(BBox &bbox, MemCache &memCache);
+  bool readVectorMap(ViewPort &viewPort, MemCache &memCache, lv_obj_t *canvas,
                      uint8_t zoom, double rotation);
   void getPosition(double lat, double lon);
 
@@ -203,7 +203,7 @@ public:
   void deleteMapScrSprites();
   void createMapScrSprites();
   void generateRenderMap(uint8_t zoom);
-  void generateVectorMap(uint8_t zoom);
+  bool generateVectorMap(uint8_t zoom);
   void displayMap();
   void setWaypoint(double wptLat, double wptLon);
   void updateMap();
