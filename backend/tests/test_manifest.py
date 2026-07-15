@@ -87,6 +87,31 @@ class ManifestTests(unittest.TestCase):
                 zipfile.ZIP_STORED,
             )
 
+    def test_source_name_is_the_default_pack_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = fake_job()
+            job.request.pop("displayName")
+            map_id = stable_map_id(job)
+            job.map_id = map_id
+            folder = root / "VECTMAP" / map_id / "+0032+0008"
+            folder.mkdir(parents=True)
+            (folder / "123_456.fmb").write_bytes(b"map-block")
+
+            manifest = build_manifest(job, root, PipelineMetadata())
+
+            self.assertTrue(map_id.startswith("singapore-"))
+            self.assertNotIn("custom-map", map_id)
+            self.assertEqual(manifest["displayName"], "Singapore")
+            self.assertEqual(manifest["source"]["name"], "Singapore")
+
+    def test_explicit_pack_name_overrides_source_name(self):
+        job = fake_job()
+        job.request["displayName"] = "  Marina Bay rides  "
+
+        self.assertEqual(job.artifact_display_name, "Marina Bay rides")
+        self.assertTrue(stable_map_id(job).startswith("marina-bay-rides-"))
+
     def test_archive_remains_compatible_without_optional_preview(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

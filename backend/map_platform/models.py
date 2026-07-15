@@ -183,6 +183,16 @@ class MapJob:
     progress_total: int | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
 
+    @property
+    def artifact_display_name(self) -> str:
+        """Return the immutable pack name available when the job is created."""
+        requested = self.request.get("displayName")
+        if isinstance(requested, str) and (trimmed := requested.strip()):
+            return trimmed
+        if trimmed_source := self.source_region.name.strip():
+            return trimmed_source
+        return "Offline map"
+
     def to_dict(self, *, include_internal: bool = False) -> dict[str, Any]:
         result = {
             "jobId": self.job_id,

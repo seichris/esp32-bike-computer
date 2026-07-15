@@ -111,7 +111,7 @@ def reuse_keys(
     compatibility = _document_sha256(compatibility_document)
     exact_document = {
         "compatibilityKey": compatibility,
-        "packDisplayName": job.request.get("displayName"),
+        "packDisplayName": job.artifact_display_name,
         "geometry": {
             "mode": job.geometry.mode.value,
             "bounds": job.geometry.bounds.to_list(),

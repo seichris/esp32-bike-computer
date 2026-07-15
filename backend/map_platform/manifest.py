@@ -33,8 +33,12 @@ class PipelineMetadata:
 
 
 def stable_map_id(job: MapJob) -> str:
-    display_name = str(job.request.get("displayName", "custom-map"))
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", display_name).strip("-").lower() or "custom-map"
+    slug = (
+        re.sub(r"[^a-zA-Z0-9]+", "-", job.artifact_display_name)
+        .strip("-")
+        .lower()
+        or "offline-map"
+    )
     source = json.dumps(
         {
             "mode": job.geometry.mode.value,
@@ -49,7 +53,7 @@ def stable_map_id(job: MapJob) -> str:
     )
     digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:10]
     maximum_slug_bytes = MAX_PACK_MAP_ID_BYTES - len(digest) - 1
-    slug = slug[:maximum_slug_bytes].rstrip("-") or "custom-map"
+    slug = slug[:maximum_slug_bytes].rstrip("-") or "offline-map"
     return f"{slug}-{digest}"
 
 
@@ -110,7 +114,7 @@ def build_manifest(job: MapJob, map_root: Path, pipeline: PipelineMetadata) -> d
     return {
         "schemaVersion": 1,
         "mapId": map_id,
-        "displayName": str(job.request.get("displayName", map_id)),
+        "displayName": job.artifact_display_name,
         "geometryType": job.geometry.mode.value,
         "bounds": job.geometry.bounds.to_list(),
         "createdAt": job.created_at,
@@ -122,6 +126,7 @@ def build_manifest(job: MapJob, map_root: Path, pipeline: PipelineMetadata) -> d
         "source": {
             "provider": job.source_region.provider,
             "region": job.source_region.id,
+            "name": job.source_region.name,
             "publishedAt": job.source_region.published_at,
             "license": job.source_region.license,
             "url": job.source_region.url,

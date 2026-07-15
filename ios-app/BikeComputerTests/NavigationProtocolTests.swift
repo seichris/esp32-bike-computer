@@ -466,6 +466,8 @@ struct NavigationProtocolTests {
         testOfflineMapListJobsURLRequest()
         testOfflineMapInventoryMutationURLRequests()
         testOfflineMapManagerMigratesProductionConfig()
+        testSavedMapDefaultNamePolicy()
+        testOfflineMapManagerRepairsGeneratedPackDefaults()
         testOfflineMapManagerRenamesCachedPack()
         testSavedMapRenameViewWiring()
         testOfflineMapManagerRestoresLastTransferIdentity()
@@ -3999,6 +4001,101 @@ struct NavigationProtocolTests {
         )
     }
 
+    static func testSavedMapDefaultNamePolicy() {
+        assertEqual(
+            SavedMapDisplayNamePolicy.resolve(
+                artifactDisplayName: "custom-map-4dc48b9bcb",
+                sourceRegionName: "China",
+                mapID: "custom-map-4dc48b9bcb"
+            ),
+            "China",
+            "a generated artifact ID never outranks the Geofabrik area name"
+        )
+        assertEqual(
+            SavedMapDisplayNamePolicy.resolve(
+                artifactDisplayName: "Shanghai Suzhou",
+                sourceRegionName: "China",
+                mapID: "shanghai-suzhou"
+            ),
+            "Shanghai Suzhou",
+            "an explicit pack name still outranks the source area"
+        )
+        assertEqual(
+            SavedMapDisplayNamePolicy.preferred("china-latest.osm.pbf"),
+            "China",
+            "legacy Geofabrik filenames become readable area names"
+        )
+        assertEqual(
+            SavedMapDisplayNamePolicy.resolve(
+                artifactDisplayName: "custom-map-deadbeef00",
+                sourceRegionName: nil,
+                mapID: "custom-map-deadbeef00"
+            ),
+            "Offline Map",
+            "generic IDs are never shown even when legacy metadata has no source"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapManagerRepairsGeneratedPackDefaults() {
+        let suite = "offline-map-default-repair-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "default repair test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let cacheDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-default-repair-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(
+            at: cacheDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let mapID = "custom-map-4dc48b9bcb"
+        let packURL = cacheDirectory.appendingPathComponent("\(mapID).zip")
+        let manifest = try! JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 1,
+            "mapId": mapID,
+            "displayName": mapID,
+            "bounds": [120.90, 30.70, 121.95, 31.55],
+            "source": [
+                "provider": "geofabrik",
+                "region": "geofabrik-asia-china",
+                "url": "https://download.geofabrik.de/asia/china-latest.osm.pbf",
+            ],
+        ])
+        try! makeStoredZip(entries: [
+            ("manifest.json", manifest),
+            ("VECTMAP/\(mapID)/+0000+0000/1.fmb", Data("map-block".utf8)),
+        ]).write(to: packURL)
+        defaults.set(
+            [packURL.lastPathComponent: mapID],
+            forKey: "offlineMap.packDisplayNames"
+        )
+
+        let manager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory
+        )
+
+        assertEqual(
+            manager.displayName(forCachedPack: packURL),
+            "China",
+            "restart repairs an old generated label from Geofabrik manifest metadata"
+        )
+        assertEqual(
+            OfflineMapPackPreviewReader.content(for: packURL)?.bounds,
+            OfflineMapPreviewBounds(coordinates: [120.90, 30.70, 121.95, 31.55]),
+            "a preview-less legacy artifact still exposes bounds for local rendering"
+        )
+        assertEqual(
+            OfflineMapPackPreviewReader.content(for: packURL)?.imageData,
+            nil,
+            "the bounds fallback does not pretend a legacy artifact embedded an image"
+        )
+    }
+
     @MainActor
     static func testOfflineMapManagerRenamesCachedPack() {
         let suite = "offline-map-rename-test-\(UUID().uuidString)"
@@ -4130,8 +4227,10 @@ struct NavigationProtocolTests {
         }
         assert(
             managerSource.contains("Task.detached(priority: .utility)") &&
+                managerSource.contains("OfflineMapPackPreviewReader.content(for: packURL)") &&
+                managerSource.contains("OfflineMapFallbackPreviewRenderer.image") &&
                 !managerSource.contains("packURLs.forEach(cachePreviewIfAvailable)"),
-            "saved-map previews load lazily without scanning cached archives on the main actor"
+            "saved-map previews load lazily and render bounds when an old pack has no image"
         )
         assert(
             managerSource.contains(
@@ -4329,6 +4428,7 @@ struct NavigationProtocolTests {
         let manifest = try! JSONSerialization.data(withJSONObject: [
             "schemaVersion": 1,
             "mapId": "map-1",
+            "boundsE7": [1_037_500_000, 12_400_000, 1_039_300_000, 13_700_000],
             "preview": previewMetadata,
         ])
         let url = FileManager.default.temporaryDirectory
@@ -4462,6 +4562,11 @@ struct NavigationProtocolTests {
             OfflineMapPackPreviewReader.imageData(for: streamURL),
             preview,
             "cached signed streams expose their inline boundary preview"
+        )
+        assertEqual(
+            OfflineMapPackPreviewReader.content(for: streamURL)?.bounds,
+            OfflineMapPreviewBounds(coordinates: [103.75, 1.24, 103.93, 1.37]),
+            "cached signed streams retain bounds for the local thumbnail fallback"
         )
 
         var corruptPreview = previewMetadata

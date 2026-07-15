@@ -167,6 +167,33 @@ class MapReuseTests(unittest.TestCase):
             self.assertIsNotNone(changed_source_snapshot)
             self.assertNotEqual(first_source_snapshot, changed_source_snapshot)
 
+    def test_exact_key_uses_source_name_when_request_has_no_pack_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MapJobService(SourceIndex([self.source]), JobStore(tmp))
+            unnamed = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.70, 1.20, 104.00, 1.50]}
+            )
+            explicitly_named = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.70, 1.20, 104.00, 1.50],
+                    "displayName": "Singapore",
+                }
+            )
+
+            self.assertEqual(
+                reuse_keys(
+                    unnamed,
+                    producer_build_sha256=PRODUCER_BUILD,
+                    producer_image_digest=PRODUCER_IMAGE,
+                ),
+                reuse_keys(
+                    explicitly_named,
+                    producer_build_sha256=PRODUCER_BUILD,
+                    producer_image_digest=PRODUCER_IMAGE,
+                ),
+            )
+
     def test_bbox_processing_bounds_are_complete_blocks(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = MapJobService(SourceIndex([self.source]), JobStore(tmp))
