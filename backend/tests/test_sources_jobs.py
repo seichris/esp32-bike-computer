@@ -106,6 +106,36 @@ class SourceAndJobTests(unittest.TestCase):
 
         self.assertEqual(source.id, "geofabrik-japan")
         self.assertEqual(source.local_path, "backend/data/source-pbf/geofabrik/japan-latest.osm.pbf")
+        self.assertEqual(source.preview_geometry["type"], "Polygon")
+
+    def test_geofabrik_preview_geometry_is_persisted_but_not_public(self):
+        source = SourceRegion(
+            id="geofabrik-sg",
+            provider="geofabrik",
+            name="Singapore",
+            url="https://example.invalid/sg.osm.pbf",
+            bounds=Bounds(103.0, 1.0, 104.5, 1.8),
+            preview_geometry={
+                "type": "Polygon",
+                "coordinates": [[[103, 1], [104.5, 1], [104.5, 1.8], [103, 1.8], [103, 1]]],
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            service = MapJobService(SourceIndex([source]), store)
+            job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+            )
+
+            persisted = service.get_job(job.job_id)
+            stored = json.loads((Path(tmp) / f"{job.job_id}.json").read_text())
+
+        self.assertEqual(persisted.source_region.preview_geometry, source.preview_geometry)
+        self.assertEqual(stored["sourceRegion"]["previewGeometry"], source.preview_geometry)
+        self.assertNotIn("previewGeometry", job.to_dict()["sourceRegion"])
 
     def test_create_job_persists_request(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -85,6 +85,7 @@ class SourceRegion:
     published_at: str | None = None
     checksum: str | None = None
     license: str = "ODbL-1.0"
+    preview_geometry: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SourceRegion":
@@ -98,9 +99,10 @@ class SourceRegion:
             published_at=data.get("publishedAt"),
             checksum=data.get("checksum"),
             license=str(data.get("license", "ODbL-1.0")),
+            preview_geometry=data.get("previewGeometry"),
         )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, include_internal: bool = False) -> dict[str, Any]:
         result = {
             "id": self.id,
             "provider": self.provider,
@@ -112,6 +114,8 @@ class SourceRegion:
             "checksum": self.checksum,
             "license": self.license,
         }
+        if include_internal and self.preview_geometry is not None:
+            result["previewGeometry"] = self.preview_geometry
         return result
 
 
@@ -151,7 +155,7 @@ class MapJob:
             "status": self.status.value,
             "request": self.request,
             "geometry": self.geometry.to_dict(),
-            "sourceRegion": self.source_region.to_dict(),
+            "sourceRegion": self.source_region.to_dict(include_internal=include_internal),
             "clientInstallationId": self.client_installation_id,
             "clientRequestId": self.client_request_id,
             "installOnDevice": self.install_on_device,

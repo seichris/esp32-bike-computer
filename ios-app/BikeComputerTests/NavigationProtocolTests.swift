@@ -438,6 +438,7 @@ struct NavigationProtocolTests {
         testOfflineMapManagerReconcilesAcknowledgedFirstInstall()
         testOfflineMapPolygonClosesRing()
         testOfflineMapStoredZipReader()
+        testOfflineMapPackPreviewReader()
         await testOfflineMapArchiveValidationCancellation()
         testCachedMapInstalledIdentityUsesManifestSession()
         testOfflineMapManifestDecoding()
@@ -3789,6 +3790,12 @@ struct NavigationProtocolTests {
             source.contains("manager.hasActiveBackgroundUpload"),
             "a restored upload disables conflicting saved-map upload and delete actions"
         )
+        assert(
+            source.contains("SavedMapThumbnail(") &&
+                source.contains("manager.previewImage(forCachedPack: packURL)") &&
+                source.contains(".frame(width: 52, height: 36)"),
+            "each saved map shows a fixed-size preview before its editable name"
+        )
     }
 
     @MainActor
@@ -3947,6 +3954,107 @@ struct NavigationProtocolTests {
         } catch {
             assert(false, "duplicate map entries should produce invalidPack")
         }
+    }
+
+    static func testOfflineMapPackPreviewReader() {
+        let preview = Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )!
+        let previewMetadata: [String: Any] = [
+            "type": "boundary-png",
+            "path": "preview.png",
+            "width": 1,
+            "height": 1,
+            "background": "transparent",
+            "dataBase64": preview.base64EncodedString(),
+        ]
+        let manifest = try! JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 1,
+            "mapId": "map-1",
+            "preview": previewMetadata,
+        ])
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-preview-\(UUID().uuidString).zip")
+        try? makeStoredZip(entries: [
+            ("manifest.json", manifest),
+            ("preview.png", preview),
+            ("VECTMAP/map-1/+0032+0008/123_456.fmb", Data("map-block".utf8)),
+        ]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        assertEqual(
+            OfflineMapPackPreviewReader.imageData(for: url),
+            preview,
+            "stored map packs expose their boundary preview"
+        )
+        assertEqual(
+            OfflineMapPackPreviewReader.imageData(fromManifestData: manifest),
+            preview,
+            "stream manifests expose their inline signed boundary preview"
+        )
+        var stream = Data("BIKEMAP1".utf8)
+        func appendUInt16LE(_ value: UInt16) {
+            stream.append(UInt8(value & 0xff))
+            stream.append(UInt8(value >> 8))
+        }
+        func appendUInt32LE(_ value: UInt32) {
+            for shift in stride(from: 0, through: 24, by: 8) {
+                stream.append(UInt8((value >> UInt32(shift)) & 0xff))
+            }
+        }
+        func appendUInt64LE(_ value: UInt64) {
+            for shift in stride(from: 0, through: 56, by: 8) {
+                stream.append(UInt8((value >> UInt64(shift)) & 0xff))
+            }
+        }
+        appendUInt16LE(1)
+        appendUInt16LE(0)
+        appendUInt32LE(UInt32(manifest.count))
+        appendUInt16LE(5)
+        appendUInt16LE(0)
+        appendUInt32LE(1)
+        appendUInt64LE(1)
+        stream.append(manifest)
+        stream.append(Data(repeating: 0, count: 5))
+        stream.append(0)
+        let streamURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-preview-\(UUID().uuidString).bmap")
+        try? stream.write(to: streamURL)
+        defer { try? FileManager.default.removeItem(at: streamURL) }
+        assertEqual(
+            OfflineMapPackPreviewReader.imageData(for: streamURL),
+            preview,
+            "cached signed streams expose their inline boundary preview"
+        )
+
+        var corruptPreview = previewMetadata
+        corruptPreview["width"] = "wide"
+        let corruptManifest = try! JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 1,
+            "mapId": "map-1",
+            "preview": corruptPreview,
+        ])
+        let corruptURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-corrupt-preview-\(UUID().uuidString).zip")
+        try? makeStoredZip(entries: [
+            ("manifest.json", corruptManifest),
+            ("preview.png", Data("not-a-png".utf8)),
+            ("VECTMAP/map-1/+0032+0008/123_456.fmb", Data("map-block".utf8)),
+        ]).write(to: corruptURL)
+        defer { try? FileManager.default.removeItem(at: corruptURL) }
+
+        guard let archive = try? OfflineMapPackArchive(url: corruptURL),
+              let decodedManifest = try? archive.manifest() else {
+            assert(false, "a corrupt optional preview must not invalidate the map archive")
+            return
+        }
+        assertEqual(decodedManifest.preview, nil, "malformed preview metadata is ignored")
+        assertEqual(archive.mapFileEntries.count, 1, "map transfer entries remain available")
+        assertEqual(
+            OfflineMapPackPreviewReader.imageData(for: corruptURL),
+            nil,
+            "corrupt previews fall back without throwing"
+        )
     }
 
     static func testOfflineMapArchiveValidationCancellation() async {

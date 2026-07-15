@@ -143,6 +143,7 @@ class GeofabrikSourceProvider:
                 bounds=bounds,
                 local_path=f"backend/data/source-pbf/geofabrik/{safe_id}-latest.osm.pbf",
                 license="ODbL-1.0",
+                preview_geometry=geometry,
             ),
             geometry=geometry,
         )

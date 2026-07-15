@@ -8,6 +8,9 @@
 import CoreLocation
 import Combine
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 #if os(iOS)
 import Security
 #endif
@@ -895,6 +898,10 @@ final class OfflineMapManager: ObservableObject {
     private var activationReconciliationTask: Task<Void, Never>?
     private var backgroundUploadObserver: AnyCancellable?
     private var activityCounter = OfflineMapActivityCounter()
+#if canImport(UIKit)
+    private var packPreviewImages: [String: UIImage] = [:]
+    private var unavailablePackPreviews: Set<String> = []
+#endif
 
     init(
         defaults: UserDefaults = .standard,
@@ -1230,6 +1237,7 @@ final class OfflineMapManager: ObservableObject {
             if FileManager.default.fileExists(atPath: packURL.path) {
                 try FileManager.default.removeItem(at: packURL)
             }
+            invalidateCachedPreview(for: packURL)
             try SavedMapArtifactMetadataStore.delete(for: packURL)
             try deleteCompatibilityArtifacts(mapID: mapID)
             packDisplayNames.removeValue(forKey: packURL.lastPathComponent)
@@ -1258,6 +1266,12 @@ final class OfflineMapManager: ObservableObject {
         }
         return packURL.deletingPathExtension().lastPathComponent
     }
+
+#if canImport(UIKit)
+    func previewImage(forCachedPack packURL: URL) -> UIImage? {
+        packPreviewImages[previewCacheKey(for: packURL)]
+    }
+#endif
 
     @discardableResult
     func renameCachedPack(at packURL: URL, to proposedName: String) -> String {
@@ -1876,6 +1890,7 @@ final class OfflineMapManager: ObservableObject {
                 try? FileManager.default.removeItem(at: obsolete)
                 try? SavedMapArtifactMetadataStore.delete(for: obsolete)
                 packDisplayNames.removeValue(forKey: obsolete.lastPathComponent)
+                invalidateCachedPreview(for: obsolete)
             }
             if backedUpArtifact { try? FileManager.default.removeItem(at: backup) }
             if backedUpMetadata { try? FileManager.default.removeItem(at: metadataBackup) }
@@ -1892,6 +1907,7 @@ final class OfflineMapManager: ObservableObject {
             downloadURL = nil
             throw error
         }
+        invalidateCachedPreview(for: destination)
         downloadedPackURL = destination
         OfflineMapJobPersistence.markPackDownloaded(
             jobId: job.jobId,
@@ -3291,12 +3307,56 @@ final class OfflineMapManager: ObservableObject {
                 let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
                 return lhsDate > rhsDate
             }
+#if canImport(UIKit)
+            let activePreviewKeys = Set(packURLs.map(previewCacheKey))
+            for key in Array(packPreviewImages.keys) where !activePreviewKeys.contains(key) {
+                packPreviewImages.removeValue(forKey: key)
+            }
+            unavailablePackPreviews.formIntersection(activePreviewKeys)
+            packURLs.forEach(cachePreviewIfAvailable)
+#endif
             cacheMissingDisplayNames(for: packURLs)
             cachedPackURLs = packURLs
         } catch {
+#if canImport(UIKit)
+            packPreviewImages.removeAll()
+            unavailablePackPreviews.removeAll()
+#endif
             cachedPackURLs = []
         }
     }
+
+#if canImport(UIKit)
+    private func previewCacheKey(for packURL: URL) -> String {
+        packURL.standardizedFileURL.path
+    }
+
+    private func cachePreviewIfAvailable(for packURL: URL) {
+        let key = previewCacheKey(for: packURL)
+        guard packPreviewImages[key] == nil,
+              !unavailablePackPreviews.contains(key) else {
+            return
+        }
+        guard let data = OfflineMapPackPreviewReader.imageData(for: packURL),
+              let image = UIImage(data: data),
+              image.size.width > 0,
+              image.size.height > 0,
+              image.size.width <= 512,
+              image.size.height <= 512 else {
+            unavailablePackPreviews.insert(key)
+            return
+        }
+        packPreviewImages[key] = image
+    }
+
+    private func invalidateCachedPreview(for packURL: URL) {
+        let key = previewCacheKey(for: packURL)
+        packPreviewImages.removeValue(forKey: key)
+        unavailablePackPreviews.remove(key)
+    }
+#else
+    private func invalidateCachedPreview(for packURL: URL) {}
+#endif
 
     private func cacheMissingDisplayNames(for packURLs: [URL]) {
         var didChange = false

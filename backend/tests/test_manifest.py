@@ -1,3 +1,5 @@
+import base64
+import json
 import tempfile
 import unittest
 import zipfile
@@ -7,6 +9,7 @@ from map_platform.geometry import normalize_geometry
 from map_platform.manifest import PipelineMetadata, build_manifest, stable_map_id, validate_pack_path, write_pack_archive
 from map_platform.map_stream import canonical_manifest_bytes
 from map_platform.models import Bounds, GeometryMode, JobStatus, MapJob, NormalizedGeometry, SourceRegion
+from map_platform.preview import render_boundary_preview
 
 
 def fake_job() -> MapJob:
@@ -54,6 +57,18 @@ class ManifestTests(unittest.TestCase):
 
             self.assertEqual(manifest["mapId"], map_id)
             self.assertEqual(len(manifest["files"]), 2)
+            self.assertEqual(manifest["preview"]["type"], "boundary-png")
+            self.assertEqual(manifest["preview"]["path"], "preview.png")
+            self.assertTrue(
+                base64.b64decode(manifest["preview"]["dataBase64"]).startswith(
+                    b"\x89PNG\r\n\x1a\n"
+                )
+            )
+            stream_manifest = json.loads(canonical_manifest_bytes(manifest))
+            self.assertEqual(
+                stream_manifest["preview"]["dataBase64"],
+                manifest["preview"]["dataBase64"],
+            )
             self.assertNotIn(
                 f"VECTMAP/{map_id}/test_imgs/block_232_63-10_10.png",
                 [file["path"] for file in manifest["files"]],
@@ -62,11 +77,88 @@ class ManifestTests(unittest.TestCase):
             self.assertGreater(archive.stat().st_size, 0)
             with zipfile.ZipFile(archive) as zip_archive:
                 compress_types = {info.filename: info.compress_type for info in zip_archive.infolist()}
+                archived_manifest = json.loads(zip_archive.read("manifest.json"))
             self.assertEqual(compress_types["manifest.json"], zipfile.ZIP_STORED)
+            self.assertEqual(compress_types["preview.png"], zipfile.ZIP_STORED)
+            self.assertNotIn("dataBase64", archived_manifest["preview"])
             self.assertNotIn(f"VECTMAP/{map_id}/test_imgs/block_232_63-10_10.png", compress_types)
             self.assertEqual(
                 compress_types[f"VECTMAP/{map_id}/+0032+0008/123_456.fmb"],
                 zipfile.ZIP_STORED,
+            )
+
+    def test_archive_remains_compatible_without_optional_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = fake_job()
+            map_id = stable_map_id(job)
+            job.map_id = map_id
+            folder = root / "VECTMAP" / map_id / "+0032+0008"
+            folder.mkdir(parents=True)
+            (folder / "123_456.fmb").write_bytes(b"map-block")
+
+            manifest = build_manifest(job, root, PipelineMetadata())
+            manifest.pop("preview")
+            archive = write_pack_archive(root, manifest, root / "legacy.zip")
+
+            with zipfile.ZipFile(archive) as zip_archive:
+                self.assertNotIn("preview.png", zip_archive.namelist())
+
+    def test_preview_uses_source_boundary_and_requested_bounds_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = fake_job()
+            map_id = stable_map_id(job)
+            job.map_id = map_id
+            folder = root / "VECTMAP" / map_id / "+0032+0008"
+            folder.mkdir(parents=True)
+            (folder / "123_456.fmb").write_bytes(b"map-block")
+            requested_geometry = {
+                "type": "Polygon",
+                "coordinates": [[
+                    [103.75, 1.24],
+                    [103.93, 1.24],
+                    [103.84, 1.37],
+                    [103.75, 1.24],
+                ]],
+            }
+            job.geometry = NormalizedGeometry(
+                mode=GeometryMode.CUSTOM_POLYGON,
+                bounds=job.geometry.bounds,
+                area_km2=job.geometry.area_km2,
+                vertex_count=3,
+                geometry=requested_geometry,
+            )
+
+            fallback_manifest = build_manifest(job, root, PipelineMetadata())
+            fallback_data = base64.b64decode(fallback_manifest["preview"]["dataBase64"])
+            self.assertEqual(
+                fallback_data,
+                render_boundary_preview(None, job.geometry.bounds),
+            )
+
+            source_geometry = {
+                "type": "Polygon",
+                "coordinates": [[
+                    [103.0, 1.0],
+                    [104.5, 1.0],
+                    [103.75, 1.8],
+                    [103.0, 1.0],
+                ]],
+            }
+            job.source_region = SourceRegion(
+                id=job.source_region.id,
+                provider=job.source_region.provider,
+                name=job.source_region.name,
+                url=job.source_region.url,
+                bounds=job.source_region.bounds,
+                preview_geometry=source_geometry,
+            )
+            source_manifest = build_manifest(job, root, PipelineMetadata())
+            source_data = base64.b64decode(source_manifest["preview"]["dataBase64"])
+            self.assertEqual(
+                source_data,
+                render_boundary_preview(source_geometry, job.geometry.bounds),
             )
 
     def test_map_id_includes_custom_polygon_geometry(self):

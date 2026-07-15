@@ -592,10 +592,37 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
         let url: String?
     }
 
+    struct Preview: Decodable, Equatable {
+        let type: String
+        let path: String
+        let width: Int
+        let height: Int
+        let background: String?
+        let dataBase64: String?
+    }
+
     let mapId: String?
     let displayName: String?
     let source: Source?
+    let preview: Preview?
     let files: [File]?
+
+    private enum CodingKeys: String, CodingKey {
+        case mapId
+        case displayName
+        case source
+        case preview
+        case files
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        mapId = try container.decodeIfPresent(String.self, forKey: .mapId)
+        displayName = try container.decodeIfPresent(String.self, forKey: .displayName)
+        source = try container.decodeIfPresent(Source.self, forKey: .source)
+        preview = try? container.decode(Preview.self, forKey: .preview)
+        files = try container.decodeIfPresent([File].self, forKey: .files)
+    }
 }
 
 nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
@@ -764,6 +791,24 @@ struct OfflineMapPackArchive {
         return try JSONDecoder().decode(OfflineMapPackManifest.self, from: data(for: manifestEntry))
     }
 
+    nonisolated func previewImageData() -> Data? {
+        guard let manifest = try? manifest(),
+              let preview = OfflineMapPackPreviewReader.validPreview(manifest.preview) else {
+            return nil
+        }
+        if let entry = entries.first(where: { $0.path == preview.path }),
+           entry.byteCount <= OfflineMapPackPreviewReader.maximumImageBytes,
+           let data = try? data(for: entry),
+           OfflineMapPackPreviewReader.isValidPNG(
+               data,
+               expectedWidth: preview.width,
+               expectedHeight: preview.height
+           ) {
+            return data
+        }
+        return OfflineMapPackPreviewReader.inlineImageData(preview)
+    }
+
     nonisolated func validate(expectedMapId: String) throws {
         try Task.checkCancellation()
         let manifest = try manifest()
@@ -899,6 +944,7 @@ struct OfflineMapPackArchive {
             return false
         }
         if path == "manifest.json" ||
+            path == "preview.png" ||
             path == "ATTRIBUTION.txt" ||
             path.hasPrefix("LICENSES/") {
             return true
@@ -909,6 +955,114 @@ struct OfflineMapPackArchive {
         return path.split(separator: "/").allSatisfy { part in
             !part.isEmpty && part != "." && part != ".." && !part.hasPrefix(".")
         }
+    }
+}
+
+nonisolated enum OfflineMapPackPreviewReader {
+    static let maximumImageBytes = 512 * 1024
+    private static let pngSignature = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+
+    static func imageData(for packURL: URL) -> Data? {
+        switch packURL.pathExtension.lowercased() {
+        case "zip":
+            return try? OfflineMapPackArchive(url: packURL).previewImageData()
+        case "bmap":
+            guard let manifestData = streamManifestData(for: packURL) else { return nil }
+            return imageData(fromManifestData: manifestData)
+        default:
+            return nil
+        }
+    }
+
+    static func imageData(fromManifestData data: Data) -> Data? {
+        guard data.count <= BikeMapStreamFormat.maximumManifestBytes,
+              let manifest = try? JSONDecoder().decode(OfflineMapPackManifest.self, from: data),
+              let preview = validPreview(manifest.preview) else {
+            return nil
+        }
+        return inlineImageData(preview)
+    }
+
+    static func validPreview(
+        _ preview: OfflineMapPackManifest.Preview?
+    ) -> OfflineMapPackManifest.Preview? {
+        guard let preview,
+              preview.type == "boundary-png",
+              preview.path == "preview.png",
+              (1...512).contains(preview.width),
+              (1...512).contains(preview.height) else {
+            return nil
+        }
+        return preview
+    }
+
+    static func inlineImageData(_ preview: OfflineMapPackManifest.Preview) -> Data? {
+        guard let encoded = preview.dataBase64,
+              encoded.utf8.count <= maximumImageBytes * 2,
+              let data = Data(base64Encoded: encoded),
+              isValidPNG(
+                  data,
+                  expectedWidth: preview.width,
+                  expectedHeight: preview.height
+              ) else {
+            return nil
+        }
+        return data
+    }
+
+    static func isValidPNG(
+        _ data: Data,
+        expectedWidth: Int,
+        expectedHeight: Int
+    ) -> Bool {
+        guard data.count >= 33,
+              data.count <= maximumImageBytes,
+              data.starts(with: pngSignature),
+              data.uint32BE(at: 8) == 13,
+              data.subdata(in: 12..<16) == Data("IHDR".utf8) else {
+            return false
+        }
+        return data.uint32BE(at: 16) == UInt32(expectedWidth) &&
+            data.uint32BE(at: 20) == UInt32(expectedHeight)
+    }
+
+    private static func streamManifestData(for url: URL) -> Data? {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+              values.isRegularFile == true,
+              let fileSize = values.fileSize,
+              fileSize >= BikeMapStreamFormat.fixedHeaderBytes,
+              let handle = try? FileHandle(forReadingFrom: url) else {
+            return nil
+        }
+        defer { try? handle.close() }
+
+        do {
+            let headerData = try readExactly(
+                BikeMapStreamFormat.fixedHeaderBytes,
+                from: handle
+            )
+            let header = try BikeMapStreamFormat.parseHeader(headerData)
+            _ = try BikeMapStreamFormat.layout(
+                header: header,
+                contentBytes: UInt64(fileSize)
+            )
+            return try readExactly(Int(header.manifestBytes), from: handle)
+        } catch {
+            return nil
+        }
+    }
+
+    private static func readExactly(_ count: Int, from handle: FileHandle) throws -> Data {
+        var data = Data()
+        data.reserveCapacity(count)
+        while data.count < count {
+            let chunk = try handle.read(upToCount: count - data.count) ?? Data()
+            guard !chunk.isEmpty else {
+                throw OfflineMapPlatformError.invalidPack("map preview manifest is truncated")
+            }
+            data.append(chunk)
+        }
+        return data
     }
 }
 
@@ -2064,6 +2218,13 @@ struct OfflineMapPlatformClient {
 }
 
 private extension Data {
+    nonisolated func uint32BE(at offset: Int) -> UInt32 {
+        UInt32(self[offset]) << 24 |
+            UInt32(self[offset + 1]) << 16 |
+            UInt32(self[offset + 2]) << 8 |
+            UInt32(self[offset + 3])
+    }
+
     nonisolated func uint16LE(at offset: Int) -> UInt16 {
         UInt16(self[offset]) | (UInt16(self[offset + 1]) << 8)
     }
