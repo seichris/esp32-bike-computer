@@ -41,6 +41,54 @@ private enum OfflineMapDefaults {
     ]
 }
 
+#if canImport(UIKit)
+@MainActor
+private enum OfflineMapFallbackPreviewRenderer {
+    private static let size = CGSize(width: 160, height: 96)
+    private static let padding: CGFloat = 8
+
+    static func image(for bounds: OfflineMapPreviewBounds) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            let centerLatitude = (bounds.minLatitude + bounds.maxLatitude) / 2
+            let longitudeScale = max(0.1, cos(centerLatitude * .pi / 180))
+            let projectedWidth = (bounds.maxLongitude - bounds.minLongitude) * longitudeScale
+            let projectedHeight = bounds.maxLatitude - bounds.minLatitude
+            let scale = min(
+                (Double(size.width - padding * 2) / projectedWidth),
+                (Double(size.height - padding * 2) / projectedHeight)
+            )
+            let width = CGFloat(projectedWidth * scale)
+            let height = CGFloat(projectedHeight * scale)
+            let rect = CGRect(
+                x: (size.width - width) / 2,
+                y: (size.height - height) / 2,
+                width: width,
+                height: height
+            )
+            let path = UIBezierPath(roundedRect: rect, cornerRadius: 3)
+            UIColor(
+                red: 76 / 255,
+                green: 139 / 255,
+                blue: 168 / 255,
+                alpha: 0.82
+            ).setFill()
+            path.fill()
+            UIColor(
+                red: 40 / 255,
+                green: 96 / 255,
+                blue: 124 / 255,
+                alpha: 1
+            ).setStroke()
+            path.lineWidth = 2
+            path.stroke()
+        }
+    }
+}
+#endif
+
 nonisolated enum OfflineMapServerIdentity {
     private static let managedIdentity = "managed-production"
 
@@ -1323,18 +1371,32 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func displayName(forCachedPack packURL: URL) -> String {
-        if let displayName = packDisplayNames[packURL.lastPathComponent], !displayName.isEmpty {
+        let metadata = SavedMapArtifactMetadataStore.load(for: packURL)
+        if let displayName = packDisplayNames[packURL.lastPathComponent],
+           !displayName.isEmpty,
+           (metadata?.userDefinedDisplayName == true ||
+               !SavedMapDisplayNamePolicy.isGeneratedGenericName(displayName)) {
             return displayName
         }
-        if let displayName = SavedMapArtifactMetadataStore.load(for: packURL)?.displayName,
-           !displayName.isEmpty {
+        if metadata?.userDefinedDisplayName == true,
+           let displayName = metadata?.displayName,
+           !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return displayName
         }
-        if currentJob?.mapId == packURL.deletingPathExtension().lastPathComponent,
-           let displayName = displayNameForCurrentJob() {
+        if let displayName = SavedMapDisplayNamePolicy.preferred(metadata?.displayName) {
             return displayName
         }
-        return packURL.deletingPathExtension().lastPathComponent
+        if let manifestName = manifestDisplayName(for: packURL) {
+            return manifestName
+        }
+        if currentJob?.mapId == packURL.deletingPathExtension().lastPathComponent {
+            return displayNameForCurrentJob()
+        }
+        return SavedMapDisplayNamePolicy.resolve(
+            artifactDisplayName: nil,
+            sourceRegionName: nil,
+            mapID: packURL.deletingPathExtension().lastPathComponent
+        )
     }
 
 #if canImport(UIKit)
@@ -1351,8 +1413,8 @@ final class OfflineMapManager: ObservableObject {
         }
         let token = previewLoadRegistry.begin(for: key)
         previewLoadTasks[key] = Task { [weak self] in
-            let data = await Task.detached(priority: .utility) {
-                OfflineMapPackPreviewReader.imageData(for: packURL)
+            let preview = await Task.detached(priority: .utility) {
+                OfflineMapPackPreviewReader.content(for: packURL)
             }.value
             guard let self else { return }
             guard self.previewLoadRegistry.finishIfCurrent(
@@ -1366,16 +1428,22 @@ final class OfflineMapManager: ObservableObject {
                   }) else {
                 return
             }
-            guard let data,
-                  let image = UIImage(data: data),
-                  image.size.width > 0,
-                  image.size.height > 0,
-                  image.size.width <= 512,
-                  image.size.height <= 512 else {
-                self.unavailablePackPreviews.insert(key)
+            if let data = preview?.imageData,
+               let image = UIImage(data: data),
+               image.size.width > 0,
+               image.size.height > 0,
+               image.size.width <= 512,
+               image.size.height <= 512 {
+                self.packPreviewImages[key] = image
                 return
             }
-            self.packPreviewImages[key] = image
+            if let bounds = preview?.bounds {
+                self.packPreviewImages[key] = OfflineMapFallbackPreviewRenderer.image(
+                    for: bounds
+                )
+                return
+            }
+            self.unavailablePackPreviews.insert(key)
         }
     }
 #endif
@@ -1775,8 +1843,12 @@ final class OfflineMapManager: ObservableObject {
                       let sourceName, !sourceName.isEmpty else {
                     return false
                 }
-                return Self.cleanDisplayName(localName).localizedCaseInsensitiveCompare(
-                    Self.cleanDisplayName(sourceName)
+                guard !SavedMapDisplayNamePolicy.isGeneratedGenericName(localName) else {
+                    return false
+                }
+                return SavedMapDisplayNamePolicy.clean(localName)
+                    .localizedCaseInsensitiveCompare(
+                        SavedMapDisplayNamePolicy.clean(sourceName)
                 ) != .orderedSame
             }()
         }
@@ -2010,7 +2082,7 @@ final class OfflineMapManager: ObservableObject {
         downloadProgress = 0
         downloadByteProgress = nil
         var temporaryURL: URL?
-        var verifiedStream: VerifiedBikeMapArtifact?
+        var artifactDisplayName: String?
         let trustStore = mapStreamTrustStore
         do {
             let constraints = try OfflineMapDownloadConstraints.mapArtifact(primaryArtifact)
@@ -2021,7 +2093,7 @@ final class OfflineMapManager: ObservableObject {
             })
             temporaryURL = downloadedURL
             let validationTask = Task.detached(priority: .userInitiated) {
-                () throws -> VerifiedBikeMapArtifact? in
+                () throws -> String? in
                 switch choice {
                 case .bikeMapStream(let artifact, _):
                     return try BikeMapStreamArtifactValidator.validate(
@@ -2029,7 +2101,7 @@ final class OfflineMapManager: ObservableObject {
                         artifact: artifact,
                         expectedMapID: mapId,
                         trustStore: trustStore
-                    )
+                    ).displayName
                 case .legacyZip(let artifact):
                     if let artifact {
                         try OfflineMapArtifactFileValidator.validate(
@@ -2039,10 +2111,10 @@ final class OfflineMapManager: ObservableObject {
                     }
                     let archive = try OfflineMapPackArchive(url: downloadedURL)
                     try archive.validate(expectedMapId: mapId)
-                    return nil
+                    return try archive.manifest().displayName
                 }
             }
-            verifiedStream = try await withTaskCancellationHandler {
+            artifactDisplayName = try await withTaskCancellationHandler {
                 try await validationTask.value
             } onCancel: {
                 validationTask.cancel()
@@ -2066,13 +2138,22 @@ final class OfflineMapManager: ObservableObject {
             .first
         let existingDisplayName = ["\(mapId).bmap", "\(mapId).zip"]
             .compactMap { packDisplayNames[$0] }
-            .first { !$0.isEmpty }
-        let defaultDisplayName = verifiedStream?.displayName ?? displayNameForCurrentJob()
+            .first {
+                !$0.isEmpty &&
+                    (existingMetadata?.userDefinedDisplayName == true ||
+                        !SavedMapDisplayNamePolicy.isGeneratedGenericName($0))
+            }
+        let defaultDisplayName = SavedMapDisplayNamePolicy.resolve(
+            artifactDisplayName: artifactDisplayName,
+            sourceRegionName: job.sourceRegion?.name,
+            mapID: mapId
+        )
         let displayName = existingDisplayName ?? defaultDisplayName
         let userDefinedDisplayName = existingMetadata?.userDefinedDisplayName ?? {
-            guard let existingDisplayName, let defaultDisplayName else { return false }
-            return Self.cleanDisplayName(existingDisplayName).localizedCaseInsensitiveCompare(
-                Self.cleanDisplayName(defaultDisplayName)
+            guard let existingDisplayName else { return false }
+            return SavedMapDisplayNamePolicy.clean(existingDisplayName)
+                .localizedCaseInsensitiveCompare(
+                    SavedMapDisplayNamePolicy.clean(defaultDisplayName)
             ) != .orderedSame
         }()
         let downloadReceiptID = UUID().uuidString.lowercased()
@@ -2150,8 +2231,7 @@ final class OfflineMapManager: ObservableObject {
             mapId: mapId,
             defaults: defaults
         )
-        if packDisplayNames[destination.lastPathComponent]?.isEmpty != false,
-           let displayName {
+        if packDisplayNames[destination.lastPathComponent]?.isEmpty != false {
             packDisplayNames[destination.lastPathComponent] = displayName
         }
         persistPackDisplayNames()
@@ -2169,7 +2249,7 @@ final class OfflineMapManager: ObservableObject {
                 )
             )
         }
-        if userDefinedDisplayName, let displayName, !displayName.isEmpty {
+        if userDefinedDisplayName, !displayName.isEmpty {
             try? await client.updateDisplayName(jobId: job.jobId, displayName: displayName)
         }
         refreshCachedPacks()
@@ -3528,23 +3608,12 @@ final class OfflineMapManager: ObservableObject {
         }
     }
 
-    private func displayNameForCurrentJob() -> String? {
-        if let regionName = currentJob?.sourceRegion?.name.trimmingCharacters(in: .whitespacesAndNewlines),
-           !regionName.isEmpty {
-            return Self.cleanDisplayName(regionName)
-        }
-        if let mapId = currentJob?.mapId, !mapId.isEmpty {
-            return mapId
-        }
-        return nil
-    }
-
-    private static func cleanDisplayName(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "-latest.osm.pbf", with: "")
-            .replacingOccurrences(of: ".osm.pbf", with: "")
-            .replacingOccurrences(of: ".zip", with: "")
-            .replacingOccurrences(of: "geofabrik-", with: "")
+    private func displayNameForCurrentJob() -> String {
+        SavedMapDisplayNamePolicy.resolve(
+            artifactDisplayName: nil,
+            sourceRegionName: currentJob?.sourceRegion?.name,
+            mapID: currentJob?.mapId
+        )
     }
 
     private func persistPackDisplayNames() {
@@ -3623,7 +3692,7 @@ final class OfflineMapManager: ObservableObject {
             }
             unavailablePackPreviews.formIntersection(activePreviewKeys)
 #endif
-            cacheMissingDisplayNames(for: packURLs)
+            cacheDefaultDisplayNames(for: packURLs)
             cachedPackURLs = packURLs
         } catch {
 #if canImport(UIKit)
@@ -3655,11 +3724,29 @@ final class OfflineMapManager: ObservableObject {
     private func invalidateCachedPreview(for packURL: URL) {}
 #endif
 
-    private func cacheMissingDisplayNames(for packURLs: [URL]) {
+    private func cacheDefaultDisplayNames(for packURLs: [URL]) {
         var didChange = false
-        for packURL in packURLs where packDisplayNames[packURL.lastPathComponent]?.isEmpty != false {
+        for packURL in packURLs {
+            let metadata = SavedMapArtifactMetadataStore.load(for: packURL)
+            let existing = packDisplayNames[packURL.lastPathComponent]
+            if existing?.isEmpty != false,
+               metadata?.userDefinedDisplayName == true,
+               let userName = metadata?.displayName,
+               !userName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                packDisplayNames[packURL.lastPathComponent] = userName
+                didChange = true
+                continue
+            }
+            let needsDefault = existing?.isEmpty != false ||
+                (metadata?.userDefinedDisplayName != true &&
+                    SavedMapDisplayNamePolicy.isGeneratedGenericName(existing))
+            guard needsDefault else { continue }
             guard let displayName = manifestDisplayName(for: packURL) else { continue }
             packDisplayNames[packURL.lastPathComponent] = displayName
+            if var metadata, metadata.userDefinedDisplayName != true {
+                metadata.displayName = displayName
+                try? SavedMapArtifactMetadataStore.save(metadata, for: packURL)
+            }
             didChange = true
         }
         if didChange {
@@ -3668,26 +3755,28 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func manifestDisplayName(for packURL: URL) -> String? {
-        if let displayName = SavedMapArtifactMetadataStore.load(for: packURL)?.displayName,
-           !displayName.isEmpty {
+        if let displayName = SavedMapDisplayNamePolicy.preferred(
+            SavedMapArtifactMetadataStore.load(for: packURL)?.displayName
+        ) {
             return displayName
         }
-        guard let archive = try? OfflineMapPackArchive(url: packURL),
-              let manifest = try? archive.manifest() else {
+        guard let manifest = OfflineMapPackPreviewReader.manifest(for: packURL) else {
             return nil
         }
-        let candidates = [
+        if let displayName = SavedMapDisplayNamePolicy.preferred(manifest.displayName) {
+            return displayName
+        }
+        if let sourceName = SavedMapDisplayNamePolicy.preferred(manifest.source?.name) {
+            return sourceName
+        }
+        let sourceCandidates = [
             manifest.source?.url.flatMap { URL(string: $0)?.lastPathComponent },
-            manifest.source?.region,
-            manifest.displayName
+            manifest.source?.region
         ]
-        for candidate in candidates {
-            guard let value = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !value.isEmpty,
-                  !value.hasPrefix("custom-map-") else {
-                continue
+        for candidate in sourceCandidates {
+            if let sourceName = SavedMapDisplayNamePolicy.preferredSourceName(candidate) {
+                return sourceName
             }
-            return Self.cleanDisplayName(value)
         }
         return nil
     }

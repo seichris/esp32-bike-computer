@@ -605,6 +605,105 @@ struct OfflineMapPackEntry: Equatable {
     let crc32: UInt32
 }
 
+nonisolated enum SavedMapDisplayNamePolicy {
+    static func resolve(
+        artifactDisplayName: String?,
+        sourceRegionName: String?,
+        mapID: String?
+    ) -> String {
+        if let artifactName = preferred(artifactDisplayName) {
+            return artifactName
+        }
+        if let sourceName = preferred(sourceRegionName) {
+            return sourceName
+        }
+        if let mapName = preferredSourceName(mapID) {
+            return mapName
+        }
+        return "Offline Map"
+    }
+
+    static func preferred(_ candidate: String?) -> String? {
+        guard let candidate else { return nil }
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isGeneratedGenericName(trimmed) else { return nil }
+        return trimmed
+    }
+
+    static func preferredSourceName(_ candidate: String?) -> String? {
+        guard let candidate = preferred(candidate) else { return nil }
+        let cleaned = clean(candidate)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
+    static func isGeneratedGenericName(_ candidate: String?) -> Bool {
+        guard let candidate else { return false }
+        let normalized = candidate
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return normalized == "custom-map" || normalized.range(
+            of: "^custom-map-[0-9a-f]{10}$",
+            options: .regularExpression
+        ) != nil
+    }
+
+    static func clean(_ candidate: String) -> String {
+        var value = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        for suffix in ["-latest.osm.pbf", ".osm.pbf", ".zip", ".bmap"]
+            where value.lowercased().hasSuffix(suffix) {
+            value.removeLast(suffix.count)
+            break
+        }
+        if value.lowercased().hasPrefix("geofabrik-") {
+            value.removeFirst("geofabrik-".count)
+        }
+        value = value
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        if value == value.lowercased() {
+            return value.localizedCapitalized
+        }
+        return value
+    }
+}
+
+nonisolated struct OfflineMapPreviewBounds: Equatable, Sendable {
+    let minLongitude: Double
+    let minLatitude: Double
+    let maxLongitude: Double
+    let maxLatitude: Double
+
+    init?(coordinates: [Double]) {
+        guard coordinates.count == 4,
+              coordinates.allSatisfy(\.isFinite) else {
+            return nil
+        }
+        let minLongitude = coordinates[0]
+        let minLatitude = coordinates[1]
+        let maxLongitude = coordinates[2]
+        let maxLatitude = coordinates[3]
+        guard (-180...180).contains(minLongitude),
+              (-180...180).contains(maxLongitude),
+              (-90...90).contains(minLatitude),
+              (-90...90).contains(maxLatitude),
+              minLongitude < maxLongitude,
+              minLatitude < maxLatitude else {
+            return nil
+        }
+        self.minLongitude = minLongitude
+        self.minLatitude = minLatitude
+        self.maxLongitude = maxLongitude
+        self.maxLatitude = maxLatitude
+    }
+}
+
+nonisolated struct OfflineMapPackPreviewContent: Equatable, Sendable {
+    let imageData: Data?
+    let bounds: OfflineMapPreviewBounds?
+}
+
 nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
     struct File: Decodable, Equatable {
         let path: String
@@ -614,6 +713,7 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
 
     struct Source: Decodable, Equatable {
         let region: String?
+        let name: String?
         let url: String?
     }
 
@@ -631,6 +731,18 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
     let source: Source?
     let preview: Preview?
     let files: [File]?
+    let bounds: [Double]?
+    let boundsE7: [Int]?
+
+    var previewBounds: OfflineMapPreviewBounds? {
+        if let bounds, let decoded = OfflineMapPreviewBounds(coordinates: bounds) {
+            return decoded
+        }
+        guard let boundsE7, boundsE7.count == 4 else { return nil }
+        return OfflineMapPreviewBounds(
+            coordinates: boundsE7.map { Double($0) / 10_000_000 }
+        )
+    }
 
     private enum CodingKeys: String, CodingKey {
         case mapId
@@ -638,6 +750,8 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
         case source
         case preview
         case files
+        case bounds
+        case boundsE7
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -647,6 +761,8 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
         source = try container.decodeIfPresent(Source.self, forKey: .source)
         preview = try? container.decode(Preview.self, forKey: .preview)
         files = try container.decodeIfPresent([File].self, forKey: .files)
+        bounds = try? container.decode([Double].self, forKey: .bounds)
+        boundsE7 = try? container.decode([Int].self, forKey: .boundsE7)
     }
 }
 
@@ -1193,12 +1309,45 @@ nonisolated enum OfflineMapPackPreviewReader {
     private static let pngSignature = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
 
     static func imageData(for packURL: URL) -> Data? {
+        content(for: packURL)?.imageData
+    }
+
+    static func content(for packURL: URL) -> OfflineMapPackPreviewContent? {
         switch packURL.pathExtension.lowercased() {
         case "zip":
-            return try? OfflineMapPackArchive(url: packURL).previewImageData()
+            guard let archive = try? OfflineMapPackArchive(url: packURL),
+                  let manifest = try? archive.manifest() else {
+                return nil
+            }
+            return OfflineMapPackPreviewContent(
+                imageData: archive.previewImageData(),
+                bounds: manifest.previewBounds
+            )
         case "bmap":
-            guard let manifestData = streamManifestData(for: packURL) else { return nil }
-            return imageData(fromManifestData: manifestData)
+            guard let manifestData = streamManifestData(for: packURL),
+                  let manifest = try? JSONDecoder().decode(
+                    OfflineMapPackManifest.self,
+                    from: manifestData
+                  ) else {
+                return nil
+            }
+            return OfflineMapPackPreviewContent(
+                imageData: imageData(from: manifest),
+                bounds: manifest.previewBounds
+            )
+        default:
+            return nil
+        }
+    }
+
+    static func manifest(for packURL: URL) -> OfflineMapPackManifest? {
+        switch packURL.pathExtension.lowercased() {
+        case "zip":
+            guard let archive = try? OfflineMapPackArchive(url: packURL) else { return nil }
+            return try? archive.manifest()
+        case "bmap":
+            guard let data = streamManifestData(for: packURL) else { return nil }
+            return try? JSONDecoder().decode(OfflineMapPackManifest.self, from: data)
         default:
             return nil
         }
@@ -1206,10 +1355,14 @@ nonisolated enum OfflineMapPackPreviewReader {
 
     static func imageData(fromManifestData data: Data) -> Data? {
         guard data.count <= BikeMapStreamFormat.maximumManifestBytes,
-              let manifest = try? JSONDecoder().decode(OfflineMapPackManifest.self, from: data),
-              let preview = validPreview(manifest.preview) else {
+              let manifest = try? JSONDecoder().decode(OfflineMapPackManifest.self, from: data) else {
             return nil
         }
+        return imageData(from: manifest)
+    }
+
+    private static func imageData(from manifest: OfflineMapPackManifest) -> Data? {
+        guard let preview = validPreview(manifest.preview) else { return nil }
         return inlineImageData(preview)
     }
 

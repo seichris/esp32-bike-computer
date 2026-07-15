@@ -48,3 +48,32 @@ xcrun swiftc \
   ios-app/BikeComputerTests/DestinationCalloutLayoutTests.swift
 
 "${CATALYST_OUT}"
+
+PREVIEW_CATALYST_OUT="${TMPDIR:-/tmp}/open-bike-saved-map-preview-tests"
+
+xcrun swiftc \
+  -D HOST_TESTING \
+  -parse-as-library \
+  -target "$(uname -m)-apple-ios15.0-macabi" \
+  -sdk "${MACOS_SDK}" \
+  -F "${IOS_SUPPORT}/System/Library/Frameworks" \
+  -I "${IOS_SUPPORT}/usr/lib/swift" \
+  -L "${IOS_SUPPORT}/usr/lib/swift" \
+  -o "${PREVIEW_CATALYST_OUT}" \
+  ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift \
+  ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \
+  ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamFormat.swift \
+  ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift \
+  ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift \
+  ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
+  ios-app/BikeComputerTests/SavedMapPreviewCatalystTests.swift
+
+"${PREVIEW_CATALYST_OUT}"

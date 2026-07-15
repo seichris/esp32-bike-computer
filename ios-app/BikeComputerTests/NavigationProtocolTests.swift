@@ -112,6 +112,23 @@ func makeStoredZip(entries: [(String, Data)]) -> Data {
     return zip
 }
 
+func makePreviewReadableBikeMapStream(manifest: Data) -> Data {
+    var stream = Data("BIKEMAP1".utf8)
+    appendUInt16LE(1, to: &stream)
+    appendUInt16LE(0, to: &stream)
+    appendUInt32LE(UInt32(manifest.count), to: &stream)
+    appendUInt16LE(5, to: &stream)
+    appendUInt16LE(0, to: &stream)
+    appendUInt32LE(1, to: &stream)
+    for shift in stride(from: 0, through: 56, by: 8) {
+        stream.append(UInt8((UInt64(1) >> UInt64(shift)) & 0xff))
+    }
+    stream.append(manifest)
+    stream.append(Data(repeating: 0, count: 5))
+    stream.append(0)
+    return stream
+}
+
 actor AsyncTestGate {
     private var isOpen = false
     private var waiter: CheckedContinuation<Void, Never>?
@@ -466,6 +483,8 @@ struct NavigationProtocolTests {
         testOfflineMapListJobsURLRequest()
         testOfflineMapInventoryMutationURLRequests()
         testOfflineMapManagerMigratesProductionConfig()
+        testSavedMapDefaultNamePolicy()
+        testOfflineMapManagerRepairsGeneratedPackDefaults()
         testOfflineMapManagerRenamesCachedPack()
         testSavedMapRenameViewWiring()
         testOfflineMapManagerRestoresLastTransferIdentity()
@@ -3030,6 +3049,8 @@ struct NavigationProtocolTests {
             mapId: String,
             installationId: String? = nil,
             installOnDevice: Bool? = nil,
+            sourceRegionName: String? = nil,
+            artifacts: [OfflineMapArtifact]? = nil,
             createdAt: String = "2026-07-12T04:00:00Z"
         ) -> Data {
             var payload: [String: Any] = [
@@ -3040,6 +3061,18 @@ struct NavigationProtocolTests {
             ]
             if let installationId { payload["clientInstallationId"] = installationId }
             if let installOnDevice { payload["installOnDevice"] = installOnDevice }
+            if let sourceRegionName {
+                payload["sourceRegion"] = [
+                    "id": "geofabrik-asia-china",
+                    "name": sourceRegionName,
+                    "provider": "geofabrik",
+                ]
+            }
+            if let artifacts {
+                payload["artifacts"] = try! JSONSerialization.jsonObject(
+                    with: JSONEncoder().encode(artifacts)
+                )
+            }
             return try! JSONSerialization.data(withJSONObject: payload)
         }
 
@@ -3054,6 +3087,7 @@ struct NavigationProtocolTests {
 
         func packData(
             mapId: String,
+            displayName: String = "Recovery Test",
             storedMapData: Data = Data([0x01]),
             hashedMapData: Data? = nil
         ) -> Data {
@@ -3061,7 +3095,7 @@ struct NavigationProtocolTests {
             let declaredData = hashedMapData ?? storedMapData
             let manifest = try! JSONSerialization.data(withJSONObject: [
                 "mapId": mapId,
-                "displayName": "Recovery Test",
+                "displayName": displayName,
                 "files": [[
                     "path": mapPath,
                     "bytes": declaredData.count,
@@ -3121,7 +3155,14 @@ struct NavigationProtocolTests {
         var persistedDownloadCount = 0
         OfflineMapTestURLProtocol.configure { request in
             if request.url?.path == "/v1/map-jobs/job-persisted" {
-                return (200, jobData(jobId: "job-persisted", mapId: "map-persisted"))
+                return (
+                    200,
+                    jobData(
+                        jobId: "job-persisted",
+                        mapId: "map-persisted",
+                        sourceRegionName: "China"
+                    )
+                )
             }
             if request.url?.path == "/v1/map-packs/map-persisted/download-url" {
                 return (200, downloadURLData(mapId: "map-persisted"))
@@ -3138,7 +3179,10 @@ struct NavigationProtocolTests {
                 let url = FileManager.default.temporaryDirectory
                     .appendingPathComponent(UUID().uuidString)
                     .appendingPathExtension("zip")
-                try packData(mapId: "map-persisted").write(to: url)
+                try packData(
+                    mapId: "map-persisted",
+                    displayName: "COVID-19 Rides"
+                ).write(to: url)
                 return url
             }
         )
@@ -3151,6 +3195,15 @@ struct NavigationProtocolTests {
             persistedManager.hasDownloadedPendingDeviceInstall,
             "downloaded deferred install becomes eligible for BLE-ready auto-resume"
         )
+        if let downloadedURL = persistedManager.downloadedPackURL {
+            assertEqual(
+                persistedManager.displayName(forCachedPack: downloadedURL),
+                "COVID-19 Rides",
+                "legacy ZIP download preserves an explicit manifest name over its source"
+            )
+        } else {
+            assert(false, "persisted recovery should expose its downloaded ZIP")
+        }
         assertEqual(
             OfflineMapJobPersistence.downloadedJobId(defaults: persistedDefaults),
             "job-persisted",
@@ -3198,6 +3251,237 @@ struct NavigationProtocolTests {
             relaunchedPersistedManager.deleteCachedPack(at: url)
         }
         relaunchedPersistedManager.forgetPendingMapJob()
+
+        let signedFixtureURL = URL(
+            fileURLWithPath: "backend/tests/fixtures/map_stream_v1_golden.txt"
+        )
+        let signedFixtureText = try! String(contentsOf: signedFixtureURL, encoding: .utf8)
+        let signedFixture = Dictionary(
+            uniqueKeysWithValues: signedFixtureText.split(separator: "\n").map { line in
+                let parts = line.split(
+                    separator: "=",
+                    maxSplits: 1,
+                    omittingEmptySubsequences: false
+                )
+                return (String(parts[0]), String(parts[1]))
+            }
+        )
+        let signedStream = Data(hex: signedFixture["stream_hex"]!)!
+        let signedPublicKey = Data(hex: signedFixture["public_key_x963_hex"]!)!
+        let signedPublicKeyHash = FirmwareUpdateManager.sha256Hex(signedPublicKey)
+        let signedArtifact = OfflineMapArtifact(
+            format: OfflineMapArtifact.bikeMapStreamFormat,
+            mediaType: "application/vnd.openbikecomputer.map-stream",
+            filename: "golden-map.bmap",
+            objectKey: "maps/golden-map/bike-map-stream-v1/map-test-2026-01/" +
+                "\(signedPublicKeyHash)/\(String(repeating: "1", count: 64))/" +
+                "\(String(repeating: "2", count: 64))/" +
+                "\(signedFixture["signed_manifest_receipt"]!).bmap",
+            bytes: Int64(signedStream.count),
+            sha256: FirmwareUpdateManager.sha256Hex(signedStream),
+            manifestReceipt: signedFixture["manifest_receipt"],
+            signedManifestReceipt: signedFixture["signed_manifest_receipt"],
+            signatureKeyId: "map-test-2026-01",
+            signatureKeySha256: signedPublicKeyHash,
+            producerBuildSha256: String(repeating: "1", count: 64),
+            producerImageDigest: "sha256:" + String(repeating: "2", count: 64),
+            requiredIosBuild: "100",
+            requiredIosGitSha: String(repeating: "a", count: 40),
+            requiredIosBuildSha256: String(repeating: "b", count: 64),
+            requiredFirmwareVersion: nil,
+            requiredFirmwareBuild: nil,
+            requiredFirmwareGitSha: nil
+        )
+        let signedTrustStore = BikeMapStreamTrustStore(publicKeysByID: [
+            "map-test-2026-01": signedPublicKey,
+        ])
+
+        func runSignedRecovery(
+            jobID: String,
+            userDefinedName: String?
+        ) async {
+            let suite = "offline-map-signed-recovery-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let cache = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "offline-map-signed-recovery-cache-\(UUID().uuidString)",
+                isDirectory: true
+            )
+            defer { try? FileManager.default.removeItem(at: cache) }
+            try! FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+
+            let serverURL = "https://signed-recovery.example"
+            let credential = OfflineMapInstallationCredential(
+                clientInstallationId: "inst_v2_1234567890abcdef1234567890abcdef",
+                clientInstallationToken: "v1." + String(repeating: "A", count: 43)
+            )
+            try! OfflineMapInstallationCredentialStore(defaults: defaults).save(
+                credential,
+                serverURLString: serverURL
+            )
+            defaults.set(serverURL, forKey: "offlineMap.serverURL")
+            OfflineMapJobPersistence.save(
+                jobId: jobID,
+                serverURLString: serverURL,
+                defaults: defaults
+            )
+
+            let legacyURL = cache.appendingPathComponent("golden-map.zip")
+            if let userDefinedName {
+                try! packData(mapId: "golden-map", displayName: "Golden Map")
+                    .write(to: legacyURL)
+                defaults.set(
+                    [legacyURL.lastPathComponent: userDefinedName],
+                    forKey: "offlineMap.packDisplayNames"
+                )
+                try! SavedMapArtifactMetadataStore.save(
+                    SavedMapArtifactMetadata(
+                        schemaVersion: SavedMapArtifactMetadata.currentSchemaVersion,
+                        mapID: "golden-map",
+                        displayName: userDefinedName,
+                        localArtifactFilename: legacyURL.lastPathComponent,
+                        streamFormatVersion: nil,
+                        jobID: "older-job",
+                        serverURLString: serverURL,
+                        clientInstallationID: credential.clientInstallationId,
+                        primaryArtifact: nil,
+                        legacyArtifact: nil,
+                        lastTransferProtocol: nil,
+                        lastTransferStreamFormat: nil,
+                        lastTransferSessionID: nil,
+                        lastBackgroundTaskID: nil,
+                        lastDeviceSequence: nil,
+                        lastDeviceState: nil,
+                        lastDeviceStep: nil,
+                        lastDeviceStepCount: nil,
+                        lastDeviceProgress: nil,
+                        expectedActiveMapID: "golden-map",
+                        expectedActiveSessionID: nil,
+                        lastTransferOutcome: nil,
+                        userDefinedDisplayName: true
+                    ),
+                    for: legacyURL
+                )
+            }
+
+            OfflineMapTestURLProtocol.configure { request in
+                switch request.url?.path {
+                case "/v1/map-jobs/\(jobID)":
+                    return (
+                        200,
+                        jobData(
+                            jobId: jobID,
+                            mapId: "golden-map",
+                            sourceRegionName: "China",
+                            artifacts: [signedArtifact]
+                        )
+                    )
+                case "/v1/map-packs/golden-map/artifacts/bike-map-stream-v1/download-url":
+                    var response = try! JSONSerialization.jsonObject(
+                        with: JSONEncoder().encode(signedArtifact)
+                    ) as! [String: Any]
+                    response["url"] = "/immutable/golden-map.bmap"
+                    response["expiresAt"] = 2_000_000_000
+                    response["expiresInSeconds"] = 900
+                    return (200, try! JSONSerialization.data(withJSONObject: response))
+                case "/v1/map-jobs":
+                    return (200, try! JSONSerialization.data(withJSONObject: ["jobs": []]))
+                case "/v1/map-jobs/\(jobID)/downloads",
+                     "/v1/map-jobs/\(jobID)/display-name":
+                    return (
+                        200,
+                        try! JSONSerialization.data(withJSONObject: [
+                            "jobId": jobID,
+                            "downloadCount": 1,
+                        ])
+                    )
+                default:
+                    return (404, Data())
+                }
+            }
+            let manager = OfflineMapManager(
+                defaults: defaults,
+                mapPlatformSession: session,
+                cacheDirectory: cache,
+                mapStreamTrustStore: signedTrustStore,
+                packDownload: { _, _, onProgress, _ in
+                    onProgress(1)
+                    let url = FileManager.default.temporaryDirectory
+                        .appendingPathComponent(UUID().uuidString)
+                        .appendingPathExtension("bmap")
+                    try signedStream.write(to: url)
+                    return url
+                }
+            )
+            manager.resumePendingMapJobIfNeeded()
+            let signedRecoveryCompleted = await waitForMapTaskCompletion(manager)
+            assert(
+                signedRecoveryCompleted,
+                "signed BMAP recovery should complete"
+            )
+            guard let downloadedURL = manager.downloadedPackURL else {
+                assert(false, "signed BMAP recovery should publish its downloaded artifact")
+                return
+            }
+            assertEqual(
+                downloadedURL.pathExtension,
+                "bmap",
+                "signed recovery publishes the canonical BMAP extension"
+            )
+            let expectedName = userDefinedName ?? "Golden Map"
+            assertEqual(
+                manager.displayName(forCachedPack: downloadedURL),
+                expectedName,
+                userDefinedName == nil
+                    ? "signed manifest displayName outranks the source-region fallback"
+                    : "signed replacement preserves an explicit user name"
+            )
+            let downloadedMetadata = SavedMapArtifactMetadataStore.load(for: downloadedURL)
+            assertEqual(
+                downloadedMetadata?.displayName,
+                expectedName,
+                "signed recovery persists the resolved display name"
+            )
+            assertEqual(
+                downloadedMetadata?.userDefinedDisplayName,
+                userDefinedName != nil,
+                "signed replacement preserves display-name provenance"
+            )
+            assertEqual(
+                downloadedMetadata?.primaryArtifact,
+                signedArtifact,
+                "signed recovery persists the verified stream artifact"
+            )
+            assert(
+                OfflineMapTestURLProtocol.requests().contains {
+                    $0.url?.path ==
+                        "/v1/map-packs/golden-map/artifacts/bike-map-stream-v1/download-url"
+                },
+                "signed recovery exercises the immutable artifact URL path"
+            )
+            if userDefinedName != nil {
+                assert(
+                    !FileManager.default.fileExists(atPath: legacyURL.path),
+                    "signed replacement removes the obsolete ZIP"
+                )
+                assert(
+                    SavedMapArtifactMetadataStore.load(for: legacyURL) == nil,
+                    "signed replacement removes the obsolete ZIP metadata"
+                )
+                assert(
+                    defaults.dictionary(forKey: "offlineMap.packDisplayNames")?[
+                        legacyURL.lastPathComponent
+                    ] == nil,
+                    "signed replacement removes the obsolete ZIP display-name entry"
+                )
+            }
+        }
+
+        await runSignedRecovery(jobID: "job-signed-name", userDefinedName: nil)
+        await runSignedRecovery(
+            jobID: "job-signed-replacement",
+            userDefinedName: "Weekend Ride"
+        )
 
         let managedSuite = "offline-map-managed-token-route-\(UUID().uuidString)"
         let managedDefaults = UserDefaults(suiteName: managedSuite)!
@@ -3397,6 +3681,16 @@ struct NavigationProtocolTests {
         let downloadRetryPack = downloadRetryCache.appendingPathComponent("map-download-retry.zip")
         let originalDownloadRetryPackData = packData(mapId: "map-download-retry")
         try! originalDownloadRetryPackData.write(to: downloadRetryPack)
+        let originalDownloadRetryMetadata = try! JSONSerialization.data(withJSONObject: [
+            "schemaVersion": SavedMapArtifactMetadata.currentSchemaVersion,
+            "mapID": "map-download-retry",
+            "displayName": "Shanghai Riverside",
+            "localArtifactFilename": downloadRetryPack.lastPathComponent,
+            "userDefinedDisplayName": true,
+        ])
+        try! originalDownloadRetryMetadata.write(
+            to: SavedMapArtifactMetadataStore.metadataURL(for: downloadRetryPack)
+        )
         var downloadURLIssueCount = 0
         var packDownloadAttemptCount = 0
         var rejectedTemporaryURLs: [URL] = []
@@ -3496,6 +3790,16 @@ struct NavigationProtocolTests {
             downloadRetryManager.displayName(forCachedPack: downloadRetryPack),
             "Shanghai Riverside",
             "same-map replacement preserves the user rename"
+        )
+        assertEqual(
+            SavedMapArtifactMetadataStore.load(for: downloadRetryPack)?.displayName,
+            "Shanghai Riverside",
+            "same-map replacement persists the user rename in artifact metadata"
+        )
+        assertEqual(
+            SavedMapArtifactMetadataStore.load(for: downloadRetryPack)?.userDefinedDisplayName,
+            true,
+            "same-map replacement preserves explicit user-name provenance"
         )
         downloadRetryManager.deleteCachedPack(at: downloadRetryPack)
 
@@ -3999,6 +4303,195 @@ struct NavigationProtocolTests {
         )
     }
 
+    static func testSavedMapDefaultNamePolicy() {
+        assertEqual(
+            SavedMapDisplayNamePolicy.resolve(
+                artifactDisplayName: "custom-map-4dc48b9bcb",
+                sourceRegionName: "China",
+                mapID: "custom-map-4dc48b9bcb"
+            ),
+            "China",
+            "a generated artifact ID never outranks the Geofabrik area name"
+        )
+        assertEqual(
+            SavedMapDisplayNamePolicy.resolve(
+                artifactDisplayName: "Shanghai Suzhou",
+                sourceRegionName: "China",
+                mapID: "shanghai-suzhou"
+            ),
+            "Shanghai Suzhou",
+            "an explicit pack name still outranks the source area"
+        )
+        assertEqual(
+            SavedMapDisplayNamePolicy.resolve(
+                artifactDisplayName: "COVID-19 Rides",
+                sourceRegionName: "China",
+                mapID: "covid-19-rides"
+            ),
+            "COVID-19 Rides",
+            "explicit artifact punctuation and casing are preserved"
+        )
+        assertEqual(
+            SavedMapDisplayNamePolicy.resolve(
+                artifactDisplayName: "gravel loop",
+                sourceRegionName: "China",
+                mapID: "gravel-loop"
+            ),
+            "gravel loop",
+            "explicit lowercase artifact names are preserved"
+        )
+        assertEqual(
+            SavedMapDisplayNamePolicy.preferredSourceName("china-latest.osm.pbf"),
+            "China",
+            "legacy Geofabrik filenames become readable area names"
+        )
+        assert(
+            !SavedMapDisplayNamePolicy.isGeneratedGenericName("custom-map-weekend"),
+            "a user label sharing the old prefix is not mistaken for a generated ID"
+        )
+        assertEqual(
+            SavedMapDisplayNamePolicy.resolve(
+                artifactDisplayName: "custom-map-deadbeef00",
+                sourceRegionName: nil,
+                mapID: "custom-map-deadbeef00"
+            ),
+            "Offline Map",
+            "generic IDs are never shown even when legacy metadata has no source"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapManagerRepairsGeneratedPackDefaults() {
+        let suite = "offline-map-default-repair-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "default repair test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let cacheDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-default-repair-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(
+            at: cacheDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let mapID = "custom-map-4dc48b9bcb"
+        let packURL = cacheDirectory.appendingPathComponent("\(mapID).zip")
+        let sourceName = "Shanghai and Suzhou"
+        let manifest = try! JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 1,
+            "mapId": mapID,
+            "displayName": mapID,
+            "bounds": [120.90, 30.70, 121.95, 31.55],
+            "source": [
+                "provider": "geofabrik",
+                "region": "geofabrik-asia-china",
+                "name": sourceName,
+                "url": "https://download.geofabrik.de/asia/china-latest.osm.pbf",
+            ],
+        ])
+        try! makeStoredZip(entries: [
+            ("manifest.json", manifest),
+            ("VECTMAP/\(mapID)/+0000+0000/1.fmb", Data("map-block".utf8)),
+        ]).write(to: packURL)
+
+        let explicitMapID = "marina-bay-rides-deadbeef00"
+        let explicitPackURL = cacheDirectory.appendingPathComponent("\(explicitMapID).zip")
+        let explicitManifest = try! JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 1,
+            "mapId": explicitMapID,
+            "displayName": "COVID-19 Rides",
+            "bounds": [103.80, 1.25, 103.90, 1.35],
+            "source": [
+                "provider": "geofabrik",
+                "region": "geofabrik-asia-malaysia-singapore-brunei",
+                "name": "Malaysia, Singapore, and Brunei",
+            ],
+        ])
+        try! makeStoredZip(entries: [
+            ("manifest.json", explicitManifest),
+            ("VECTMAP/\(explicitMapID)/+0000+0000/1.fmb", Data("map-block".utf8)),
+        ]).write(to: explicitPackURL)
+
+        let prefixedUserMapID = "custom-map-aabbccddee"
+        let prefixedUserPackURL = cacheDirectory
+            .appendingPathComponent("\(prefixedUserMapID).zip")
+        let prefixedUserManifest = try! JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 1,
+            "mapId": prefixedUserMapID,
+            "displayName": prefixedUserMapID,
+            "bounds": [120.90, 30.70, 121.95, 31.55],
+            "source": ["name": "China"],
+        ])
+        try! makeStoredZip(entries: [
+            ("manifest.json", prefixedUserManifest),
+            ("VECTMAP/\(prefixedUserMapID)/+0000+0000/1.fmb", Data("map-block".utf8)),
+        ]).write(to: prefixedUserPackURL)
+
+        let streamMapID = "custom-map-cafebabe00"
+        let streamPackURL = cacheDirectory.appendingPathComponent("\(streamMapID).bmap")
+        let streamManifest = try! JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 1,
+            "mapId": streamMapID,
+            "displayName": streamMapID,
+            "boundsE7": [1_209_000_000, 307_000_000, 1_219_500_000, 315_500_000],
+            "source": ["name": "Yangtze Delta"],
+        ])
+        try! makePreviewReadableBikeMapStream(manifest: streamManifest)
+            .write(to: streamPackURL)
+        defaults.set(
+            [
+                packURL.lastPathComponent: mapID,
+                prefixedUserPackURL.lastPathComponent: "custom-map-weekend",
+            ],
+            forKey: "offlineMap.packDisplayNames"
+        )
+
+        let manager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory
+        )
+
+        assertEqual(
+            manager.displayName(forCachedPack: packURL),
+            sourceName,
+            "restart repairs an old generated label from manifest source.name"
+        )
+        assertEqual(
+            manager.displayName(forCachedPack: explicitPackURL),
+            "COVID-19 Rides",
+            "an explicit ZIP manifest name outranks and preserves source metadata"
+        )
+        assertEqual(
+            manager.displayName(forCachedPack: prefixedUserPackURL),
+            "custom-map-weekend",
+            "a legacy user label sharing the generated prefix is preserved"
+        )
+        assertEqual(
+            defaults.dictionary(forKey: "offlineMap.packDisplayNames")?[
+                prefixedUserPackURL.lastPathComponent
+            ] as? String,
+            "custom-map-weekend",
+            "repair does not rewrite a legacy user label that only shares the prefix"
+        )
+        assertEqual(
+            manager.displayName(forCachedPack: streamPackURL),
+            "Yangtze Delta",
+            "a BMAP manifest source.name is used through the manager display path"
+        )
+        assertEqual(
+            OfflineMapPackPreviewReader.content(for: packURL)?.bounds,
+            OfflineMapPreviewBounds(coordinates: [120.90, 30.70, 121.95, 31.55]),
+            "a preview-less legacy artifact still exposes bounds for local rendering"
+        )
+        assertEqual(
+            OfflineMapPackPreviewReader.content(for: packURL)?.imageData,
+            nil,
+            "the bounds fallback does not pretend a legacy artifact embedded an image"
+        )
+    }
+
     @MainActor
     static func testOfflineMapManagerRenamesCachedPack() {
         let suite = "offline-map-rename-test-\(UUID().uuidString)"
@@ -4130,8 +4623,10 @@ struct NavigationProtocolTests {
         }
         assert(
             managerSource.contains("Task.detached(priority: .utility)") &&
+                managerSource.contains("OfflineMapPackPreviewReader.content(for: packURL)") &&
+                managerSource.contains("OfflineMapFallbackPreviewRenderer.image") &&
                 !managerSource.contains("packURLs.forEach(cachePreviewIfAvailable)"),
-            "saved-map previews load lazily without scanning cached archives on the main actor"
+            "saved-map previews load lazily and render bounds when an old pack has no image"
         )
         assert(
             managerSource.contains(
@@ -4329,6 +4824,7 @@ struct NavigationProtocolTests {
         let manifest = try! JSONSerialization.data(withJSONObject: [
             "schemaVersion": 1,
             "mapId": "map-1",
+            "boundsE7": [1_037_500_000, 12_400_000, 1_039_300_000, 13_700_000],
             "preview": previewMetadata,
         ])
         let url = FileManager.default.temporaryDirectory
@@ -4429,31 +4925,7 @@ struct NavigationProtocolTests {
             preview,
             "stream manifests expose their inline signed boundary preview"
         )
-        var stream = Data("BIKEMAP1".utf8)
-        func appendUInt16LE(_ value: UInt16) {
-            stream.append(UInt8(value & 0xff))
-            stream.append(UInt8(value >> 8))
-        }
-        func appendUInt32LE(_ value: UInt32) {
-            for shift in stride(from: 0, through: 24, by: 8) {
-                stream.append(UInt8((value >> UInt32(shift)) & 0xff))
-            }
-        }
-        func appendUInt64LE(_ value: UInt64) {
-            for shift in stride(from: 0, through: 56, by: 8) {
-                stream.append(UInt8((value >> UInt64(shift)) & 0xff))
-            }
-        }
-        appendUInt16LE(1)
-        appendUInt16LE(0)
-        appendUInt32LE(UInt32(manifest.count))
-        appendUInt16LE(5)
-        appendUInt16LE(0)
-        appendUInt32LE(1)
-        appendUInt64LE(1)
-        stream.append(manifest)
-        stream.append(Data(repeating: 0, count: 5))
-        stream.append(0)
+        let stream = makePreviewReadableBikeMapStream(manifest: manifest)
         let streamURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("offline-map-preview-\(UUID().uuidString).bmap")
         try? stream.write(to: streamURL)
@@ -4462,6 +4934,11 @@ struct NavigationProtocolTests {
             OfflineMapPackPreviewReader.imageData(for: streamURL),
             preview,
             "cached signed streams expose their inline boundary preview"
+        )
+        assertEqual(
+            OfflineMapPackPreviewReader.content(for: streamURL)?.bounds,
+            OfflineMapPreviewBounds(coordinates: [103.75, 1.24, 103.93, 1.37]),
+            "cached signed streams retain bounds for the local thumbnail fallback"
         )
 
         var corruptPreview = previewMetadata
