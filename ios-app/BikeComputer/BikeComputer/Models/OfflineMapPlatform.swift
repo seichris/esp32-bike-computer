@@ -617,7 +617,7 @@ nonisolated enum SavedMapDisplayNamePolicy {
         if let sourceName = preferred(sourceRegionName) {
             return sourceName
         }
-        if let mapName = preferred(mapID) {
+        if let mapName = preferredSourceName(mapID) {
             return mapName
         }
         return "Offline Map"
@@ -627,7 +627,12 @@ nonisolated enum SavedMapDisplayNamePolicy {
         guard let candidate else { return nil }
         let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isGeneratedGenericName(trimmed) else { return nil }
-        let cleaned = clean(trimmed)
+        return trimmed
+    }
+
+    static func preferredSourceName(_ candidate: String?) -> String? {
+        guard let candidate = preferred(candidate) else { return nil }
+        let cleaned = clean(candidate)
         return cleaned.isEmpty ? nil : cleaned
     }
 
@@ -636,7 +641,10 @@ nonisolated enum SavedMapDisplayNamePolicy {
         let normalized = candidate
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        return normalized == "custom-map" || normalized.hasPrefix("custom-map-")
+        return normalized == "custom-map" || normalized.range(
+            of: "^custom-map-[0-9a-f]{10}$",
+            options: .regularExpression
+        ) != nil
     }
 
     static func clean(_ candidate: String) -> String {

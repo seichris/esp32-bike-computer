@@ -2082,7 +2082,7 @@ final class OfflineMapManager: ObservableObject {
         downloadProgress = 0
         downloadByteProgress = nil
         var temporaryURL: URL?
-        var verifiedStream: VerifiedBikeMapArtifact?
+        var artifactDisplayName: String?
         let trustStore = mapStreamTrustStore
         do {
             let constraints = try OfflineMapDownloadConstraints.mapArtifact(primaryArtifact)
@@ -2093,7 +2093,7 @@ final class OfflineMapManager: ObservableObject {
             })
             temporaryURL = downloadedURL
             let validationTask = Task.detached(priority: .userInitiated) {
-                () throws -> VerifiedBikeMapArtifact? in
+                () throws -> String? in
                 switch choice {
                 case .bikeMapStream(let artifact, _):
                     return try BikeMapStreamArtifactValidator.validate(
@@ -2101,7 +2101,7 @@ final class OfflineMapManager: ObservableObject {
                         artifact: artifact,
                         expectedMapID: mapId,
                         trustStore: trustStore
-                    )
+                    ).displayName
                 case .legacyZip(let artifact):
                     if let artifact {
                         try OfflineMapArtifactFileValidator.validate(
@@ -2111,10 +2111,10 @@ final class OfflineMapManager: ObservableObject {
                     }
                     let archive = try OfflineMapPackArchive(url: downloadedURL)
                     try archive.validate(expectedMapId: mapId)
-                    return nil
+                    return try archive.manifest().displayName
                 }
             }
-            verifiedStream = try await withTaskCancellationHandler {
+            artifactDisplayName = try await withTaskCancellationHandler {
                 try await validationTask.value
             } onCancel: {
                 validationTask.cancel()
@@ -2144,7 +2144,7 @@ final class OfflineMapManager: ObservableObject {
                         !SavedMapDisplayNamePolicy.isGeneratedGenericName($0))
             }
         let defaultDisplayName = SavedMapDisplayNamePolicy.resolve(
-            artifactDisplayName: verifiedStream?.displayName,
+            artifactDisplayName: artifactDisplayName,
             sourceRegionName: job.sourceRegion?.name,
             mapID: mapId
         )
@@ -3763,15 +3763,19 @@ final class OfflineMapManager: ObservableObject {
         guard let manifest = OfflineMapPackPreviewReader.manifest(for: packURL) else {
             return nil
         }
-        let candidates = [
-            manifest.source?.name,
+        if let displayName = SavedMapDisplayNamePolicy.preferred(manifest.displayName) {
+            return displayName
+        }
+        if let sourceName = SavedMapDisplayNamePolicy.preferred(manifest.source?.name) {
+            return sourceName
+        }
+        let sourceCandidates = [
             manifest.source?.url.flatMap { URL(string: $0)?.lastPathComponent },
-            manifest.source?.region,
-            manifest.displayName
+            manifest.source?.region
         ]
-        for candidate in candidates {
-            if let displayName = SavedMapDisplayNamePolicy.preferred(candidate) {
-                return displayName
+        for candidate in sourceCandidates {
+            if let sourceName = SavedMapDisplayNamePolicy.preferredSourceName(candidate) {
+                return sourceName
             }
         }
         return nil
