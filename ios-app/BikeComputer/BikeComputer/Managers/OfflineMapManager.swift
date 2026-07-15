@@ -1055,6 +1055,11 @@ nonisolated enum SavedMapArtifactMetadataStore {
     }
 }
 
+typealias SavedMapArtifactMetadataSaveOperation = @MainActor (
+    SavedMapArtifactMetadata,
+    URL
+) throws -> Void
+
 nonisolated enum SavedMapStreamMigrationFallback {
     static func shouldUseLegacyArtifact(
         for metadata: SavedMapArtifactMetadata
@@ -1266,6 +1271,7 @@ final class OfflineMapManager: ObservableObject {
     private let packDownload: PackDownloadOperation
     private let previewLoad: OfflineMapPreviewLoadOperation
     private let mapSnapshot: OfflineMapSnapshotOperation
+    private let metadataSave: SavedMapArtifactMetadataSaveOperation
     private let cacheDirectoryOverride: URL?
     private let installationCredentialStore: OfflineMapInstallationCredentialStore
     private let mapStreamTrustStore: BikeMapStreamTrustStore
@@ -1315,6 +1321,9 @@ final class OfflineMapManager: ObservableObject {
         },
         mapSnapshot: @escaping OfflineMapSnapshotOperation = { bounds in
             try await OfflineMapSnapshotPreviewRenderer.pngData(for: bounds)
+        },
+        metadataSave: @escaping SavedMapArtifactMetadataSaveOperation = { metadata, url in
+            try SavedMapArtifactMetadataStore.save(metadata, for: url)
         }
     ) {
         OfflineMapPackCompatibilityArchive.removeOrphans()
@@ -1323,6 +1332,7 @@ final class OfflineMapManager: ObservableObject {
         self.packDownload = packDownload
         self.previewLoad = previewLoad
         self.mapSnapshot = mapSnapshot
+        self.metadataSave = metadataSave
         self.cacheDirectoryOverride = cacheDirectory
         self.installationCredentialStore = OfflineMapInstallationCredentialStore(defaults: defaults)
         self.mapStreamTrustStore = mapStreamTrustStore
@@ -2542,48 +2552,18 @@ final class OfflineMapManager: ObservableObject {
             userDefinedDisplayName: userDefinedDisplayName,
             downloadReceiptID: downloadReceiptID
         )
-        let backup = destination
-            .deletingLastPathComponent()
-            .appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString).backup")
-        let metadataURL = SavedMapArtifactMetadataStore.metadataURL(for: destination)
-        let metadataBackup = SavedMapArtifactMetadataStore.metadataURL(for: backup)
-        var backedUpArtifact = false
-        var backedUpMetadata = false
         do {
-            if FileManager.default.fileExists(atPath: destination.path) {
-                try FileManager.default.moveItem(at: destination, to: backup)
-                backedUpArtifact = true
-            }
-            if FileManager.default.fileExists(atPath: metadataURL.path) {
-                try FileManager.default.moveItem(at: metadataURL, to: metadataBackup)
-                backedUpMetadata = true
-            }
-            try FileManager.default.moveItem(at: temporaryURL, to: destination)
-            try SavedMapArtifactMetadataStore.save(metadata, for: destination)
-            let obsoleteExtension = fileExtension == "bmap" ? "zip" : "bmap"
-            let obsolete = try cachedPackURL(mapId: mapId, fileExtension: obsoleteExtension)
-            if FileManager.default.fileExists(atPath: obsolete.path) {
-                try? FileManager.default.removeItem(at: obsolete)
-                try? SavedMapArtifactMetadataStore.delete(for: obsolete)
-                packDisplayNames.removeValue(forKey: obsolete.lastPathComponent)
-                invalidateCachedPreview(for: obsolete)
-            }
-            if backedUpArtifact { try? FileManager.default.removeItem(at: backup) }
-            if backedUpMetadata { try? FileManager.default.removeItem(at: metadataBackup) }
+            try replaceDownloadedArtifact(
+                at: temporaryURL,
+                destination: destination,
+                metadata: metadata,
+                mapID: mapId,
+                fileExtension: fileExtension
+            )
         } catch {
-            try? FileManager.default.removeItem(at: temporaryURL)
-            try? FileManager.default.removeItem(at: destination)
-            try? SavedMapArtifactMetadataStore.delete(for: destination)
-            if backedUpArtifact {
-                try? FileManager.default.moveItem(at: backup, to: destination)
-            }
-            if backedUpMetadata {
-                try? FileManager.default.moveItem(at: metadataBackup, to: metadataURL)
-            }
             downloadURL = nil
             throw error
         }
-        invalidateCachedPreview(for: destination)
         downloadedPackURL = destination
         OfflineMapJobPersistence.markPackDownloaded(
             jobId: job.jobId,
@@ -2619,6 +2599,59 @@ final class OfflineMapManager: ObservableObject {
         downloadByteProgress = nil
         transferProgress = 0
         statusMessage = "map downloaded"
+    }
+
+    func replaceDownloadedArtifact(
+        at temporaryURL: URL,
+        destination: URL,
+        metadata: SavedMapArtifactMetadata,
+        mapID: String,
+        fileExtension: String
+    ) throws {
+        defer { invalidateCachedPreview(for: destination) }
+        let backup = destination
+            .deletingLastPathComponent()
+            .appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString).backup")
+        let metadataURL = SavedMapArtifactMetadataStore.metadataURL(for: destination)
+        let metadataBackup = SavedMapArtifactMetadataStore.metadataURL(for: backup)
+        var backedUpArtifact = false
+        var backedUpMetadata = false
+        do {
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.moveItem(at: destination, to: backup)
+                backedUpArtifact = true
+            }
+            if FileManager.default.fileExists(atPath: metadataURL.path) {
+                try FileManager.default.moveItem(at: metadataURL, to: metadataBackup)
+                backedUpMetadata = true
+            }
+            try FileManager.default.moveItem(at: temporaryURL, to: destination)
+            try metadataSave(metadata, destination)
+            let obsoleteExtension = fileExtension == "bmap" ? "zip" : "bmap"
+            let obsolete = try cachedPackURL(
+                mapId: mapID,
+                fileExtension: obsoleteExtension
+            )
+            if FileManager.default.fileExists(atPath: obsolete.path) {
+                try? FileManager.default.removeItem(at: obsolete)
+                try? SavedMapArtifactMetadataStore.delete(for: obsolete)
+                packDisplayNames.removeValue(forKey: obsolete.lastPathComponent)
+                invalidateCachedPreview(for: obsolete)
+            }
+            if backedUpArtifact { try? FileManager.default.removeItem(at: backup) }
+            if backedUpMetadata { try? FileManager.default.removeItem(at: metadataBackup) }
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            try? FileManager.default.removeItem(at: destination)
+            try? SavedMapArtifactMetadataStore.delete(for: destination)
+            if backedUpArtifact {
+                try? FileManager.default.moveItem(at: backup, to: destination)
+            }
+            if backedUpMetadata {
+                try? FileManager.default.moveItem(at: metadataBackup, to: metadataURL)
+            }
+            throw error
+        }
     }
 
     private func finishRecoveredJob(

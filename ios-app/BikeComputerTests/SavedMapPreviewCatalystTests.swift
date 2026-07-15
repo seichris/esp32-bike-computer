@@ -7,6 +7,10 @@ private func fail(_ message: String) -> Never {
     Foundation.exit(1)
 }
 
+private enum ExpectedPreviewTestError: Error {
+    case metadataSave
+}
+
 private func appendUInt16LE(_ value: UInt16, to data: inout Data) {
     data.append(UInt8(value & 0xff))
     data.append(UInt8(value >> 8))
@@ -430,6 +434,147 @@ struct SavedMapPreviewCatalystTests {
         try? await Task.sleep(nanoseconds: 50_000_000)
         guard SavedMapSnapshotPreviewStore.imageData(for: stalePackURL) == snapshotPNG else {
             fail("a stale invalid-preview load must not delete a replacement snapshot")
+        }
+
+        let rollbackMapID = "custom-map-rollback-preview"
+        let rollbackPackURL = cacheDirectory.appendingPathComponent("\(rollbackMapID).zip")
+        let rollbackOldPackData: Data
+        let rollbackNewPackData: Data
+        let rollbackReplacementMetadata: SavedMapArtifactMetadata
+        do {
+            let oldManifest = try JSONSerialization.data(withJSONObject: [
+                "schemaVersion": 1,
+                "mapId": rollbackMapID,
+                "displayName": "Old Rollback Map",
+                "bounds": [120.90, 30.70, 121.95, 31.55],
+            ])
+            rollbackOldPackData = storedZip(entries: [
+                ("manifest.json", oldManifest),
+                (
+                    "VECTMAP/\(rollbackMapID)/+0000+0000/1.fmb",
+                    Data("old-map-block".utf8)
+                ),
+            ])
+            let newManifest = try JSONSerialization.data(withJSONObject: [
+                "schemaVersion": 1,
+                "mapId": rollbackMapID,
+                "displayName": "Replacement Rollback Map",
+                "bounds": [10.0, 20.0, 11.0, 21.0],
+            ])
+            rollbackNewPackData = storedZip(entries: [
+                ("manifest.json", newManifest),
+                (
+                    "VECTMAP/\(rollbackMapID)/+0000+0000/1.fmb",
+                    Data("new-map-block".utf8)
+                ),
+            ])
+            try rollbackOldPackData.write(to: rollbackPackURL)
+            let oldMetadataData = try JSONSerialization.data(withJSONObject: [
+                "schemaVersion": SavedMapArtifactMetadata.currentSchemaVersion,
+                "mapID": rollbackMapID,
+                "displayName": "Old Rollback Map",
+                "localArtifactFilename": rollbackPackURL.lastPathComponent,
+                "userDefinedDisplayName": true,
+            ])
+            let oldMetadata = try JSONDecoder().decode(
+                SavedMapArtifactMetadata.self,
+                from: oldMetadataData
+            )
+            try SavedMapArtifactMetadataStore.save(oldMetadata, for: rollbackPackURL)
+            let replacementMetadataData = try JSONSerialization.data(withJSONObject: [
+                "schemaVersion": SavedMapArtifactMetadata.currentSchemaVersion,
+                "mapID": rollbackMapID,
+                "displayName": "Replacement Rollback Map",
+                "localArtifactFilename": rollbackPackURL.lastPathComponent,
+                "userDefinedDisplayName": false,
+            ])
+            rollbackReplacementMetadata = try JSONDecoder().decode(
+                SavedMapArtifactMetadata.self,
+                from: replacementMetadataData
+            )
+        } catch {
+            fail("rollback preview race fixture should write: \(error)")
+        }
+        let rollbackReplacementContent = OfflineMapPreviewLoadResult(
+            snapshotData: nil,
+            packContent: OfflineMapPackPreviewContent(
+                imageData: nil,
+                bounds: OfflineMapPreviewBounds(
+                    coordinates: [10.0, 20.0, 11.0, 21.0]
+                )
+            )
+        )
+        var rollbackLoadStarted = false
+        var rollbackLoadReturned = false
+        var rollbackSnapshotGenerationCount = 0
+        var rollbackLoadContinuation: CheckedContinuation<
+            OfflineMapPreviewLoadResult,
+            Never
+        >?
+        let rollbackManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            previewLoad: { _ in
+                rollbackLoadStarted = true
+                let result = await withCheckedContinuation { continuation in
+                    rollbackLoadContinuation = continuation
+                }
+                rollbackLoadReturned = true
+                return result
+            },
+            mapSnapshot: { _ in
+                rollbackSnapshotGenerationCount += 1
+                return snapshotPNG
+            },
+            metadataSave: { _, _ in
+                throw ExpectedPreviewTestError.metadataSave
+            }
+        )
+        rollbackManager.loadPreviewIfNeeded(forCachedPack: rollbackPackURL)
+        let rollbackStartedDeadline = Date().addingTimeInterval(3)
+        while !rollbackLoadStarted && Date() < rollbackStartedDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard rollbackLoadStarted, let rollbackContinuation = rollbackLoadContinuation else {
+            fail("rollback preview load should start")
+        }
+        let rollbackIncomingURL = cacheDirectory.appendingPathComponent(
+            ".rollback-incoming-\(UUID().uuidString).zip"
+        )
+        do {
+            try rollbackNewPackData.write(to: rollbackIncomingURL)
+            try rollbackManager.replaceDownloadedArtifact(
+                at: rollbackIncomingURL,
+                destination: rollbackPackURL,
+                metadata: rollbackReplacementMetadata,
+                mapID: rollbackMapID,
+                fileExtension: "zip"
+            )
+            fail("rollback replacement should fail at metadata persistence")
+        } catch ExpectedPreviewTestError.metadataSave {
+            // Expected failure after the replacement artifact has been moved into place.
+        } catch {
+            fail("rollback replacement should fail with the injected error: \(error)")
+        }
+        guard (try? Data(contentsOf: rollbackPackURL)) == rollbackOldPackData,
+              SavedMapArtifactMetadataStore.load(for: rollbackPackURL)?.displayName ==
+                  "Old Rollback Map" else {
+            fail("failed replacement should restore the previous artifact and metadata")
+        }
+        rollbackLoadContinuation = nil
+        rollbackContinuation.resume(returning: rollbackReplacementContent)
+        let rollbackReturnedDeadline = Date().addingTimeInterval(3)
+        while !rollbackLoadReturned && Date() < rollbackReturnedDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard rollbackLoadReturned else {
+            fail("non-cooperative rollback preview load should return")
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        guard rollbackSnapshotGenerationCount == 0,
+              rollbackManager.previewImage(forCachedPack: rollbackPackURL) == nil,
+              SavedMapSnapshotPreviewStore.imageData(for: rollbackPackURL) == nil else {
+            fail("failed replacement should invalidate transient preview work")
         }
 
         var generatedBounds: OfflineMapPreviewBounds?
