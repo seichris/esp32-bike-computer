@@ -8,9 +8,6 @@ Navigate your bike rides with a sleek, Garmin-mounted bike computer.
 2. **Download the free iOS app** and pair your bike computer.
 3. **Ride.** Start navigation and follow turn-by-turn directions from your handlebars.
 
-To mount your bike computer on a Garmin mount, use our 3D-printable files in
-[`hardware/cad`](https://github.com/seichris/open-bike-computer/blob/main/hardware/cad/README.md).
-
 ## Contributing
 
 Ideas and feature requests are welcome—[open an issue](https://github.com/seichris/open-bike-computer/issues/new).
