@@ -177,7 +177,7 @@ static bool destinationRequestTimedOut(uint32_t nowMs) {
   const bool timedOut = destinationRequestPending &&
                         static_cast<uint32_t>(nowMs -
                                               destinationRequestStartedMs) >
-                            15000;
+                            destination_picker_protocol::REQUEST_TIMEOUT_MS;
   if (timedOut) {
     destinationRequestPending = false;
   }
@@ -190,7 +190,8 @@ static bool destinationStatusShouldExpire(uint32_t nowMs) {
   const bool shouldExpire =
       !destinationRequestPending &&
       destinationPickerStatus.code != DestinationPickerStatusCode::Idle &&
-      static_cast<uint32_t>(nowMs - destinationStatusUpdatedMs) > 5000;
+      static_cast<uint32_t>(nowMs - destinationStatusUpdatedMs) >
+          destination_picker_protocol::TERMINAL_STATUS_DISPLAY_MS;
   portEXIT_CRITICAL(&destinationPickerMux);
   return shouldExpire;
 }

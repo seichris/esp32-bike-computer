@@ -422,13 +422,6 @@ static void updateMapGuidanceOverlay() {
         lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text_static(label, "Add saved destinations in the app");
       } else {
-        lv_obj_t *title = lv_label_create(mapGuidanceDestinationPicker);
-        lv_obj_set_width(title, LV_PCT(100));
-        lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
-        lv_obj_set_style_text_color(title, lv_color_white(), 0);
-        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text_static(title, "Choose destination");
-
         for (uint8_t i = 0; i < catalog.count; i++) {
           const DeviceDestination &destination = catalog.items[i];
           if (destination.kind != DestinationKind::Favorite) {

@@ -267,9 +267,9 @@ UTF-8 strings of at most 64 bytes, and an empty catalog is valid.
 
 When idle, the picker expands the bottom overlay to two-thirds of the display.
 It shows large, transparent destination rows with a small yellow star before
-each label. Tapping the exposed map or pressing the BOOT/forward button
-dismisses the picker and restores the normal one-third guidance strip; a later
-forward press resumes normal screen cycling.
+each label and no section heading. Tapping the exposed map or pressing the
+BOOT/forward button dismisses the picker and restores the normal one-third
+guidance strip; a later forward press resumes normal screen cycling.
 
 The logical catalog is versioned JSON:
 
@@ -277,8 +277,11 @@ The logical catalog is versioned JSON:
 {"version":1,"generation":17,"items":[{"token":1,"kind":"favorite","label":"Home"},{"token":2,"kind":"favorite","label":"Work"}]}
 ```
 
-`generation` is a non-zero `UInt32`. Each item has a unique non-zero `UInt16`
-token and uses `kind: favorite`. For schema-v1 compatibility, firmware still
+`generation` is a non-zero `UInt32`. iOS starts each process from a randomized
+non-zero generation and advances it after each queued catalog, preventing a
+retained device catalog from aliasing a different token map after app relaunch.
+Each item has a unique non-zero `UInt16` token and uses `kind: favorite`. For
+schema-v1 compatibility, firmware still
 accepts correctly ordered `recent` items from older apps but does not render
 them. Coordinates and search queries remain private to the app; iOS keeps the
 token-to-`SavedDestination` mapping so an exact saved coordinate is used when
@@ -306,25 +309,39 @@ When a row is tapped, firmware notifies iOS on `2A6E`:
 The device immediately displays an animated white spinner with
 `Starting navigation...` and suppresses repeat requests while one is pending.
 iOS accepts the request only when generation and token match its active catalog,
-the device is authenticated, navigation is idle, and current location is
-available. It calculates a cycling route from the current location to the exact
-saved endpoint and replies on either command route:
+the device is authenticated, navigation is idle, and a fresh, reasonably
+accurate current location is available. It calculates a cycling route from that
+location to the exact saved endpoint and replies on either command route. When
+the authenticated picker becomes available, iOS may request Always location
+permission while the app is active, but it does not run continuous GPS merely
+because the device is connected. A row tap starts a request-scoped location
+session and holds it through the complete MapKit route-start outcome. With only
+When In Use permission, that session must start while the app is active; an
+unsupported background start fails instead of pretending the route is pending:
 
 ```text
 "DNST" | Generation: UInt32LE | Token: UInt16LE | State: UInt8 | Message: UTF-8
 ```
 
 State `1` is calculating, `2` started, `3` failed, and `4` stale. Messages are
-at most 64 UTF-8 bytes. Terminal status returns the overlay to the picker after
-five seconds; a request with no terminal response fails locally after 15
-seconds. Active maneuver data always takes precedence over the picker. The
-last valid catalog remains in RAM across disconnects, while tapping it without
-an authenticated app connection shows `Open app to start navigation`.
+at most 64 UTF-8 bytes. iOS cancels location/search/directions work at 13 seconds
+so its terminal response has time to arrive before firmware's 15-second pending
+request timeout. A disconnect also cancels any device-originated route before
+it can start on the phone alone. Terminal status returns the overlay to the
+picker after five seconds. Active maneuver data always takes precedence over
+the picker. The last valid catalog remains in RAM across disconnects, while
+tapping it without an authenticated app connection shows
+`Open app to start navigation`.
 
 iOS republishes the catalog after authenticated capability negotiation, any
 favorite change, reconnect, and navigation stop. The logical catalog is queued
 atomically on iOS so write-queue pressure cannot expose a partial new
-generation.
+generation. A failed acknowledged catalog chunk schedules a forced full-catalog
+retry with a new generation. DNST control responses use a separate bounded
+priority lane so even a bulk queue filled entirely by protected catalog chunks
+cannot starve the device's pending request. An acknowledged DNST write failure
+retries the latest status up to two times; a newer status supersedes stale
+retries.
 
 ## OSM Map Blocks
 

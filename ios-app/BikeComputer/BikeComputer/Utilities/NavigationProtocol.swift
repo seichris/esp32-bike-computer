@@ -32,6 +32,60 @@ struct DeviceDestinationCatalogBuild {
     let sourceFingerprint: String
 }
 
+enum DeviceDestinationCatalogGeneration {
+    static func initial(
+        randomValue: UInt32 = UInt32.random(in: 1...UInt32.max)
+    ) -> UInt32 {
+        randomValue == 0 ? 1 : randomValue
+    }
+
+    static func next(after current: UInt32) -> UInt32 {
+        current == UInt32.max ? 1 : current + 1
+    }
+}
+
+enum DeviceDestinationCatalogSyncPolicy {
+    static func shouldPublish(
+        force: Bool,
+        lastFingerprint: String?,
+        nextFingerprint: String
+    ) -> Bool {
+        force || lastFingerprint != nextFingerprint
+    }
+}
+
+enum DeviceDestinationLocationPolicy {
+    static let maximumAge: TimeInterval = 5
+    static let maximumHorizontalAccuracy: CLLocationAccuracy = 100
+    static let maximumFutureSkew: TimeInterval = 5
+
+    static func isUsable(_ location: CLLocation, now: Date = Date()) -> Bool {
+        guard location.horizontalAccuracy >= 0,
+              location.horizontalAccuracy <= maximumHorizontalAccuracy else {
+            return false
+        }
+        let age = now.timeIntervalSince(location.timestamp)
+        return age >= -maximumFutureSkew && age <= maximumAge
+    }
+}
+
+enum DeviceDestinationRequestTiming {
+    static let locationRefreshTimeout: TimeInterval = 5
+    static let firmwareRequestTimeout: TimeInterval = 15
+    // Leave enough time for the terminal DNST write to reach firmware before
+    // its own pending-request timeout expires.
+    static let appRequestDeadline: TimeInterval = 13
+}
+
+enum DeviceDestinationStatusRetryPolicy {
+    static let maximumRetryCount = 2
+    static let retryDelay: TimeInterval = 0.15
+
+    static func shouldRetry(afterAttempt attempt: Int) -> Bool {
+        attempt < maximumRetryCount
+    }
+}
+
 enum DeviceDestinationCatalogBuilder {
     static let version: UInt8 = 1
     static let favoriteLimit = 3
@@ -41,26 +95,34 @@ enum DeviceDestinationCatalogBuilder {
         favorites: [SavedDestination],
         generation: UInt32
     ) -> DeviceDestinationCatalogBuild {
-        var selected: [(DeviceDestinationKind, SavedDestination)] = []
+        var selected: [(
+            kind: DeviceDestinationKind,
+            destination: SavedDestination,
+            label: String
+        )] = []
         var seenIdentities = Set<String>()
 
         for destination in favorites where selected.count < favoriteLimit {
+            let label = utf8Prefix(destination.name, maxBytes: labelMaxBytes)
             let identity = destinationIdentity(destination)
-            guard !destination.name.isEmpty, seenIdentities.insert(identity).inserted else { continue }
-            selected.append((.favorite, destination))
+            guard !label.isEmpty,
+                  seenIdentities.insert(identity).inserted else { continue }
+            selected.append((.favorite, destination, label))
         }
 
         var destinationsByToken: [UInt16: SavedDestination] = [:]
         let items = selected.enumerated().map { index, entry in
             let token = UInt16(index + 1)
-            destinationsByToken[token] = entry.1
+            destinationsByToken[token] = entry.destination
             return DeviceDestinationCatalogItem(
                 token: token,
-                kind: entry.0,
-                label: utf8Prefix(entry.1.name, maxBytes: labelMaxBytes)
+                kind: entry.kind,
+                label: entry.label
             )
         }
-        let fingerprintParts: [String] = selected.map { kind, destination in
+        let fingerprintParts: [String] = selected.map { entry in
+            let kind = entry.kind
+            let destination = entry.destination
             let latitude = destination.latitude.map { String($0) } ?? "-"
             let longitude = destination.longitude.map { String($0) } ?? "-"
             return "\(kind.rawValue)|\(destination.id.uuidString)|\(latitude)|\(longitude)|\(destination.name)"

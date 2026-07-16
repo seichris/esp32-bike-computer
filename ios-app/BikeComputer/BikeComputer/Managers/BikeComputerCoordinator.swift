@@ -88,10 +88,17 @@ class BikeComputerCoordinator: ObservableObject {
         generation: UInt,
         completion: (NavigationStartOutcome) -> Void
     )?
-    private var destinationCatalogGeneration: UInt32 = 0
-    private var destinationCatalogFingerprint = ""
+    private var destinationCatalogGeneration: UInt32?
+    private var nextDestinationCatalogGeneration =
+        DeviceDestinationCatalogGeneration.initial()
+    private var destinationCatalogFingerprint: String?
     private var destinationCatalogByToken: [UInt16: SavedDestination] = [:]
     private var destinationCatalogRetryWorkItem: DispatchWorkItem?
+    private var pendingDeviceDestinationLocationRequest: DeviceDestinationRequest?
+    private var pendingDeviceDestinationLocationObservation: AnyCancellable?
+    private var pendingDeviceDestinationLocationTimeout: DispatchWorkItem?
+    private var pendingDeviceDestinationRequestDeadline: DispatchWorkItem?
+    private var pendingDeviceDestinationRouteGeneration: UInt?
     private var wasNavigating = false
 
     // MARK: - Initialization
@@ -209,7 +216,10 @@ class BikeComputerCoordinator: ObservableObject {
             .sink { [weak self] isReady in
                 guard let self else { return }
                 self.deviceCapabilityRefreshGeneration &+= 1
-                guard isReady else { return }
+                guard isReady else {
+                    self.cancelPendingDeviceDestinationLocationResolution()
+                    return
+                }
                 let generation = self.deviceCapabilityRefreshGeneration
                 if let location = self.locationManager.currentLocation {
                     self.navEngine.processExternalLocation(location)
@@ -237,6 +247,26 @@ class BikeComputerCoordinator: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 self?.synchronizeDestinationCatalog(force: true)
             }
+        }
+        .store(in: &cancellables)
+
+        Publishers.CombineLatest3(
+            bleManager.$isNavigationReady,
+            bleManager.$supportsDestinationPicker,
+            destinationStore.$favoriteDestinations
+        )
+        .map { isReady, supportsDestinationPicker, favorites in
+            let hasDeviceDestinations = !DeviceDestinationCatalogBuilder.build(
+                favorites: favorites,
+                generation: 1
+            ).payload.items.isEmpty
+            return isReady && supportsDestinationPicker && hasDeviceDestinations
+        }
+        .removeDuplicates()
+        .sink { [weak self] isEnabled in
+            // Prepare background permission while the app is active, without
+            // running continuous high-accuracy GPS before the rider taps a row.
+            self?.locationManager.setDeviceDestinationRequestsEnabled(isEnabled)
         }
         .store(in: &cancellables)
 
@@ -276,6 +306,11 @@ class BikeComputerCoordinator: ObservableObject {
         bleManager.onDestinationRequest = { [weak self] request in
             Task { @MainActor in
                 self?.handleDestinationRequest(request)
+            }
+        }
+        bleManager.onDestinationCatalogWriteFailure = { [weak self] in
+            Task { @MainActor in
+                self?.scheduleDestinationCatalogRetry()
             }
         }
         locationManager.healthKitManager = healthKitManager
@@ -370,6 +405,10 @@ class BikeComputerCoordinator: ObservableObject {
         locationManager.requestWhenInUseAuthorization()
     }
 
+    func applicationDidBecomeActive() {
+        locationManager.prepareDeviceDestinationRequestsIfNeeded()
+    }
+
     var isLocationAuthorized: Bool {
         locationAuthorizationStatus == .authorizedAlways ||
             locationAuthorizationStatus == .authorizedWhenInUse
@@ -447,13 +486,16 @@ class BikeComputerCoordinator: ObservableObject {
         guard bleManager.isNavigationReady,
               bleManager.supportsDestinationPicker else { return }
 
-        var nextGeneration = destinationCatalogGeneration &+ 1
-        if nextGeneration == 0 { nextGeneration = 1 }
+        let nextGeneration = nextDestinationCatalogGeneration
         let build = DeviceDestinationCatalogBuilder.build(
             favorites: destinationStore.favoriteDestinations,
             generation: nextGeneration
         )
-        guard force || build.sourceFingerprint != destinationCatalogFingerprint else {
+        guard DeviceDestinationCatalogSyncPolicy.shouldPublish(
+            force: force,
+            lastFingerprint: destinationCatalogFingerprint,
+            nextFingerprint: build.sourceFingerprint
+        ) else {
             destinationCatalogRetryWorkItem?.cancel()
             destinationCatalogRetryWorkItem = nil
             return
@@ -466,6 +508,8 @@ class BikeComputerCoordinator: ObservableObject {
         destinationCatalogRetryWorkItem?.cancel()
         destinationCatalogRetryWorkItem = nil
         destinationCatalogGeneration = nextGeneration
+        nextDestinationCatalogGeneration =
+            DeviceDestinationCatalogGeneration.next(after: nextGeneration)
         destinationCatalogFingerprint = build.sourceFingerprint
         destinationCatalogByToken = build.destinationsByToken
     }
@@ -475,40 +519,29 @@ class BikeComputerCoordinator: ObservableObject {
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.destinationCatalogRetryWorkItem = nil
-            self.synchronizeDestinationCatalog()
+            // A failed enqueue is still unsynchronized even when the source
+            // fingerprint matches the last catalog accepted by the queue.
+            self.synchronizeDestinationCatalog(force: true)
         }
         destinationCatalogRetryWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: workItem)
     }
 
     private func handleDestinationRequest(_ request: DeviceDestinationRequest) {
-        guard request.generation == destinationCatalogGeneration,
-              let destination = destinationCatalogByToken[request.token] else {
-            bleManager.sendDestinationStatus(
-                generation: request.generation,
-                token: request.token,
-                status: .stale,
-                message: "Destination list changed"
-            )
-            synchronizeDestinationCatalog(force: true)
+        guard bleManager.isNavigationReady else { return }
+        guard let destination = destination(for: request) else {
+            rejectStaleDestinationRequest(request)
             return
         }
 
-        guard !isNavigating, !routeCalculation.isCalculating else {
+        guard !isNavigating,
+              !routeCalculation.isCalculating,
+              pendingDeviceDestinationLocationRequest == nil else {
             bleManager.sendDestinationStatus(
                 generation: request.generation,
                 token: request.token,
                 status: .failed,
                 message: "Navigation is already active"
-            )
-            return
-        }
-        guard currentLocation != nil else {
-            bleManager.sendDestinationStatus(
-                generation: request.generation,
-                token: request.token,
-                status: .failed,
-                message: "Current location unavailable"
             )
             return
         }
@@ -519,30 +552,240 @@ class BikeComputerCoordinator: ObservableObject {
             status: .calculating,
             message: "Starting navigation..."
         )
-        startNavigation(
-            from: .currentLocation,
-            to: destination.routeEndpoint,
-            transportType: RouteTransportTypes.cycling
-        ) { [weak self] outcome in
-            guard let self else { return }
-            switch outcome {
-            case .started:
-                self.bleManager.sendDestinationStatus(
-                    generation: request.generation,
-                    token: request.token,
-                    status: .started,
-                    message: "Navigation started"
-                )
-                self.destinationStore.addRecent(destination)
-            case .failed(let message):
-                self.bleManager.sendDestinationStatus(
-                    generation: request.generation,
-                    token: request.token,
-                    status: .failed,
-                    message: message
-                )
+        pendingDeviceDestinationLocationRequest = request
+        scheduleDeviceDestinationRequestDeadline(for: request)
+        resolveFreshDeviceDestinationLocation { [weak self] location in
+            guard let self,
+                  self.pendingDeviceDestinationLocationRequest == request else {
+                return
             }
+            guard self.bleManager.isNavigationReady else {
+                self.cancelPendingDeviceDestinationLocationResolution()
+                return
+            }
+            guard let currentDestination = self.destination(for: request),
+                  currentDestination == destination else {
+                self.finishDeviceDestinationRequest(
+                    request,
+                    status: .stale,
+                    message: "Destination list changed"
+                )
+                self.synchronizeDestinationCatalog(force: true)
+                return
+            }
+            guard !self.isNavigating, !self.routeCalculation.isCalculating else {
+                self.finishDeviceDestinationRequest(
+                    request,
+                    status: .failed,
+                    message: "Navigation is already active"
+                )
+                return
+            }
+            guard let location else {
+                self.finishDeviceDestinationRequest(
+                    request,
+                    status: .failed,
+                    message: "Current location unavailable"
+                )
+                return
+            }
+
+            let routeLocation = CoordinateConverter.mapKitRouteLocation(
+                fromGPSLocation: location
+            )
+            let source = MKMapItem(placemark: MKPlacemark(
+                coordinate: routeLocation.coordinate
+            ))
+            source.name = "Current Location"
+            self.startNavigation(
+                from: .mapItem(source),
+                to: currentDestination.routeEndpoint,
+                transportType: RouteTransportTypes.cycling
+            ) { [weak self] outcome in
+                guard let self,
+                      self.pendingDeviceDestinationLocationRequest == request else {
+                    return
+                }
+                switch outcome {
+                case .started:
+                    self.finishDeviceDestinationRequest(
+                        request,
+                        status: .started,
+                        message: "Navigation started"
+                    )
+                    self.destinationStore.addRecent(currentDestination)
+                case .failed(let message):
+                    self.finishDeviceDestinationRequest(
+                        request,
+                        status: .failed,
+                        message: message
+                    )
+                }
+            }
+            self.pendingDeviceDestinationRouteGeneration =
+                self.pendingNavigationStart?.generation
         }
+    }
+
+    private func scheduleDeviceDestinationRequestDeadline(
+        for request: DeviceDestinationRequest
+    ) {
+        pendingDeviceDestinationRequestDeadline?.cancel()
+        let deadline = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.pendingDeviceDestinationLocationRequest == request else {
+                return
+            }
+            self.cancelPendingDeviceDestinationRouteCalculation()
+            self.finishDeviceDestinationRequest(
+                request,
+                status: .failed,
+                message: "Route request timed out"
+            )
+        }
+        pendingDeviceDestinationRequestDeadline = deadline
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + DeviceDestinationRequestTiming.appRequestDeadline,
+            execute: deadline
+        )
+    }
+
+    private func finishDeviceDestinationRequest(
+        _ request: DeviceDestinationRequest,
+        status: DeviceDestinationStatusCode,
+        message: String
+    ) {
+        guard pendingDeviceDestinationLocationRequest == request else { return }
+        pendingDeviceDestinationRequestDeadline?.cancel()
+        pendingDeviceDestinationRequestDeadline = nil
+        pendingDeviceDestinationLocationObservation?.cancel()
+        pendingDeviceDestinationLocationObservation = nil
+        pendingDeviceDestinationLocationTimeout?.cancel()
+        pendingDeviceDestinationLocationTimeout = nil
+        pendingDeviceDestinationLocationRequest = nil
+        pendingDeviceDestinationRouteGeneration = nil
+        locationManager.endDeviceDestinationLocationRefresh()
+        bleManager.sendDestinationStatus(
+            generation: request.generation,
+            token: request.token,
+            status: status,
+            message: message
+        )
+    }
+
+    private func destination(
+        for request: DeviceDestinationRequest
+    ) -> SavedDestination? {
+        guard let generation = destinationCatalogGeneration,
+              request.generation == generation,
+              let fingerprint = destinationCatalogFingerprint,
+              let destination = destinationCatalogByToken[request.token] else {
+            return nil
+        }
+        let currentBuild = DeviceDestinationCatalogBuilder.build(
+            favorites: destinationStore.favoriteDestinations,
+            generation: generation
+        )
+        guard currentBuild.sourceFingerprint == fingerprint else { return nil }
+        return destination
+    }
+
+    private func rejectStaleDestinationRequest(
+        _ request: DeviceDestinationRequest
+    ) {
+        bleManager.sendDestinationStatus(
+            generation: request.generation,
+            token: request.token,
+            status: .stale,
+            message: "Destination list changed"
+        )
+        synchronizeDestinationCatalog(force: true)
+    }
+
+    private func resolveFreshDeviceDestinationLocation(
+        completion: @escaping (CLLocation?) -> Void
+    ) {
+        if let currentLocation = locationManager.currentLocation,
+           DeviceDestinationLocationPolicy.isUsable(currentLocation) {
+            guard locationManager.beginDeviceDestinationLocationRefresh(
+                restart: false
+            ) else {
+                completion(nil)
+                return
+            }
+            completion(currentLocation)
+            return
+        }
+
+        pendingDeviceDestinationLocationObservation?.cancel()
+        pendingDeviceDestinationLocationTimeout?.cancel()
+
+        pendingDeviceDestinationLocationObservation = locationManager.$currentLocation
+            .compactMap { $0 }
+            .filter { DeviceDestinationLocationPolicy.isUsable($0) }
+            .first()
+            .sink { [weak self] location in
+                guard let self else { return }
+                self.pendingDeviceDestinationLocationTimeout?.cancel()
+                self.pendingDeviceDestinationLocationTimeout = nil
+                self.pendingDeviceDestinationLocationObservation?.cancel()
+                self.pendingDeviceDestinationLocationObservation = nil
+                completion(location)
+            }
+
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingDeviceDestinationLocationObservation?.cancel()
+            self.pendingDeviceDestinationLocationObservation = nil
+            self.pendingDeviceDestinationLocationTimeout = nil
+            completion(nil)
+        }
+        pendingDeviceDestinationLocationTimeout = timeout
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + DeviceDestinationRequestTiming.locationRefreshTimeout,
+            execute: timeout
+        )
+        guard locationManager.beginDeviceDestinationLocationRefresh(
+            restart: true
+        ) else {
+            pendingDeviceDestinationLocationObservation?.cancel()
+            pendingDeviceDestinationLocationObservation = nil
+            pendingDeviceDestinationLocationTimeout?.cancel()
+            pendingDeviceDestinationLocationTimeout = nil
+            completion(nil)
+            return
+        }
+    }
+
+    private func cancelPendingDeviceDestinationLocationResolution() {
+        cancelPendingDeviceDestinationRouteCalculation()
+        pendingDeviceDestinationLocationObservation?.cancel()
+        pendingDeviceDestinationLocationObservation = nil
+        pendingDeviceDestinationLocationTimeout?.cancel()
+        pendingDeviceDestinationLocationTimeout = nil
+        pendingDeviceDestinationRequestDeadline?.cancel()
+        pendingDeviceDestinationRequestDeadline = nil
+        pendingDeviceDestinationLocationRequest = nil
+        pendingDeviceDestinationRouteGeneration = nil
+        locationManager.endDeviceDestinationLocationRefresh()
+    }
+
+    private func cancelPendingDeviceDestinationRouteCalculation() {
+        guard let generation = pendingDeviceDestinationRouteGeneration,
+              routeCalculationGeneration == generation else { return }
+        ongoingSourceSearch?.cancel()
+        ongoingSourceSearch = nil
+        ongoingDestinationSearch?.cancel()
+        ongoingDestinationSearch = nil
+        ongoingDirections?.cancel()
+        ongoingDirections = nil
+        if pendingNavigationStart?.generation == generation {
+            pendingNavigationStart = nil
+        }
+        routeCalculationGeneration &+= 1
+        routeCalculation.isCalculating = false
+        routeCalculation.status = ""
+        pendingDeviceDestinationRouteGeneration = nil
     }
 }
 

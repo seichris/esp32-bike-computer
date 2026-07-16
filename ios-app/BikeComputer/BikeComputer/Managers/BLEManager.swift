@@ -17,8 +17,21 @@ import UIKit
 
 struct NavigationWriteEndpoint {
     let maximumWriteLength: Int
+    let expectsWriteResponse: Bool
     let canSend: () -> Bool
     let write: (Data) -> Void
+
+    init(
+        maximumWriteLength: Int,
+        expectsWriteResponse: Bool = false,
+        canSend: @escaping () -> Bool,
+        write: @escaping (Data) -> Void
+    ) {
+        self.maximumWriteLength = maximumWriteLength
+        self.expectsWriteResponse = expectsWriteResponse
+        self.canSend = canSend
+        self.write = write
+    }
 }
 
 enum DeviceBLEProtocol {
@@ -57,7 +70,9 @@ enum DeviceBLEProtocol {
     static let batteryStatusScreenCapabilityMask: UInt8 = 1 << 5
     static let destinationPickerCapabilityMask: UInt8 = 1 << 6
     static let deviceCapabilitiesVersion: UInt8 = 5
-    static let fallbackWriteQueueCapacity = 256
+    // Large enough for the worst schema-v1 three-favorite catalog at the
+    // minimum BLE write length, without retaining a long stale GPS backlog.
+    static let fallbackWriteQueueCapacity = 64
 
     static let serviceRoadsVisibilityMask: Int32 = 1 << 10
     static let tracksVisibilityMask: Int32 = 1 << 11
@@ -555,6 +570,7 @@ class BLEManager: NSObject, ObservableObject {
     private var mapTransferStatusChunkCount: UInt8 = 0
     private var mapTransferStatusChunks: [UInt8: Data] = [:]
     private var writeWithResponseInFlight = false
+    private var navigationWriteWithResponseFailureHandler: (() -> Void)?
     private var connectionTimeoutTimer: Timer?
     private var authRetryTimer: Timer?
     private var authTimeoutTimer: Timer?
@@ -562,6 +578,7 @@ class BLEManager: NSObject, ObservableObject {
     private var powerButtonHonkAttempt = 0
     private var nextPowerButtonHonkRequestID: UInt32 = 1
     private var nextDestinationCatalogTransferID: UInt8 = 1
+    private var destinationStatusSequence: UInt64 = 0
     private var powerButtonHonkRetryWorkItem: DispatchWorkItem?
     private var powerButtonHonkAckTimeout: TimeInterval = 1.0
     private var powerButtonHonkFailureRetryDelay: TimeInterval = 0.1
@@ -578,6 +595,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     var onDestinationRequest: ((DeviceDestinationRequest) -> Void)?
+    var onDestinationCatalogWriteFailure: (() -> Void)?
     
     // MARK: - UserDefaults Keys
     private enum SettingsKeys {
@@ -1669,7 +1687,10 @@ class BLEManager: NSObject, ObservableObject {
         guard enqueueDestinationFrames(
             frames,
             endpoint: endpoint,
-            label: "destination catalog generation=\(payload.generation)"
+            label: "destination catalog generation=\(payload.generation)",
+            onWriteFailure: { [weak self] in
+                self?.onDestinationCatalogWriteFailure?()
+            }
         ) else { return false }
 
         nextDestinationCatalogTransferID &+= 1
@@ -1685,6 +1706,26 @@ class BLEManager: NSObject, ObservableObject {
         token: UInt16,
         status: DeviceDestinationStatusCode,
         message: String
+    ) -> Bool {
+        destinationStatusSequence &+= 1
+        return enqueueDestinationStatus(
+            generation: generation,
+            token: token,
+            status: status,
+            message: message,
+            sequence: destinationStatusSequence,
+            attempt: 0
+        )
+    }
+
+    @discardableResult
+    private func enqueueDestinationStatus(
+        generation: UInt32,
+        token: UInt16,
+        status: DeviceDestinationStatusCode,
+        message: String,
+        sequence: UInt64,
+        attempt: Int
     ) -> Bool {
         // A DREQ notification itself proves that the connected firmware knows
         // DNST. Allow the reply during the brief post-authentication window
@@ -1708,8 +1749,54 @@ class BLEManager: NSObject, ObservableObject {
         return enqueueDestinationFrames(
             [packet],
             endpoint: endpoint,
-            label: "destination status \(status)"
+            label: "destination status \(status)",
+            prioritized: true,
+            onWriteFailure: { [weak self] in
+                self?.scheduleDestinationStatusRetry(
+                    generation: generation,
+                    token: token,
+                    status: status,
+                    message: message,
+                    sequence: sequence,
+                    failedAttempt: attempt
+                )
+            }
         )
+    }
+
+    private func scheduleDestinationStatusRetry(
+        generation: UInt32,
+        token: UInt16,
+        status: DeviceDestinationStatusCode,
+        message: String,
+        sequence: UInt64,
+        failedAttempt: Int
+    ) {
+        guard DeviceDestinationStatusRetryPolicy.shouldRetry(
+            afterAttempt: failedAttempt
+        ) else {
+            log("Destination status write failed after all retries")
+            return
+        }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + DeviceDestinationStatusRetryPolicy.retryDelay
+        ) { [weak self] in
+            guard let self,
+                  self.destinationStatusSequence == sequence,
+                  self.isConnected,
+                  self.isNavigationReady else { return }
+            let didRetry = self.enqueueDestinationStatus(
+                generation: generation,
+                token: token,
+                status: status,
+                message: message,
+                sequence: sequence,
+                attempt: failedAttempt + 1
+            )
+            if !didRetry {
+                self.log("Destination status retry could not be queued")
+            }
+        }
     }
 
     func sendDebugNavigationPacket() {
@@ -1790,6 +1877,8 @@ class BLEManager: NSObject, ObservableObject {
         deviceMapBlockCount = 0
         pendingAuthNonce = nil
         authWriteState = .idle
+        writeWithResponseInFlight = false
+        navigationWriteWithResponseFailureHandler = nil
         navigationWriteQueue.removeAll()
         lastSentPhoneBatteryPercent = nil
         lastSentPhoneBatteryCharging = nil
@@ -1856,6 +1945,7 @@ class BLEManager: NSObject, ObservableObject {
         navigationWriteEndpoint = nil
         isNavigationReady = false
         writeWithResponseInFlight = false
+        navigationWriteWithResponseFailureHandler = nil
         pendingAuthNonce = nil
         authWriteState = .idle
         navigationWriteQueue.removeAll()
@@ -1915,6 +2005,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsDestinationPicker = false
         powerButtonHonkConfigurationError = nil
         nextDestinationCatalogTransferID = 1
+        destinationStatusSequence &+= 1
         hasReceivedDeviceCapabilities = false
         hasSentMapProfileForConnection = false
         hasSentMapNavigationProfileForConnection = false
@@ -2096,6 +2187,7 @@ class BLEManager: NSObject, ObservableObject {
 
         installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: peripheral.maximumWriteValueLength(for: navigationWriteType),
+            expectsWriteResponse: navigationWriteType == .withResponse,
             canSend: { [weak self, weak peripheral] in
                 guard let self, let peripheral else { return false }
                 if navigationWriteType == .withResponse {
@@ -2184,14 +2276,16 @@ class BLEManager: NSObject, ObservableObject {
         label: String,
         transportWrite: ((Data) -> Void)? = nil,
         onWrite: (() -> Void)? = nil,
-        onDrop: (() -> Void)? = nil
+        onDrop: (() -> Void)? = nil,
+        onWriteFailure: (() -> Void)? = nil
     ) {
         if navigationWriteQueue.enqueue(NavigationWrite(
             data: data,
             label: label,
             transportWrite: transportWrite,
             onWrite: onWrite,
-            onDrop: onDrop
+            onDrop: onDrop,
+            onWriteFailure: onWriteFailure
         )) {
             log("Navigation write queue full; dropped oldest packet")
         }
@@ -2204,7 +2298,9 @@ class BLEManager: NSObject, ObservableObject {
     private func enqueueDestinationFrames(
         _ frames: [Data],
         endpoint: NavigationWriteEndpoint,
-        label: String
+        label: String,
+        prioritized: Bool = false,
+        onWriteFailure: (() -> Void)? = nil
     ) -> Bool {
         guard !frames.isEmpty,
               frames.allSatisfy({ $0.count <= endpoint.maximumWriteLength }) else {
@@ -2220,10 +2316,17 @@ class BLEManager: NSObject, ObservableObject {
                 transportWrite: characteristic == nil ? nil : { [weak self, weak peripheral, weak characteristic] payload in
                     guard let self, let peripheral, let characteristic else { return }
                     self.writeDeviceData(payload, to: characteristic, on: peripheral)
-                }
+                },
+                onWriteFailure: onWriteFailure
             )
         }
-        guard navigationWriteQueue.enqueueAtomically(writes) else {
+        let didEnqueue: Bool
+        if prioritized {
+            didEnqueue = navigationWriteQueue.enqueuePrioritizedAtomically(writes)
+        } else {
+            didEnqueue = navigationWriteQueue.enqueueAtomically(writes)
+        }
+        guard didEnqueue else {
             log("Destination frames not queued: insufficient write queue capacity")
             return false
         }
@@ -2302,7 +2405,14 @@ class BLEManager: NSObject, ObservableObject {
 
     private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
         navigationWriteQueue.flush(canSend: endpoint.canSend, maxWrites: 1) { write in
+            if endpoint.expectsWriteResponse {
+                writeWithResponseInFlight = true
+            }
+            navigationWriteWithResponseFailureHandler = write.onWriteFailure
             write.perform(using: endpoint.write)
+            if !writeWithResponseInFlight {
+                navigationWriteWithResponseFailureHandler = nil
+            }
             log("Sent \(write.label): \(write.data.count) bytes")
         }
         if navigationWriteQueue.count == 0 {
@@ -2314,6 +2424,25 @@ class BLEManager: NSObject, ObservableObject {
             lastNavigationQueuePendingLogAt = Date()
         }
     }
+
+    private func completeNavigationWrite(error: Error?) {
+        writeWithResponseInFlight = false
+        let writeFailureHandler = navigationWriteWithResponseFailureHandler
+        navigationWriteWithResponseFailureHandler = nil
+        if error != nil {
+            writeFailureHandler?()
+        }
+        if let endpoint = navigationWriteEndpoint {
+            flushPendingNavigationWrites(endpoint: endpoint)
+            scheduleNavigationFlushRetryIfNeeded()
+        }
+    }
+
+#if HOST_TESTING
+    func completeNavigationWriteForTesting(error: Error?) {
+        completeNavigationWrite(error: error)
+    }
+#endif
 
     private func writeDeviceData(
         _ data: Data,
@@ -2477,6 +2606,8 @@ extension BLEManager: CBCentralManagerDelegate {
         deviceMapBlockCount = 0
         pendingAuthNonce = nil
         authWriteState = .idle
+        writeWithResponseInFlight = false
+        navigationWriteWithResponseFailureHandler = nil
         navigationWriteQueue.removeAll()
         lastSentPhoneBatteryPercent = nil
         lastSentPhoneBatteryCharging = nil
@@ -2678,9 +2809,6 @@ extension BLEManager: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, 
                    didWriteValueFor characteristic: CBCharacteristic, 
                    error: Error?) {
-        if characteristic.uuid != authCharacteristicUUID {
-            writeWithResponseInFlight = false
-        }
         if let error = error {
             log("Error writing characteristic \(characteristic.uuid): \(error.localizedDescription); props=\(characteristic.properties.debugDescription)")
             if characteristic.uuid == authCharacteristicUUID {
@@ -2688,20 +2816,16 @@ extension BLEManager: CBPeripheralDelegate {
                 isPairingMode = false
                 clearConnectionState()
                 centralManager.cancelPeripheralConnection(peripheral)
-            }
-            if characteristic.uuid != authCharacteristicUUID,
-               let endpoint = navigationWriteEndpoint {
-                flushPendingNavigationWrites(endpoint: endpoint)
-                scheduleNavigationFlushRetryIfNeeded()
+            } else {
+                completeNavigationWrite(error: error)
             }
             return
         }
 
         if characteristic.uuid == authCharacteristicUUID {
             authWriteCompleted(for: peripheral, characteristic: characteristic)
-        } else if let endpoint = navigationWriteEndpoint {
-            flushPendingNavigationWrites(endpoint: endpoint)
-            scheduleNavigationFlushRetryIfNeeded()
+        } else {
+            completeNavigationWrite(error: nil)
         }
     }
     
@@ -2858,6 +2982,10 @@ extension BLEManager: CBPeripheralDelegate {
     @discardableResult
     func handleNavigationCharacteristicNotification(_ data: Data) -> Bool {
         if let request = DeviceDestinationRequest.parse(data) {
+            guard isConnected, isNavigationReady else {
+                log("Ignored destination request before authentication completed")
+                return true
+            }
             log("Received destination request generation=\(request.generation) token=\(request.token)")
             onDestinationRequest?(request)
             return true

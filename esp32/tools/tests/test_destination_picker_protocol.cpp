@@ -19,6 +19,9 @@ int main() {
   static_assert(destination_picker_protocol::MAX_FAVORITES == 3);
   static_assert(destination_picker_protocol::MAX_RECENTS == 5);
   static_assert(destination_picker_protocol::MAX_ITEMS == 8);
+  static_assert(destination_picker_protocol::REQUEST_TIMEOUT_MS == 15000);
+  static_assert(destination_picker_protocol::TERMINAL_STATUS_DISPLAY_MS ==
+                5000);
 
   CatalogReassembler reassembler;
   auto first = chunk(7, 0, 2, "{\"version\":1,");
