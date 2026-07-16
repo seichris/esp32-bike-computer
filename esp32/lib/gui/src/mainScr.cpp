@@ -250,6 +250,17 @@ static int16_t navigationArrowAngle(uint8_t iconID) {
   }
 }
 
+static void setNavigationDistanceLabel(lv_obj_t *label,
+                                       uint16_t distanceMeters) {
+  if (distanceMeters >= 1000) {
+    const uint16_t deciKilometers = (distanceMeters + 50U) / 100U;
+    lv_label_set_text_fmt(label, "%u.%u km", deciKilometers / 10U,
+                          deciKilometers % 10U);
+  } else {
+    lv_label_set_text_fmt(label, "%u m", distanceMeters);
+  }
+}
+
 static void applyMapRotationForActiveTile() {
   if (activeTile == MAP_GUIDANCE) {
     const Maps::RotationMode desiredMode =
@@ -492,12 +503,7 @@ static void updateMapGuidanceOverlay() {
 
   NavigationData navData = getCurrentNavigationData();
   lv_img_set_angle(mapGuidanceArrow, navigationArrowAngle(navData.iconID));
-  if (navData.distance >= 1000) {
-    lv_label_set_text_fmt(mapGuidanceDistance, "%.1f km",
-                          navData.distance / 1000.0f);
-  } else {
-    lv_label_set_text_fmt(mapGuidanceDistance, "%u m", navData.distance);
-  }
+  setNavigationDistanceLabel(mapGuidanceDistance, navData.distance);
 }
 
 static void refreshMapGuidanceOverlayAsync(void *userData) {
@@ -1214,11 +1220,7 @@ void updateNavEvent(lv_event_t *event) {
   formatNavigationInstruction(navData.instruction, formattedInstruction,
                               sizeof(formattedInstruction));
   lv_label_set_text(nameNav, formattedInstruction);
-  if (navData.distance >= 1000) {
-    lv_label_set_text_fmt(distNav, "%.1f km", navData.distance / 1000.0f);
-  } else {
-    lv_label_set_text_fmt(distNav, "%u m", navData.distance);
-  }
+  setNavigationDistanceLabel(distNav, navData.distance);
 
   lv_img_set_angle(arrowNav, navigationArrowAngle(navData.iconID));
 }
@@ -1277,14 +1279,16 @@ static void createMapGuidanceOverlay() {
   lv_img_set_zoom(mapGuidanceArrow,
                   TFT_HEIGHT > 320 ? iconScale * 2 : iconScale);
   lv_img_set_pivot(mapGuidanceArrow, 50, 50);
-  lv_obj_align(mapGuidanceArrow, LV_ALIGN_LEFT_MID, 20, 0);
+  lv_obj_align(mapGuidanceArrow, LV_ALIGN_LEFT_MID, 76, 0);
 
   mapGuidanceDistance = lv_label_create(mapGuidanceOverlay);
+  lv_obj_set_width(mapGuidanceDistance, 205);
   lv_obj_set_style_text_font(mapGuidanceDistance, &lv_font_montserrat_48, 0);
   lv_obj_set_style_text_color(mapGuidanceDistance, lv_color_white(), 0);
   lv_obj_set_style_text_align(mapGuidanceDistance, LV_TEXT_ALIGN_LEFT, 0);
+  lv_label_set_long_mode(mapGuidanceDistance, LV_LABEL_LONG_CLIP);
   lv_label_set_text_static(mapGuidanceDistance, "--");
-  lv_obj_align(mapGuidanceDistance, LV_ALIGN_CENTER, 46, 0);
+  lv_obj_align(mapGuidanceDistance, LV_ALIGN_LEFT_MID, 212, 0);
 
   mapGuidanceCatalogRevision = UINT32_MAX;
   mapGuidanceStatusRevision = UINT32_MAX;
