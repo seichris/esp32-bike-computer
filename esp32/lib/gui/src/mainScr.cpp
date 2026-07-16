@@ -113,6 +113,8 @@ const ScreenMapRenderSettings &currentMapStyleSettings() {
 
 static void tapCycleScreenEvent(lv_event_t *event);
 static void mapGuidanceOverlayTapEvent(lv_event_t *event);
+static void updateMapGuidanceOverlay();
+static void refreshMapGuidanceOverlayAsync(void *userData);
 
 static int16_t mapInteractionAnchorX() {
   return gui_layout::mapScreenAnchorX(TFT_WIDTH, mapView.mapScrWidth);
@@ -382,9 +384,31 @@ static void updateMapGuidanceOverlay() {
       lv_obj_clean(mapGuidanceDestinationPicker);
 
       if (status.code != DestinationPickerStatusCode::Idle) {
-        lv_obj_t *label = lv_label_create(mapGuidanceDestinationPicker);
+        lv_obj_t *statusContent =
+            lv_obj_create(mapGuidanceDestinationPicker);
+        lv_obj_remove_style_all(statusContent);
+        lv_obj_set_size(statusContent, LV_PCT(100), LV_PCT(100));
+        lv_obj_clear_flag(statusContent, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_flex_flow(statusContent, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(statusContent, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_row(statusContent, 12, 0);
+
+        if (status.code == DestinationPickerStatusCode::Calculating) {
+          lv_obj_t *spinner = lv_spinner_create(statusContent);
+          lv_obj_set_size(spinner, 54, 54);
+          lv_spinner_set_anim_params(spinner, 900, 220);
+          lv_obj_set_style_arc_width(spinner, 5, LV_PART_MAIN);
+          lv_obj_set_style_arc_color(spinner, lv_color_hex(0x3A3A3A),
+                                     LV_PART_MAIN);
+          lv_obj_set_style_arc_width(spinner, 5, LV_PART_INDICATOR);
+          lv_obj_set_style_arc_color(spinner, lv_color_hex(0xFFD60A),
+                                     LV_PART_INDICATOR);
+        }
+
+        lv_obj_t *label = lv_label_create(statusContent);
         lv_obj_set_width(label, LV_PCT(100));
-        lv_obj_set_style_text_font(label, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_18, 0);
         lv_obj_set_style_text_color(label, lv_color_white(), 0);
         lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(label, status.message[0] == '\0'
@@ -436,6 +460,7 @@ static void updateMapGuidanceOverlay() {
                         "accepted=%d",
                         (unsigned long)context->generation, context->token,
                         accepted ? 1 : 0);
+                  (void)lv_async_call(refreshMapGuidanceOverlayAsync, nullptr);
                 }
               },
               LV_EVENT_RELEASED, &mapGuidanceRowContexts[i]);
@@ -480,6 +505,15 @@ static void updateMapGuidanceOverlay() {
   } else {
     lv_label_set_text_fmt(mapGuidanceDistance, "%u m", navData.distance);
   }
+}
+
+static void refreshMapGuidanceOverlayAsync(void *userData) {
+  (void)userData;
+  if (!isMainScreen || mainScreen == nullptr || activeTile != MAP_GUIDANCE) {
+    return;
+  }
+  updateMapGuidanceOverlay();
+  lv_obj_invalidate(mainScreen);
 }
 
 static bool dismissMapGuidanceDestinationPicker() {

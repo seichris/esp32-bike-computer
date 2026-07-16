@@ -303,12 +303,12 @@ When a row is tapped, firmware notifies iOS on `2A6E`:
 "DREQ" | Generation: UInt32LE | Token: UInt16LE
 ```
 
-The device immediately displays `Starting navigation...` and suppresses repeat
-requests while one is pending. iOS accepts the request only when generation and
-token match its active catalog, the device is authenticated, navigation is
-idle, and current location is available. It calculates a cycling route from
-the current location to the exact saved endpoint and replies on either command
-route:
+The device immediately displays an animated yellow spinner with
+`Starting navigation...` and suppresses repeat requests while one is pending.
+iOS accepts the request only when generation and token match its active catalog,
+the device is authenticated, navigation is idle, and current location is
+available. It calculates a cycling route from the current location to the exact
+saved endpoint and replies on either command route:
 
 ```text
 "DNST" | Generation: UInt32LE | Token: UInt16LE | State: UInt8 | Message: UTF-8
