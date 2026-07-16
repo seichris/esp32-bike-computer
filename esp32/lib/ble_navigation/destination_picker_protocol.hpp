@@ -17,6 +17,8 @@ static constexpr uint8_t MAX_RECENTS = 5;
 static constexpr uint8_t MAX_ITEMS = MAX_FAVORITES + MAX_RECENTS;
 static constexpr size_t MAX_LABEL_BYTES = 64;
 static constexpr uint32_t CHUNK_TIMEOUT_MS = 5000;
+static constexpr uint32_t REQUEST_TIMEOUT_MS = 15000;
+static constexpr uint32_t TERMINAL_STATUS_DISPLAY_MS = 5000;
 
 enum class ChunkResult : uint8_t {
   Rejected,

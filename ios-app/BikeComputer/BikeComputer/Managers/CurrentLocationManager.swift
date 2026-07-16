@@ -8,6 +8,9 @@
 import Foundation
 import CoreLocation
 import Combine
+#if canImport(UIKit) && !HOST_TESTING
+import UIKit
+#endif
 
 class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published var currentLocation: CLLocation?
@@ -24,6 +27,9 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     private var isNavigating = false
     private var isViewingMap = false
     private var isLocationUpdating = false
+    private var isDeviceDestinationRequestsEnabled = false
+    private var isRefreshingDeviceDestinationLocation = false
+    private var hasRequestedAlwaysAuthorizationForDeviceDestinations = false
     
     weak var healthKitManager: HealthKitManager?
     
@@ -50,6 +56,40 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         locationManager.requestLocation()
     }
 
+    func setDeviceDestinationRequestsEnabled(_ enabled: Bool) {
+        guard isDeviceDestinationRequestsEnabled != enabled else { return }
+        isDeviceDestinationRequestsEnabled = enabled
+        prepareDeviceDestinationRequestsIfNeeded()
+    }
+
+    func prepareDeviceDestinationRequestsIfNeeded() {
+        guard isDeviceDestinationRequestsEnabled,
+              authorizationStatus == .authorizedWhenInUse,
+              Self.applicationIsActive,
+              !hasRequestedAlwaysAuthorizationForDeviceDestinations else {
+            return
+        }
+        hasRequestedAlwaysAuthorizationForDeviceDestinations = true
+        locationManager.requestAlwaysAuthorization()
+    }
+
+    @discardableResult
+    func beginDeviceDestinationLocationRefresh(restart: Bool) -> Bool {
+        guard isLocationAuthorized,
+              authorizationStatus == .authorizedAlways || Self.applicationIsActive else {
+            return false
+        }
+        isRefreshingDeviceDestinationLocation = true
+        updateLocationTracking(restart: restart)
+        return true
+    }
+
+    func endDeviceDestinationLocationRefresh() {
+        guard isRefreshingDeviceDestinationLocation else { return }
+        isRefreshingDeviceDestinationLocation = false
+        updateLocationTracking()
+    }
+
     func requestWhenInUseAuthorization() {
         locationManager.requestWhenInUseAuthorization()
     }
@@ -70,13 +110,18 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         updateLocationTracking()
     }
     
-    public func updateLocationTracking() {
+    public func updateLocationTracking(restart: Bool = false) {
         let shouldTrack = isNavigating || 
                          isViewingMap || 
-                         (healthKitManager?.isWorkoutActive == true)
-        let shouldTrackInBackground = isNavigating || (healthKitManager?.isWorkoutActive == true)
+                         (healthKitManager?.isWorkoutActive == true) ||
+                         isRefreshingDeviceDestinationLocation
+        let shouldTrackInBackground = isNavigating ||
+                                      (healthKitManager?.isWorkoutActive == true) ||
+                                      isRefreshingDeviceDestinationLocation
 
-        if shouldTrackInBackground && locationManager.authorizationStatus == .authorizedWhenInUse {
+        if shouldTrackInBackground &&
+            locationManager.authorizationStatus == .authorizedWhenInUse &&
+            Self.applicationIsActive {
             locationManager.requestAlwaysAuthorization()
         }
 
@@ -84,8 +129,11 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         locationManager.pausesLocationUpdatesAutomatically = !shouldTrackInBackground
         locationManager.showsBackgroundLocationIndicator = shouldTrackInBackground
         
-        if shouldTrack && !isLocationUpdating {
-            print("🌍 Starting location updates (navigating: \(isNavigating), map: \(isViewingMap), workout: \(healthKitManager?.isWorkoutActive == true))")
+        if shouldTrack && (!isLocationUpdating || restart) {
+            if isLocationUpdating {
+                locationManager.stopUpdatingLocation()
+            }
+            print("🌍 Starting location updates (navigating: \(isNavigating), map: \(isViewingMap), workout: \(healthKitManager?.isWorkoutActive == true), device destination request: \(isRefreshingDeviceDestinationLocation))")
             locationManager.startUpdatingLocation()
             isLocationUpdating = true
         } else if !shouldTrack && isLocationUpdating {
@@ -194,6 +242,15 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         authorizationStatus = manager.authorizationStatus
+        prepareDeviceDestinationRequestsIfNeeded()
         updateLocationTracking()
+    }
+
+    private static var applicationIsActive: Bool {
+#if canImport(UIKit) && !HOST_TESTING
+        UIApplication.shared.applicationState == .active
+#else
+        true
+#endif
     }
 }

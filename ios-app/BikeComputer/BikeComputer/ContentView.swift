@@ -106,10 +106,12 @@ struct ContentView: View {
             coordinator.updateSelectedView(newValue)
         }
         .onAppear {
+            coordinator.applicationDidBecomeActive()
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
         }
         .onChange(of: scenePhase) { newValue in
             guard newValue == .active else { return }
+            coordinator.applicationDidBecomeActive()
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
         }
         .onChange(of: coordinator.bleManager.isConnected) { _ in

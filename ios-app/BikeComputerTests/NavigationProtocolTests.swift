@@ -2319,6 +2319,88 @@ struct NavigationProtocolTests {
                     "AB", "destination labels remove embedded nulls")
         assertEqual(DeviceDestinationCatalogBuilder.utf8Prefix("A\nB", maxBytes: 64),
                     "A B", "destination labels normalize embedded controls")
+        let controlOnlyBuild = DeviceDestinationCatalogBuilder.build(
+            favorites: [
+                SavedDestination(name: "\u{1}\u{2}"),
+                SavedDestination(name: "Valid favorite")
+            ],
+            generation: 17
+        )
+        assertEqual(controlOnlyBuild.payload.items.map(\.label),
+                    ["Valid favorite"],
+                    "favorites whose sanitized label is empty are omitted")
+        assertEqual(DeviceDestinationCatalogGeneration.initial(randomValue: 0), 1,
+                    "catalog generation zero is normalized away")
+        assertEqual(DeviceDestinationCatalogGeneration.initial(randomValue: 99), 99,
+                    "catalog generation preserves a randomized non-zero seed")
+        assertEqual(DeviceDestinationCatalogGeneration.next(after: 99), 100,
+                    "catalog generation advances after publication")
+        assertEqual(DeviceDestinationCatalogGeneration.next(after: UInt32.max), 1,
+                    "catalog generation wraps without emitting zero")
+        assert(DeviceDestinationCatalogSyncPolicy.shouldPublish(
+            force: false,
+            lastFingerprint: nil,
+            nextFingerprint: ""
+        ), "an initial empty catalog is still published")
+        assert(!DeviceDestinationCatalogSyncPolicy.shouldPublish(
+            force: false,
+            lastFingerprint: "",
+            nextFingerprint: ""
+        ), "an unchanged published empty catalog is not repeated")
+        assert(DeviceDestinationCatalogSyncPolicy.shouldPublish(
+            force: true,
+            lastFingerprint: "same",
+            nextFingerprint: "same"
+        ), "a reconnect retry can force an unchanged catalog")
+        assert(DeviceDestinationRequestTiming.locationRefreshTimeout <
+               DeviceDestinationRequestTiming.appRequestDeadline,
+               "location refresh leaves time for route calculation")
+        assert(DeviceDestinationRequestTiming.appRequestDeadline <
+               DeviceDestinationRequestTiming.firmwareRequestTimeout,
+               "iOS terminates before the firmware request timeout")
+        assert(DeviceDestinationStatusRetryPolicy.shouldRetry(afterAttempt: 0),
+               "the first acknowledged status failure is retried")
+        assert(!DeviceDestinationStatusRetryPolicy.shouldRetry(
+            afterAttempt: DeviceDestinationStatusRetryPolicy.maximumRetryCount
+        ), "status retries remain bounded")
+
+        let now = Date()
+        let freshLocation = CLLocation(
+            coordinate: favoriteCoordinate,
+            altitude: 0,
+            horizontalAccuracy: 25,
+            verticalAccuracy: 25,
+            course: -1,
+            speed: -1,
+            timestamp: now.addingTimeInterval(-5)
+        )
+        let staleLocation = CLLocation(
+            coordinate: favoriteCoordinate,
+            altitude: 0,
+            horizontalAccuracy: 25,
+            verticalAccuracy: 25,
+            course: -1,
+            speed: -1,
+            timestamp: now.addingTimeInterval(
+                -(DeviceDestinationLocationPolicy.maximumAge + 1)
+            )
+        )
+        let inaccurateLocation = CLLocation(
+            coordinate: favoriteCoordinate,
+            altitude: 0,
+            horizontalAccuracy:
+                DeviceDestinationLocationPolicy.maximumHorizontalAccuracy + 1,
+            verticalAccuracy: 25,
+            course: -1,
+            speed: -1,
+            timestamp: now
+        )
+        assert(DeviceDestinationLocationPolicy.isUsable(freshLocation, now: now),
+               "a recent accurate fix can start a device route")
+        assert(!DeviceDestinationLocationPolicy.isUsable(staleLocation, now: now),
+               "a stale cached fix cannot start a device route")
+        assert(!DeviceDestinationLocationPolicy.isUsable(inaccurateLocation, now: now),
+               "an inaccurate fix cannot start a device route")
 
         guard let frames = DeviceDestinationCatalogChunker.frames(
             payload: build.payload,
@@ -2366,6 +2448,24 @@ struct NavigationProtocolTests {
             transferID: 1,
             maximumWriteLength: 64
         ) == nil, "the sender enforces the firmware reassembly byte limit")
+
+        let escapeHeavyFavorites = (1...3).map { index in
+            SavedDestination(
+                name: String(repeating: "\"", count: 63) + String(index)
+            )
+        }
+        let escapeHeavyBuild = DeviceDestinationCatalogBuilder.build(
+            favorites: escapeHeavyFavorites,
+            generation: UInt32.max
+        )
+        let escapeHeavyFrames = DeviceDestinationCatalogChunker.frames(
+            payload: escapeHeavyBuild.payload,
+            transferID: 2,
+            maximumWriteLength: 20
+        )
+        assert((escapeHeavyFrames?.count ?? Int.max) <=
+               DeviceBLEProtocol.fallbackWriteQueueCapacity,
+               "the bounded queue fits any valid three-favorite catalog at minimum MTU")
 
         var requestData = Data(DeviceBLEProtocol.destinationRequestPrefix.utf8)
         appendUInt32LE(17, to: &requestData)
@@ -2416,12 +2516,17 @@ struct NavigationProtocolTests {
         manager.onDestinationRequest = { receivedRequest = $0 }
         assert(manager.handleNavigationCharacteristicNotification(requestData),
                "DREQ notification is consumed before other control frames")
-        assertEqual(receivedRequest,
-                    DeviceDestinationRequest(generation: 17, token: 3),
-                    "BLE manager forwards the exact device selection")
+        assert(receivedRequest == nil,
+               "DREQ is not dispatched before authentication completes")
 
         manager.isConnected = true
         manager.isNavigationReady = true
+        assert(manager.handleNavigationCharacteristicNotification(requestData),
+               "authenticated DREQ notification is consumed")
+        assertEqual(receivedRequest,
+                    DeviceDestinationRequest(generation: 17, token: 3),
+                    "BLE manager forwards the exact authenticated device selection")
+
         var writes: [Data] = []
         let managerFrames = DeviceDestinationCatalogChunker.frames(
             payload: build.payload,
@@ -2458,6 +2563,49 @@ struct NavigationProtocolTests {
         ), "a retained-catalog request can be answered before CAPS completes")
         assertEqual(String(data: reconnectWrites.first?.prefix(4) ?? Data(), encoding: .utf8),
                     "DNST", "the pre-capability reconnect reply uses DNST")
+
+        let retryManager = BLEManager()
+        retryManager.isConnected = true
+        retryManager.isNavigationReady = true
+        var retryTransportReady = true
+        var statusRetryWrites: [Data] = []
+        retryManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            expectsWriteResponse: true,
+            canSend: { retryTransportReady },
+            write: { data in
+                statusRetryWrites.append(data)
+                retryTransportReady = false
+            }
+        ))
+        assert(retryManager.sendDestinationStatus(
+            generation: 17,
+            token: 3,
+            status: .failed,
+            message: "Could not start navigation"
+        ), "an acknowledged destination status is initially queued")
+        assertEqual(statusRetryWrites.count, 1,
+                    "the first status attempt reaches the transport")
+        let simulatedWriteError = NSError(
+            domain: "DestinationStatusRetryTests",
+            code: 1
+        )
+        retryTransportReady = true
+        retryManager.completeNavigationWriteForTesting(error: simulatedWriteError)
+        assert(waitForMainLoop(timeout: 3) { statusRetryWrites.count == 2 },
+               "a delegate-equivalent write error retries the latest status")
+        retryTransportReady = true
+        retryManager.completeNavigationWriteForTesting(error: simulatedWriteError)
+        assert(waitForMainLoop(timeout: 3) { statusRetryWrites.count == 3 },
+               "a second acknowledged failure uses the final bounded retry")
+        retryTransportReady = true
+        retryManager.completeNavigationWriteForTesting(error: simulatedWriteError)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        assertEqual(statusRetryWrites.count, 3,
+                    "status retry exhaustion does not loop indefinitely")
+        assert(statusRetryWrites.dropFirst().allSatisfy {
+            $0 == statusRetryWrites.first
+        }, "status retries preserve the exact terminal response")
     }
 
     static func testRouteInitialLocationUsesResolvedSource() {
@@ -6441,6 +6589,72 @@ struct NavigationProtocolTests {
                "a later regular write is dropped when only atomic chunks are pending")
         assertEqual(protectedWrites, [Data([1]), Data([2]), Data([3])],
                     "later queue pressure cannot fragment an accepted atomic message")
+
+        var prioritizedQueue = NavigationWriteQueue(maxCount: 3)
+        var droppedRegularWrite = false
+        prioritizedQueue.enqueue(NavigationWrite(
+            data: Data([1]),
+            label: "regular-1",
+            onDrop: { droppedRegularWrite = true }
+        ))
+        prioritizedQueue.enqueue(NavigationWrite(data: Data([2]), label: "regular-2"))
+        prioritizedQueue.enqueue(NavigationWrite(data: Data([3]), label: "regular-3"))
+        assert(prioritizedQueue.enqueuePrioritizedAtomically([
+            NavigationWrite(data: Data([9]), label: "destination-status")
+        ]), "a destination status uses its dedicated lane at bulk capacity")
+        assert(!droppedRegularWrite,
+               "priority admission does not evict ordinary traffic")
+        assertEqual(prioritizedQueue.count, 4,
+                    "the bounded priority lane is separate from bulk capacity")
+        var prioritizedWrites: [Data] = []
+        prioritizedQueue.flush(canSend: { true }) {
+            prioritizedWrites.append($0.data)
+        }
+        assertEqual(prioritizedWrites,
+                    [Data([9]), Data([1]), Data([2]), Data([3])],
+                    "destination status is sent before queued ordinary traffic")
+
+        var catalogAndStatusQueue = NavigationWriteQueue(maxCount: 3)
+        assert(catalogAndStatusQueue.enqueueAtomically([
+            NavigationWrite(data: Data([4]), label: "catalog-1"),
+            NavigationWrite(data: Data([5]), label: "catalog-2"),
+            NavigationWrite(data: Data([6]), label: "catalog-3")
+        ]), "catalog batch can fill bulk capacity before priority traffic")
+        var supersededStatusWasDropped = false
+        assert(catalogAndStatusQueue.enqueuePrioritizedAtomically([
+            NavigationWrite(
+                data: Data([8]),
+                label: "calculating-status",
+                onDrop: { supersededStatusWasDropped = true }
+            )
+        ]), "first priority status is admitted despite a full catalog lane")
+        assert(catalogAndStatusQueue.enqueuePrioritizedAtomically([
+            NavigationWrite(data: Data([9]), label: "terminal-status")
+        ]), "new terminal status replaces an older queued status")
+        assert(supersededStatusWasDropped,
+               "priority replacement reports the superseded status")
+        var catalogAndStatusWrites: [Data] = []
+        catalogAndStatusQueue.flush(canSend: { true }) {
+            catalogAndStatusWrites.append($0.data)
+        }
+        assertEqual(catalogAndStatusWrites,
+                    [Data([9]), Data([4]), Data([5]), Data([6])],
+                    "priority replacement preserves the complete catalog batch")
+
+        var catalogWriteFailureWasReported = false
+        var failureTrackingQueue = NavigationWriteQueue(maxCount: 1)
+        assert(failureTrackingQueue.enqueueAtomically([
+            NavigationWrite(
+                data: Data([7]),
+                label: "catalog",
+                onWriteFailure: { catalogWriteFailureWasReported = true }
+            )
+        ]), "catalog failure callback is accepted with the atomic batch")
+        failureTrackingQueue.flush(canSend: { true }) { write in
+            write.onWriteFailure?()
+        }
+        assert(catalogWriteFailureWasReported,
+               "atomic batch protection preserves the transport failure callback")
     }
 
     static func testDeviceBLEProtocolConstants() {
