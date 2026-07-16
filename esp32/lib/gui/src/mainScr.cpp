@@ -402,7 +402,7 @@ static void updateMapGuidanceOverlay() {
           lv_obj_set_style_arc_color(spinner, lv_color_hex(0x3A3A3A),
                                      LV_PART_MAIN);
           lv_obj_set_style_arc_width(spinner, 5, LV_PART_INDICATOR);
-          lv_obj_set_style_arc_color(spinner, lv_color_hex(0xFFD60A),
+          lv_obj_set_style_arc_color(spinner, lv_color_white(),
                                      LV_PART_INDICATOR);
         }
 

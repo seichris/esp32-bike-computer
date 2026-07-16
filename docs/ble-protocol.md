@@ -303,7 +303,7 @@ When a row is tapped, firmware notifies iOS on `2A6E`:
 "DREQ" | Generation: UInt32LE | Token: UInt16LE
 ```
 
-The device immediately displays an animated yellow spinner with
+The device immediately displays an animated white spinner with
 `Starting navigation...` and suppresses repeat requests while one is pending.
 iOS accepts the request only when generation and token match its active catalog,
 the device is authenticated, navigation is idle, and current location is
