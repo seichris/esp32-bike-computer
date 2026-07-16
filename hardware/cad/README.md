@@ -3,7 +3,7 @@
 This folder contains source and printable CAD files for the supported Waveshare
 ESP32-S3 Touch AMOLED enclosures and mounts.
 
-- `waveshare_206_case.stl`: Printable AMOLED 2.06 case matching the official 50.8 x 42.0 x 13.6 mm enclosure dimensions, with round button holes, SD and USB-C access, a speaker opening, and a 1 mm USB-cover tether hole.
+- `waveshare_206_case.stl`: Printable AMOLED 2.06 case with a 42.0 x 50.8 x 15.313 mm exterior, a provisional 38.0 x 46.0 mm display opening, 42.5 mm mounting-hole spacing, round button holes, SD and USB-C access, a speaker opening, and a 1 mm USB-cover tether hole.
 - `waveshare_206_case_garmin.py`: Blender Python source that fuses the backing-plate-free Garmin locking mount to the AMOLED 2.06 case.
 - `waveshare_206_case_garmin.stl`: Printable AMOLED 2.06 case with the backing-plate-free Garmin mount oriented toward the SD and USB sides.
 - `waveshare_amoled_175_bottom_plate.py`: Blender Python source for the plain circular bottom plate.
