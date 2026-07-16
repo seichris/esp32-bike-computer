@@ -21,6 +21,7 @@ struct ContentView: View {
     @State private var showingSettings = false
     @State private var isSearchPanelExpanded = false
     @State private var dismissedOfflineMapOnboarding = false
+    @State private var confirmedDeviceMapMissing = false
     @State private var offlineMapSelectionWidth: CGFloat?
     @State private var offlineMapSelectionHeight: CGFloat?
     @State private var offlineMapSelectionCenterY: CGFloat?
@@ -127,6 +128,21 @@ struct ContentView: View {
                 offlineMapSelectionDragStartFrame = nil
             }
         }
+        .task(id: deviceMapMissingCandidate) {
+            guard deviceMapMissingCandidate else {
+                confirmedDeviceMapMissing = false
+                return
+            }
+
+            do {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            } catch {
+                return
+            }
+
+            guard deviceMapMissingCandidate else { return }
+            confirmedDeviceMapMissing = true
+        }
     }
 
     private func schedulePendingMapInstallResume() {
@@ -149,6 +165,13 @@ struct ContentView: View {
         offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
     }
 
+    private var deviceMapMissingCandidate: Bool {
+        coordinator.isLocationAuthorized &&
+            coordinator.bleManager.isNavigationReady &&
+            coordinator.bleManager.deviceHasSDCard == true &&
+            coordinator.bleManager.deviceMapFoundForCurrentLocation == false
+    }
+
     private var shouldShowOfflineMapOnboarding: Bool {
         guard !dismissedOfflineMapOnboarding else { return false }
         guard !offlineMapManager.isMapAreaSelectionActive else { return false }
@@ -160,8 +183,7 @@ struct ContentView: View {
         if !coordinator.isLocationAuthorized {
             return true
         }
-        return coordinator.bleManager.deviceHasSDCard == true &&
-            coordinator.bleManager.deviceMapFoundForCurrentLocation == false
+        return confirmedDeviceMapMissing
     }
 
     private var topOverlay: some View {
