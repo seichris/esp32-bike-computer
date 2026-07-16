@@ -408,6 +408,7 @@ struct NavigationProtocolTests {
         testNonChinaCoordinatesPassThroughUnchanged()
         testSourceEndpointSelection()
         testSavedDestinationStore()
+        testDestinationPickerProtocol()
         testRouteInitialLocationUsesResolvedSource()
         testRouteTransportTypes()
         testDeviceGPSPacketBuilder()
@@ -2284,6 +2285,179 @@ struct NavigationProtocolTests {
         default:
             assert(false, "searched destination should produce a query endpoint")
         }
+    }
+
+    static func testDestinationPickerProtocol() {
+        let longName = String(repeating: "骑", count: 40)
+        let favoriteCoordinate = CLLocationCoordinate2D(
+            latitude: 1.30001,
+            longitude: 103.80001
+        )
+        var favorites = [
+            SavedDestination(name: longName, coordinate: favoriteCoordinate)
+        ]
+        favorites.append(contentsOf: (1..<10).map {
+            SavedDestination(name: "Favorite \($0)")
+        })
+        let build = DeviceDestinationCatalogBuilder.build(
+            favorites: favorites,
+            generation: 17
+        )
+        assertEqual(build.payload.version, 1, "destination catalog has an explicit schema version")
+        assertEqual(build.payload.generation, 17, "destination catalog preserves its generation")
+        assertEqual(build.payload.items.count, 3, "destination catalog is capped to three favorites")
+        assertEqual(build.payload.items.map(\.kind),
+                    Array(repeating: .favorite, count: 3),
+                    "the device catalog contains favorites only")
+        assertEqual(build.destinationsByToken.count, 3,
+                    "every visible token maps back to an exact saved destination")
+        assert(build.payload.items[0].label.utf8.count <= 64,
+               "multibyte destination labels are truncated at a valid UTF-8 boundary")
+        assert(!build.payload.items[0].label.isEmpty,
+               "UTF-8 truncation retains a useful destination label")
+        assertEqual(DeviceDestinationCatalogBuilder.utf8Prefix("A\0B", maxBytes: 64),
+                    "AB", "destination labels remove embedded nulls")
+        assertEqual(DeviceDestinationCatalogBuilder.utf8Prefix("A\nB", maxBytes: 64),
+                    "A B", "destination labels normalize embedded controls")
+
+        guard let frames = DeviceDestinationCatalogChunker.frames(
+            payload: build.payload,
+            transferID: 9,
+            maximumWriteLength: 20
+        ) else {
+            assert(false, "destination catalog should fit the bounded chunk protocol")
+            return
+        }
+        assert(frames.count > 1, "minimum-MTU destination catalogs are chunked")
+        assert(frames.allSatisfy { $0.count <= 20 },
+               "every destination chunk respects the negotiated write length")
+        for (index, frame) in frames.enumerated() {
+            assertEqual(String(data: frame.prefix(4), encoding: .utf8), "DLST",
+                        "destination chunk uses DLST prefix")
+            assertEqual(frame[4], 9, "destination chunks share a transfer ID")
+            assertEqual(frame[5], UInt8(index), "destination chunks are indexed in order")
+            assertEqual(frame[6], UInt8(frames.count), "destination chunks declare the full count")
+        }
+        let encodedCatalog = frames.reduce(into: Data()) {
+            $0.append($1.dropFirst(7))
+        }
+        let decodedCatalog = try? JSONDecoder().decode(
+            DeviceDestinationCatalogPayload.self,
+            from: encodedCatalog
+        )
+        assertEqual(decodedCatalog, build.payload,
+                    "reassembled destination chunks decode to the original catalog")
+        assert(DeviceDestinationCatalogChunker.frames(
+            payload: build.payload,
+            transferID: 1,
+            maximumWriteLength: 7
+        ) == nil, "a transport too small for the chunk header is rejected")
+        let oversizedPayload = DeviceDestinationCatalogPayload(
+            version: 1,
+            generation: 18,
+            items: [DeviceDestinationCatalogItem(
+                token: 1,
+                kind: .favorite,
+                label: String(repeating: "x", count: 5000)
+            )]
+        )
+        assert(DeviceDestinationCatalogChunker.frames(
+            payload: oversizedPayload,
+            transferID: 1,
+            maximumWriteLength: 64
+        ) == nil, "the sender enforces the firmware reassembly byte limit")
+
+        var requestData = Data(DeviceBLEProtocol.destinationRequestPrefix.utf8)
+        appendUInt32LE(17, to: &requestData)
+        appendUInt16LE(3, to: &requestData)
+        assertEqual(DeviceDestinationRequest.parse(requestData),
+                    DeviceDestinationRequest(generation: 17, token: 3),
+                    "DREQ parses generation and token little-endian")
+        assert(DeviceDestinationRequest.parse(requestData.dropLast()) == nil,
+               "truncated DREQ packets are rejected")
+
+        let status = DeviceDestinationStatusPacketBuilder.data(
+            generation: 17,
+            token: 3,
+            status: .failed,
+            message: String(repeating: "é", count: 50)
+        )
+        assertEqual(String(data: status.prefix(4), encoding: .utf8), "DNST",
+                    "destination status uses DNST prefix")
+        assertEqual(readUInt32LE(status, offset: 4), 17,
+                    "destination status includes the catalog generation")
+        assertEqual(readUInt16LE(status, offset: 8), 3,
+                    "destination status includes the selected token")
+        assertEqual(status[10], DeviceDestinationStatusCode.failed.rawValue,
+                    "destination status includes the state code")
+        assert(status.dropFirst(11).count <= 64,
+               "destination status messages are bounded on UTF-8 boundaries")
+        let minimumMTUStatus = DeviceDestinationStatusPacketBuilder.data(
+            generation: 17,
+            token: 3,
+            status: .failed,
+            message: String(repeating: "é", count: 50),
+            maximumLength: 20
+        )
+        assert(minimumMTUStatus.count <= 20,
+               "destination status respects the negotiated write limit")
+        assert(String(data: minimumMTUStatus.dropFirst(11), encoding: .utf8) != nil,
+               "write-limit truncation preserves valid UTF-8")
+
+        let manager = BLEManager()
+        let capabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.destinationPickerCapabilityMask])
+        assert(manager.handleDeviceCapabilitiesNotification(capabilities),
+               "destination picker capability response is consumed")
+        assert(manager.supportsDestinationPicker,
+               "capability bit 6 enables destination catalog synchronization")
+
+        var receivedRequest: DeviceDestinationRequest?
+        manager.onDestinationRequest = { receivedRequest = $0 }
+        assert(manager.handleNavigationCharacteristicNotification(requestData),
+               "DREQ notification is consumed before other control frames")
+        assertEqual(receivedRequest,
+                    DeviceDestinationRequest(generation: 17, token: 3),
+                    "BLE manager forwards the exact device selection")
+
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        var writes: [Data] = []
+        let managerFrames = DeviceDestinationCatalogChunker.frames(
+            payload: build.payload,
+            transferID: 1,
+            maximumWriteLength: 64
+        )!
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { writes.append($0) }
+        ))
+        assert(manager.sendDestinationCatalog(build.payload),
+               "BLE manager queues a complete fallback destination catalog")
+        assert(waitForMainLoop(timeout: 3) { writes.count == managerFrames.count },
+               "BLE manager drains every catalog frame")
+        assert(writes.allSatisfy {
+            String(data: $0.prefix(4), encoding: .utf8) == "DLST"
+        }, "fallback catalog frames stay explicitly framed")
+
+        let reconnectManager = BLEManager()
+        reconnectManager.isConnected = true
+        reconnectManager.isNavigationReady = true
+        var reconnectWrites: [Data] = []
+        reconnectManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { reconnectWrites.append($0) }
+        ))
+        assert(reconnectManager.sendDestinationStatus(
+            generation: 17,
+            token: 3,
+            status: .calculating,
+            message: "Starting navigation..."
+        ), "a retained-catalog request can be answered before CAPS completes")
+        assertEqual(String(data: reconnectWrites.first?.prefix(4) ?? Data(), encoding: .utf8),
+                    "DNST", "the pre-capability reconnect reply uses DNST")
     }
 
     static func testRouteInitialLocationUsesResolvedSource() {
@@ -6232,6 +6406,41 @@ struct NavigationProtocolTests {
                     "targeted writes use their native characteristic transport")
         assertEqual(fallbackWrites.count, 0,
                     "targeted writes do not leak onto the fallback characteristic")
+
+        var atomicQueue = NavigationWriteQueue(maxCount: 3)
+        atomicQueue.enqueue(NavigationWrite(data: Data([1]), label: "existing"))
+        assert(!atomicQueue.enqueueAtomically([
+            NavigationWrite(data: Data([2]), label: "chunk-1"),
+            NavigationWrite(data: Data([3]), label: "chunk-2"),
+            NavigationWrite(data: Data([4]), label: "chunk-3")
+        ]), "an oversized logical message is rejected atomically")
+        assertEqual(atomicQueue.count, 1,
+                    "atomic rejection leaves existing queue traffic unchanged")
+        assert(atomicQueue.enqueueAtomically([
+            NavigationWrite(data: Data([2]), label: "chunk-1"),
+            NavigationWrite(data: Data([3]), label: "chunk-2")
+        ]), "a complete logical message fits in the remaining capacity")
+        assertEqual(atomicQueue.remainingCapacity, 0,
+                    "remaining queue capacity accounts for atomic writes")
+
+        var protectedBatchQueue = NavigationWriteQueue(maxCount: 3)
+        assert(protectedBatchQueue.enqueueAtomically([
+            NavigationWrite(data: Data([1]), label: "catalog-1"),
+            NavigationWrite(data: Data([2]), label: "catalog-2"),
+            NavigationWrite(data: Data([3]), label: "catalog-3")
+        ]), "a complete logical message can fill the queue")
+        var overflowWasDropped = false
+        assert(protectedBatchQueue.enqueue(NavigationWrite(
+            data: Data([4]),
+            label: "later-write",
+            onDrop: { overflowWasDropped = true }
+        )), "queue pressure reports a dropped regular write")
+        var protectedWrites: [Data] = []
+        protectedBatchQueue.flush(canSend: { true }) { protectedWrites.append($0.data) }
+        assert(overflowWasDropped,
+               "a later regular write is dropped when only atomic chunks are pending")
+        assertEqual(protectedWrites, [Data([1]), Data([2]), Data([3])],
+                    "later queue pressure cannot fragment an accepted atomic message")
     }
 
     static func testDeviceBLEProtocolConstants() {
@@ -6251,11 +6460,15 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.soundPlayPrefix, "SNDP", "sound playback remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.powerButtonHonkPrefix, "SNDH", "PWR honk configuration remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.powerButtonHonkStatusPrefix, "SNHA", "PWR honk acknowledgement remains firmware-compatible")
+        assertEqual(DeviceBLEProtocol.destinationCatalogChunkPrefix, "DLST", "destination catalogs use DLST chunks")
+        assertEqual(DeviceBLEProtocol.destinationRequestPrefix, "DREQ", "device destination requests use DREQ")
+        assertEqual(DeviceBLEProtocol.destinationStatusPrefix, "DNST", "destination route statuses use DNST")
         assertEqual(DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask, 4, "PWR honk acknowledgement uses capability bit 2")
         assertEqual(DeviceBLEProtocol.independentMapProfilesCapabilityMask, 8, "independent map profiles use capability bit 3")
         assertEqual(DeviceBLEProtocol.extendedMapVisibilityCapabilityMask, 16, "extended map visibility uses capability bit 4")
         assertEqual(DeviceBLEProtocol.batteryStatusScreenCapabilityMask, 32, "Battery Status support uses capability bit 5")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 4, "capability version advertises Battery Status screen support")
+        assertEqual(DeviceBLEProtocol.destinationPickerCapabilityMask, 64, "destination picker support uses capability bit 6")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 5, "capability version advertises destination picker support")
         assertEqual(DeviceBLEProtocol.serviceRoadsVisibilityMask, 0x400, "service roads use visibility bit 10")
         assertEqual(DeviceBLEProtocol.tracksVisibilityMask, 0x800, "tracks use visibility bit 11")
         assertEqual(DeviceBLEProtocol.extendedVisibilityMarker, 0x1000, "extended visibility uses marker bit 12")

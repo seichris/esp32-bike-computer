@@ -46,14 +46,18 @@ enum DeviceBLEProtocol {
     static let soundPlayPrefix = "SNDP"
     static let powerButtonHonkPrefix = "SNDH"
     static let powerButtonHonkStatusPrefix = "SNHA"
+    static let destinationCatalogChunkPrefix = "DLST"
+    static let destinationRequestPrefix = "DREQ"
+    static let destinationStatusPrefix = "DNST"
     static let deviceSoundsCapabilityMask: UInt8 = 1 << 0
     static let powerButtonHonkCapabilityMask: UInt8 = 1 << 1
     static let powerButtonHonkAcknowledgementCapabilityMask: UInt8 = 1 << 2
     static let independentMapProfilesCapabilityMask: UInt8 = 1 << 3
     static let extendedMapVisibilityCapabilityMask: UInt8 = 1 << 4
     static let batteryStatusScreenCapabilityMask: UInt8 = 1 << 5
-    static let deviceCapabilitiesVersion: UInt8 = 4
-    static let fallbackWriteQueueCapacity = 32
+    static let destinationPickerCapabilityMask: UInt8 = 1 << 6
+    static let deviceCapabilitiesVersion: UInt8 = 5
+    static let fallbackWriteQueueCapacity = 256
 
     static let serviceRoadsVisibilityMask: Int32 = 1 << 10
     static let tracksVisibilityMask: Int32 = 1 << 11
@@ -407,6 +411,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsIndependentMapProfiles: Bool = false
     @Published private(set) var supportsExtendedMapVisibility: Bool = false
     @Published private(set) var supportsBatteryStatusScreen: Bool = false
+    @Published private(set) var supportsDestinationPicker: Bool = false
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
@@ -556,6 +561,7 @@ class BLEManager: NSObject, ObservableObject {
     private var pendingPowerButtonHonkPacket: Data?
     private var powerButtonHonkAttempt = 0
     private var nextPowerButtonHonkRequestID: UInt32 = 1
+    private var nextDestinationCatalogTransferID: UInt8 = 1
     private var powerButtonHonkRetryWorkItem: DispatchWorkItem?
     private var powerButtonHonkAckTimeout: TimeInterval = 1.0
     private var powerButtonHonkFailureRetryDelay: TimeInterval = 0.1
@@ -570,6 +576,8 @@ class BLEManager: NSObject, ObservableObject {
     private var hasActiveBLESession: Bool {
         isConnected || isConnecting || connectedPeripheral != nil
     }
+
+    var onDestinationRequest: ((DeviceDestinationRequest) -> Void)?
     
     // MARK: - UserDefaults Keys
     private enum SettingsKeys {
@@ -1256,6 +1264,8 @@ class BLEManager: NSObject, ObservableObject {
         supportsIndependentMapProfiles = false
         supportsExtendedMapVisibility = false
         supportsBatteryStatusScreen = false
+        supportsDestinationPicker = false
+        nextDestinationCatalogTransferID = 1
         hasReceivedDeviceCapabilities = true
         log("Device capabilities unavailable; using baseline feature visibility")
         sendScreenSettingsAfterCapabilityNegotiation()
@@ -1641,6 +1651,67 @@ class BLEManager: NSObject, ObservableObject {
         )
     }
 
+    @discardableResult
+    func sendDestinationCatalog(_ payload: DeviceDestinationCatalogPayload) -> Bool {
+        guard supportsDestinationPicker,
+              let endpoint = navigationWriteEndpoint,
+              isConnected,
+              isNavigationReady,
+              let frames = DeviceDestinationCatalogChunker.frames(
+                payload: payload,
+                transferID: nextDestinationCatalogTransferID,
+                maximumWriteLength: endpoint.maximumWriteLength
+              ) else {
+            log("Cannot send destination catalog: picker unsupported or transport unavailable")
+            return false
+        }
+
+        guard enqueueDestinationFrames(
+            frames,
+            endpoint: endpoint,
+            label: "destination catalog generation=\(payload.generation)"
+        ) else { return false }
+
+        nextDestinationCatalogTransferID &+= 1
+        if nextDestinationCatalogTransferID == 0 {
+            nextDestinationCatalogTransferID = 1
+        }
+        return true
+    }
+
+    @discardableResult
+    func sendDestinationStatus(
+        generation: UInt32,
+        token: UInt16,
+        status: DeviceDestinationStatusCode,
+        message: String
+    ) -> Bool {
+        // A DREQ notification itself proves that the connected firmware knows
+        // DNST. Allow the reply during the brief post-authentication window
+        // before the CAPS response arrives, when the device may still show its
+        // retained catalog from the previous connection.
+        guard let endpoint = navigationWriteEndpoint,
+              isConnected,
+              isNavigationReady,
+              endpoint.maximumWriteLength >= 11 else { return false }
+        let packet = DeviceDestinationStatusPacketBuilder.data(
+            generation: generation,
+            token: token,
+            status: status,
+            message: message,
+            maximumLength: endpoint.maximumWriteLength
+        )
+        guard packet.count <= endpoint.maximumWriteLength else {
+            log("Cannot send destination status: write limit exceeded")
+            return false
+        }
+        return enqueueDestinationFrames(
+            [packet],
+            endpoint: endpoint,
+            label: "destination status \(status)"
+        )
+    }
+
     func sendDebugNavigationPacket() {
         let packet = "\(NavigationIconID.left)|123|Debug turn left"
         guard sendNavigationData(packet) else {
@@ -1841,7 +1912,9 @@ class BLEManager: NSObject, ObservableObject {
         supportsIndependentMapProfiles = false
         supportsExtendedMapVisibility = false
         supportsBatteryStatusScreen = false
+        supportsDestinationPicker = false
         powerButtonHonkConfigurationError = nil
+        nextDestinationCatalogTransferID = 1
         hasReceivedDeviceCapabilities = false
         hasSentMapProfileForConnection = false
         hasSentMapNavigationProfileForConnection = false
@@ -2125,6 +2198,39 @@ class BLEManager: NSObject, ObservableObject {
 
         flushPendingNavigationWrites(endpoint: endpoint)
         scheduleNavigationFlushRetryIfNeeded()
+    }
+
+    @discardableResult
+    private func enqueueDestinationFrames(
+        _ frames: [Data],
+        endpoint: NavigationWriteEndpoint,
+        label: String
+    ) -> Bool {
+        guard !frames.isEmpty,
+              frames.allSatisfy({ $0.count <= endpoint.maximumWriteLength }) else {
+            return false
+        }
+
+        let peripheral = connectedPeripheral
+        let characteristic = settingsCharacteristic
+        let writes = frames.enumerated().map { index, frame in
+            NavigationWrite(
+                data: frame,
+                label: "\(characteristic == nil ? "fallback" : "native") \(label) \(index + 1)/\(frames.count)",
+                transportWrite: characteristic == nil ? nil : { [weak self, weak peripheral, weak characteristic] payload in
+                    guard let self, let peripheral, let characteristic else { return }
+                    self.writeDeviceData(payload, to: characteristic, on: peripheral)
+                }
+            )
+        }
+        guard navigationWriteQueue.enqueueAtomically(writes) else {
+            log("Destination frames not queued: insufficient write queue capacity")
+            return false
+        }
+        flushPendingNavigationWrites(endpoint: endpoint)
+        scheduleNavigationFlushRetryIfNeeded()
+        log("Queued \(frames.count) \(label) frame(s)")
+        return true
     }
 
     @discardableResult
@@ -2657,6 +2763,7 @@ extension BLEManager: CBPeripheralDelegate {
             supportsIndependentMapProfiles = false
             supportsExtendedMapVisibility = false
             supportsBatteryStatusScreen = false
+            supportsDestinationPicker = false
             hasReceivedDeviceCapabilities = false
             hasSentScreenSettingsForConnection = false
             clearPendingPowerButtonHonkConfiguration()
@@ -2676,6 +2783,8 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.extendedMapVisibilityCapabilityMask != 0
         let hasBatteryStatusScreen =
             flags & DeviceBLEProtocol.batteryStatusScreenCapabilityMask != 0
+        let hasDestinationPicker =
+            flags & DeviceBLEProtocol.destinationPickerCapabilityMask != 0
         let hasDevicePowerButtonConfig = data.count == 8
         if hasDevicePowerButtonConfig {
             guard hasPowerButtonHonk,
@@ -2688,6 +2797,7 @@ extension BLEManager: CBPeripheralDelegate {
                 supportsIndependentMapProfiles = false
                 supportsExtendedMapVisibility = false
                 supportsBatteryStatusScreen = false
+                supportsDestinationPicker = false
                 hasReceivedDeviceCapabilities = false
                 hasSentScreenSettingsForConnection = false
                 clearPendingPowerButtonHonkConfiguration()
@@ -2727,6 +2837,7 @@ extension BLEManager: CBPeripheralDelegate {
         supportsIndependentMapProfiles = hasIndependentMapProfiles
         supportsExtendedMapVisibility = hasExtendedMapVisibility
         supportsBatteryStatusScreen = hasBatteryStatusScreen
+        supportsDestinationPicker = hasDestinationPicker
         if !hasPowerButtonHonkAcknowledgement {
             clearPendingPowerButtonHonkConfiguration()
         }
@@ -2746,6 +2857,11 @@ extension BLEManager: CBPeripheralDelegate {
 
     @discardableResult
     func handleNavigationCharacteristicNotification(_ data: Data) -> Bool {
+        if let request = DeviceDestinationRequest.parse(data) {
+            log("Received destination request generation=\(request.generation) token=\(request.token)")
+            onDestinationRequest?(request)
+            return true
+        }
         if handlePowerButtonHonkStatusNotification(data) {
             return true
         }

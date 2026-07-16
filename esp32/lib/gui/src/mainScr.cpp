@@ -60,6 +60,21 @@ lv_obj_t *btnZoomOut;
 static lv_obj_t *mapGuidanceOverlay;
 static lv_obj_t *mapGuidanceArrow;
 static lv_obj_t *mapGuidanceDistance;
+static lv_obj_t *mapGuidanceDestinationPicker;
+static lv_obj_t *mapGuidanceCycleStrip;
+static uint32_t mapGuidanceCatalogRevision = UINT32_MAX;
+static uint32_t mapGuidanceStatusRevision = UINT32_MAX;
+static bool mapGuidancePickerExpanded = true;
+static bool mapGuidanceHadNavigationData = false;
+struct DestinationRowContext {
+  uint32_t generation = 0;
+  uint16_t token = 0;
+};
+static constexpr lv_point_precise_t MAP_GUIDANCE_STAR_POINTS[] = {
+    {9, 0},  {11, 6}, {18, 7}, {13, 11}, {15, 18}, {9, 14},
+    {3, 18}, {5, 11}, {0, 7},  {7, 6},   {9, 0}};
+static DestinationRowContext
+    mapGuidanceRowContexts[destination_picker_protocol::MAX_ITEMS];
 
 Maps mapView;
 
@@ -73,14 +88,17 @@ bool shouldInterruptMapRenderForScreenCycle() {
     return false;
   }
 
-  // The BOOT button always cycles screens. On Map + Navigation, also use the
-  // touch controller's interrupt hint so a new tap can pre-empt the synchronous
-  // vector renderer before LVGL has had a chance to consume the touch event.
+  // The BOOT button always handles the forward action. On Map + Navigation,
+  // also use the touch controller's interrupt hint while the destination
+  // picker is open (or tap-to-switch is enabled) so a new tap can pre-empt the
+  // synchronous vector renderer before LVGL consumes the touch event.
   if (waveshareBootScreenCyclePending ||
       digitalRead(BOARD_BOOT_PIN) == LOW) {
     return true;
   }
-  return mapRenderSettings.tapToSwitchScreens &&
+  const bool pickerNeedsInput =
+      mapGuidancePickerExpanded && !hasCurrentNavigationData();
+  return (pickerNeedsInput || mapRenderSettings.tapToSwitchScreens) &&
          (touchPressed || digitalRead(TCH_I2C_INT) == LOW);
 #else
   return false;
@@ -94,6 +112,9 @@ const ScreenMapRenderSettings &currentMapStyleSettings() {
 }
 
 static void tapCycleScreenEvent(lv_event_t *event);
+static void mapGuidanceOverlayTapEvent(lv_event_t *event);
+static void updateMapGuidanceOverlay();
+static void refreshMapGuidanceOverlayAsync(void *userData);
 
 static int16_t mapInteractionAnchorX() {
   return gui_layout::mapScreenAnchorX(TFT_WIDTH, mapView.mapScrWidth);
@@ -266,19 +287,215 @@ static void applyMapRotationForActiveTile() {
   }
 }
 
+static uint16_t mapGuidanceOverlayHeight(bool expanded) {
+  return expanded ? (TFT_HEIGHT * 2) / 3 : TFT_HEIGHT / 3;
+}
+
+static bool mapGuidanceTapIsOutsideOverlay(lv_event_t *event) {
+  if (mapGuidanceOverlay == nullptr || event == nullptr) {
+    return false;
+  }
+
+  lv_indev_t *indev = lv_event_get_indev(event);
+  if (indev == nullptr) {
+    return false;
+  }
+
+  lv_point_t point;
+  lv_area_t overlayArea;
+  lv_indev_get_point(indev, &point);
+  lv_obj_get_coords(mapGuidanceOverlay, &overlayArea);
+  return point.x < overlayArea.x1 || point.x > overlayArea.x2 ||
+         point.y < overlayArea.y1 || point.y > overlayArea.y2;
+}
+
+static void applyMapGuidanceOverlayLayout() {
+  if (!mapGuidanceOverlay || !mapGuidanceDestinationPicker ||
+      !mapGuidanceCycleStrip) {
+    return;
+  }
+
+  const bool expanded =
+      mapGuidancePickerExpanded && !hasCurrentNavigationData();
+  const uint16_t overlayHeight = mapGuidanceOverlayHeight(expanded);
+  lv_obj_set_size(mapGuidanceOverlay, TFT_WIDTH, overlayHeight);
+  lv_obj_set_pos(mapGuidanceOverlay, 0, TFT_HEIGHT - overlayHeight);
+
+  if (expanded) {
+    lv_obj_set_size(mapGuidanceDestinationPicker, TFT_WIDTH - 16,
+                    overlayHeight - 16);
+    lv_obj_align(mapGuidanceDestinationPicker, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(mapGuidanceCycleStrip, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_set_size(mapGuidanceDestinationPicker, TFT_WIDTH - 52,
+                    overlayHeight - 16);
+    lv_obj_align(mapGuidanceDestinationPicker, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_size(mapGuidanceCycleStrip, 28, overlayHeight - 16);
+    lv_obj_align(mapGuidanceCycleStrip, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_clear_flag(mapGuidanceCycleStrip, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
 static void updateMapGuidanceOverlay() {
-  if (!mapGuidanceArrow || !mapGuidanceDistance) {
+  if (!mapGuidanceArrow || !mapGuidanceDistance ||
+      !mapGuidanceDestinationPicker) {
     return;
   }
 
   LV_IMG_DECLARE(navup);
   lv_img_set_src(mapGuidanceArrow, &navup);
 
-  if (!hasCurrentNavigationData()) {
+  const bool hasNavigationData = hasCurrentNavigationData();
+  if (hasNavigationData != mapGuidanceHadNavigationData) {
+    mapGuidanceHadNavigationData = hasNavigationData;
+    mapGuidancePickerExpanded = !hasNavigationData;
+  }
+  applyMapGuidanceOverlayLayout();
+
+  if (!hasNavigationData) {
     lv_img_set_angle(mapGuidanceArrow, 0);
     lv_label_set_text_static(mapGuidanceDistance, "--");
+
+    if (!mapGuidancePickerExpanded) {
+      lv_obj_add_flag(mapGuidanceDestinationPicker, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_clear_flag(mapGuidanceArrow, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_clear_flag(mapGuidanceDistance, LV_OBJ_FLAG_HIDDEN);
+      return;
+    }
+
+    lv_obj_add_flag(mapGuidanceArrow, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(mapGuidanceDistance, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(mapGuidanceDestinationPicker, LV_OBJ_FLAG_HIDDEN);
+
+    const DestinationCatalogSnapshot catalog =
+        getDestinationCatalogSnapshot();
+    const DestinationPickerStatusSnapshot status =
+        getDestinationPickerStatusSnapshot();
+    uint8_t visibleFavoriteCount = 0;
+    for (uint8_t i = 0; i < catalog.count; i++) {
+      if (catalog.items[i].kind == DestinationKind::Favorite) {
+        visibleFavoriteCount++;
+      }
+    }
+    if (catalog.revision != mapGuidanceCatalogRevision ||
+        status.revision != mapGuidanceStatusRevision) {
+      mapGuidanceCatalogRevision = catalog.revision;
+      mapGuidanceStatusRevision = status.revision;
+      lv_obj_clean(mapGuidanceDestinationPicker);
+
+      if (status.code != DestinationPickerStatusCode::Idle) {
+        lv_obj_t *statusContent =
+            lv_obj_create(mapGuidanceDestinationPicker);
+        lv_obj_remove_style_all(statusContent);
+        lv_obj_set_size(statusContent, LV_PCT(100), LV_PCT(100));
+        lv_obj_clear_flag(statusContent, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_flex_flow(statusContent, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(statusContent, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_row(statusContent, 12, 0);
+
+        if (status.code == DestinationPickerStatusCode::Calculating) {
+          lv_obj_t *spinner = lv_spinner_create(statusContent);
+          lv_obj_set_size(spinner, 54, 54);
+          lv_spinner_set_anim_params(spinner, 900, 220);
+          lv_obj_set_style_arc_width(spinner, 5, LV_PART_MAIN);
+          lv_obj_set_style_arc_color(spinner, lv_color_hex(0x3A3A3A),
+                                     LV_PART_MAIN);
+          lv_obj_set_style_arc_width(spinner, 5, LV_PART_INDICATOR);
+          lv_obj_set_style_arc_color(spinner, lv_color_white(),
+                                     LV_PART_INDICATOR);
+        }
+
+        lv_obj_t *label = lv_label_create(statusContent);
+        lv_obj_set_width(label, LV_PCT(100));
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(label, lv_color_white(), 0);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(label, status.message[0] == '\0'
+                                     ? "Starting navigation..."
+                                     : status.message);
+      } else if (visibleFavoriteCount == 0) {
+        lv_obj_t *label = lv_label_create(mapGuidanceDestinationPicker);
+        lv_obj_set_width(label, LV_PCT(100));
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(label, lv_color_white(), 0);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text_static(label, "Add saved destinations in the app");
+      } else {
+        lv_obj_t *title = lv_label_create(mapGuidanceDestinationPicker);
+        lv_obj_set_width(title, LV_PCT(100));
+        lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(title, lv_color_white(), 0);
+        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text_static(title, "Choose destination");
+
+        for (uint8_t i = 0; i < catalog.count; i++) {
+          const DeviceDestination &destination = catalog.items[i];
+          if (destination.kind != DestinationKind::Favorite) {
+            continue;
+          }
+
+          lv_obj_t *row = lv_btn_create(mapGuidanceDestinationPicker);
+          lv_obj_remove_style_all(row);
+          lv_obj_set_size(row, LV_PCT(100), 64);
+          lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+          lv_obj_clear_flag(row, LV_OBJ_FLAG_EVENT_BUBBLE);
+          lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+          lv_obj_add_flag(row, LV_OBJ_FLAG_PRESS_LOCK);
+          lv_obj_set_style_pad_hor(row, 8, 0);
+          lv_obj_set_style_pad_ver(row, 0, 0);
+          lv_obj_add_event_cb(
+              row,
+              [](lv_event_t *event) {
+                if (lv_event_get_code(event) != LV_EVENT_RELEASED) {
+                  return;
+                }
+                lv_event_stop_bubbling(event);
+                const auto *context = static_cast<const DestinationRowContext *>(
+                    lv_event_get_user_data(event));
+                if (context != nullptr) {
+                  const bool accepted = requestDestinationRoute(
+                      context->generation, context->token);
+                  log_i("UI: destination tapped generation=%lu token=%u "
+                        "accepted=%d",
+                        (unsigned long)context->generation, context->token,
+                        accepted ? 1 : 0);
+                  (void)lv_async_call(refreshMapGuidanceOverlayAsync, nullptr);
+                }
+              },
+              LV_EVENT_RELEASED, &mapGuidanceRowContexts[i]);
+          mapGuidanceRowContexts[i].generation = catalog.generation;
+          mapGuidanceRowContexts[i].token = destination.token;
+
+          lv_obj_t *star = lv_line_create(row);
+          lv_obj_remove_style_all(star);
+          lv_line_set_points(
+              star, MAP_GUIDANCE_STAR_POINTS,
+              sizeof(MAP_GUIDANCE_STAR_POINTS) /
+                  sizeof(MAP_GUIDANCE_STAR_POINTS[0]));
+          lv_obj_set_style_line_width(star, 2, 0);
+          lv_obj_set_style_line_color(star, lv_color_hex(0xFFD60A), 0);
+          lv_obj_set_style_line_rounded(star, true, 0);
+          lv_obj_align(star, LV_ALIGN_LEFT_MID, 5, 0);
+
+          lv_obj_t *label = lv_label_create(row);
+          lv_obj_set_width(label, LV_PCT(100));
+          lv_obj_set_style_pad_left(label, 36, 0);
+          lv_obj_set_style_pad_right(label, 4, 0);
+          lv_obj_set_style_text_font(label, &lv_font_montserrat_24, 0);
+          lv_obj_set_style_text_color(label, lv_color_white(), 0);
+          lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
+          lv_label_set_text(label, destination.label);
+          lv_obj_align(label, LV_ALIGN_LEFT_MID, 0, 0);
+        }
+      }
+    }
     return;
   }
+
+  lv_obj_add_flag(mapGuidanceDestinationPicker, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(mapGuidanceArrow, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(mapGuidanceDistance, LV_OBJ_FLAG_HIDDEN);
 
   NavigationData navData = getCurrentNavigationData();
   lv_img_set_angle(mapGuidanceArrow, navigationArrowAngle(navData.iconID));
@@ -288,6 +505,28 @@ static void updateMapGuidanceOverlay() {
   } else {
     lv_label_set_text_fmt(mapGuidanceDistance, "%u m", navData.distance);
   }
+}
+
+static void refreshMapGuidanceOverlayAsync(void *userData) {
+  (void)userData;
+  if (!isMainScreen || mainScreen == nullptr || activeTile != MAP_GUIDANCE) {
+    return;
+  }
+  updateMapGuidanceOverlay();
+  lv_obj_invalidate(mainScreen);
+}
+
+static bool dismissMapGuidanceDestinationPicker() {
+  if (activeTile != MAP_GUIDANCE || !mapGuidancePickerExpanded ||
+      hasCurrentNavigationData()) {
+    return false;
+  }
+
+  mapGuidancePickerExpanded = false;
+  updateMapGuidanceOverlay();
+  lv_obj_invalidate(mainScreen);
+  log_i("UI: dismissed destination picker");
+  return true;
 }
 
 /**
@@ -657,10 +896,20 @@ void mapToolBarEvent(lv_event_t *event) {
 void scrollMapEvent(lv_event_t *event) {
   if (!canScrollMap) {
     if (activeTile == MAP_GUIDANCE &&
-        lv_event_get_code(event) == LV_EVENT_CLICKED &&
-        mapRenderSettings.tapToSwitchScreens) {
-      log_i("MAP GUIDANCE TAP: cycling main screen");
-      showNextMainScreen();
+        lv_event_get_code(event) == LV_EVENT_CLICKED) {
+      if (mapGuidancePickerExpanded && !hasCurrentNavigationData()) {
+        // Only the exposed map above the two-thirds overlay dismisses it. This
+        // coordinate guard prevents a misdirected row touch from collapsing
+        // the picker instead of selecting its destination.
+        if (mapGuidanceTapIsOutsideOverlay(event)) {
+          (void)dismissMapGuidanceDestinationPicker();
+        }
+        return;
+      }
+      if (mapRenderSettings.tapToSwitchScreens) {
+        log_i("MAP GUIDANCE TAP: cycling main screen");
+        showNextMainScreen();
+      }
     }
     return;
   }
@@ -982,7 +1231,7 @@ void updateNavEvent(lv_event_t *event) {
 }
 
 static void createMapGuidanceOverlay() {
-  const uint16_t overlayHeight = TFT_HEIGHT / 3;
+  const uint16_t overlayHeight = mapGuidanceOverlayHeight(false);
 
   mapGuidanceOverlay = lv_obj_create(mainScreen);
   lv_obj_remove_style_all(mapGuidanceOverlay);
@@ -993,8 +1242,41 @@ static void createMapGuidanceOverlay() {
   lv_obj_set_style_bg_color(mapGuidanceOverlay, lv_color_black(), 0);
   lv_obj_set_style_bg_opa(mapGuidanceOverlay, 230, 0);
   lv_obj_set_style_pad_all(mapGuidanceOverlay, 8, 0);
-  lv_obj_add_event_cb(mapGuidanceOverlay, tapCycleScreenEvent, LV_EVENT_CLICKED,
-                      NULL);
+  lv_obj_add_event_cb(mapGuidanceOverlay, mapGuidanceOverlayTapEvent,
+                      LV_EVENT_CLICKED, NULL);
+
+  mapGuidanceDestinationPicker = lv_obj_create(mapGuidanceOverlay);
+  lv_obj_remove_style_all(mapGuidanceDestinationPicker);
+  lv_obj_set_size(mapGuidanceDestinationPicker, TFT_WIDTH - 52,
+                  overlayHeight - 16);
+  lv_obj_align(mapGuidanceDestinationPicker, LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_set_flex_flow(mapGuidanceDestinationPicker, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(mapGuidanceDestinationPicker, LV_FLEX_ALIGN_START,
+                        LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+  lv_obj_set_style_pad_all(mapGuidanceDestinationPicker, 4, 0);
+  lv_obj_set_style_pad_row(mapGuidanceDestinationPicker, 4, 0);
+  // A favorites-only catalog always fits in the expanded overlay. Keeping this
+  // container scrollable can turn small touch jitter into a scroll gesture and
+  // suppress the destination row's selection event.
+  lv_obj_clear_flag(mapGuidanceDestinationPicker, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(mapGuidanceDestinationPicker,
+                            LV_SCROLLBAR_MODE_OFF);
+  lv_obj_clear_flag(mapGuidanceDestinationPicker, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+  mapGuidanceCycleStrip = lv_btn_create(mapGuidanceOverlay);
+  lv_obj_set_size(mapGuidanceCycleStrip, 28, overlayHeight - 16);
+  lv_obj_align(mapGuidanceCycleStrip, LV_ALIGN_RIGHT_MID, 0, 0);
+  lv_obj_set_style_radius(mapGuidanceCycleStrip, 8, 0);
+  lv_obj_set_style_bg_color(mapGuidanceCycleStrip, lv_color_hex(0x181818), 0);
+  lv_obj_set_style_bg_opa(mapGuidanceCycleStrip, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(mapGuidanceCycleStrip, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_add_event_cb(mapGuidanceCycleStrip, tapCycleScreenEvent,
+                      LV_EVENT_CLICKED, NULL);
+  lv_obj_t *cycleLabel = lv_label_create(mapGuidanceCycleStrip);
+  lv_obj_set_style_text_color(cycleLabel, lv_color_white(), 0);
+  lv_obj_set_style_text_font(cycleLabel, &lv_font_montserrat_18, 0);
+  lv_label_set_text_static(cycleLabel, LV_SYMBOL_RIGHT);
+  lv_obj_center(cycleLabel);
 
   mapGuidanceArrow = lv_img_create(mapGuidanceOverlay);
   LV_IMG_DECLARE(navup);
@@ -1010,6 +1292,12 @@ static void createMapGuidanceOverlay() {
   lv_obj_set_style_text_align(mapGuidanceDistance, LV_TEXT_ALIGN_LEFT, 0);
   lv_label_set_text_static(mapGuidanceDistance, "--");
   lv_obj_align(mapGuidanceDistance, LV_ALIGN_CENTER, 46, 0);
+
+  mapGuidanceCatalogRevision = UINT32_MAX;
+  mapGuidanceStatusRevision = UINT32_MAX;
+  mapGuidanceHadNavigationData = hasCurrentNavigationData();
+  mapGuidancePickerExpanded = !mapGuidanceHadNavigationData;
+  updateMapGuidanceOverlay();
 
   lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
 }
@@ -1040,6 +1328,8 @@ static void showMainTile(tileName tile) {
     lv_obj_move_foreground(mapGuidanceOverlay);
     mapView.followGps = true;
     applyMapRotationForActiveTile();
+    mapGuidanceHadNavigationData = hasCurrentNavigationData();
+    mapGuidancePickerExpanded = !mapGuidanceHadNavigationData;
     updateMapGuidanceOverlay();
     mapView.redrawMap = true;
     lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
@@ -1100,12 +1390,22 @@ static void tapCycleScreenEvent(lv_event_t *event) {
   showNextMainScreen();
 }
 
+static void mapGuidanceOverlayTapEvent(lv_event_t *event) {
+  if (mapGuidancePickerExpanded && !hasCurrentNavigationData()) {
+    return;
+  }
+  tapCycleScreenEvent(event);
+}
+
 void toggleNavigationScreen() {
   if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
       !batteryStatusTile || !mapGuidanceOverlay) {
     return;
   }
 
+  if (dismissMapGuidanceDestinationPicker()) {
+    return;
+  }
   showNextMainScreen();
 }
 

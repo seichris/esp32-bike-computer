@@ -205,6 +205,12 @@ jobs:
             tools/tests/test_device_screen_protocol.cpp \
             -o /tmp/test_device_screen_protocol
           /tmp/test_device_screen_protocol
+      - name: Destination picker protocol host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_destination_picker_protocol.cpp \
+            -o /tmp/test_destination_picker_protocol
+          /tmp/test_destination_picker_protocol
       - name: Map profile persistence host tests
         run: |
           g++ -std=c++17 \
