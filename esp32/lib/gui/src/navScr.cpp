@@ -77,7 +77,7 @@ void navigationScr(_lv_obj_t *screen) {
   arrowNav = lv_img_create(screen);
   lv_img_set_zoom(arrowNav, iconScale * 2);
   lv_obj_update_layout(arrowNav);
-  lv_obj_align(arrowNav, LV_ALIGN_BOTTOM_MID, 0, -18);
+  lv_obj_align(arrowNav, LV_ALIGN_BOTTOM_MID, 0, -30);
 
   LV_IMG_DECLARE(navup);
   lv_img_set_src(arrowNav, &navup);
