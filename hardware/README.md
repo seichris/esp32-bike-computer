@@ -440,7 +440,9 @@ both the production `WAVESHARE_AMOLED_175` image and the standalone
 
 This verified status supersedes older bring-up notes that described the 1.75"
 audio path as TBD/untested or reported that the ES8311 was not detected. The
-current status is backed by the checked-in [1.75 schematic](<reference/1.75 - esp32-s3-touch-amoled-1.75-schematic.pdf>),
+current status is backed by the physical production-image and audible-playback
+validation recorded in [PR #62](https://github.com/seichris/open-bike-computer/pull/62),
+the checked-in [1.75 schematic](<reference/1.75 - esp32-s3-touch-amoled-1.75-schematic.pdf>),
 Waveshare's [`08_ES8311` playback example](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75/tree/main/examples/arduino/08_ES8311),
 the board-specific [production speaker driver](../esp32/lib/speaker/speaker.cpp),
 and the dedicated smoke-test environment in [PlatformIO](../esp32/platformio.ini).
