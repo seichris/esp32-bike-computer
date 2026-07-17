@@ -305,6 +305,8 @@ class WorkerTests(unittest.TestCase):
             self.assertTrue(pipeline.started.wait(timeout=1))
             self.assertTrue(worker_heartbeat.wait(timeout=1))
             time.sleep(0.06)
+            worker_heartbeat.clear()
+            self.assertTrue(worker_heartbeat.wait(timeout=1))
 
             second = MapWorker(
                 store,
