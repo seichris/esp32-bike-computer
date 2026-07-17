@@ -47,6 +47,23 @@ constexpr float MOVING_GYRO_THRESHOLD_DPS = 20.0f;
 constexpr float MOVING_ACCEL_DELTA_MG = 180.0f;
 constexpr float ORIENTATION_THRESHOLD_MG = 650.0f;
 
+bool identifySensorAt(uint8_t address, uint8_t &whoAmI) {
+  if (!i2c::probe(address, "QMI8658", 2)) {
+    return false;
+  }
+  if (!i2c::readRegister8(address, REG_WHO_AM_I, whoAmI, "QMI8658 whoami",
+                          3)) {
+    return false;
+  }
+  if (whoAmI != EXPECTED_WHO_AM_I) {
+    Serial.printf("QMI8658: ignoring addr=0x%02X unexpected whoami=0x%02X\n",
+                  address, whoAmI);
+    return false;
+  }
+  return true;
+}
+
+#ifdef WAVESHARE_IMU_DIAGNOSTICS
 Status imuStatus;
 Sample latestSample;
 uint32_t lastPollMs = 0;
@@ -246,9 +263,42 @@ bool configureSensor() {
   logRawDiagnostic("config-failed");
   return false;
 }
+#endif
 
 } // namespace
 
+bool disable() {
+  uint8_t whoAmI = 0;
+  uint8_t address = waveshare_board::QMI8658_ADDR_PRIMARY;
+  if (!identifySensorAt(address, whoAmI)) {
+    address = waveshare_board::QMI8658_ADDR_FALLBACK;
+    if (!identifySensorAt(address, whoAmI)) {
+      Serial.println("QMI8658: not found; production sensors remain unused");
+      return false;
+    }
+  }
+
+  const bool writeOk = i2c::writeRegister8(
+      address, REG_CTRL7, CTRL7_DISABLE_SENSORS, "QMI8658 power down", 3);
+  delay(1);
+
+  uint8_t ctrl7 = 0xFF;
+  const bool readOk = i2c::readRegister8(address, REG_CTRL7, ctrl7,
+                                         "QMI8658 power-down readback", 3);
+  const bool disabled = writeOk && readOk &&
+                        (ctrl7 & CTRL7_ENABLE_ACCEL_GYRO) == 0;
+  if (disabled) {
+    Serial.printf("QMI8658: accelerometer and gyro disabled addr=0x%02X\n",
+                  address);
+  } else {
+    Serial.printf("QMI8658: failed to disable sensors addr=0x%02X "
+                  "write=%d read=%d ctrl7=0x%02X\n",
+                  address, writeOk, readOk, ctrl7);
+  }
+  return disabled;
+}
+
+#ifdef WAVESHARE_IMU_DIAGNOSTICS
 const Status &status() { return imuStatus; }
 
 const Sample &lastSample() { return latestSample; }
@@ -302,9 +352,7 @@ bool begin() {
   Serial.printf("QMI8658: found addr=0x%02X whoami=0x%02X rev=0x%02X "
                 "accel=8g@125Hz gyro=512dps@112Hz\n",
                 imuStatus.address, imuStatus.whoAmI, imuStatus.revision);
-#ifdef WAVESHARE_IMU_DEBUG_LOG
   logRawDiagnostic("configured");
-#endif
   return true;
 }
 
@@ -380,7 +428,6 @@ void process() {
     logRawDiagnostic("zero-sample");
   }
 
-#ifdef WAVESHARE_IMU_DEBUG_LOG
   static uint32_t lastLogMs = 0;
   if (now - lastLogMs >= 5000) {
     lastLogMs = now;
@@ -393,8 +440,8 @@ void process() {
                   static_cast<unsigned long>(imuStatus.sampleCount),
                   static_cast<unsigned long>(imuStatus.failedReads));
   }
-#endif
 }
+#endif
 
 } // namespace waveshare_board::imu
 

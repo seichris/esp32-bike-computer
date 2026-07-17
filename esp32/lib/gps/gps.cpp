@@ -29,6 +29,7 @@ Gps::Gps() {}
  */
 void Gps::init()
 {
+#ifdef HAS_HARDWARE_GPS
   gpsPort.setRxBufferSize(1024);
 
   if (gpsBaud != 4)
@@ -68,7 +69,7 @@ void Gps::init()
   gpsPort.flush();
   delay(100);
 #endif
-
+#endif
 }
 
 /**
@@ -232,6 +233,9 @@ long Gps::detectRate(int rxPin)
  */
 long Gps::autoBaud()
 {
+#ifndef HAS_HARDWARE_GPS
+  return 0;
+#else
   long rate = detectRate(GPS_RX) + detectRate(GPS_RX) + detectRate(GPS_RX);
   rate = rate / 3l;
   long baud = 0;
@@ -274,6 +278,7 @@ long Gps::autoBaud()
     baud = 0;
 
   return baud;
+#endif
 }
 
 /**
