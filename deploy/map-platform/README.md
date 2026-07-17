@@ -7,6 +7,14 @@ may match, but remain separate so an approval-only control-plane release can
 advance without replacing a hardware-tested worker. Coolify secrets remain
 outside Git.
 
+## One-time GitHub configuration
+
+In repository **Settings > Actions > General > Workflow permissions**, enable
+**Allow GitHub Actions to create and approve pull requests**. Keep the default
+`GITHUB_TOKEN` permissions restricted to read access; the image workflow grants
+write access only to its promotion job. GitHub uses this repository switch to
+decide whether `GITHUB_TOKEN` may open the digest-promotion pull request.
+
 ## One-time Coolify configuration
 
 Update the existing `open-bike-computer-map-platform` resource rather than
