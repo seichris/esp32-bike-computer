@@ -46,9 +46,10 @@ merge changes `compose.yaml`, which matches the Coolify watch path and deploys
 the exact pinned image. A promotion-only merge does not start another image
 build, so the workflow cannot loop.
 
-GitHub may require a repository maintainer to approve CI on pull requests
-created with `GITHUB_TOKEN`. Do not replace that token with a broadly scoped
-personal token only to remove the approval step.
+GitHub suppresses workflow events caused by `GITHUB_TOKEN`, so the promotion
+job explicitly dispatches `ci.yml` for the promotion commit after opening or
+refreshing the pull request. This keeps the automation on the least-privileged
+repository token without requiring a personal access token.
 
 Validate the lock locally with:
 
