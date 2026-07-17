@@ -35,11 +35,14 @@ constexpr uint8_t EXPECTED_WHO_AM_I = 0x05;
 constexpr uint8_t RESET_VALUE = 0xB0;
 constexpr uint8_t RST_RESULT_OK = 0x80;
 constexpr uint8_t CTRL1_LITTLE_ENDIAN_AUTO_INC = 0x40;
+constexpr uint8_t CTRL1_SENSOR_DISABLE = 0x01;
 constexpr uint8_t CTRL2_ACCEL_8G_125HZ = 0x26;
 constexpr uint8_t CTRL3_GYRO_512DPS_112HZ = 0x56;
 constexpr uint8_t CTRL7_ENABLE_ACCEL_GYRO = 0x03;
 constexpr uint8_t CTRL7_DISABLE_SENSORS = 0x00;
 
+constexpr uint32_t SYSTEM_TURN_ON_TIMEOUT_MS = 2000;
+constexpr uint32_t SENSOR_SHUTDOWN_DELAY_MS = 20;
 constexpr float ACCEL_LSB_PER_G = 4096.0f;
 constexpr float GYRO_LSB_PER_DPS = 64.0f;
 constexpr uint32_t SAMPLE_INTERVAL_MS = 500;
@@ -141,7 +144,7 @@ bool softReset(uint8_t address) {
 
   const uint32_t startMs = millis();
   uint8_t resetResult = 0;
-  while (millis() - startMs < 250) {
+  while (millis() - startMs < SYSTEM_TURN_ON_TIMEOUT_MS) {
     delay(10);
     if (i2c::readRegister8(address, REG_RST_RESULT, resetResult,
                            "QMI8658 reset result", 1) &&
@@ -278,22 +281,44 @@ bool disable() {
     }
   }
 
-  const bool writeOk = i2c::writeRegister8(
+  uint8_t ctrl1Before = 0;
+  const bool ctrl1ReadOk =
+      i2c::readRegister8(address, REG_CTRL1, ctrl1Before,
+                         "QMI8658 power-down ctrl1", 3);
+  const bool ctrl7WriteOk = i2c::writeRegister8(
       address, REG_CTRL7, CTRL7_DISABLE_SENSORS, "QMI8658 power down", 3);
+  if (ctrl7WriteOk) {
+    // The datasheet specifies a powered-sensor shutdown transition of up to
+    // 2/ODR. The diagnostic configuration's slowest ODR is 112 Hz.
+    delay(SENSOR_SHUTDOWN_DELAY_MS);
+  }
+  const bool ctrl1WriteOk =
+      ctrl1ReadOk && ctrl7WriteOk &&
+      i2c::writeRegister8(address, REG_CTRL1,
+                          ctrl1Before | CTRL1_SENSOR_DISABLE,
+                          "QMI8658 disable oscillator", 3);
   delay(1);
 
   uint8_t ctrl7 = 0xFF;
-  const bool readOk = i2c::readRegister8(address, REG_CTRL7, ctrl7,
-                                         "QMI8658 power-down readback", 3);
-  const bool disabled = writeOk && readOk &&
-                        (ctrl7 & CTRL7_ENABLE_ACCEL_GYRO) == 0;
+  const bool ctrl7ReadOk = i2c::readRegister8(
+      address, REG_CTRL7, ctrl7, "QMI8658 power-down ctrl7 readback", 3);
+  uint8_t ctrl1 = 0;
+  const bool ctrl1VerifyOk = i2c::readRegister8(
+      address, REG_CTRL1, ctrl1, "QMI8658 power-down ctrl1 readback", 3);
+  const bool disabled =
+      ctrl7WriteOk && ctrl1WriteOk && ctrl7ReadOk && ctrl1VerifyOk &&
+      ctrl7 == CTRL7_DISABLE_SENSORS &&
+      (ctrl1 & CTRL1_SENSOR_DISABLE) == CTRL1_SENSOR_DISABLE;
   if (disabled) {
-    Serial.printf("QMI8658: accelerometer and gyro disabled addr=0x%02X\n",
-                  address);
+    Serial.printf("QMI8658: powered down addr=0x%02X ctrl1=0x%02X "
+                  "ctrl7=0x%02X\n",
+                  address, ctrl1, ctrl7);
   } else {
-    Serial.printf("QMI8658: failed to disable sensors addr=0x%02X "
-                  "write=%d read=%d ctrl7=0x%02X\n",
-                  address, writeOk, readOk, ctrl7);
+    Serial.printf("QMI8658: power-down failed addr=0x%02X "
+                  "ctrl1Read=%d ctrl1Write=%d ctrl1Verify=%d ctrl1=0x%02X "
+                  "ctrl7Write=%d ctrl7Read=%d ctrl7=0x%02X\n",
+                  address, ctrl1ReadOk, ctrl1WriteOk, ctrl1VerifyOk, ctrl1,
+                  ctrl7WriteOk, ctrl7ReadOk, ctrl7);
   }
   return disabled;
 }

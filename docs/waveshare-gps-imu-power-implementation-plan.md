@@ -7,8 +7,9 @@ two unused hardware paths:
 
 1. Do not initialize the UART GPS receiver or create its FreeRTOS polling task.
    The iPhone remains the only live GPS source on Waveshare builds.
-2. Keep both QMI8658 sensor engines disabled in production and stop all periodic
-   accelerometer and gyroscope reads.
+2. Put the QMI8658 into power-down in production, disabling every sensor engine
+   and its internal oscillator, and stop all periodic accelerometer and
+   gyroscope reads.
 
 The shared `Gps` data model remains in place because BLE, maps, navigation, and
 ride telemetry consume it. Hardware-GPS support remains available to the older
@@ -45,9 +46,9 @@ derived orientation and movement state. No navigation, screen rotation,
 wake/sleep, or ride feature consumes that state.
 
 Skipping `imu::begin()` alone is insufficient: after a warm ESP restart, the
-QMI8658 may remain powered on the shared rail with sensor engines left enabled
-by the previous firmware. Production boot should therefore explicitly write
-the sensor-enable register to its disabled state once.
+QMI8658 may remain powered on the shared rail with sensor engines or its
+internal oscillator left enabled by the previous firmware. Production boot
+should therefore explicitly enter and verify the sensor's power-down mode once.
 
 ## Implementation
 
@@ -93,9 +94,15 @@ Add `waveshare_board::imu::disable()` in `qmi8658.hpp/.cpp`. It should:
 
 1. Probe the primary `0x6B` and fallback `0x6A` addresses.
 2. Confirm `WHO_AM_I` without enabling or sampling either sensor.
-3. Write `CTRL7 = 0x00` to disable both accelerometer and gyroscope engines.
-4. Read `CTRL7` back and report a single concise success or failure message.
-5. Return harmlessly if no QMI8658 is present so boot can continue.
+3. Write `CTRL7 = 0x00` to disable the accelerometer, gyroscope,
+   magnetometer, and AttitudeEngine.
+4. Wait for the sensor-off transition (`2/ODR`, conservatively 20 ms for the
+   supported 112/125 Hz diagnostic configuration).
+5. Preserve the interface bits in `CTRL1` while setting `SensorDisable = 1` to
+   stop the internal oscillator and enter power-down.
+6. Read both registers back, require the exact disabled state, and report a
+   single concise success or failure message.
+7. Return harmlessly if no QMI8658 is present so boot can continue.
 
 Do not call the existing diagnostic configuration path from `disable()` because
 that path resets, configures, and re-enables both engines.
@@ -108,7 +115,9 @@ Use `WAVESHARE_IMU_DIAGNOSTICS` as an opt-in build flag. When defined, the
 existing `begin()`, `process()`, sample/status accessors, and IMU heartbeat stay
 available for board bring-up. The standard 1.75-inch and 2.06-inch environments
 must omit this flag. Replace the narrower `WAVESHARE_IMU_DEBUG_LOG` comment and
-behavior so one clearly named flag controls the complete diagnostic path.
+behavior so one clearly named flag controls the complete diagnostic path. The
+diagnostic reset path must allow the datasheet's 1.75-second system turn-on time
+so it can recover after production firmware has entered power-down.
 
 Files:
 
@@ -144,8 +153,8 @@ fields in the system heartbeat because they verify the active iPhone GPS path.
   `Gps::init()`, `gpsTask()`, or GPS baud/rate UART operations.
 - Confirm normal Waveshare builds have no call to `imu::begin()`,
   `imu::process()`, `readSample()`, or IMU heartbeat accessors.
-- Confirm `imu::disable()` writes and verifies `CTRL7 = 0x00` only after I2C is
-  initialized.
+- Confirm `imu::disable()` writes and verifies `CTRL7 = 0x00` and
+  `CTRL1.SensorDisable = 1` only after I2C is initialized.
 - Confirm BLE GPS writes and every `gps.gpsData` map/UI consumer remain intact.
 
 ### Build matrix
@@ -192,8 +201,9 @@ that the unused work stopped.
 - Production Waveshare firmware never starts `Serial2` for GPS and never creates
   the GPS mutex or task.
 - BLE from the iPhone remains the sole live position source on Waveshare.
-- Production boot explicitly verifies that both QMI8658 sensor engines are
-  disabled, with no subsequent IMU polling.
+- Production boot explicitly verifies QMI8658 power-down, including every
+  sensor-enable bit and the internal oscillator, with no subsequent IMU
+  polling.
 - The standard Waveshare 1.75-inch and 2.06-inch builds pass.
 - A representative non-Waveshare hardware-GPS build passes and retains its UART
   GPS behavior.
