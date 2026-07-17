@@ -7,19 +7,25 @@ on:
       - "backend/**"
       - "tools/OSM_Extract/conf/**"
       - "tools/OSM_Extract/scripts/**"
+      - "config/map-stream-hardware-gate.json"
+      - "config/map-stream-rollout-approvals.json"
       - "config/map-stream-trust.json"
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
-  id-token: write
-  attestations: write
 
 jobs:
   publish:
     name: Publish worker image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      image_digest: ${{ steps.image.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -63,3 +69,121 @@ jobs:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           echo "ghcr.io/${GITHUB_REPOSITORY_OWNER}/open-bike-computer-map-platform@${IMAGE_DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+
+  propose-production:
+    name: Propose production image
+    needs: publish
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    concurrency:
+      group: map-platform-production-promotion
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: scope
+        name: Classify candidate scope
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          worker_changed="$(python3 deploy/map-platform/detect_worker_change.py \
+            --before "$BEFORE_SHA" \
+            --after "$GITHUB_SHA")"
+          echo "worker_changed=${worker_changed}" >> "$GITHUB_OUTPUT"
+
+      - id: update
+        name: Update and validate production lock
+        env:
+          IMAGE_DIGEST: ${{ needs.publish.outputs.image_digest }}
+          WORKER_CHANGED: ${{ steps.scope.outputs.worker_changed }}
+          MAP_PLATFORM_DOWNLOAD_SECRET: ci-download-secret
+          MAP_PLATFORM_INSTALLATION_SECRET: ci-installation-secret-32-bytes-minimum
+          MAP_PLATFORM_TRUSTED_PROXY_CIDRS: 172.16.0.0/12
+        run: |
+          update_args=(
+            deploy/map-platform/compose.yaml
+            --control-plane-digest "$IMAGE_DIGEST"
+            --source-commit "$GITHUB_SHA"
+          )
+          if test "$WORKER_CHANGED" = "true"; then
+            update_args+=(--worker-digest "$IMAGE_DIGEST")
+          fi
+          python3 deploy/map-platform/update_image.py "${update_args[@]}"
+          python3 deploy/map-platform/update_image.py \
+            deploy/map-platform/compose.yaml \
+            --check
+          docker compose -f deploy/map-platform/compose.yaml config >/dev/null
+          git diff --check
+          if git diff --quiet -- deploy/map-platform/compose.yaml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or refresh production promotion pull request
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ needs.publish.outputs.image_digest }}
+          WORKER_CHANGED: ${{ steps.scope.outputs.worker_changed }}
+          PROMOTION_BRANCH: deploy/map-platform-production
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$PROMOTION_BRANCH"
+          git add deploy/map-platform/compose.yaml
+          short_sha="${GITHUB_SHA:0:12}"
+          git commit -m "Promote map platform image ${short_sha}"
+
+          remote_sha="$(git ls-remote --heads origin "refs/heads/${PROMOTION_BRANCH}" | cut -f1)"
+          if test -n "$remote_sha"; then
+            git push \
+              --force-with-lease="refs/heads/${PROMOTION_BRANCH}:${remote_sha}" \
+              origin "HEAD:refs/heads/${PROMOTION_BRANCH}"
+          else
+            git push origin "HEAD:refs/heads/${PROMOTION_BRANCH}"
+          fi
+
+          image_reference="ghcr.io/${GITHUB_REPOSITORY_OWNER}/open-bike-computer-map-platform@${IMAGE_DIGEST}"
+          title="Promote map platform image ${short_sha}"
+          run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body="$(printf '%s\n' \
+            '## Production image' \
+            '' \
+            "- Source commit: \`${GITHUB_SHA}\`" \
+            "- Image: \`${image_reference}\`" \
+            "- Moves signed worker pin: \`${WORKER_CHANGED}\`" \
+            "- Build and attestation: ${run_url}" \
+            '' \
+            '## Deployment' \
+            '' \
+            'Merging this pull request updates the digest-pinned production Compose consumed by Coolify. It does not rebuild the image or mutate Coolify environment variables.' \
+            '' \
+            'Review the candidate and required hardware rollout gates before merging.')"
+
+          pr_number="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --head "$PROMOTION_BRANCH" \
+            --base "${{ github.event.repository.default_branch }}" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+          if test -n "$pr_number"; then
+            gh api \
+              --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" \
+              -f title="$title" \
+              -f body="$body" >/dev/null
+          else
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "${{ github.event.repository.default_branch }}" \
+              --head "$PROMOTION_BRANCH" \
+              --title "$title" \
+              --body "$body"
+          fi

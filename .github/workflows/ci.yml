@@ -132,13 +132,20 @@ jobs:
       - name: Install backend test dependencies
         run: python -m pip install -e '.[test,object-storage]'
       - name: Python syntax
-        run: python -m py_compile map_platform/*.py tests/*.py
+        run: >-
+          python -m py_compile
+          map_platform/*.py
+          tests/*.py
+          ../deploy/map-platform/*.py
+          ../deploy/map-platform/tests/*.py
       - name: Generated map stream trust registry
         run: |
           python tools/generate_map_stream_trust.py --check
           python tools/check_map_stream_hardware_gate.py --validate-requirements
       - name: Unit tests
-        run: python -m unittest discover -s tests
+        run: |
+          python -m unittest discover -s tests
+          python -m unittest discover -s ../deploy/map-platform/tests
       - name: Production Compose config
         env:
           MAP_PLATFORM_DOWNLOAD_SECRET: ci-download-secret
@@ -146,6 +153,13 @@ jobs:
           MAP_PLATFORM_TRUSTED_PROXY_CIDRS: "172.16.0.0/12"
           MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS: "86400"
         run: docker compose config
+      - name: GitOps production Compose config
+        env:
+          MAP_PLATFORM_DOWNLOAD_SECRET: ci-download-secret
+          MAP_PLATFORM_INSTALLATION_SECRET: ci-installation-secret-32-bytes-minimum
+          MAP_PLATFORM_TRUSTED_PROXY_CIDRS: "172.16.0.0/12"
+          MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS: "86400"
+        run: docker compose -f ../deploy/map-platform/compose.yaml config
       - name: Build backend production image
         run: >-
           docker build

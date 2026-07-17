@@ -182,12 +182,13 @@ Production delivery modes are:
 For `percentage` and `all`, set `MAP_PLATFORM_MAP_STREAM_PROMOTION_ID` to an ID
 present in the checked-in approval registry. The approval PR is expected to be
 later than the tested source commit; that control-plane-only change does not
-alter the derived worker component identity. Set `MAP_PLATFORM_WORKER_IMAGE` to
-the exact `registry/repository@sha256:<digest>` reference exercised by the
-hardware report and deploy that service without rebuilding it. Compose passes
-the same value as the worker service image and the API/worker admission identity;
-the deployment registry policy must verify the image signature/provenance before
-launch. The API image may advance to include the
+alter the derived worker component identity. Keep the worker image anchor in
+`deploy/map-platform/compose.yaml` on the exact
+`registry/repository@sha256:<digest>` reference exercised by the hardware report
+and deploy it without rebuilding it. The production lock passes that value as
+both the worker service image and the API/worker admission identity; the
+deployment registry policy must verify the image signature/provenance before
+launch. Its separate control-plane image anchor may advance to include the
 approval registry. The worker signs its derived content identity into every
 stream manifest and records the exact public-key fingerprint in the
 key-specific artifact identity. The API
