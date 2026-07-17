@@ -38,7 +38,9 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         locationManager.activityType = .fitness
         locationManager.allowsBackgroundLocationUpdates = false
         locationManager.pausesLocationUpdatesAutomatically = true
+#if !os(macOS)
         locationManager.showsBackgroundLocationIndicator = false
+#endif
         locationManager.requestWhenInUseAuthorization()
         // Don't start by default - wait for explicit need
     }
@@ -55,7 +57,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
 
     func prepareDeviceDestinationRequestsIfNeeded() {
         guard isDeviceDestinationRequestsEnabled,
-              authorizationStatus == .authorizedWhenInUse,
+              Self.isAuthorizedWhenInUse(authorizationStatus),
               Self.applicationIsActive,
               !hasRequestedAlwaysAuthorizationForDeviceDestinations else {
             return
@@ -86,7 +88,8 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     }
 
     var isLocationAuthorized: Bool {
-        authorizationStatus == .authorizedAlways || authorizationStatus == .authorizedWhenInUse
+        authorizationStatus == .authorizedAlways ||
+            Self.isAuthorizedWhenInUse(authorizationStatus)
     }
     
     // MARK: - Smart Location Update Control (Optimization #3)
@@ -109,14 +112,16 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
                                       isRefreshingDeviceDestinationLocation
 
         if shouldTrackInBackground &&
-            locationManager.authorizationStatus == .authorizedWhenInUse &&
+            Self.isAuthorizedWhenInUse(locationManager.authorizationStatus) &&
             Self.applicationIsActive {
             locationManager.requestAlwaysAuthorization()
         }
 
         locationManager.allowsBackgroundLocationUpdates = shouldTrackInBackground
         locationManager.pausesLocationUpdatesAutomatically = !shouldTrackInBackground
+#if !os(macOS)
         locationManager.showsBackgroundLocationIndicator = shouldTrackInBackground
+#endif
         
         if shouldTrack && (!isLocationUpdating || restart) {
             if isLocationUpdating {
@@ -221,6 +226,14 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         UIApplication.shared.applicationState == .active
 #else
         true
+#endif
+    }
+
+    private static func isAuthorizedWhenInUse(_ status: CLAuthorizationStatus) -> Bool {
+#if os(macOS)
+        false
+#else
+        status == .authorizedWhenInUse
 #endif
     }
 }

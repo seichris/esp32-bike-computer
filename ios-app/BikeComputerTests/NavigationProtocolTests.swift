@@ -315,6 +315,70 @@ final class TestBLEManager: BLEManager {
     }
 }
 
+@MainActor
+final class TestNavigationDirectionsTask: NavigationDirectionsTask {
+    let request: MKDirections.Request
+    private(set) var isCancelled = false
+    private var completion: (@MainActor (Result<[MKRoute], Error>) -> Void)?
+
+    init(request: MKDirections.Request) {
+        self.request = request
+    }
+
+    func calculate(
+        completion: @escaping @MainActor (Result<[MKRoute], Error>) -> Void
+    ) {
+        self.completion = completion
+    }
+
+    func cancel() {
+        isCancelled = true
+    }
+
+    func succeed(with routes: [MKRoute]) {
+        completion?(.success(routes))
+    }
+
+    func fail(with error: Error) {
+        completion?(.failure(error))
+    }
+}
+
+@MainActor
+final class TestNavigationDirectionsFactory {
+    private(set) var tasks: [TestNavigationDirectionsTask] = []
+
+    func makeTask(request: MKDirections.Request) -> any NavigationDirectionsTask {
+        let task = TestNavigationDirectionsTask(request: request)
+        tasks.append(task)
+        return task
+    }
+}
+
+enum TestNavigationDirectionsError: LocalizedError {
+    case unavailable
+
+    var errorDescription: String? {
+        "Directions unavailable"
+    }
+}
+
+final class TestClock {
+    var date: Date
+
+    init(_ date: Date = Date(timeIntervalSince1970: 1_700_000_000)) {
+        self.date = date
+    }
+
+    func now() -> Date {
+        date
+    }
+
+    func advance(by interval: TimeInterval) {
+        date = date.addingTimeInterval(interval)
+    }
+}
+
 final class FirmwareRequestCaptureProtocol: URLProtocol {
     static var handler: ((URLRequest, Data) throws -> (HTTPURLResponse, Data))?
 
@@ -437,6 +501,13 @@ struct NavigationProtocolTests {
         testRouteEndpointExtraction()
         testRouteRemainingDistance()
         testRouteDeviationDetection()
+        testReplacementStepSelectionUsesUnambiguousGeometry()
+        testCoordinatorReroutesAndAppliesLatestRoute()
+        testCoordinatorRejectsStaleRerouteLocations()
+        testCoordinatorDetectsDeviationFromCurrentStep()
+        testCoordinatorEnforcesRerouteCooldown()
+        testCoordinatorCancelsStaleReroutes()
+        testCoordinatorPreservesReroutingAfterFailedReplacement()
         testStepRemainingDistanceFollowsPolyline()
         testStepRemainingDistanceResolvesAmbiguousGeometry()
         testChinaRouteCoordinatesRoundTripWithoutCalibrationNudge()
@@ -492,6 +563,7 @@ struct NavigationProtocolTests {
         testNavigationEngineClearsRouteGeometryWhenReadyAndIdle()
         testNavigationEngineOmitsRideTelemetryWhenIdle()
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
+        testNavigationEngineReplacesRouteWithoutResettingTelemetry()
         testOfflineMapCustomBBoxRequest()
         testBikeMapStreamGoldenVector()
         testBikeMapStreamArtifactValidation()
@@ -2098,23 +2170,764 @@ struct NavigationProtocolTests {
         assert((RouteDeviation.distance(from: offRoute, to: polyline) ?? 0) > 80,
                "off-route location reports distance to the nearest segment")
 
-        var detector = RouteDeviationDetector(
-            distanceThreshold: 30,
-            requiredConsecutiveSamples: 3,
-            maxHorizontalAccuracy: 50
-        )
+        var detector = RouteDeviationDetector()
+        assertEqual(detector.distanceThreshold, 30, "default reroute distance threshold is 30 meters")
+        assertEqual(detector.requiredConsecutiveSamples, 3, "default reroute streak requires three samples")
+        assertEqual(detector.maxHorizontalAccuracy, 50, "default reroute accuracy ceiling is 50 meters")
         assert(!detector.shouldReroute(distanceToRoute: 40, horizontalAccuracy: 10),
                "first off-route sample does not reroute")
+        assert(!detector.shouldReroute(distanceToRoute: 20, horizontalAccuracy: 10),
+               "an on-route sample interrupts the deviation streak")
+        assertEqual(detector.consecutiveOffRouteSamples, 0,
+                    "an on-route sample resets the deviation streak")
+        assert(!detector.shouldReroute(distanceToRoute: 40, horizontalAccuracy: 10),
+               "the streak restarts after returning to the route")
         assert(!detector.shouldReroute(distanceToRoute: 40, horizontalAccuracy: 10),
                "second off-route sample does not reroute")
         assert(detector.shouldReroute(distanceToRoute: 40, horizontalAccuracy: 10),
                "third accurate off-route sample reroutes")
+        assert(!detector.shouldReroute(distanceToRoute: 40, horizontalAccuracy: 10),
+               "a new deviation streak can start after rerouting")
         assert(!detector.shouldReroute(distanceToRoute: 40, horizontalAccuracy: 80),
-               "poor GPS accuracy does not trigger rerouting")
+               "poor GPS accuracy interrupts the deviation streak")
+        assertEqual(detector.consecutiveOffRouteSamples, 0,
+                    "poor GPS accuracy resets the deviation streak")
+        assert(!detector.shouldReroute(distanceToRoute: 30, horizontalAccuracy: 5),
+               "the exact base threshold does not trigger rerouting")
         assert(!detector.shouldReroute(distanceToRoute: 55, horizontalAccuracy: 30),
                "accuracy-adjusted threshold avoids marginal deviations")
         assertEqual(detector.consecutiveOffRouteSamples, 0,
                     "an on-route or uncertain sample resets the deviation streak")
+    }
+
+    static func testReplacementStepSelectionUsesUnambiguousGeometry() {
+        let crossing = CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000)
+        let firstTurn = CLLocationCoordinate2D(latitude: 37.0020, longitude: -122.0000)
+        let loopPoint = CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0010)
+        let destination = CLLocationCoordinate2D(latitude: 37.0010, longitude: -121.9990)
+        let route = TestRoute(
+            steps: [
+                TestRouteStep(
+                    instructions: "Continue north",
+                    coordinates: [crossing, firstTurn]
+                ),
+                TestRouteStep(
+                    instructions: "Continue through crossing",
+                    coordinates: [firstTurn, loopPoint, crossing, destination]
+                )
+            ],
+            coordinates: [crossing, firstTurn, loopPoint, crossing, destination]
+        )
+        let crossingLocation = testLocation(
+            latitude: crossing.latitude,
+            longitude: crossing.longitude,
+            horizontalAccuracy: 5
+        )
+
+        assertEqual(
+            RouteStepSelection.closestNavigableStepIndex(
+                to: crossingLocation,
+                in: route
+            ),
+            0,
+            "ambiguous replacement geometry cannot skip steps without movement evidence"
+        )
+
+        let parallelSource = CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000)
+        let parallelTurn = CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000)
+        let parallelDestination = CLLocationCoordinate2D(latitude: 37.0000, longitude: -121.99995)
+        let parallelRoute = TestRoute(
+            steps: [
+                TestRouteStep(
+                    instructions: "Continue north",
+                    coordinates: [parallelSource, parallelTurn]
+                ),
+                TestRouteStep(
+                    instructions: "Return south",
+                    coordinates: [parallelTurn, parallelDestination]
+                )
+            ],
+            coordinates: [parallelSource, parallelTurn, parallelDestination]
+        )
+        let stationaryParallelLocation = testLocation(
+            latitude: parallelSource.latitude,
+            longitude: parallelSource.longitude,
+            horizontalAccuracy: 20
+        )
+        assertEqual(
+            RouteStepSelection.closestNavigableStepIndex(
+                to: stationaryParallelLocation,
+                in: parallelRoute
+            ),
+            0,
+            "nearby parallel geometry cannot skip a maneuver without movement evidence"
+        )
+
+        let curvedSource = CLLocationCoordinate2D(latitude: 37.0003, longitude: -121.9995)
+        let curvedNorth = CLLocationCoordinate2D(latitude: 37.0009, longitude: -121.9995)
+        let curvedEast = CLLocationCoordinate2D(latitude: 37.0009, longitude: -121.9992)
+        let curvedManeuver = CLLocationCoordinate2D(latitude: 37.0003, longitude: -121.9992)
+        let curvedLatest = CLLocationCoordinate2D(latitude: 37.0003, longitude: -121.9998)
+        let curvedRoute = TestRoute(
+            steps: [
+                TestRouteStep(
+                    instructions: "Turn left",
+                    coordinates: [curvedSource, curvedNorth, curvedEast, curvedManeuver]
+                ),
+                TestRouteStep(
+                    instructions: "Continue",
+                    coordinates: [curvedManeuver, curvedSource, curvedLatest]
+                )
+            ],
+            coordinates: [
+                curvedSource,
+                curvedNorth,
+                curvedEast,
+                curvedManeuver,
+                curvedSource,
+                curvedLatest
+            ]
+        )
+        let curvedLatestLocation = testLocation(
+            latitude: curvedLatest.latitude,
+            longitude: curvedLatest.longitude
+        )
+        assertEqual(
+            RouteStepSelection.closestNavigableStepIndex(
+                to: curvedLatestLocation,
+                in: curvedRoute
+            ),
+            1,
+            "a clearly closer later step is selected without inferring progress from movement"
+        )
+
+        let accuracyBoundarySource = CLLocationCoordinate2D(
+            latitude: 37.0000,
+            longitude: -122.0000
+        )
+        let accuracyBoundaryTurn = CLLocationCoordinate2D(
+            latitude: 37.0010,
+            longitude: -122.0000
+        )
+        let accuracyBoundaryLatest = CLLocationCoordinate2D(
+            latitude: 37.0020,
+            longitude: -122.0000
+        )
+        let accuracyBoundaryDestination = CLLocationCoordinate2D(
+            latitude: 37.0030,
+            longitude: -122.0000
+        )
+        let accuracyBoundaryRoute = TestRoute(
+            steps: [
+                TestRouteStep(
+                    instructions: "Turn left",
+                    coordinates: [accuracyBoundarySource, accuracyBoundaryTurn]
+                ),
+                TestRouteStep(
+                    instructions: "Continue",
+                    coordinates: [accuracyBoundaryTurn, accuracyBoundaryDestination]
+                )
+            ],
+            coordinates: [
+                accuracyBoundarySource,
+                accuracyBoundaryTurn,
+                accuracyBoundaryDestination
+            ]
+        )
+        let accuracyBoundaryLocation = testLocation(
+            latitude: accuracyBoundaryLatest.latitude,
+            longitude: accuracyBoundaryLatest.longitude,
+            horizontalAccuracy: 50
+        )
+        assertEqual(
+            RouteStepSelection.closestNavigableStepIndex(
+                to: accuracyBoundaryLocation,
+                in: accuracyBoundaryRoute
+            ),
+            1,
+            "the 50-meter accuracy boundary still selects a later step when it is clearly closer"
+        )
+    }
+
+    @MainActor
+    static func testCoordinatorReroutesAndAppliesLatestRoute() {
+        let suite = "CoordinatorRerouteTests.Apply.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let factory = TestNavigationDirectionsFactory()
+        let coordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: defaults),
+            directionsFactory: factory.makeTask,
+            startServices: false
+        )
+
+        let sourceCoordinate = CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000)
+        let destinationCoordinate = CLLocationCoordinate2D(latitude: 37.0040, longitude: -122.0000)
+        let source = MKMapItem(placemark: MKPlacemark(coordinate: sourceCoordinate))
+        let destination = MKMapItem(placemark: MKPlacemark(coordinate: destinationCoordinate))
+        let initialRoute = TestRoute(
+            instructions: "Continue on original route",
+            coordinates: [sourceCoordinate, destinationCoordinate]
+        )
+
+        coordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling
+        )
+        assertEqual(factory.tasks.count, 1, "initial navigation creates one directions request")
+        factory.tasks[0].succeed(with: [initialRoute])
+        assert(coordinator.isNavigating, "initial route starts navigation")
+        assert(
+            waitForMainLoop(timeout: 2) { !coordinator.routeCalculation.isCalculating },
+            "initial route calculation should finish before reroute evaluation"
+        )
+
+        let offRouteLocation = testLocation(latitude: 37.0003, longitude: -121.9995)
+        for sampleIndex in 0..<3 {
+            coordinator.processNavigationLocationForTesting(offRouteLocation)
+            if sampleIndex < 2 {
+                assertEqual(
+                    factory.tasks.count,
+                    1,
+                    "rerouting waits for three consecutive off-route fixes"
+                )
+            }
+        }
+
+        assertEqual(factory.tasks.count, 2, "three accepted off-route fixes create one reroute request")
+        guard factory.tasks.count == 2,
+              let rerouteSource = factory.tasks[1].request.source,
+              let rerouteDestination = factory.tasks[1].request.destination else {
+            assert(false, "reroute request should include source and destination")
+            return
+        }
+        assertCoordinate(
+            rerouteSource.placemark.coordinate,
+            latitude: offRouteLocation.coordinate.latitude,
+            longitude: offRouteLocation.coordinate.longitude,
+            "reroute starts from the latest off-route fix"
+        )
+        assertCoordinate(
+            rerouteDestination.placemark.coordinate,
+            latitude: destinationCoordinate.latitude,
+            longitude: destinationCoordinate.longitude,
+            "reroute retains the original destination"
+        )
+
+        let curveNorth = CLLocationCoordinate2D(latitude: 37.0009, longitude: -121.9995)
+        let curveEast = CLLocationCoordinate2D(latitude: 37.0009, longitude: -121.9992)
+        let firstManeuver = CLLocationCoordinate2D(latitude: 37.0003, longitude: -121.9992)
+        let replacementEnd = CLLocationCoordinate2D(latitude: 37.0003, longitude: -121.9998)
+        let replacementRoute = TestRoute(
+            steps: [
+                TestRouteStep(
+                    instructions: "Turn left",
+                    coordinates: [
+                        offRouteLocation.coordinate,
+                        curveNorth,
+                        curveEast,
+                        firstManeuver
+                    ]
+                ),
+                TestRouteStep(
+                    instructions: "Continue",
+                    coordinates: [
+                        firstManeuver,
+                        offRouteLocation.coordinate,
+                        replacementEnd
+                    ]
+                )
+            ],
+            coordinates: [
+                offRouteLocation.coordinate,
+                curveNorth,
+                curveEast,
+                firstManeuver,
+                offRouteLocation.coordinate,
+                replacementEnd
+            ]
+        )
+        for coordinate in [curveNorth, curveEast, firstManeuver, replacementEnd] {
+            coordinator.processNavigationLocationForTesting(testLocation(
+                latitude: coordinate.latitude,
+                longitude: coordinate.longitude
+            ))
+        }
+        factory.tasks[1].succeed(with: [replacementRoute])
+
+        assert(coordinator.currentRoute === replacementRoute, "reroute response replaces the map route")
+        assertEqual(
+            coordinator.currentInstruction,
+            "Continue",
+            "accumulated curved movement advances past a maneuver near the request source"
+        )
+
+        let cooldownDeviation = testLocation(latitude: 37.0003, longitude: -121.9989)
+        for _ in 0..<3 {
+            coordinator.processNavigationLocationForTesting(cooldownDeviation)
+        }
+        assertEqual(factory.tasks.count, 2, "cooldown suppresses an immediate repeated reroute")
+    }
+
+    @MainActor
+    static func testCoordinatorRejectsStaleRerouteLocations() {
+        let sourceCoordinate = CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000)
+        let destinationCoordinate = CLLocationCoordinate2D(latitude: 37.0040, longitude: -122.0000)
+        let source = MKMapItem(placemark: MKPlacemark(coordinate: sourceCoordinate))
+        let destination = MKMapItem(placemark: MKPlacemark(coordinate: destinationCoordinate))
+        let initialRoute = TestRoute(
+            instructions: "Continue on original route",
+            coordinates: [sourceCoordinate, destinationCoordinate]
+        )
+        let rerouteTrigger = testLocation(latitude: 37.0003, longitude: -121.9995)
+
+        let staleSuite = "CoordinatorRerouteTests.StaleLocation.\(UUID().uuidString)"
+        let staleDefaults = UserDefaults(suiteName: staleSuite)!
+        defer { staleDefaults.removePersistentDomain(forName: staleSuite) }
+        let staleClock = TestClock()
+        let staleFactory = TestNavigationDirectionsFactory()
+        let staleCoordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: staleDefaults),
+            directionsFactory: staleFactory.makeTask,
+            startServices: false,
+            now: staleClock.now
+        )
+        staleCoordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling
+        )
+        staleFactory.tasks[0].succeed(with: [initialRoute])
+        assert(
+            waitForMainLoop(timeout: 2) { !staleCoordinator.routeCalculation.isCalculating },
+            "stale-location test initial route calculation should finish"
+        )
+        for _ in 0..<3 {
+            staleCoordinator.processNavigationLocationForTesting(rerouteTrigger)
+        }
+        assertEqual(staleFactory.tasks.count, 2, "stale-location test creates a reroute request")
+
+        let returnedRoute = TestRoute(
+            instructions: "Continue on returned route",
+            coordinates: [
+                rerouteTrigger.coordinate,
+                CLLocationCoordinate2D(latitude: 37.0020, longitude: -121.9995)
+            ]
+        )
+        let movedAway = testLocation(latitude: 37.0009, longitude: -121.9985)
+        staleCoordinator.processNavigationLocationForTesting(movedAway)
+        staleCoordinator.processNavigationLocationForTesting(testLocation(
+            latitude: 37.0009,
+            longitude: -121.9995,
+            horizontalAccuracy: 80
+        ))
+        staleFactory.tasks[1].succeed(with: [returnedRoute])
+
+        assert(
+            staleCoordinator.currentRoute === initialRoute,
+            "a response that misses the latest accurate fix is not applied"
+        )
+        for _ in 0..<3 {
+            staleCoordinator.processNavigationLocationForTesting(movedAway)
+        }
+        assertEqual(
+            staleFactory.tasks.count,
+            2,
+            "discarding a stale response still respects the reroute cooldown"
+        )
+        staleClock.advance(by: 15)
+        for _ in 0..<3 {
+            staleCoordinator.processNavigationLocationForTesting(movedAway)
+        }
+        assertEqual(staleFactory.tasks.count, 3, "stale rerouting resumes after 15 seconds")
+        guard let retriedSource = staleFactory.tasks[2].request.source else {
+            assert(false, "retried reroute should have a source")
+            return
+        }
+        assertCoordinate(
+            retriedSource.placemark.coordinate,
+            latitude: movedAway.coordinate.latitude,
+            longitude: movedAway.coordinate.longitude,
+            "retried reroute starts from the new accurate fix"
+        )
+
+        let accuracySuite = "CoordinatorRerouteTests.PoorAccuracy.\(UUID().uuidString)"
+        let accuracyDefaults = UserDefaults(suiteName: accuracySuite)!
+        defer { accuracyDefaults.removePersistentDomain(forName: accuracySuite) }
+        let accuracyFactory = TestNavigationDirectionsFactory()
+        let accuracyCoordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: accuracyDefaults),
+            directionsFactory: accuracyFactory.makeTask,
+            startServices: false
+        )
+        accuracyCoordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling
+        )
+        accuracyFactory.tasks[0].succeed(with: [initialRoute])
+        assert(
+            waitForMainLoop(timeout: 2) { !accuracyCoordinator.routeCalculation.isCalculating },
+            "poor-accuracy test initial route calculation should finish"
+        )
+        for _ in 0..<3 {
+            accuracyCoordinator.processNavigationLocationForTesting(rerouteTrigger)
+        }
+        assertEqual(accuracyFactory.tasks.count, 2, "poor-accuracy test creates a reroute request")
+
+        let firstManeuver = CLLocationCoordinate2D(latitude: 37.0006, longitude: -121.9995)
+        let replacementRoute = TestRoute(
+            steps: [
+                TestRouteStep(
+                    instructions: "Turn left",
+                    coordinates: [rerouteTrigger.coordinate, firstManeuver]
+                ),
+                TestRouteStep(
+                    instructions: "Continue",
+                    coordinates: [
+                        firstManeuver,
+                        CLLocationCoordinate2D(latitude: 37.0020, longitude: -121.9995)
+                    ]
+                )
+            ],
+            coordinates: [
+                rerouteTrigger.coordinate,
+                firstManeuver,
+                CLLocationCoordinate2D(latitude: 37.0020, longitude: -121.9995)
+            ]
+        )
+        let latestAccurateFix = testLocation(latitude: 37.0009, longitude: -121.9995)
+        accuracyCoordinator.processNavigationLocationForTesting(latestAccurateFix)
+        let poorFix = testLocation(
+            latitude: 37.0009,
+            longitude: -121.9985,
+            horizontalAccuracy: 80
+        )
+        accuracyCoordinator.processNavigationLocationForTesting(poorFix)
+        accuracyFactory.tasks[1].succeed(with: [replacementRoute])
+
+        assert(
+            accuracyCoordinator.currentRoute === replacementRoute,
+            "a poor latest fix does not prevent applying a route valid at the trigger fix"
+        )
+        assertEqual(
+            accuracyCoordinator.currentInstruction,
+            "Continue",
+            "a poor fix cannot replace the latest eligible reroute position"
+        )
+    }
+
+    @MainActor
+    static func testCoordinatorDetectsDeviationFromCurrentStep() {
+        let suite = "CoordinatorRerouteTests.CurrentStep.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let factory = TestNavigationDirectionsFactory()
+        let coordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: defaults),
+            directionsFactory: factory.makeTask,
+            startServices: false
+        )
+        let sourceCoordinate = CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000)
+        let firstManeuver = CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000)
+        let destinationCoordinate = CLLocationCoordinate2D(latitude: 37.0010, longitude: -121.9990)
+        let source = MKMapItem(placemark: MKPlacemark(coordinate: sourceCoordinate))
+        let destination = MKMapItem(placemark: MKPlacemark(coordinate: destinationCoordinate))
+        let route = TestRoute(
+            steps: [
+                TestRouteStep(
+                    instructions: "Continue north",
+                    coordinates: [sourceCoordinate, firstManeuver]
+                ),
+                TestRouteStep(
+                    instructions: "Turn right",
+                    coordinates: [firstManeuver, destinationCoordinate]
+                )
+            ],
+            coordinates: [sourceCoordinate, firstManeuver, destinationCoordinate]
+        )
+        coordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling
+        )
+        factory.tasks[0].succeed(with: [route])
+        assert(
+            waitForMainLoop(timeout: 2) { !coordinator.routeCalculation.isCalculating },
+            "current-step test initial route calculation should finish"
+        )
+
+        let skippedAhead = testLocation(latitude: 37.0010, longitude: -121.9995)
+        for _ in 0..<3 {
+            coordinator.processNavigationLocationForTesting(skippedAhead)
+        }
+        assertEqual(
+            factory.tasks.count,
+            2,
+            "a shortcut onto a later route segment reroutes when the current step was missed"
+        )
+    }
+
+    @MainActor
+    static func testCoordinatorEnforcesRerouteCooldown() {
+        let suite = "CoordinatorRerouteTests.Cooldown.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let clock = TestClock()
+        let factory = TestNavigationDirectionsFactory()
+        let coordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: defaults),
+            directionsFactory: factory.makeTask,
+            startServices: false,
+            now: clock.now
+        )
+        let sourceCoordinate = CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000)
+        let destinationCoordinate = CLLocationCoordinate2D(latitude: 37.0040, longitude: -122.0000)
+        let source = MKMapItem(placemark: MKPlacemark(coordinate: sourceCoordinate))
+        let destination = MKMapItem(placemark: MKPlacemark(coordinate: destinationCoordinate))
+        let route = TestRoute(
+            instructions: "Continue",
+            coordinates: [sourceCoordinate, destinationCoordinate]
+        )
+        coordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling
+        )
+        factory.tasks[0].succeed(with: [route])
+        assert(
+            waitForMainLoop(timeout: 2) { !coordinator.routeCalculation.isCalculating },
+            "cooldown test initial route calculation should finish"
+        )
+
+        let offRouteLocation = testLocation(latitude: 37.0003, longitude: -121.9995)
+        for _ in 0..<3 {
+            coordinator.processNavigationLocationForTesting(offRouteLocation)
+        }
+        assertEqual(factory.tasks.count, 2, "cooldown test creates the first reroute")
+        factory.tasks[1].fail(with: TestNavigationDirectionsError.unavailable)
+
+        let replacementDestination = MKMapItem(
+            placemark: MKPlacemark(
+                coordinate: CLLocationCoordinate2D(latitude: 37.0050, longitude: -121.9980)
+            )
+        )
+        coordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(replacementDestination),
+            transportType: .walking
+        )
+        assertEqual(factory.tasks.count, 3, "cooldown test creates a replacement route request")
+        factory.tasks[2].succeed(with: [])
+        assert(
+            waitForMainLoop(timeout: 3) { !coordinator.routeCalculation.isCalculating },
+            "failed replacement should finish before cooldown evaluation"
+        )
+        for _ in 0..<3 {
+            coordinator.processNavigationLocationForTesting(offRouteLocation)
+        }
+        assertEqual(
+            factory.tasks.count,
+            3,
+            "a failed replacement attempt does not clear the active route's cooldown"
+        )
+
+        clock.advance(by: 14.999)
+        for _ in 0..<3 {
+            coordinator.processNavigationLocationForTesting(offRouteLocation)
+        }
+        assertEqual(factory.tasks.count, 3, "rerouting remains suppressed just before 15 seconds")
+
+        clock.advance(by: 0.001)
+        for _ in 0..<3 {
+            coordinator.processNavigationLocationForTesting(offRouteLocation)
+        }
+        assertEqual(factory.tasks.count, 4, "rerouting resumes at the 15-second boundary")
+        assertEqual(
+            factory.tasks[3].request.transportType.rawValue,
+            RouteTransportTypes.cycling.rawValue,
+            "cooldown retry retains the active route's transport mode"
+        )
+    }
+
+    @MainActor
+    static func testCoordinatorCancelsStaleReroutes() {
+        let stopSuite = "CoordinatorRerouteTests.Stop.\(UUID().uuidString)"
+        let stopDefaults = UserDefaults(suiteName: stopSuite)!
+        defer { stopDefaults.removePersistentDomain(forName: stopSuite) }
+
+        let sourceCoordinate = CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000)
+        let destinationCoordinate = CLLocationCoordinate2D(latitude: 37.0040, longitude: -122.0000)
+        let source = MKMapItem(placemark: MKPlacemark(coordinate: sourceCoordinate))
+        let destination = MKMapItem(placemark: MKPlacemark(coordinate: destinationCoordinate))
+        let initialRoute = TestRoute(
+            instructions: "Continue",
+            coordinates: [sourceCoordinate, destinationCoordinate]
+        )
+        let staleRoute = TestRoute(
+            instructions: "Stale reroute",
+            coordinates: [sourceCoordinate, destinationCoordinate]
+        )
+        let offRouteLocation = testLocation(latitude: 37.0003, longitude: -121.9995)
+
+        let stopFactory = TestNavigationDirectionsFactory()
+        let stopCoordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: stopDefaults),
+            directionsFactory: stopFactory.makeTask,
+            startServices: false
+        )
+        stopCoordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling
+        )
+        stopFactory.tasks[0].succeed(with: [initialRoute])
+        assert(
+            waitForMainLoop(timeout: 2) { !stopCoordinator.routeCalculation.isCalculating },
+            "stop test initial route calculation should finish"
+        )
+        for _ in 0..<3 {
+            stopCoordinator.processNavigationLocationForTesting(offRouteLocation)
+        }
+        assertEqual(stopFactory.tasks.count, 2, "stop test creates a reroute request")
+        let stoppedReroute = stopFactory.tasks[1]
+
+        stopCoordinator.stopNavigation()
+        assert(stoppedReroute.isCancelled, "stopping navigation cancels the active reroute")
+        stoppedReroute.succeed(with: [staleRoute])
+        assert(!stopCoordinator.isNavigating, "a stale stopped reroute cannot restart navigation")
+        assert(stopCoordinator.currentRoute == nil, "a stale stopped reroute cannot restore a route")
+
+        let replaceSuite = "CoordinatorRerouteTests.Replace.\(UUID().uuidString)"
+        let replaceDefaults = UserDefaults(suiteName: replaceSuite)!
+        defer { replaceDefaults.removePersistentDomain(forName: replaceSuite) }
+        let replaceFactory = TestNavigationDirectionsFactory()
+        let replaceCoordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: replaceDefaults),
+            directionsFactory: replaceFactory.makeTask,
+            startServices: false
+        )
+        replaceCoordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling
+        )
+        replaceFactory.tasks[0].succeed(with: [initialRoute])
+        assert(
+            waitForMainLoop(timeout: 2) { !replaceCoordinator.routeCalculation.isCalculating },
+            "replacement test initial route calculation should finish"
+        )
+        for _ in 0..<3 {
+            replaceCoordinator.processNavigationLocationForTesting(offRouteLocation)
+        }
+        assertEqual(replaceFactory.tasks.count, 2, "replacement test creates a reroute request")
+        let replacedReroute = replaceFactory.tasks[1]
+
+        let newDestinationCoordinate = CLLocationCoordinate2D(latitude: 37.0050, longitude: -121.9980)
+        let newDestination = MKMapItem(placemark: MKPlacemark(coordinate: newDestinationCoordinate))
+        replaceCoordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(newDestination),
+            transportType: RouteTransportTypes.cycling
+        )
+        assert(replacedReroute.isCancelled, "selecting a new destination cancels the active reroute")
+        assertEqual(replaceFactory.tasks.count, 3, "new destination creates its own route request")
+        replacedReroute.succeed(with: [staleRoute])
+        assert(
+            replaceCoordinator.currentRoute === initialRoute,
+            "a stale reroute cannot replace the route while a new destination is pending"
+        )
+    }
+
+    @MainActor
+    static func testCoordinatorPreservesReroutingAfterFailedReplacement() {
+        let suite = "CoordinatorRerouteTests.FailedReplacement.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let factory = TestNavigationDirectionsFactory()
+        let coordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: defaults),
+            directionsFactory: factory.makeTask,
+            startServices: false
+        )
+        let sourceCoordinate = CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000)
+        let originalDestinationCoordinate = CLLocationCoordinate2D(latitude: 37.0040, longitude: -122.0000)
+        let replacementDestinationCoordinate = CLLocationCoordinate2D(latitude: 37.0050, longitude: -121.9980)
+        let source = MKMapItem(placemark: MKPlacemark(coordinate: sourceCoordinate))
+        let originalDestination = MKMapItem(
+            placemark: MKPlacemark(coordinate: originalDestinationCoordinate)
+        )
+        let replacementDestination = MKMapItem(
+            placemark: MKPlacemark(coordinate: replacementDestinationCoordinate)
+        )
+        let initialRoute = TestRoute(
+            instructions: "Continue",
+            coordinates: [sourceCoordinate, originalDestinationCoordinate]
+        )
+
+        coordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(originalDestination),
+            transportType: .automobile
+        )
+        assertEqual(
+            factory.tasks[0].request.transportType.rawValue,
+            MKDirectionsTransportType.automobile.rawValue,
+            "initial route uses the selected transport mode"
+        )
+        factory.tasks[0].succeed(with: [initialRoute])
+        assert(
+            waitForMainLoop(timeout: 2) { !coordinator.routeCalculation.isCalculating },
+            "failed replacement test initial route calculation should finish"
+        )
+        coordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(replacementDestination),
+            transportType: .walking
+        )
+        assertEqual(factory.tasks.count, 2, "replacement destination creates a route request")
+        assertEqual(
+            factory.tasks[1].request.transportType.rawValue,
+            MKDirectionsTransportType.walking.rawValue,
+            "replacement attempt uses its requested transport mode"
+        )
+
+        let offRouteLocation = testLocation(latitude: 37.0003, longitude: -121.9995)
+        for _ in 0..<3 {
+            coordinator.processNavigationLocationForTesting(offRouteLocation)
+        }
+        assertEqual(factory.tasks.count, 2, "rerouting pauses while a replacement route is calculating")
+
+        factory.tasks[1].succeed(with: [])
+        assert(
+            waitForMainLoop(timeout: 3) { !coordinator.routeCalculation.isCalculating },
+            "failed replacement route calculation should finish"
+        )
+        for _ in 0..<3 {
+            coordinator.processNavigationLocationForTesting(offRouteLocation)
+        }
+        assertEqual(factory.tasks.count, 3, "rerouting resumes on the original route after replacement fails")
+        guard factory.tasks.count == 3,
+              let resumedDestination = factory.tasks[2].request.destination else {
+            assert(false, "resumed reroute should retain a destination")
+            return
+        }
+        assertCoordinate(
+            resumedDestination.placemark.coordinate,
+            latitude: originalDestinationCoordinate.latitude,
+            longitude: originalDestinationCoordinate.longitude,
+            "failed replacement keeps the original reroute destination"
+        )
+        assertEqual(
+            factory.tasks[2].request.transportType.rawValue,
+            MKDirectionsTransportType.automobile.rawValue,
+            "failed replacement keeps the original route's transport mode"
+        )
     }
 
     static func testStepRemainingDistanceFollowsPolyline() {
@@ -8735,6 +9548,109 @@ struct NavigationProtocolTests {
 
         assert(!accepted, "far live GPS should not be accepted for rerouting")
         assertEqual(manager.sentPackets.count, 1, "far live GPS should not overwrite a route started from another source")
+    }
+
+    static func testNavigationEngineReplacesRouteWithoutResettingTelemetry() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        let clock = TestClock()
+        let engine = NavigationEngine(now: clock.now)
+        engine.setBLEManager(manager)
+
+        let originalCoordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0040, longitude: -122.0000)
+        ]
+        let originalRoute = TestRoute(
+            instructions: "Continue on original route",
+            coordinates: originalCoordinates
+        )
+        let start = testLocation(latitude: 37.0000, longitude: -122.0000)
+        let progress = testLocation(latitude: 37.0002, longitude: -122.0000)
+        let latest = testLocation(latitude: 37.0009, longitude: -121.9995)
+
+        engine.startNavigation(with: originalRoute, initialLocation: start)
+        clock.advance(by: 10)
+        engine.processExternalLocation(progress)
+        engine.processExternalLocation(latest)
+        guard let telemetryBeforeReplacement = manager.sentGPSPositions.last else {
+            assert(false, "navigation should send telemetry before rerouting")
+            return
+        }
+        let distanceBeforeReplacement = readUInt32LE(telemetryBeforeReplacement, offset: 18)
+        let elapsedBeforeReplacement = readUInt32LE(telemetryBeforeReplacement, offset: 22)
+        assert(distanceBeforeReplacement > 0, "ride distance accumulates before rerouting")
+        assertEqual(elapsedBeforeReplacement, 10, "ride elapsed time accumulates before rerouting")
+
+        let rerouteSource = CLLocationCoordinate2D(latitude: 37.0003, longitude: -121.9995)
+        let firstManeuver = CLLocationCoordinate2D(latitude: 37.0006, longitude: -121.9995)
+        let replacementEnd = CLLocationCoordinate2D(latitude: 37.0020, longitude: -121.9995)
+        let replacementRoute = TestRoute(
+            steps: [
+                TestRouteStep(
+                    instructions: "Turn left",
+                    coordinates: [rerouteSource, firstManeuver]
+                ),
+                TestRouteStep(
+                    instructions: "Continue",
+                    coordinates: [firstManeuver, replacementEnd]
+                )
+            ],
+            coordinates: [rerouteSource, firstManeuver, replacementEnd]
+        )
+        let geometryCountBeforeReplacement = manager.sentRouteGeometry.count
+
+        clock.advance(by: 5)
+        engine.replaceRoute(
+            with: replacementRoute,
+            currentLocation: latest
+        )
+
+        assertEqual(engine.currentInstruction, "Continue", "replacement skips an already-passed first maneuver")
+        assertEqual(
+            manager.sentPackets.last,
+            "\(NavigationIconID.straight)|\(engine.distanceToManeuver)|Continue",
+            "replacement maneuver is sent to the BLE device"
+        )
+        assert(
+            manager.sentRouteGeometry.count > geometryCountBeforeReplacement,
+            "replacement sends new route geometry"
+        )
+        guard let replacementGeometry = manager.sentRouteGeometry.last,
+              let replacementStart = routeStartCoordinate(from: replacementGeometry),
+              let telemetryAfterReplacement = manager.sentGPSPositions.last else {
+            assert(false, "replacement should send geometry and telemetry")
+            return
+        }
+        assertCoordinate(
+            replacementStart,
+            latitude: firstManeuver.latitude,
+            longitude: firstManeuver.longitude,
+            "replacement geometry starts near the rider's latest route position"
+        )
+        assert(
+            readUInt32LE(telemetryAfterReplacement, offset: 18) >= distanceBeforeReplacement,
+            "route replacement preserves accumulated ride distance"
+        )
+        let elapsedAfterReplacement = readUInt32LE(telemetryAfterReplacement, offset: 22)
+        assertEqual(elapsedAfterReplacement, 15, "route replacement preserves elapsed ride time")
+
+        clock.advance(by: 1)
+        engine.processExternalLocation(testLocation(latitude: 37.0010, longitude: -121.9995))
+        guard let telemetryAfterMoreProgress = manager.sentGPSPositions.last else {
+            assert(false, "navigation should continue sending telemetry after rerouting")
+            return
+        }
+        assert(
+            readUInt32LE(telemetryAfterMoreProgress, offset: 18) >= distanceBeforeReplacement,
+            "ride distance remains nondecreasing after rerouting"
+        )
+        assert(
+            readUInt32LE(telemetryAfterMoreProgress, offset: 22) >= elapsedAfterReplacement,
+            "elapsed ride time remains nondecreasing after rerouting"
+        )
     }
 
     static func routeStartCoordinate(from data: Data) -> CLLocationCoordinate2D? {

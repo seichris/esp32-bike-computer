@@ -12,6 +12,8 @@ xcrun swiftc \
   -D HOST_TESTING \
   -o "${OUT}" \
   ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
