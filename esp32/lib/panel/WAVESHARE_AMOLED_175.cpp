@@ -9,7 +9,6 @@
 #ifdef USE_ARDUINO_GFX
 
 #include <cstring>
-#include <Preferences.h>
 
 // Include HAL for pin definitions
 #include "../../include/hal.hpp"
@@ -59,8 +58,7 @@ Arduino_CO5300 *gfx = new Arduino_CO5300(bus,
 
 extern lv_display_t *display;
 static lv_color_t *disp_draw_buf = NULL;
-static uint8_t displayRotation =
-    0; // Global rotation for touch coordinate transform
+static uint8_t displayRotation = waveshare_board::display::DEFAULT_ROTATION;
 volatile uint32_t displayFlushCount = 0;
 volatile uint32_t lastDisplayFlushMs = 0;
 volatile uint32_t lastDisplayFlushDurationUs = 0;
@@ -75,9 +73,9 @@ static uint8_t sanitizeDisplayRotation(uint8_t requestedRotation) {
     return ROTATION_0;
   }
 
-  if (requestedRotation == ROTATION_90 && !EXPERIMENTAL_90_ROTATION_ENABLED) {
-    Serial.println("CO5300: 90-degree display rotation disabled until the "
-                   "active window is verified; using 0");
+  if (requestedRotation == ROTATION_90 && !ROTATION_90_ENABLED) {
+    Serial.println("CO5300: 90-degree display rotation is only enabled for "
+                   "the 1.75-inch target; using 0");
     return ROTATION_0;
   }
 
@@ -94,15 +92,15 @@ static void applyCo5300Rotation(uint8_t rotation) {
   using namespace waveshare_board::display;
 
   Serial.printf("CO5300: logical=%ux%u active=%ux%u constructorGap=(%u,%u,%u,%u) "
-                "rotation=%u experimental90=%d\n",
+                "rotation=%u rotation90Enabled=%d\n",
                 LOGICAL_WIDTH, LOGICAL_HEIGHT, ACTIVE_WIDTH, ACTIVE_HEIGHT,
                 ARDUINO_CO5300_COL_OFFSET1, ARDUINO_CO5300_ROW_OFFSET1,
                 ARDUINO_CO5300_COL_OFFSET2, ARDUINO_CO5300_ROW_OFFSET2,
-                rotation, EXPERIMENTAL_90_ROTATION_ENABLED ? 1 : 0);
+                rotation, ROTATION_90_ENABLED ? 1 : 0);
 
   switch (rotation) {
   case ROTATION_90:
-    Serial.printf("CO5300: applying experimental MADCTL 0x%02X for 90-degree "
+    Serial.printf("CO5300: applying MADCTL 0x%02X for 90-degree "
                   "rotation\n",
                   CO5300_MADCTL_ROTATION_90);
     writeCo5300Madctl(CO5300_MADCTL_ROTATION_90);
@@ -152,7 +150,7 @@ static void drawDisplayTestPatterns(uint8_t appliedRotation) {
   using namespace waveshare_board::display;
 
   drawDisplayTestPatternForRotation(ROTATION_0);
-  if (EXPERIMENTAL_90_ROTATION_ENABLED) {
+  if (ROTATION_90_ENABLED) {
     drawDisplayTestPatternForRotation(ROTATION_90);
   }
   applyCo5300Rotation(appliedRotation);
@@ -800,15 +798,13 @@ void setupDisplay() {
   gfx->begin();
   delay(100); // Let display stabilize
 
-  // Load rotation from NVS (default to 0 if not set)
-  Preferences prefs;
-  prefs.begin("mapSettings", true); // read-only
-  uint8_t requestedRotation = prefs.getUChar("rotation", 0);
-  prefs.end();
-  uint8_t rotation = sanitizeDisplayRotation(requestedRotation);
+  // Rotation is a hardware-target choice. The square 1.75-inch device boots
+  // at 90 degrees; the rectangular 2.06-inch device remains at 0 degrees.
+  // Ignore legacy NVS values written by older versions of the iOS app.
+  uint8_t rotation = sanitizeDisplayRotation(
+      waveshare_board::display::DEFAULT_ROTATION);
   displayRotation = rotation; // Store globally for touch coordinate rotation
-  Serial.printf("Loaded rotation from NVS: requested=%u applied=%u\n",
-                requestedRotation, rotation);
+  Serial.printf("Loaded target display rotation: %u\n", rotation);
 
   // ============================================================================
   // DISPLAY ROTATION VIA RAW MADCTL COMMAND
@@ -817,9 +813,8 @@ void setupDisplay() {
   // - Standard panels use: 0x80=MY, 0x40=MX, 0x20=MV (row/col exchange)
   // - CO5300 uses different bits: 0x02=X_FLIP, 0x05=Y_FLIP, 0x20=MV
   //
-  // IMPORTANT: current board bring-up only verified 0° for normal firmware.
-  // A 90° MADCTL path exists behind WAVESHARE_ENABLE_EXPERIMENTAL_90_ROTATION
-  // for hardware testing. 180° and 270° attempts all resulted in mirroring or
+  // The 1.75-inch target uses the 90° MADCTL path by default. The 2.06-inch
+  // target remains at 0°. 180° and 270° attempts all resulted in mirroring or
   // wrong direction.
   //
   // === 180° ROTATION ATTEMPTS (all failed): ===
@@ -837,9 +832,9 @@ void setupDisplay() {
   // ============================================================================
   // KNOWN ISSUE: 90° ROTATION HAS GREEN EDGE AT BOTTOM
   // ============================================================================
-  // When 90° rotation is enabled experimentally, a thin green strip appears at
-  // the bottom of the display. The map and touch work correctly, but this visual
-  // artifact persists during all map operations.
+  // On the 1.75-inch target, a thin green strip may appear at the bottom of the
+  // display. The map and touch work correctly, but this visual artifact persisted
+  // during earlier map operations.
   //
   // === WHAT WE TRIED TO FIX THE GREEN EDGE (all failed): ===
   // 1. fillScreen(BLACK) after MADCTL - still shows green
@@ -862,18 +857,15 @@ void setupDisplay() {
   //   render mode configuration
   // - Modify Arduino_CO5300 driver only if software rotation is too slow.
   //
-  // For now, normal Waveshare firmware clamps 90° requests back to 0° so the
-  // shipped build does not expose the known artifact. Use
-  // WAVESHARE_AMOLED_175_DISPLAY_TEST to inspect 0° and the experimental 90°
-  // path on hardware before enabling it in normal firmware.
+  // WAVESHARE_AMOLED_175_DISPLAY_TEST can still be used to inspect both target
+  // orientations on hardware.
   // ============================================================================
   //
   applyCo5300Rotation(rotation);
   if (rotation == waveshare_board::display::ROTATION_90) {
-    gfx->fillScreen(0x0000); // Clear with the experimental rotation applied.
+    gfx->fillScreen(0x0000); // Clear with the target rotation applied.
   }
   // Note: rotation values 2 (180°) and 3 (270°) are not supported by CO5300
-  // The iOS app only offers 0° and 90° options
 
   // Turn on display and set brightness (CRITICAL for AMOLED!)
   Serial.println("Turning on display and setting brightness...");

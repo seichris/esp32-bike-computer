@@ -99,7 +99,7 @@ Current setting IDs:
 | `1` | Map minimum polygon size | `0...50` |
 | `2` | Map detail level | `0` low, `1` medium, `2` high |
 | `3` | Map route line width | `2...48` |
-| `4` | Display rotation | `0...3` |
+| `4` | Legacy display rotation | Ignored. Rotation is fixed by firmware target: 90° on the 1.75-inch device and 0° on the 2.06-inch device. |
 | `6` | Map rotation mode | `0` north-up, `1` course-up |
 | `7` | Map zoom level | `0...5` |
 | `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/footways, bit 3 major roads, bit 4 residential/other local roads, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker, bit 10 service roads, bit 11 tracks, bit 12 extended-mask marker |
