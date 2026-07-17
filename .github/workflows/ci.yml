@@ -69,6 +69,30 @@ jobs:
       - name: Run Swift helper tests
         run: ./scripts/run-navigation-tests.sh
         working-directory: ios-app
+      - name: Run workout contract tests
+        run: ./scripts/run-workout-contract-tests.sh
+        working-directory: ios-app
+      - name: Run workout contract tests on iOS
+        run: ./scripts/run-workout-platform-tests.sh ios
+        working-directory: ios-app
+      - name: Run workout contract tests on watchOS
+        run: ./scripts/run-workout-platform-tests.sh watchos
+        working-directory: ios-app
+      - name: Build watch app
+        run: |
+          xcodebuild \
+            -project BikeComputer/BikeComputer.xcodeproj \
+            -target BikeComputerWatch \
+            -configuration Release \
+            -sdk watchos \
+            -arch arm64_32 \
+            ONLY_ACTIVE_ARCH=YES \
+            CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/bike-computer-watch" \
+            OBJROOT="$RUNNER_TEMP/bike-computer-watch-obj" \
+            SYMROOT="$RUNNER_TEMP/bike-computer-watch-sym" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+        working-directory: ios-app
       - name: Build app
         run: |
           xcodebuild \

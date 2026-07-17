@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>WKApplication</key>
+	<true/>
+	<key>WKCompanionAppBundleIdentifier</key>
+	<string>LetItRide.BikeComputer</string>
+	<key>WKRunsIndependentlyOfCompanionApp</key>
+	<true/>
+	<key>WKBackgroundModes</key>
+	<array>
+		<string>workout-processing</string>
+	</array>
+	<key>NSHealthShareUsageDescription</key>
+	<string>BikeComputer reads live cycling metrics from Apple Watch and connected cycling sensors during your workout.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>BikeComputer saves the cycling workouts and routes that you start in the BikeComputer Watch app.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>BikeComputer records your outdoor ride route and uses location for speed and elevation when cycling sensors are unavailable.</string>
+</dict>
+</plist>
