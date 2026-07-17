@@ -2299,7 +2299,7 @@ final class BackgroundMapUploadCoordinator: NSObject,
 
 struct OfflineMapPlatformClient {
     let baseURL: URL
-    let apiToken: String?
+    let legacyBearerToken: String?
     let clientInstallationId: String
     let clientInstallationToken: String?
     let mapStreamTrustCapabilities: String?
@@ -2308,7 +2308,7 @@ struct OfflineMapPlatformClient {
 
     init(
         baseURL: URL,
-        apiToken: String? = nil,
+        legacyBearerToken: String? = nil,
         clientInstallationId: String,
         clientInstallationToken: String? = nil,
         mapStreamTrustCapabilities: String? = BikeMapStreamTrustStore.production.capabilityHeaderValue,
@@ -2316,7 +2316,7 @@ struct OfflineMapPlatformClient {
         session: URLSession = .shared
     ) {
         self.baseURL = baseURL
-        self.apiToken = apiToken?.isEmpty == true ? nil : apiToken
+        self.legacyBearerToken = legacyBearerToken?.isEmpty == true ? nil : legacyBearerToken
         self.clientInstallationId = clientInstallationId
         self.clientInstallationToken = clientInstallationToken
         self.mapStreamTrustCapabilities = mapStreamTrustCapabilities
@@ -2330,7 +2330,6 @@ struct OfflineMapPlatformClient {
         }
         var request = try Self.makeCreateJobURLRequest(
             baseURL: baseURL,
-            apiToken: apiToken,
             jobRequest: jobRequest
         )
         authorizeInstallation(&request)
@@ -2338,13 +2337,31 @@ struct OfflineMapPlatformClient {
     }
 
     func registerInstallation() async throws -> OfflineMapInstallationCredential {
-        var request = URLRequest(
-            url: try Self.endpointURL(baseURL: baseURL, path: "/v1/installations")
-        )
-        request.httpMethod = "POST"
-        if let apiToken {
-            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        let endpoint = try Self.endpointURL(baseURL: baseURL, path: "/v1/installations")
+        let url: URL
+        if clientInstallationToken?.isEmpty == false {
+            guard var components = URLComponents(
+                url: endpoint,
+                resolvingAgainstBaseURL: false
+            ) else {
+                throw OfflineMapPlatformError.invalidBaseURL
+            }
+            components.queryItems = [
+                URLQueryItem(
+                    name: "clientInstallationId",
+                    value: clientInstallationId
+                )
+            ]
+            guard let refreshedURL = components.url else {
+                throw OfflineMapPlatformError.invalidBaseURL
+            }
+            url = refreshedURL
+        } else {
+            url = endpoint
         }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        authorizeInstallation(&request)
         let credential: OfflineMapInstallationCredential = try await send(request: request)
         guard credential.clientInstallationId.range(
             of: "^inst_v2_[0-9a-f]{32}$",
@@ -2359,10 +2376,16 @@ struct OfflineMapPlatformClient {
         return credential
     }
 
+    func canAdoptInstallationCredential(
+        _ credential: OfflineMapInstallationCredential
+    ) -> Bool {
+        clientInstallationToken?.isEmpty != false ||
+            credential.clientInstallationId == clientInstallationId
+    }
+
     func job(id: String) async throws -> OfflineMapJob {
         let request = try Self.makeInstallationScopedURLRequest(
             baseURL: baseURL,
-            apiToken: apiToken,
             path: "/v1/map-jobs/\(id)",
             method: "GET",
             clientInstallationId: clientInstallationId
@@ -2375,7 +2398,6 @@ struct OfflineMapPlatformClient {
     func jobs() async throws -> [OfflineMapJob] {
         let request = try Self.makeListJobsURLRequest(
             baseURL: baseURL,
-            apiToken: apiToken,
             clientInstallationId: clientInstallationId
         )
         var authorized = request
@@ -2394,7 +2416,6 @@ struct OfflineMapPlatformClient {
     func updateDisplayName(jobId: String, displayName: String) async throws {
         var request = try Self.makeUpdateDisplayNameURLRequest(
             baseURL: baseURL,
-            apiToken: apiToken,
             clientInstallationId: clientInstallationId,
             jobId: jobId,
             displayName: displayName
@@ -2412,7 +2433,6 @@ struct OfflineMapPlatformClient {
     ) async throws {
         var request = try Self.makeRecordDownloadURLRequest(
             baseURL: baseURL,
-            apiToken: apiToken,
             clientInstallationId: clientInstallationId,
             jobId: jobId,
             receipt: receipt
@@ -2427,7 +2447,6 @@ struct OfflineMapPlatformClient {
     func downloadURL(mapId: String, jobId: String) async throws -> URL {
         let request = try Self.makeInstallationScopedURLRequest(
             baseURL: baseURL,
-            apiToken: apiToken,
             path: "/v1/map-packs/\(mapId)/download-url",
             method: "POST",
             clientInstallationId: clientInstallationId,
@@ -2457,7 +2476,6 @@ struct OfflineMapPlatformClient {
         }
         var request = try Self.makeInstallationScopedURLRequest(
             baseURL: baseURL,
-            apiToken: apiToken,
             path: "/v1/map-packs/\(mapId)/artifacts/\(artifact.format)/download-url",
             method: "POST",
             clientInstallationId: clientInstallationId,
@@ -2490,22 +2508,17 @@ struct OfflineMapPlatformClient {
 
     static func makeCreateJobURLRequest(
         baseURL: URL,
-        apiToken: String?,
         jobRequest: OfflineMapJobRequest
     ) throws -> URLRequest {
         var request = URLRequest(url: try endpointURL(baseURL: baseURL, path: "/v1/map-jobs"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let apiToken, !apiToken.isEmpty {
-            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
-        }
         request.httpBody = try JSONEncoder.offlineMap.encode(jobRequest)
         return request
     }
 
     static func makeListJobsURLRequest(
         baseURL: URL,
-        apiToken: String?,
         clientInstallationId: String
     ) throws -> URLRequest {
         let endpoint = try endpointURL(baseURL: baseURL, path: "/v1/map-jobs")
@@ -2518,15 +2531,11 @@ struct OfflineMapPlatformClient {
         }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        if let apiToken, !apiToken.isEmpty {
-            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
-        }
         return request
     }
 
     static func makeInstallationScopedURLRequest(
         baseURL: URL,
-        apiToken: String?,
         path: String,
         method: String,
         clientInstallationId: String,
@@ -2544,22 +2553,17 @@ struct OfflineMapPlatformClient {
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
-        if let apiToken, !apiToken.isEmpty {
-            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
-        }
         return request
     }
 
     static func makeUpdateDisplayNameURLRequest(
         baseURL: URL,
-        apiToken: String?,
         clientInstallationId: String,
         jobId: String,
         displayName: String
     ) throws -> URLRequest {
         var request = try makeInstallationScopedURLRequest(
             baseURL: baseURL,
-            apiToken: apiToken,
             path: "/v1/map-jobs/\(jobId)/display-name",
             method: "PATCH",
             clientInstallationId: clientInstallationId
@@ -2573,14 +2577,12 @@ struct OfflineMapPlatformClient {
 
     static func makeRecordDownloadURLRequest(
         baseURL: URL,
-        apiToken: String?,
         clientInstallationId: String,
         jobId: String,
         receipt: OfflineMapDownloadReceiptRequest
     ) throws -> URLRequest {
         var request = try makeInstallationScopedURLRequest(
             baseURL: baseURL,
-            apiToken: apiToken,
             path: "/v1/map-jobs/\(jobId)/downloads",
             method: "POST",
             clientInstallationId: clientInstallationId
@@ -2597,9 +2599,6 @@ struct OfflineMapPlatformClient {
     ) async throws -> Response {
         var request = URLRequest(url: try Self.endpointURL(baseURL: baseURL, path: path))
         request.httpMethod = method
-        if let apiToken {
-            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
-        }
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONEncoder.offlineMap.encode(body)
@@ -2621,6 +2620,12 @@ struct OfflineMapPlatformClient {
     }
 
     private func authorizeInstallation(_ request: inout URLRequest) {
+        if let legacyBearerToken {
+            request.setValue(
+                "Bearer \(legacyBearerToken)",
+                forHTTPHeaderField: "Authorization"
+            )
+        }
         if let clientInstallationToken, !clientInstallationToken.isEmpty {
             request.setValue(
                 clientInstallationToken,

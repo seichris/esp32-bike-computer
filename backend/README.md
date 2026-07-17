@@ -42,13 +42,17 @@ uvicorn --factory map_platform.api:create_app --reload --port 8080
 Create a custom bbox job:
 
 ```sh
+credential="$(curl -s -X POST http://localhost:8080/v1/installations)"
+installation_id="$(printf '%s' "$credential" | python -c 'import json,sys; print(json.load(sys.stdin)["clientInstallationId"])')"
+installation_token="$(printf '%s' "$credential" | python -c 'import json,sys; print(json.load(sys.stdin)["clientInstallationToken"])')"
 curl -s http://localhost:8080/v1/map-jobs \
   -H 'content-type: application/json' \
+  -H "x-installation-token: $installation_token" \
   -d '{
     "mode": "custom_bbox",
     "displayName": "Singapore central",
     "bbox": [103.75, 1.24, 103.93, 1.37],
-    "clientInstallationId": "installation-12345678",
+    "clientInstallationId": "'"$installation_id"'",
     "clientRequestId": "request-12345678",
     "installOnDevice": false,
     "target": { "renderer": "esp32-fmb", "firmwareVersion": "0.0.0" }
@@ -87,16 +91,36 @@ enough CPU, RAM, and temporary disk for the largest allowed PBF cut-out.
 
 Required Coolify secrets:
 
-- `MAP_PLATFORM_API_TOKEN`: bearer token used by the iOS app for job creation,
-  job polling, and signed download URL creation. Treat it as a client token,
-  because it is embedded in distributed app builds.
 - `MAP_PLATFORM_DOWNLOAD_SECRET`: HMAC secret for signed map-pack downloads.
   Use a separate long random value so signed URLs survive API restarts without
-  reusing the API token as the signing key.
+  reusing another credential as the signing key.
 - `MAP_PLATFORM_INSTALLATION_SECRET`: separate 32-byte-or-longer HMAC secret
   for stateless v2 installation credentials. Rotate it by moving the old value
   into comma-separated `MAP_PLATFORM_INSTALLATION_PREVIOUS_SECRETS`, deploy the
   new current value, then remove retired values after the app migration window.
+
+The public iOS app contains no server-wide credential. It requests a unique
+installation credential from `POST /v1/installations`, stores it in the
+Keychain, and presents it only for installation-owned resources. Issuance,
+map creation, download-URL creation, and the general public API are protected
+by persistent limits in `/data/rate-limits.sqlite3`. Defaults are intentionally
+conservative and can be tuned with:
+
+- `MAP_PLATFORM_PUBLIC_REQUEST_LIMIT_PER_MINUTE` (default `240` per IP)
+- `MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY` (default `3` per IP)
+- `MAP_PLATFORM_MAP_CREATE_LIMIT_PER_HOUR` (default `4` per installation)
+- `MAP_PLATFORM_MAP_CREATE_IP_LIMIT_PER_DAY` (default `20` per IP)
+- `MAP_PLATFORM_DOWNLOAD_URL_LIMIT_PER_HOUR` (default `30` per installation)
+- `MAP_PLATFORM_DOWNLOAD_URL_IP_LIMIT_PER_HOUR` (default `60` per IP)
+- `MAP_PLATFORM_MAX_REQUEST_BODY_BYTES` (default `2097152` for every non-GET request; large enough for the maximum supported route corridor)
+
+Production Compose requires `MAP_PLATFORM_TRUSTED_PROXY_CIDRS` to contain the
+comma-separated CIDRs of the
+Coolify reverse proxies that overwrite or append `X-Forwarded-For`. Forwarded
+addresses are ignored unless the immediate peer is trusted, and the resolver
+walks the chain from the right to prevent client-supplied spoofing. IPv6
+addresses are grouped by `/64` so privacy-address rotation cannot trivially
+bypass a per-client quota.
 
 Required before enabling Bike Map Stream generation:
 
@@ -184,6 +208,8 @@ Useful production environment variables:
   `$MAP_PLATFORM_DATA_ROOT/source-catalogs/geofabrik-index-v1.json`.
 - `MAP_PLATFORM_GEOFABRIK_INDEX_TTL_SECONDS`: catalog cache TTL, default
   `86400`.
+- `MAP_PLATFORM_GEOFABRIK_FAILURE_COOLDOWN_SECONDS`: fail-fast interval shared
+  by concurrent catalog callers after an upstream failure, default `30`.
 
 Completed jobs expose an `artifacts` array. A client refreshes the immutable
 stream URL with:
@@ -195,9 +221,12 @@ POST /v1/map-packs/{mapId}/artifacts/bike-map-stream-v1/download-url
   &signedManifestReceipt={receipt}
 ```
 
-Before creating v2 jobs, the app calls `POST /v1/installations` once and stores
+Before creating v2 jobs, the app calls `POST /v1/installations` and stores
 the returned installation ID and high-entropy token in the Keychain. Requests
 for that registered installation send the token as `X-Installation-Token`.
+Existing credentials periodically call the same endpoint with their installation
+ID and token so the server can refresh them onto the current installation secret
+before a previous secret is retired.
 An app build with production stream keys also sends `X-Map-Stream-Trust` as a
 comma-separated set of exact `keyId=SHA256(X9.63 public key)` capabilities.
 It sends its `CFBundleVersion` as `X-Map-Stream-App-Build`. Without both
@@ -207,8 +236,9 @@ cohort.
 Artifact URL refresh always requires this installation-bound credential; the
 bundled app API token and a caller-supplied installation ID are not sufficient.
 Issuance is stateless: the server writes no per-installation file, so repeated
-bootstrap calls cannot consume the map data volume. Apply ordinary edge rate
-limits to the endpoint to control request abuse.
+bootstrap calls cannot consume the map data volume. New issuance is protected
+by the persistent IP quota; authenticated refreshes remain subject to the
+general public API quota.
 
 The receipt is required for stream URL refresh, so an expired URL can be
 replaced without changing artifact identity. Filesystem storage returns a

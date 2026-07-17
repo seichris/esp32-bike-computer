@@ -6,6 +6,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from fastapi import Depends, FastAPI, Header, HTTPException, Request
+    from fastapi.responses import FileResponse, JSONResponse
+except ImportError as exc:  # pragma: no cover - exercised only without the API extra
+    Depends = FastAPI = Header = HTTPException = Request = None  # type: ignore[assignment]
+    FileResponse = JSONResponse = None  # type: ignore[assignment]
+    _FASTAPI_IMPORT_ERROR: ImportError | None = exc
+else:
+    _FASTAPI_IMPORT_ERROR = None
+
 from .admin_inventory import map_inventory
 from .artifacts import BIKE_MAP_STREAM_FORMAT, create_artifact_store_from_environment
 from .downloads import DownloadSigner, DownloadTokenError
@@ -28,31 +38,33 @@ from .map_stream_rollout import (
 from .map_stream_trust_registry import trusted_key_fingerprints
 from .models import JobStatus
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
+from .rate_limits import (
+    ClientAddressResolver,
+    PersistentRateLimiter,
+    RateLimitExceeded,
+    RateLimitPolicy,
+)
+from .request_limits import RequestBodyLimitMiddleware
 from .source_cache import SourceCache, SourceCacheError
 from .sources import SourceIndex
 from .worker import MapWorker, cleanup_work_dirs, expire_ready_jobs
 
 
 def create_app():
-    try:
-        from fastapi import Depends, FastAPI, Header, HTTPException
-        from fastapi.responses import FileResponse
-    except ImportError as exc:
-        raise RuntimeError("Install backend API dependencies with `pip install -e backend[api]`") from exc
+    if _FASTAPI_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            "Install backend API dependencies with `pip install -e backend[api]`"
+        ) from _FASTAPI_IMPORT_ERROR
 
     repo_root = Path(os.environ.get("MAP_PLATFORM_REPO_ROOT", Path(__file__).resolve().parents[2]))
     source_index_path = Path(
         os.environ.get("MAP_PLATFORM_SOURCE_INDEX", repo_root / "backend" / "config" / "source-regions.json")
     )
     data_root = Path(os.environ.get("MAP_PLATFORM_DATA_ROOT", repo_root / "backend" / "data"))
-    api_token = os.environ.get("MAP_PLATFORM_API_TOKEN")
-    admin_token = os.environ.get("MAP_PLATFORM_ADMIN_TOKEN")
-    download_secret = os.environ.get("MAP_PLATFORM_DOWNLOAD_SECRET") or api_token or secrets.token_urlsafe(32)
-    download_signer = DownloadSigner(download_secret)
-    artifact_store = create_artifact_store_from_environment(
-        data_root,
-        credential_scope="api",
+    max_request_body_bytes = int(
+        os.environ.get("MAP_PLATFORM_MAX_REQUEST_BODY_BYTES", "2097152")
     )
+    admin_token = os.environ.get("MAP_PLATFORM_ADMIN_TOKEN")
     installation_secret = os.environ.get("MAP_PLATFORM_INSTALLATION_SECRET", "")
     previous_installation_secrets = [
         value
@@ -65,6 +77,47 @@ def create_app():
     installation_store = InstallationCredentialStore(
         installation_secret,
         previous_secrets=previous_installation_secrets,
+    )
+    download_secret = os.environ.get("MAP_PLATFORM_DOWNLOAD_SECRET") or installation_secret
+    download_signer = DownloadSigner(download_secret)
+    artifact_store = create_artifact_store_from_environment(
+        data_root,
+        credential_scope="api",
+    )
+    rate_limiter = PersistentRateLimiter(
+        data_root / "rate-limits.sqlite3",
+        installation_secret,
+    )
+    client_address_resolver = ClientAddressResolver.from_environment()
+    public_request_policy = RateLimitPolicy(
+        "public-request-ip",
+        int(os.environ.get("MAP_PLATFORM_PUBLIC_REQUEST_LIMIT_PER_MINUTE", "240")),
+        60,
+    )
+    installation_issue_policy = RateLimitPolicy(
+        "installation-issue-ip",
+        int(os.environ.get("MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY", "3")),
+        86_400,
+    )
+    map_create_ip_policy = RateLimitPolicy(
+        "map-create-ip",
+        int(os.environ.get("MAP_PLATFORM_MAP_CREATE_IP_LIMIT_PER_DAY", "20")),
+        86_400,
+    )
+    map_create_installation_policy = RateLimitPolicy(
+        "map-create-installation",
+        int(os.environ.get("MAP_PLATFORM_MAP_CREATE_LIMIT_PER_HOUR", "4")),
+        3_600,
+    )
+    download_url_ip_policy = RateLimitPolicy(
+        "download-url-ip",
+        int(os.environ.get("MAP_PLATFORM_DOWNLOAD_URL_IP_LIMIT_PER_HOUR", "60")),
+        3_600,
+    )
+    download_url_installation_policy = RateLimitPolicy(
+        "download-url-installation",
+        int(os.environ.get("MAP_PLATFORM_DOWNLOAD_URL_LIMIT_PER_HOUR", "30")),
+        3_600,
     )
     rollout_approvals_path = Path(
         os.environ.get(
@@ -128,9 +181,67 @@ def create_app():
     )
 
     app = FastAPI(title="Open Bike Computer Offline Map Platform", version="0.1.0")
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        max_body_bytes=max_request_body_bytes,
+    )
     app.state.artifact_store = artifact_store
     app.state.installation_store = installation_store
+    app.state.job_store = service.store
     app.state.map_stream_rollout = map_stream_rollout
+    app.state.rate_limiter = rate_limiter
+
+    def client_ip(request: Request) -> str:
+        return client_address_resolver.resolve(
+            request.client.host if request.client is not None else None,
+            request.headers.get("x-forwarded-for"),
+        )
+
+    def rate_limit_error(exc: RateLimitExceeded) -> HTTPException:
+        return HTTPException(
+            status_code=429,
+            detail="request rate limit exceeded",
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        )
+
+    def enforce_rate_limits(
+        *rules: tuple[RateLimitPolicy, str],
+    ) -> None:
+        try:
+            rate_limiter.consume_many(rules)
+        except RateLimitExceeded as exc:
+            raise rate_limit_error(exc) from exc
+
+    def is_public_api_request(request: Request) -> bool:
+        path = request.url.path
+        if request.method == "POST" and (
+            (path.startswith("/v1/map-jobs/") and path.endswith("/run"))
+            or (
+                path.startswith("/v1/source-regions/")
+                and path.endswith("/cache")
+            )
+        ):
+            return False
+        return (
+            path == "/v1/installations"
+            or path == "/v1/source-regions"
+            or path == "/v1/map-jobs"
+            or path.startswith("/v1/map-jobs/")
+            or path.startswith("/v1/map-packs/")
+        )
+
+    @app.middleware("http")
+    async def limit_public_requests(request: Request, call_next):
+        if is_public_api_request(request):
+            try:
+                rate_limiter.consume(public_request_policy, client_ip(request))
+            except RateLimitExceeded as exc:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "request rate limit exceeded"},
+                    headers={"Retry-After": str(exc.retry_after_seconds)},
+                )
+        return await call_next(request)
 
     def public_job(
         job,
@@ -207,12 +318,6 @@ def create_app():
             )
         return identity
 
-    def require_api_token(authorization: str | None = Header(default=None)) -> None:
-        if not api_token:
-            return
-        if authorization is None or not secrets.compare_digest(authorization, f"Bearer {api_token}"):
-            raise HTTPException(status_code=401, detail="invalid API token")
-
     def require_admin_token(authorization: str | None = Header(default=None)) -> None:
         if not admin_token:
             raise HTTPException(status_code=503, detail="admin API is disabled")
@@ -224,26 +329,28 @@ def create_app():
         installation_token: str | None,
         *,
         required: bool = False,
-    ) -> None:
+    ) -> str | None:
         if installation_id is None:
             if required:
                 raise HTTPException(status_code=401, detail="installation credential is required")
-            return
+            return None
         if not isinstance(installation_id, str):
             if required:
                 raise HTTPException(status_code=401, detail="installation credential is required")
-            return
+            return None
         try:
             registered = installation_store.is_registered(installation_id)
         except InstallationCredentialError as exc:
             if not required:
-                return
+                return None
             raise HTTPException(status_code=401, detail=str(exc)) from exc
         if required or registered:
             try:
                 installation_store.verify(installation_id, installation_token)
             except InstallationCredentialError as exc:
                 raise HTTPException(status_code=401, detail=str(exc)) from exc
+            return installation_id
+        return None
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
@@ -260,9 +367,26 @@ def create_app():
             include_undownloaded=includeUndownloaded,
         )
 
-    @app.post("/v1/installations", dependencies=[Depends(require_api_token)])
-    def create_installation() -> dict[str, str]:
-        installation_id, token = installation_store.issue()
+    @app.post("/v1/installations")
+    def create_installation(
+        request: Request,
+        clientInstallationId: str | None = None,
+        x_installation_token: str | None = Header(
+            default=None,
+            alias="X-Installation-Token",
+        ),
+    ) -> dict[str, str]:
+        if clientInstallationId is None:
+            enforce_rate_limits((installation_issue_policy, client_ip(request)))
+            installation_id, token = installation_store.issue()
+        else:
+            try:
+                installation_id, token = installation_store.refresh(
+                    clientInstallationId,
+                    x_installation_token,
+                )
+            except InstallationCredentialError as exc:
+                raise HTTPException(status_code=401, detail=str(exc)) from exc
         return {
             "clientInstallationId": installation_id,
             "clientInstallationToken": token,
@@ -275,8 +399,9 @@ def create_app():
         except ValueError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    @app.post("/v1/map-jobs", dependencies=[Depends(require_api_token)])
+    @app.post("/v1/map-jobs")
     def create_map_job(
+        request: Request,
         payload: dict[str, Any],
         x_installation_token: str | None = Header(
             default=None,
@@ -306,22 +431,45 @@ def create_app():
                 x_map_stream_app_git_sha,
                 x_map_stream_app_build_sha256,
             )
-            verify_registered_installation(
+            registered_installation_id = verify_registered_installation(
                 payload.get("clientInstallationId"),
                 x_installation_token,
             )
-            return public_job(
-                service.create_job(payload),
-                payload.get("clientInstallationId"),
-                trust_capabilities,
-                app_build,
-                app_git_sha,
-                app_build_sha256,
+            client_installation_id, client_request_id, _ = (
+                service.resolve_client_request(payload)
             )
+            with service.lock_client_request(
+                client_installation_id,
+                client_request_id,
+            ):
+                _, _, existing = service.resolve_client_request(payload)
+                if existing is not None:
+                    return public_job(
+                        existing,
+                        payload.get("clientInstallationId"),
+                        trust_capabilities,
+                        app_build,
+                        app_git_sha,
+                        app_build_sha256,
+                    )
+                rules = [(map_create_ip_policy, client_ip(request))]
+                if registered_installation_id is not None:
+                    rules.append(
+                        (map_create_installation_policy, registered_installation_id)
+                    )
+                enforce_rate_limits(*rules)
+                return public_job(
+                    service.create_job(payload),
+                    payload.get("clientInstallationId"),
+                    trust_capabilities,
+                    app_build,
+                    app_git_sha,
+                    app_build_sha256,
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.get("/v1/map-jobs", dependencies=[Depends(require_api_token)])
+    @app.get("/v1/map-jobs")
     def list_map_jobs(
         clientInstallationId: str | None = None,
         x_installation_token: str | None = Header(
@@ -372,7 +520,7 @@ def create_app():
             ]
         }
 
-    @app.get("/v1/map-jobs/{job_id}", dependencies=[Depends(require_api_token)])
+    @app.get("/v1/map-jobs/{job_id}")
     def get_map_job(
         job_id: str,
         clientInstallationId: str | None = None,
@@ -418,10 +566,7 @@ def create_app():
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
 
-    @app.patch(
-        "/v1/map-jobs/{job_id}/display-name",
-        dependencies=[Depends(require_api_token)],
-    )
+    @app.patch("/v1/map-jobs/{job_id}/display-name")
     def update_map_display_name(
         job_id: str,
         payload: dict[str, Any],
@@ -456,10 +601,7 @@ def create_app():
             "downloadCount": len(job.download_receipts),
         }
 
-    @app.post(
-        "/v1/map-jobs/{job_id}/downloads",
-        dependencies=[Depends(require_api_token)],
-    )
+    @app.post("/v1/map-jobs/{job_id}/downloads")
     def record_map_download(
         job_id: str,
         payload: dict[str, Any],
@@ -517,7 +659,7 @@ def create_app():
         except JobClaimError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.post("/v1/map-jobs/{job_id}/cancel", dependencies=[Depends(require_api_token)])
+    @app.post("/v1/map-jobs/{job_id}/cancel")
     def cancel_map_job(
         job_id: str,
         clientInstallationId: str | None = None,
@@ -611,7 +753,7 @@ def create_app():
     def cleanup_work() -> dict[str, int]:
         return {"removed": cleanup_work_dirs(data_root / "work", service.store)}
 
-    @app.get("/v1/map-packs/{map_id}", dependencies=[Depends(require_api_token)])
+    @app.get("/v1/map-packs/{map_id}")
     def get_map_pack(
         map_id: str,
         clientInstallationId: str | None = None,
@@ -661,8 +803,9 @@ def create_app():
             app_build_sha256,
         )
 
-    @app.post("/v1/map-packs/{map_id}/download-url", dependencies=[Depends(require_api_token)])
+    @app.post("/v1/map-packs/{map_id}/download-url")
     def create_download_url(
+        request: Request,
         map_id: str,
         clientInstallationId: str | None = None,
         jobId: str | None = None,
@@ -672,7 +815,19 @@ def create_app():
         ),
     ) -> dict[str, Any]:
         try:
-            verify_registered_installation(clientInstallationId, x_installation_token)
+            registered_installation_id = verify_registered_installation(
+                clientInstallationId,
+                x_installation_token,
+            )
+            rules = [(download_url_ip_policy, client_ip(request))]
+            if registered_installation_id is not None:
+                rules.append(
+                    (
+                        download_url_installation_policy,
+                        registered_installation_id,
+                    )
+                )
+            enforce_rate_limits(*rules)
             if jobId is not None:
                 job = service.get_job_for_installation(jobId, clientInstallationId)
                 if job.map_id != map_id:
@@ -697,11 +852,9 @@ def create_app():
             "expiresInSeconds": 900,
         }
 
-    @app.post(
-        "/v1/map-packs/{map_id}/artifacts/{artifact_format}/download-url",
-        dependencies=[Depends(require_api_token)],
-    )
+    @app.post("/v1/map-packs/{map_id}/artifacts/{artifact_format}/download-url")
     def create_artifact_download_url(
+        request: Request,
         map_id: str,
         artifact_format: str,
         clientInstallationId: str | None = None,
@@ -735,10 +888,17 @@ def create_app():
                 x_map_stream_app_git_sha,
                 x_map_stream_app_build_sha256,
             )
-            verify_registered_installation(
+            registered_installation_id = verify_registered_installation(
                 clientInstallationId,
                 x_installation_token,
                 required=True,
+            )
+            enforce_rate_limits(
+                (download_url_ip_policy, client_ip(request)),
+                (
+                    download_url_installation_policy,
+                    registered_installation_id,
+                ),
             )
             if jobId is not None:
                 job = service.get_job_for_installation(jobId, clientInstallationId)

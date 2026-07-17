@@ -16,6 +16,8 @@ __all__ = [
     "map_stream_trust_registry",
     "pipeline",
     "preview",
+    "rate_limits",
+    "request_limits",
     "source_cache",
     "sources",
     "strict_json",
