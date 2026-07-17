@@ -456,6 +456,37 @@ enum RouteDeviation {
     }
 }
 
+enum RouteStepSelection {
+    static func closestNavigableStepIndex(
+        to location: CLLocation,
+        in route: MKRoute
+    ) -> Int? {
+        var candidates: [(index: Int, distance: CLLocationDistance)] = []
+        for (index, step) in route.steps.enumerated() {
+            if let distance = RouteDeviation.distance(from: location, to: step.polyline) {
+                candidates.append((
+                    index: index,
+                    distance: distance
+                ))
+            }
+        }
+        guard let closestDistance = candidates.map(\.distance).min() else { return nil }
+
+        let horizontalAccuracy = location.horizontalAccuracy
+        let ambiguityTolerance = horizontalAccuracy.isFinite && horizontalAccuracy >= 0
+            ? max(horizontalAccuracy, 5)
+            : 5
+
+        // Prefer the earliest step whenever multiple route segments are within the
+        // current fix's uncertainty. Distance traveled while a request is pending
+        // cannot prove forward route progress (for example after an out-and-back).
+        return candidates
+            .filter { $0.distance <= closestDistance + ambiguityTolerance }
+            .map(\.index)
+            .min()
+    }
+}
+
 struct RouteDeviationDetector {
     let distanceThreshold: CLLocationDistance
     let requiredConsecutiveSamples: Int
@@ -476,19 +507,33 @@ struct RouteDeviationDetector {
         consecutiveOffRouteSamples = 0
     }
 
-    mutating func shouldReroute(
+    func isEligible(horizontalAccuracy: CLLocationAccuracy) -> Bool {
+        horizontalAccuracy.isFinite &&
+            horizontalAccuracy >= 0 &&
+            horizontalAccuracy <= maxHorizontalAccuracy
+    }
+
+    func isOffRoute(
         distanceToRoute: CLLocationDistance,
         horizontalAccuracy: CLLocationAccuracy
     ) -> Bool {
         guard distanceToRoute.isFinite,
-              horizontalAccuracy >= 0,
-              horizontalAccuracy <= maxHorizontalAccuracy else {
-            reset()
+              isEligible(horizontalAccuracy: horizontalAccuracy) else {
             return false
         }
 
         let accuracyAdjustedThreshold = max(distanceThreshold, horizontalAccuracy * 2)
-        guard distanceToRoute > accuracyAdjustedThreshold else {
+        return distanceToRoute > accuracyAdjustedThreshold
+    }
+
+    mutating func shouldReroute(
+        distanceToRoute: CLLocationDistance,
+        horizontalAccuracy: CLLocationAccuracy
+    ) -> Bool {
+        guard isOffRoute(
+            distanceToRoute: distanceToRoute,
+            horizontalAccuracy: horizontalAccuracy
+        ) else {
             reset()
             return false
         }

@@ -12,6 +12,43 @@ import MapKit
 import Combine
 import CoreLocation
 
+@MainActor
+protocol NavigationDirectionsTask: AnyObject {
+    func calculate(
+        completion: @escaping @MainActor (Result<[MKRoute], Error>) -> Void
+    )
+    func cancel()
+}
+
+@MainActor
+final class MapKitNavigationDirectionsTask: NavigationDirectionsTask {
+    private let directions: MKDirections
+
+    init(request: MKDirections.Request) {
+        directions = MKDirections(request: request)
+    }
+
+    func calculate(
+        completion: @escaping @MainActor (Result<[MKRoute], Error>) -> Void
+    ) {
+        directions.calculate { response, error in
+            MainActor.assumeIsolated {
+                if let error {
+                    completion(.failure(error))
+                } else {
+                    completion(.success(response?.routes ?? []))
+                }
+            }
+        }
+    }
+
+    func cancel() {
+        directions.cancel()
+    }
+}
+
+typealias NavigationDirectionsFactory = @MainActor (MKDirections.Request) -> any NavigationDirectionsTask
+
 enum NavigationStartOutcome: Equatable {
     case started
     case failed(String)
@@ -29,6 +66,9 @@ class BikeComputerCoordinator: ObservableObject {
     let destinationStore: SavedDestinationStore
     private let navEngine = NavigationEngine()
     private let locationManager = CurrentLocationManager()
+    private let directionsFactory: NavigationDirectionsFactory
+    private let startServices: Bool
+    private let now: () -> Date
 
     // MARK: - Published State (UI Observable)
 
@@ -66,8 +106,9 @@ class BikeComputerCoordinator: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var ongoingSourceSearch: MKLocalSearch?
     private var ongoingDestinationSearch: MKLocalSearch?
-    private var ongoingDirections: MKDirections?
-    private var ongoingRerouteDirections: MKDirections?
+    private var ongoingDirections: (any NavigationDirectionsTask)?
+    private var ongoingRerouteDirections: (any NavigationDirectionsTask)?
+    private var latestRerouteLocation: CLLocation?
     private var navigationDestination: MKMapItem?
     private var routeDeviationDetector = RouteDeviationDetector()
     private var lastRerouteRequestDate = Date.distantPast
@@ -98,10 +139,20 @@ class BikeComputerCoordinator: ObservableObject {
         self.init(destinationStore: SavedDestinationStore())
     }
 
-    init(destinationStore: SavedDestinationStore) {
+    init(
+        destinationStore: SavedDestinationStore,
+        directionsFactory: @escaping NavigationDirectionsFactory = {
+            MapKitNavigationDirectionsTask(request: $0)
+        },
+        startServices: Bool = true,
+        now: @escaping () -> Date = Date.init
+    ) {
         self.destinationStore = destinationStore
+        self.directionsFactory = directionsFactory
+        self.startServices = startServices
+        self.now = now
         setupManagerBindings()
-        setupManagers()
+        setupManagers(startServices: startServices)
     }
 
     // MARK: - Setup
@@ -125,7 +176,9 @@ class BikeComputerCoordinator: ObservableObject {
             .sink { [weak self] navigating in
                 guard let self = self else { return }
                 self.isNavigating = navigating
-                self.locationManager.setNavigating(navigating && !self.navEngine.isSimulationMode)
+                if self.startServices {
+                    self.locationManager.setNavigating(navigating && !self.navEngine.isSimulationMode)
+                }
                 let didStopNavigation = self.wasNavigating && !navigating
                 self.wasNavigating = navigating
                 if didStopNavigation {
@@ -165,11 +218,7 @@ class BikeComputerCoordinator: ObservableObject {
         locationManager.$currentLocation
             .compactMap { $0 }
             .sink { [weak self] location in
-                guard let self else { return }
-                let acceptedForNavigation = self.navEngine.processExternalLocation(location)
-                if acceptedForNavigation {
-                    self.evaluateRerouting(for: location)
-                }
+                self?.processNavigationLocation(location)
             }
             .store(in: &cancellables)
 
@@ -262,7 +311,7 @@ class BikeComputerCoordinator: ObservableObject {
         // Current firmware exposes only the navigation packet characteristic.
     }
 
-    private func setupManagers() {
+    private func setupManagers(startServices: Bool) {
         // Wire up inter-manager dependencies
         navEngine.setBLEManager(bleManager)
         bleManager.onDestinationRequest = { [weak self] request in
@@ -275,12 +324,37 @@ class BikeComputerCoordinator: ObservableObject {
                 self?.scheduleDestinationCatalogRetry()
             }
         }
+        guard startServices else { return }
+
         // Start BLE operations
         bleManager.startScanning()
 
         // Enable location tracking for map view
         locationManager.setViewingMap(true)
     }
+
+    private func processNavigationLocation(_ location: CLLocation) {
+        let acceptedForNavigation = navEngine.processExternalLocation(location)
+        if acceptedForNavigation {
+            if ongoingRerouteDirections != nil,
+               routeDeviationDetector.isEligible(
+                   horizontalAccuracy: location.horizontalAccuracy
+               ) {
+                let routeLocation = CoordinateConverter.mapKitRouteLocation(
+                    fromGPSLocation: location
+                )
+                latestRerouteLocation = routeLocation
+            }
+            evaluateRerouting(for: location)
+        }
+    }
+
+#if HOST_TESTING
+    func processNavigationLocationForTesting(_ location: CLLocation) {
+        currentLocation = location
+        processNavigationLocation(location)
+    }
+#endif
 
     // MARK: - Public API: BLE
 
@@ -301,10 +375,10 @@ class BikeComputerCoordinator: ObservableObject {
         isTestMode: Bool = false,
         completion: ((NavigationStartOutcome) -> Void)? = nil
     ) {
-        self.transportType = transportType
         calculateRoute(
             from: source,
             to: destination,
+            requestedTransportType: transportType,
             isTestMode: isTestMode,
             completion: completion
         )
@@ -317,12 +391,15 @@ class BikeComputerCoordinator: ObservableObject {
     func stopNavigation() {
         ongoingRerouteDirections?.cancel()
         ongoingRerouteDirections = nil
+        latestRerouteLocation = nil
         navigationDestination = nil
         routeDeviationDetector.reset()
         lastRerouteRequestDate = .distantPast
         navEngine.stopNavigation()
         currentRoute = nil
-        locationManager.setNavigating(false)
+        if startServices {
+            locationManager.setNavigating(false)
+        }
     }
 
     func handleDestinationSelection(destination: SavedDestination, mapLocation: CLLocation?) {
@@ -344,8 +421,11 @@ class BikeComputerCoordinator: ObservableObject {
 
         let destinationItem = MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
         destinationItem.name = destination.name
-        transportType = RouteTransportTypes.cycling
-        calculateRoute(from: .mapItem(source), to: .mapItem(destinationItem))
+        calculateRoute(
+            from: .mapItem(source),
+            to: .mapItem(destinationItem),
+            requestedTransportType: RouteTransportTypes.cycling
+        )
     }
 
     // MARK: - Public API: Location
@@ -363,8 +443,12 @@ class BikeComputerCoordinator: ObservableObject {
     }
 
     var isLocationAuthorized: Bool {
+#if os(macOS) && HOST_TESTING
+        locationAuthorizationStatus == .authorizedAlways
+#else
         locationAuthorizationStatus == .authorizedAlways ||
             locationAuthorizationStatus == .authorizedWhenInUse
+#endif
     }
 
     private func requestMapTransferStatusAfterDeviceRefresh() {
@@ -742,6 +826,7 @@ extension BikeComputerCoordinator {
     private func calculateRoute(
         from source: RouteEndpoint,
         to destination: RouteEndpoint,
+        requestedTransportType: MKDirectionsTransportType,
         isTestMode: Bool = false,
         completion: ((NavigationStartOutcome) -> Void)? = nil
     ) {
@@ -757,9 +842,8 @@ extension BikeComputerCoordinator {
         ongoingDirections?.cancel()
         ongoingRerouteDirections?.cancel()
         ongoingRerouteDirections = nil
-        navigationDestination = nil
+        latestRerouteLocation = nil
         routeDeviationDetector.reset()
-        lastRerouteRequestDate = .distantPast
         routeCalculationGeneration &+= 1
         let generation = routeCalculationGeneration
         if let completion {
@@ -792,6 +876,7 @@ extension BikeComputerCoordinator {
                 self.requestDirections(
                     from: sourceItem,
                     to: destinationItem,
+                    requestedTransportType: requestedTransportType,
                     isTestMode: isTestMode,
                     generation: generation
                 )
@@ -887,46 +972,44 @@ extension BikeComputerCoordinator {
     private func requestDirections(
         from sourceItem: MKMapItem,
         to destinationItem: MKMapItem,
+        requestedTransportType: MKDirectionsTransportType,
         isTestMode: Bool,
         generation: UInt
     ) {
         let request = MKDirections.Request()
         request.source = sourceItem
         request.destination = destinationItem
-        request.transportType = self.transportType
+        request.transportType = requestedTransportType
         request.requestsAlternateRoutes = false
 
         print("Calculating route with transport type: \(self.transportType.rawValue)")
 
-        let directions = MKDirections(request: request)
+        let directions = directionsFactory(request)
         self.ongoingDirections = directions
         let initialLocation = RouteInitialLocation.location(
             for: sourceItem.placemark.coordinate
         )
-        directions.calculate { [weak self] response, error in
-            // MapKit documents this callback as main-thread-only, but its
-            // imported @Sendable signature is not MainActor-annotated.
-            MainActor.assumeIsolated {
-                guard let self, self.routeCalculationGeneration == generation else { return }
-                self.ongoingDirections = nil
+        directions.calculate { [weak self] result in
+            guard let self, self.routeCalculationGeneration == generation else { return }
+            self.ongoingDirections = nil
 
-                if let error = error {
-                    print("Error calculating route: \(error.localizedDescription)")
-                    // SHOW ERROR ON SCREEN
-                    self.routeCalculation.status = "Err: \(error.localizedDescription)"
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                        guard self.routeCalculationGeneration == generation else { return }
-                        self.routeCalculation.isCalculating = false
-                        self.routeCalculation.status = ""
-                    }
-                    self.completeNavigationStart(
-                        .failed(error.localizedDescription),
-                        generation: generation
-                    )
-                    return
+            switch result {
+            case .failure(let error):
+                print("Error calculating route: \(error.localizedDescription)")
+                // SHOW ERROR ON SCREEN
+                self.routeCalculation.status = "Err: \(error.localizedDescription)"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                    guard self.routeCalculationGeneration == generation else { return }
+                    self.routeCalculation.isCalculating = false
+                    self.routeCalculation.status = ""
                 }
-
-                guard let route = response?.routes.first else {
+                self.completeNavigationStart(
+                    .failed(error.localizedDescription),
+                    generation: generation
+                )
+                return
+            case .success(let routes):
+                guard let route = routes.first else {
                     print("No routes found")
                     self.routeCalculation.status = "No route available"
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
@@ -950,7 +1033,9 @@ extension BikeComputerCoordinator {
                 // Store the route for map display
                 self.currentRoute = route
                 self.navigationDestination = destinationItem
+                self.transportType = requestedTransportType
                 self.routeDeviationDetector.reset()
+                self.lastRerouteRequestDate = .distantPast
 
                 // Start navigation from the same source MapKit used to calculate the route.
                 self.navEngine.startNavigation(
@@ -960,7 +1045,9 @@ extension BikeComputerCoordinator {
                 )
 
                 // Enable location tracking for navigation
-                self.locationManager.setNavigating(!isTestMode)
+                if self.startServices {
+                    self.locationManager.setNavigating(!isTestMode)
+                }
 
                 self.completeNavigationStart(.started, generation: generation)
 
@@ -976,6 +1063,7 @@ extension BikeComputerCoordinator {
     private func evaluateRerouting(for gpsLocation: CLLocation) {
         guard navEngine.isNavigating,
               !navEngine.isSimulationMode,
+              !routeCalculation.isCalculating,
               ongoingRerouteDirections == nil,
               let route = currentRoute,
               let destination = navigationDestination else {
@@ -983,14 +1071,14 @@ extension BikeComputerCoordinator {
             return
         }
 
-        let now = Date()
-        guard now.timeIntervalSince(lastRerouteRequestDate) >= rerouteCooldown else {
+        guard now().timeIntervalSince(lastRerouteRequestDate) >= rerouteCooldown else {
             routeDeviationDetector.reset()
             return
         }
 
         let routeLocation = CoordinateConverter.mapKitRouteLocation(fromGPSLocation: gpsLocation)
-        guard let distanceToRoute = RouteDeviation.distance(from: routeLocation, to: route.polyline),
+        guard let distanceToRoute = navEngine.distanceToCurrentStep(from: routeLocation)
+                ?? RouteDeviation.distance(from: routeLocation, to: route.polyline),
               routeDeviationDetector.shouldReroute(
                 distanceToRoute: distanceToRoute,
                 horizontalAccuracy: gpsLocation.horizontalAccuracy
@@ -1015,36 +1103,53 @@ extension BikeComputerCoordinator {
         request.transportType = transportType
         request.requestsAlternateRoutes = false
 
-        lastRerouteRequestDate = Date()
+        lastRerouteRequestDate = now()
         print("Off route by \(Int(distanceToRoute.rounded()))m; requesting reroute")
 
-        let directions = MKDirections(request: request)
+        let directions = directionsFactory(request)
         ongoingRerouteDirections = directions
-        directions.calculate { [weak self] response, error in
-            MainActor.assumeIsolated {
-                guard let self,
-                      let activeDirections = self.ongoingRerouteDirections,
-                      activeDirections === directions else {
-                    return
-                }
-                self.ongoingRerouteDirections = nil
+        latestRerouteLocation = routeLocation
+        directions.calculate { [weak self] result in
+            guard let self,
+                  let activeDirections = self.ongoingRerouteDirections,
+                  activeDirections === directions else {
+                return
+            }
+            self.ongoingRerouteDirections = nil
 
-                if let error {
-                    print("Reroute failed: \(error.localizedDescription)")
-                    return
-                }
-
+            switch result {
+            case .failure(let error):
+                self.latestRerouteLocation = nil
+                print("Reroute failed: \(error.localizedDescription)")
+                return
+            case .success(let routes):
                 guard self.navEngine.isNavigating,
-                      let route = response?.routes.first else {
+                      let route = routes.first else {
+                    self.latestRerouteLocation = nil
                     print("Reroute returned no route")
+                    return
+                }
+
+                let latestRouteLocation = self.latestRerouteLocation ?? routeLocation
+                self.latestRerouteLocation = nil
+                if let latestDistanceToRoute = RouteDeviation.distance(
+                    from: latestRouteLocation,
+                    to: route.polyline
+                ), self.routeDeviationDetector.isOffRoute(
+                    distanceToRoute: latestDistanceToRoute,
+                    horizontalAccuracy: latestRouteLocation.horizontalAccuracy
+                ) {
+                    print("Discarding stale reroute response; rider is now \(Int(latestDistanceToRoute.rounded()))m away")
+                    self.routeDeviationDetector.reset()
                     return
                 }
 
                 self.currentRoute = route
                 self.routeDeviationDetector.reset()
-                let latestRouteLocation = self.currentLocation
-                    .map(CoordinateConverter.mapKitRouteLocation(fromGPSLocation:)) ?? routeLocation
-                self.navEngine.replaceRoute(with: route, currentLocation: latestRouteLocation)
+                self.navEngine.replaceRoute(
+                    with: route,
+                    currentLocation: latestRouteLocation
+                )
                 print("Reroute applied: \(Int(route.distance.rounded()))m, \(route.steps.count) steps")
             }
         }

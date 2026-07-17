@@ -44,6 +44,7 @@ class NavigationEngine: NSObject, ObservableObject {
     private var rideDistanceMeters: CLLocationDistance = 0
     private var lastRideLocation: CLLocation?
     private var lastRouteRemainingMeters: CLLocationDistance?
+    private let now: () -> Date
     
     // Simulation state
     private var simulationTimer: Timer?
@@ -56,6 +57,11 @@ class NavigationEngine: NSObject, ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let liveLocationStartTolerance: CLLocationDistance = 150
     private let maneuverArrivalRadius: CLLocationDistance = 20
+
+    init(now: @escaping () -> Date = Date.init) {
+        self.now = now
+        super.init()
+    }
     
     // MARK: - Public Methods
     
@@ -132,11 +138,17 @@ class NavigationEngine: NSObject, ObservableObject {
     }
 
     /// Replace an active route after rerouting without resetting ride telemetry.
-    func replaceRoute(with route: MKRoute, currentLocation: CLLocation) {
+    func replaceRoute(
+        with route: MKRoute,
+        currentLocation: CLLocation
+    ) {
         guard isNavigating, !isSimulationMode else { return }
 
         currentRoute = route
-        currentStepIndex = 0
+        currentStepIndex = RouteStepSelection.closestNavigableStepIndex(
+            to: currentLocation,
+            in: route
+        ) ?? 0
         currentSnapshot = nil
         lastManeuverStepIndex = nil
         lastManeuverRemainingDistance = nil
@@ -153,6 +165,15 @@ class NavigationEngine: NSObject, ObservableObject {
         resendCurrentDeviceGpsPosition()
 
         print("Navigation route replaced with \(route.steps.count) steps")
+    }
+
+    func distanceToCurrentStep(from location: CLLocation) -> CLLocationDistance? {
+        guard let route = currentRoute,
+              currentStepIndex < route.steps.count else { return nil }
+
+        return route.steps[currentStepIndex...].lazy.compactMap {
+            RouteDeviation.distance(from: location, to: $0.polyline)
+        }.first
     }
     
     /// Stop navigation
@@ -492,7 +513,7 @@ class NavigationEngine: NSObject, ObservableObject {
     }
 
     private func resetRideTelemetry(startingAt location: CLLocation?) {
-        rideStartDate = location == nil ? nil : Date()
+        rideStartDate = location == nil ? nil : now()
         rideDistanceMeters = 0
         lastRideLocation = location
         lastRouteRemainingMeters = nil
@@ -500,7 +521,7 @@ class NavigationEngine: NSObject, ObservableObject {
 
     private func updateRideTelemetry(gpsLocation: CLLocation, routeLocation: CLLocation?) {
         if rideStartDate == nil {
-            rideStartDate = Date()
+            rideStartDate = now()
         }
 
         if let lastRideLocation {
@@ -535,7 +556,7 @@ class NavigationEngine: NSObject, ObservableObject {
         let fractionRemaining = clampedDistance / route.distance
         let remainingTime = max(route.expectedTravelTime * fractionRemaining, 0)
         routeRemainingTime = remainingTime
-        expectedArrivalDate = Date().addingTimeInterval(remainingTime)
+        expectedArrivalDate = now().addingTimeInterval(remainingTime)
     }
     
     /// Extract clean instruction text from MKRoute.Step
@@ -595,7 +616,7 @@ class NavigationEngine: NSObject, ObservableObject {
                                     speedMetersPerSecond: includeRideTelemetry ? location.speed : nil,
                                     altitudeMeters: includeRideTelemetry ? location.altitude : nil,
                                     distanceTraveledMeters: includeRideTelemetry ? rideDistanceMeters : nil,
-                                    elapsedSeconds: includeRideTelemetry ? rideStartDate.map { Date().timeIntervalSince($0) } : nil,
+                                    elapsedSeconds: includeRideTelemetry ? rideStartDate.map { now().timeIntervalSince($0) } : nil,
                                     routeRemainingMeters: includeRideTelemetry ? lastRouteRemainingMeters : nil)
     }
 
