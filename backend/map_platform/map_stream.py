@@ -340,6 +340,31 @@ def signed_manifest_payload(manifest: bytes) -> bytes:
     return SIGNATURE_DOMAIN + manifest
 
 
+def _without_redundant_text_fallbacks(manifest: dict[str, Any]) -> dict[str, Any]:
+    normalized = deepcopy(manifest)
+    files = normalized.get("files")
+    if not isinstance(files, list):
+        return normalized
+    binary_stems = {
+        file["path"][:-4]
+        for file in files
+        if isinstance(file, dict)
+        and isinstance(file.get("path"), str)
+        and file["path"].endswith(".fmb")
+    }
+    normalized["files"] = [
+        file
+        for file in files
+        if not (
+            isinstance(file, dict)
+            and isinstance(file.get("path"), str)
+            and file["path"].endswith(".fmp")
+            and file["path"][:-4] in binary_stems
+        )
+    ]
+    return normalized
+
+
 def build_stream_prefix(
     manifest: bytes,
     envelope: MapStreamSignatureEnvelope,
@@ -368,7 +393,9 @@ def write_map_stream_artifact(
     resolved_root = root.resolve()
     destination = Path(output_path)
     canonicalization_started = time.perf_counter()
-    manifest_bytes = canonical_manifest_bytes(manifest)
+    manifest_bytes = canonical_manifest_bytes(
+        _without_redundant_text_fallbacks(manifest)
+    )
     canonical_manifest = json.loads(manifest_bytes)
     files = canonical_manifest["files"]
     file_count = len(files)

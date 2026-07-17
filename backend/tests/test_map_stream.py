@@ -312,6 +312,59 @@ class MapStreamFormatTests(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.code, "map_stream_build_failed")
 
+    def test_artifact_writer_omits_redundant_oversized_text_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            map_id = "binary-preferred-map"
+            binary_path = f"VECTMAP/{map_id}/+0000+0000/1.fmb"
+            ascii_path = f"VECTMAP/{map_id}/+0000+0000/1.fmp"
+            binary = root / binary_path
+            ascii_fallback = root / ascii_path
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"binary-map-block")
+            ascii_fallback.write_bytes(b"x" * (MAX_BLOCK_BYTES + 1))
+            manifest = {
+                "schemaVersion": 1,
+                "mapId": map_id,
+                "files": [
+                    {
+                        "path": ascii_path,
+                        "bytes": ascii_fallback.stat().st_size,
+                        "sha256": hashlib.sha256(ascii_fallback.read_bytes()).hexdigest(),
+                    },
+                    {
+                        "path": binary_path,
+                        "bytes": binary.stat().st_size,
+                        "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                    },
+                ],
+            }
+            signer = P256MapArtifactSigner(
+                "map-writer-test",
+                ec.derive_private_key(4, ec.SECP256R1()),
+            )
+
+            build = write_map_stream_artifact(
+                root,
+                manifest,
+                signer,
+                root / "binary-preferred.bmap",
+            )
+
+            stream = build.path.read_bytes()
+            header = MapStreamHeader.decode(stream[:FIXED_HEADER_BYTES])
+            layout = MapStreamLayout.from_header(header, len(stream))
+            stream_manifest = json.loads(
+                stream[layout.manifest_offset : layout.signature_envelope_offset]
+            )
+            self.assertEqual(build.file_count, 1)
+            self.assertEqual(build.payload_bytes, binary.stat().st_size)
+            self.assertEqual(
+                [file["path"] for file in stream_manifest["files"]],
+                [binary_path],
+            )
+            self.assertEqual(stream[layout.payload_offset :], binary.read_bytes())
+
 
 if __name__ == "__main__":
     unittest.main()
