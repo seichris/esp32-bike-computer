@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -44,9 +45,10 @@ class FixtureMapBuildPipeline(MapBuildPipeline):
         directory = raw_output_dir / "+0000+0000"
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "1.fmb").write_bytes(b"first-map-block")
+        (directory / "1.fmp").write_bytes(b"redundant-text-fallback")
         (directory / "2.fmp").write_bytes(b"second-map-block")
         if on_progress:
-            on_progress(2, 2)
+            on_progress(3, 3)
 
 
 class PipelineArtifactTests(unittest.TestCase):
@@ -134,6 +136,13 @@ class PipelineArtifactTests(unittest.TestCase):
             self.assertEqual(first.artifact_metrics["streamFileCount"], 2)
             self.assertEqual(first.artifact_metrics["streamPayloadBytes"], 31)
             self.assertEqual(set(pending_keys), {artifact.object_key for artifact in first.artifacts})
+            zip_path = artifact_store.local_path(first_zip.object_key)
+            self.assertIsNotNone(zip_path)
+            with zipfile.ZipFile(zip_path) as archive:
+                self.assertIn(
+                    f"VECTMAP/{job.map_id}/+0000+0000/1.fmp",
+                    archive.namelist(),
+                )
 
 
 if __name__ == "__main__":
