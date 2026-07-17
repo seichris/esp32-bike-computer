@@ -42,13 +42,17 @@ uvicorn --factory map_platform.api:create_app --reload --port 8080
 Create a custom bbox job:
 
 ```sh
+credential="$(curl -s -X POST http://localhost:8080/v1/installations)"
+installation_id="$(printf '%s' "$credential" | python -c 'import json,sys; print(json.load(sys.stdin)["clientInstallationId"])')"
+installation_token="$(printf '%s' "$credential" | python -c 'import json,sys; print(json.load(sys.stdin)["clientInstallationToken"])')"
 curl -s http://localhost:8080/v1/map-jobs \
   -H 'content-type: application/json' \
+  -H "x-installation-token: $installation_token" \
   -d '{
     "mode": "custom_bbox",
     "displayName": "Singapore central",
     "bbox": [103.75, 1.24, 103.93, 1.37],
-    "clientInstallationId": "installation-12345678",
+    "clientInstallationId": "'"$installation_id"'",
     "clientRequestId": "request-12345678",
     "installOnDevice": false,
     "target": { "renderer": "esp32-fmb", "firmwareVersion": "0.0.0" }
@@ -87,16 +91,34 @@ enough CPU, RAM, and temporary disk for the largest allowed PBF cut-out.
 
 Required Coolify secrets:
 
-- `MAP_PLATFORM_API_TOKEN`: bearer token used by the iOS app for job creation,
-  job polling, and signed download URL creation. Treat it as a client token,
-  because it is embedded in distributed app builds.
 - `MAP_PLATFORM_DOWNLOAD_SECRET`: HMAC secret for signed map-pack downloads.
   Use a separate long random value so signed URLs survive API restarts without
-  reusing the API token as the signing key.
+  reusing another credential as the signing key.
 - `MAP_PLATFORM_INSTALLATION_SECRET`: separate 32-byte-or-longer HMAC secret
   for stateless v2 installation credentials. Rotate it by moving the old value
   into comma-separated `MAP_PLATFORM_INSTALLATION_PREVIOUS_SECRETS`, deploy the
   new current value, then remove retired values after the app migration window.
+
+The public iOS app contains no server-wide credential. It requests a unique
+installation credential from `POST /v1/installations`, stores it in the
+Keychain, and presents it only for installation-owned resources. Issuance,
+map creation, download-URL creation, and the general public API are protected
+by persistent limits in `/data/rate-limits.sqlite3`. Defaults are intentionally
+conservative and can be tuned with:
+
+- `MAP_PLATFORM_PUBLIC_REQUEST_LIMIT_PER_MINUTE` (default `240` per IP)
+- `MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY` (default `3` per IP)
+- `MAP_PLATFORM_MAP_CREATE_LIMIT_PER_HOUR` (default `4` per installation)
+- `MAP_PLATFORM_MAP_CREATE_IP_LIMIT_PER_DAY` (default `20` per IP)
+- `MAP_PLATFORM_DOWNLOAD_URL_LIMIT_PER_HOUR` (default `30` per installation)
+- `MAP_PLATFORM_DOWNLOAD_URL_IP_LIMIT_PER_HOUR` (default `60` per IP)
+
+Set `MAP_PLATFORM_TRUSTED_PROXY_CIDRS` to the comma-separated CIDRs of the
+Coolify reverse proxies that overwrite or append `X-Forwarded-For`. Forwarded
+addresses are ignored unless the immediate peer is trusted, and the resolver
+walks the chain from the right to prevent client-supplied spoofing. IPv6
+addresses are grouped by `/64` so privacy-address rotation cannot trivially
+bypass a per-client quota.
 
 Required before enabling Bike Map Stream generation:
 

@@ -141,7 +141,6 @@ jobs:
         run: python -m unittest discover -s tests
       - name: Production Compose config
         env:
-          MAP_PLATFORM_API_TOKEN: ci-api-token
           MAP_PLATFORM_DOWNLOAD_SECRET: ci-download-secret
           MAP_PLATFORM_INSTALLATION_SECRET: ci-installation-secret-32-bytes-minimum
           MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS: "86400"
@@ -155,7 +154,6 @@ jobs:
       - name: Smoke-start backend production image
         run: >-
           docker run --rm
-          -e MAP_PLATFORM_API_TOKEN=ci-api-token
           -e MAP_PLATFORM_DOWNLOAD_SECRET=ci-download-secret
           -e MAP_PLATFORM_INSTALLATION_SECRET=ci-installation-secret-32-bytes-minimum
           -e MAP_PLATFORM_DATA_ROOT=/tmp/map-platform-data

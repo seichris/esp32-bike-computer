@@ -20,7 +20,6 @@ import Security
 
 private enum OfflineMapDefaults {
     nonisolated static let serverURLKey = "offlineMap.serverURL"
-    nonisolated static let apiTokenKey = "offlineMap.apiToken"
     nonisolated static let centerLatitudeKey = "offlineMap.centerLatitude"
     nonisolated static let centerLongitudeKey = "offlineMap.centerLongitude"
     nonisolated static let sideLengthKey = "offlineMap.sideLengthKm"
@@ -42,6 +41,19 @@ private enum OfflineMapDefaults {
     nonisolated static let legacyServerURLs = [
         "http://rhi0maej6bwo33hn0im6h4lf.178.18.245.246.sslip.io"
     ]
+}
+
+nonisolated enum OfflineMapSharedSecretMigration {
+    private static let legacyKeys = [
+        "offlineMap.apiToken",
+        "offlineMap.activeJobAPIToken",
+    ]
+
+    static func removeLegacyValues(defaults: UserDefaults) {
+        for key in legacyKeys {
+            defaults.removeObject(forKey: key)
+        }
+    }
 }
 
 @MainActor
@@ -821,7 +833,6 @@ nonisolated enum OfflineMapJobPersistence {
     private static let activeJobIdKey = "offlineMap.activeJobId"
     private static let installOnDeviceKey = "offlineMap.activeJobInstallOnDevice"
     private static let serverURLKey = "offlineMap.activeJobServerURL"
-    private static let apiTokenKey = "offlineMap.activeJobAPIToken"
     private static let downloadedJobIdKey = "offlineMap.activeJobDownloadedJobId"
     private static let downloadedMapIdKey = "offlineMap.activeJobDownloadedMapId"
 
@@ -857,16 +868,10 @@ nonisolated enum OfflineMapJobPersistence {
         return value
     }
 
-    static func apiTokenString(defaults: UserDefaults) -> String? {
-        guard defaults.object(forKey: apiTokenKey) != nil else { return nil }
-        return defaults.string(forKey: apiTokenKey) ?? ""
-    }
-
     static func save(
         jobId: String,
         installOnDevice: Bool = false,
         serverURLString: String? = nil,
-        apiTokenString: String? = nil,
         defaults: UserDefaults
     ) {
         defaults.set(jobId, forKey: activeJobIdKey)
@@ -877,9 +882,6 @@ nonisolated enum OfflineMapJobPersistence {
         }
         if let serverURLString, !serverURLString.isEmpty {
             defaults.set(serverURLString, forKey: serverURLKey)
-        }
-        if let apiTokenString {
-            defaults.set(apiTokenString, forKey: apiTokenKey)
         }
     }
 
@@ -897,7 +899,6 @@ nonisolated enum OfflineMapJobPersistence {
         defaults.removeObject(forKey: activeJobIdKey)
         defaults.removeObject(forKey: installOnDeviceKey)
         defaults.removeObject(forKey: serverURLKey)
-        defaults.removeObject(forKey: apiTokenKey)
         defaults.removeObject(forKey: downloadedJobIdKey)
         defaults.removeObject(forKey: downloadedMapIdKey)
     }
@@ -1202,9 +1203,6 @@ final class OfflineMapManager: ObservableObject {
     @Published var serverURLString: String {
         didSet { defaults.set(serverURLString, forKey: OfflineMapDefaults.serverURLKey) }
     }
-    @Published var apiToken: String {
-        didSet { defaults.set(apiToken, forKey: OfflineMapDefaults.apiTokenKey) }
-    }
     @Published var centerLatitude: String {
         didSet { defaults.set(centerLatitude, forKey: OfflineMapDefaults.centerLatitudeKey) }
     }
@@ -1347,7 +1345,6 @@ final class OfflineMapManager: ObservableObject {
         self.clientInstallationToken = installationCredential?.clientInstallationToken
         self.packDisplayNames = defaults.dictionary(forKey: OfflineMapDefaults.packDisplayNamesKey) as? [String: String] ?? [:]
         self.serverURLString = resolvedServerURL
-        self.apiToken = Self.resolvedAPIToken(defaults: defaults)
         self.centerLatitude = defaults.string(forKey: OfflineMapDefaults.centerLatitudeKey) ?? "35.16755"
         self.centerLongitude = defaults.string(forKey: OfflineMapDefaults.centerLongitudeKey) ?? "136.89451"
         self.sideLengthKm = defaults.string(forKey: OfflineMapDefaults.sideLengthKey) ?? "25"
@@ -1361,7 +1358,7 @@ final class OfflineMapManager: ObservableObject {
             self.lastTransferOutcome = restoredTransferOutcome
         }
         defaults.set(serverURLString, forKey: OfflineMapDefaults.serverURLKey)
-        defaults.set(apiToken, forKey: OfflineMapDefaults.apiTokenKey)
+        OfflineMapSharedSecretMigration.removeLegacyValues(defaults: defaults)
         defaults.set(lastTransferOutcome, forKey: OfflineMapDefaults.lastTransferOutcomeKey)
         refreshCachedPacks()
         restoreLastTransferPresentation()
@@ -1462,22 +1459,15 @@ final class OfflineMapManager: ObservableObject {
         let persistedJobId = OfflineMapJobPersistence.activeJobId(defaults: defaults)
         let persistedInstallIntent = OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults)
         let persistedServerURL = OfflineMapJobPersistence.serverURLString(defaults: defaults)
-        let persistedAPIToken = OfflineMapJobPersistence.apiTokenString(defaults: defaults)
         if persistedJobId == nil {
             isServerRecoveryCheckPending = true
         }
 
         startMapJobTask { manager in
-            let recoveryConnection = manager.recoveryConnection(
-                persistedServerURL: persistedServerURL,
-                persistedAPIToken: persistedAPIToken
+            let recoveryServerURL = manager.recoveryServerURL(
+                persistedServerURL: persistedServerURL
             )
-            let recoveryServerURL = recoveryConnection.serverURL
-            let recoveryAPIToken = recoveryConnection.apiToken
-            let client = try manager.makeClient(
-                serverURLString: recoveryServerURL,
-                apiTokenString: recoveryAPIToken
-            )
+            let client = try manager.makeClient(serverURLString: recoveryServerURL)
             var jobId = persistedJobId
             var shouldInstallOnDevice = persistedInstallIntent
 
@@ -2259,8 +2249,7 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func makeClient(
-        serverURLString: String? = nil,
-        apiTokenString: String? = nil
+        serverURLString: String? = nil
     ) throws -> OfflineMapPlatformClient {
         let value = serverURLString ?? self.serverURLString
         guard let url = URL(string: value), url.scheme != nil else {
@@ -2268,22 +2257,8 @@ final class OfflineMapManager: ObservableObject {
         }
         let credential = installationCredentialStore.load(serverURLString: value)
         let installationID = credential?.clientInstallationId ?? legacyClientInstallationId
-        let resolvedAPIToken: String?
-        if let apiTokenString {
-            resolvedAPIToken = apiTokenString
-        } else if OfflineMapServerIdentity.isManaged(value) {
-            let bundled = OfflineMapServiceConfig.apiToken
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            resolvedAPIToken = bundled.isEmpty ? apiToken : bundled
-        } else if OfflineMapServerIdentity.normalized(value) ==
-            OfflineMapServerIdentity.normalized(self.serverURLString) {
-            resolvedAPIToken = apiToken
-        } else {
-            resolvedAPIToken = nil
-        }
         return OfflineMapPlatformClient(
             baseURL: url,
-            apiToken: resolvedAPIToken,
             clientInstallationId: installationID,
             clientInstallationToken: credential?.clientInstallationToken,
             session: mapPlatformSession
@@ -2309,7 +2284,6 @@ final class OfflineMapManager: ObservableObject {
             }
             return OfflineMapPlatformClient(
                 baseURL: client.baseURL,
-                apiToken: client.apiToken,
                 clientInstallationId: credential.clientInstallationId,
                 clientInstallationToken: credential.clientInstallationToken,
                 session: mapPlatformSession
@@ -2322,26 +2296,21 @@ final class OfflineMapManager: ObservableObject {
         }
     }
 
-    private func recoveryConnection(
-        persistedServerURL: String?,
-        persistedAPIToken: String?
-    ) -> (serverURL: String, apiToken: String?) {
+    private func recoveryServerURL(
+        persistedServerURL: String?
+    ) -> String {
         guard let persistedServerURL,
               !persistedServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return (serverURLString, apiToken)
+            return serverURLString
         }
         if OfflineMapServerIdentity.isManaged(persistedServerURL) {
-            let bundledToken = OfflineMapServiceConfig.apiToken
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let managedToken = bundledToken.isEmpty &&
-                OfflineMapServerIdentity.isManaged(serverURLString) ? apiToken : bundledToken
-            return (OfflineMapServiceConfig.productionServerURLString, managedToken)
+            return OfflineMapServiceConfig.productionServerURLString
         }
         if OfflineMapServerIdentity.normalized(persistedServerURL) ==
             OfflineMapServerIdentity.normalized(serverURLString) {
-            return (serverURLString, apiToken)
+            return serverURLString
         }
-        return (persistedServerURL, persistedAPIToken)
+        return persistedServerURL
     }
 
     private func adoptRecoveredJob(_ job: OfflineMapJob) {
@@ -2359,21 +2328,6 @@ final class OfflineMapManager: ObservableObject {
         let stored = defaults.string(forKey: OfflineMapDefaults.serverURLKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if OfflineMapServerIdentity.isManaged(stored) {
             return OfflineMapServiceConfig.productionServerURLString
-        }
-        return stored
-    }
-
-    nonisolated static func resolvedAPIToken(
-        defaults: UserDefaults,
-        bundledToken: String = OfflineMapServiceConfig.apiToken
-    ) -> String {
-        let bundled = bundledToken
-        let stored = defaults.string(forKey: OfflineMapDefaults.apiTokenKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let storedServer = defaults.string(forKey: OfflineMapDefaults.serverURLKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let usesBundledServer = OfflineMapServerIdentity.isManaged(storedServer)
-        if usesBundledServer, !bundled.isEmpty {
-            return bundled
         }
         return stored
     }
@@ -2804,7 +2758,6 @@ final class OfflineMapManager: ObservableObject {
             jobId: jobId,
             installOnDevice: installOnDevice,
             serverURLString: serverURLString,
-            apiTokenString: apiToken,
             defaults: defaults
         )
     }

@@ -1999,10 +1999,9 @@ struct NavigationProtocolTests {
         OfflineMapTestURLProtocol.configure { request in
             switch request.url?.path {
             case "/v1/installations":
-                assertEqual(
-                    request.value(forHTTPHeaderField: "Authorization"),
-                    "Bearer api-secret",
-                    "installation registration uses service authentication"
+                assert(
+                    request.value(forHTTPHeaderField: "Authorization") == nil,
+                    "installation registration does not send a shared app secret"
                 )
                 return (200, try! JSONEncoder().encode(credential))
             case "/v1/map-packs/map/artifacts/bike-map-stream-v1/download-url":
@@ -2069,7 +2068,6 @@ struct NavigationProtocolTests {
         defer { OfflineMapTestURLProtocol.reset() }
         let unregisteredClient = OfflineMapPlatformClient(
             baseURL: URL(string: "https://maps.example.com")!,
-            apiToken: "api-secret",
             clientInstallationId: "legacy-installation",
             session: session
         )
@@ -2081,7 +2079,6 @@ struct NavigationProtocolTests {
             )
             let registeredClient = OfflineMapPlatformClient(
                 baseURL: URL(string: "https://maps.example.com")!,
-                apiToken: "api-secret",
                 clientInstallationId: credential.clientInstallationId,
                 clientInstallationToken: credential.clientInstallationToken,
                 mapStreamTrustCapabilities: "map-prod-1=" + String(repeating: "5", count: 64),
@@ -3726,7 +3723,6 @@ struct NavigationProtocolTests {
             jobId: "job-resume",
             installOnDevice: true,
             serverURLString: "https://maps.example.com",
-            apiTokenString: "job-token",
             defaults: defaults
         )
         OfflineMapJobPersistence.markPackDownloaded(
@@ -3758,11 +3754,6 @@ struct NavigationProtocolTests {
             "map-resume",
             "downloaded pack identity survives app relaunch without server access"
         )
-        assertEqual(
-            OfflineMapJobPersistence.apiTokenString(defaults: defaults),
-            "job-token",
-            "pending job preserves its originating server credential"
-        )
         OfflineMapJobPersistence.clear(defaults: defaults)
         assertEqual(
             OfflineMapJobPersistence.activeJobId(defaults: defaults),
@@ -3787,11 +3778,6 @@ struct NavigationProtocolTests {
             OfflineMapJobPersistence.downloadedMapId(defaults: defaults),
             nil,
             "completed map job clears downloaded map identity"
-        )
-        assertEqual(
-            OfflineMapJobPersistence.apiTokenString(defaults: defaults),
-            nil,
-            "completed map job clears its originating credential"
         )
         OfflineMapRecoveryHistory.markHandled(jobId: "job-resume", defaults: defaults)
         OfflineMapRecoveryHistory.markHandled(jobId: "job-other", defaults: defaults)
@@ -4457,11 +4443,11 @@ struct NavigationProtocolTests {
             jobId: "job-persisted",
             installOnDevice: true,
             serverURLString: "https://persisted.example",
-            apiTokenString: "persisted-token",
             defaults: persistedDefaults
         )
         persistedDefaults.set("https://current-setting.example", forKey: "offlineMap.serverURL")
-        persistedDefaults.set("current-token", forKey: "offlineMap.apiToken")
+        persistedDefaults.set("legacy-shared-token", forKey: "offlineMap.apiToken")
+        persistedDefaults.set("legacy-job-token", forKey: "offlineMap.activeJobAPIToken")
         var persistedDownloadCount = 0
         OfflineMapTestURLProtocol.configure { request in
             if request.url?.path == "/v1/map-jobs/job-persisted" {
@@ -4525,9 +4511,14 @@ struct NavigationProtocolTests {
         )
         assert(
             OfflineMapTestURLProtocol.requests().allSatisfy {
-                $0.value(forHTTPHeaderField: "Authorization") == "Bearer persisted-token"
+                $0.value(forHTTPHeaderField: "Authorization") == nil
             },
-            "persisted recovery uses its originating server credential"
+            "persisted recovery never sends a shared server credential"
+        )
+        assert(
+            persistedDefaults.object(forKey: "offlineMap.apiToken") == nil &&
+                persistedDefaults.object(forKey: "offlineMap.activeJobAPIToken") == nil,
+            "app launch removes previously persisted shared API credentials"
         )
         let relaunchedPersistedManager = OfflineMapManager(
             defaults: persistedDefaults,
@@ -4802,7 +4793,6 @@ struct NavigationProtocolTests {
         OfflineMapJobPersistence.save(
             jobId: "job-managed-token",
             serverURLString: "https://maps.8o.vc:443/",
-            apiTokenString: "stale-bundled-token",
             defaults: managedDefaults
         )
         managedDefaults.set("https://unrelated-custom.example", forKey: "offlineMap.serverURL")
@@ -4831,26 +4821,22 @@ struct NavigationProtocolTests {
         }
         managedManager.resumePendingMapJobIfNeeded()
         let managedCompleted = await waitForMapTaskCompletion(managedManager)
-        assert(managedCompleted, "managed-server recovery should complete after token rotation")
-        let expectedManagedAuthorization = OfflineMapServiceConfig.apiToken.isEmpty ?
-            nil : "Bearer \(OfflineMapServiceConfig.apiToken)"
+        assert(managedCompleted, "managed-server recovery should complete without a bundled secret")
         assert(
             OfflineMapTestURLProtocol.requests().allSatisfy {
                 $0.url?.host == URL(string: OfflineMapServiceConfig.productionServerURLString)?.host &&
-                    $0.value(forHTTPHeaderField: "Authorization") == expectedManagedAuthorization
+                    $0.value(forHTTPHeaderField: "Authorization") == nil
             },
-            "managed-server recovery uses the updated bundled endpoint and credential"
+            "managed-server recovery uses the production endpoint without global authorization"
+        )
+        assert(
+            managedDefaults.object(forKey: "offlineMap.apiToken") == nil &&
+                managedDefaults.object(forKey: "offlineMap.activeJobAPIToken") == nil,
+            "managed-server recovery removes stale shared credentials"
         )
         assert(
             OfflineMapTestURLProtocol.requests().allSatisfy {
-                $0.value(forHTTPHeaderField: "Authorization") != "Bearer stale-bundled-token"
-            },
-            "managed-server recovery never reuses a stale bundled credential"
-        )
-        assert(
-            OfflineMapTestURLProtocol.requests().allSatisfy {
-                $0.url?.host != "unrelated-custom.example" &&
-                    $0.value(forHTTPHeaderField: "Authorization") != "Bearer unrelated-custom-token"
+                $0.url?.host != "unrelated-custom.example"
             },
             "managed recovery ignores unrelated current custom settings"
         )
@@ -4867,7 +4853,6 @@ struct NavigationProtocolTests {
         OfflineMapJobPersistence.save(
             jobId: "job-rotated-custom-token",
             serverURLString: "https://custom-rotation.example:443/",
-            apiTokenString: "old-custom-token",
             defaults: rotatedCustomDefaults
         )
         rotatedCustomDefaults.set("https://custom-rotation.example", forKey: "offlineMap.serverURL")
@@ -4896,13 +4881,13 @@ struct NavigationProtocolTests {
         }
         rotatedCustomManager.resumePendingMapJobIfNeeded()
         let rotatedCustomCompleted = await waitForMapTaskCompletion(rotatedCustomManager)
-        assert(rotatedCustomCompleted, "same-origin custom recovery should complete after token rotation")
+        assert(rotatedCustomCompleted, "same-origin custom recovery should complete without a shared token")
         assert(
             OfflineMapTestURLProtocol.requests().allSatisfy {
                 $0.url?.host == "custom-rotation.example" &&
-                    $0.value(forHTTPHeaderField: "Authorization") == "Bearer new-custom-token"
+                    $0.value(forHTTPHeaderField: "Authorization") == nil
             },
-            "same-origin custom recovery uses the current rotated credential"
+            "same-origin custom recovery uses no global authorization header"
         )
         if let url = rotatedCustomManager.downloadedPackURL {
             rotatedCustomManager.deleteCachedPack(at: url)
@@ -5428,14 +5413,16 @@ struct NavigationProtocolTests {
         }
         guard let urlRequest = try? OfflineMapPlatformClient.makeCreateJobURLRequest(
             baseURL: url,
-            apiToken: "secret",
             jobRequest: request
         ) else {
             assert(false, "create job URL request should build")
             return
         }
         assertEqual(urlRequest.url?.absoluteString, "https://maps.example.com/api/v1/map-jobs", "create job URL appends API path")
-        assertEqual(urlRequest.value(forHTTPHeaderField: "Authorization"), "Bearer secret", "create job request includes bearer token")
+        assert(
+            urlRequest.value(forHTTPHeaderField: "Authorization") == nil,
+            "create job request contains no shared authorization token"
+        )
         let body = String(data: urlRequest.httpBody ?? Data(), encoding: .utf8) ?? ""
         assert(body.contains("\"mode\":\"custom_bbox\""), "create job body includes mode")
         assert(body.contains("\"bbox\":[10,20,11,21]"), "create job body includes bbox")
@@ -5448,7 +5435,6 @@ struct NavigationProtocolTests {
         guard let baseURL = URL(string: "https://maps.example.com/api"),
               let request = try? OfflineMapPlatformClient.makeListJobsURLRequest(
                 baseURL: baseURL,
-                apiToken: "secret",
                 clientInstallationId: "installation-test"
               ) else {
             assert(false, "list jobs URL request should build")
@@ -5460,21 +5446,16 @@ struct NavigationProtocolTests {
             "https://maps.example.com/api/v1/map-jobs?clientInstallationId=installation-test",
             "list jobs request filters by installation identity"
         )
-        assertEqual(
-            request.value(forHTTPHeaderField: "Authorization"),
-            "Bearer secret",
-            "list jobs request includes bearer token"
-        )
+        assert(request.value(forHTTPHeaderField: "Authorization") == nil,
+               "list jobs request contains no shared authorization token")
         guard let jobRequest = try? OfflineMapPlatformClient.makeInstallationScopedURLRequest(
             baseURL: baseURL,
-            apiToken: "secret",
             path: "/v1/map-jobs/job-12345678",
             method: "GET",
             clientInstallationId: "installation-test"
         ),
         let downloadRequest = try? OfflineMapPlatformClient.makeInstallationScopedURLRequest(
             baseURL: baseURL,
-            apiToken: "secret",
             path: "/v1/map-packs/map-12345678/download-url",
             method: "POST",
             clientInstallationId: "installation-test",
@@ -5505,14 +5486,12 @@ struct NavigationProtocolTests {
         guard let baseURL = URL(string: "https://maps.example.com/api"),
               let displayNameRequest = try? OfflineMapPlatformClient.makeUpdateDisplayNameURLRequest(
                 baseURL: baseURL,
-                apiToken: "secret",
                 clientInstallationId: "installation-test",
                 jobId: "job-12345678",
                 displayName: "Shanghai and Suzhou"
               ),
               let downloadReceiptRequest = try? OfflineMapPlatformClient.makeRecordDownloadURLRequest(
                 baseURL: baseURL,
-                apiToken: "secret",
                 clientInstallationId: "installation-test",
                 jobId: "job-12345678",
                 receipt: OfflineMapDownloadReceiptRequest(
@@ -5532,11 +5511,8 @@ struct NavigationProtocolTests {
             "https://maps.example.com/api/v1/map-jobs/job-12345678/display-name?clientInstallationId=installation-test",
             "display name update is scoped to the installation"
         )
-        assertEqual(
-            displayNameRequest.value(forHTTPHeaderField: "Authorization"),
-            "Bearer secret",
-            "display name update includes bearer token"
-        )
+        assert(displayNameRequest.value(forHTTPHeaderField: "Authorization") == nil,
+               "display name update contains no shared authorization token")
         assertEqual(
             displayNameRequest.value(forHTTPHeaderField: "Content-Type"),
             "application/json",
@@ -5557,11 +5533,8 @@ struct NavigationProtocolTests {
             "https://maps.example.com/api/v1/map-jobs/job-12345678/downloads?clientInstallationId=installation-test",
             "download receipt is scoped to the installation"
         )
-        assertEqual(
-            downloadReceiptRequest.value(forHTTPHeaderField: "Authorization"),
-            "Bearer secret",
-            "download receipt includes bearer token"
-        )
+        assert(downloadReceiptRequest.value(forHTTPHeaderField: "Authorization") == nil,
+               "download receipt contains no shared authorization token")
         assertEqual(
             downloadReceiptRequest.value(forHTTPHeaderField: "Content-Type"),
             "application/json",
@@ -5592,24 +5565,10 @@ struct NavigationProtocolTests {
             "https://maps.8o.vc",
             "legacy offline map server URL migrates to production domain"
         )
-        assertEqual(
-            OfflineMapManager.resolvedAPIToken(
-                defaults: defaults,
-                bundledToken: "new-bundled-token"
-            ),
-            "new-bundled-token",
-            "new bundled map API token replaces a stale token after app update"
-        )
-
-        defaults.set("https://custom-map-server.example", forKey: "offlineMap.serverURL")
-        defaults.set("custom-server-token", forKey: "offlineMap.apiToken")
-        assertEqual(
-            OfflineMapManager.resolvedAPIToken(
-                defaults: defaults,
-                bundledToken: "new-bundled-token"
-            ),
-            "custom-server-token",
-            "custom server keeps its deliberate custom credential"
+        OfflineMapSharedSecretMigration.removeLegacyValues(defaults: defaults)
+        assert(
+            defaults.object(forKey: "offlineMap.apiToken") == nil,
+            "app launch removes the legacy shared map API token"
         )
     }
 

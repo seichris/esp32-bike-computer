@@ -99,10 +99,15 @@ class MapJobRunAPITests(unittest.TestCase):
                 "MAP_PLATFORM_REPO_ROOT": str(self.repo_root),
                 "MAP_PLATFORM_DATA_ROOT": self.tmp.name,
                 "MAP_PLATFORM_SOURCE_INDEX": str(self.repo_root / "backend" / "config" / "source-regions.json"),
-                "MAP_PLATFORM_API_TOKEN": "",
                 "MAP_PLATFORM_ADMIN_TOKEN": "admin-secret",
                 "MAP_PLATFORM_DOWNLOAD_SECRET": "test-secret",
                 "MAP_PLATFORM_INSTALLATION_SECRET": "test-installation-secret-32-bytes-minimum",
+                "MAP_PLATFORM_PUBLIC_REQUEST_LIMIT_PER_MINUTE": "10000",
+                "MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY": "10000",
+                "MAP_PLATFORM_MAP_CREATE_LIMIT_PER_HOUR": "10000",
+                "MAP_PLATFORM_MAP_CREATE_IP_LIMIT_PER_DAY": "10000",
+                "MAP_PLATFORM_DOWNLOAD_URL_LIMIT_PER_HOUR": "10000",
+                "MAP_PLATFORM_DOWNLOAD_URL_IP_LIMIT_PER_HOUR": "10000",
                 "MAP_PLATFORM_ARTIFACT_STORE": "filesystem",
                 "MAP_PLATFORM_ARTIFACT_ROOT": str(Path(self.tmp.name) / "artifacts"),
                 "MAP_PLATFORM_MAP_STREAM_ENABLED": "0",
@@ -152,6 +157,179 @@ class MapJobRunAPITests(unittest.TestCase):
         job = json.loads(job_path.read_text())
         job.update(values)
         job_path.write_text(json.dumps(job))
+
+    def test_installation_issuance_is_public_but_rate_limited(self):
+        limited_root = Path(self.tmp.name) / "installation-limit"
+        with patch.dict(
+            os.environ,
+            {
+                "MAP_PLATFORM_DATA_ROOT": str(limited_root),
+                "MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY": "1",
+            },
+            clear=False,
+        ):
+            client = TestClient(create_app())
+            try:
+                first = client.post("/v1/installations")
+                blocked = client.post("/v1/installations")
+            finally:
+                client.close()
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(blocked.status_code, 429)
+        self.assertEqual(blocked.json()["detail"], "request rate limit exceeded")
+        self.assertGreater(int(blocked.headers["Retry-After"]), 0)
+
+    def test_map_creation_is_limited_by_installation(self):
+        limited_root = Path(self.tmp.name) / "map-create-limit"
+        with patch.dict(
+            os.environ,
+            {
+                "MAP_PLATFORM_DATA_ROOT": str(limited_root),
+                "MAP_PLATFORM_MAP_CREATE_LIMIT_PER_HOUR": "1",
+            },
+            clear=False,
+        ):
+            client = TestClient(create_app())
+            try:
+                credential = client.post("/v1/installations").json()
+                headers = {
+                    "X-Installation-Token": credential["clientInstallationToken"]
+                }
+                payload = {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                    "clientInstallationId": credential["clientInstallationId"],
+                    "clientRequestId": "rate-limit-request-1",
+                }
+                first = client.post("/v1/map-jobs", headers=headers, json=payload)
+                payload["clientRequestId"] = "rate-limit-request-2"
+                blocked = client.post("/v1/map-jobs", headers=headers, json=payload)
+            finally:
+                client.close()
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(blocked.status_code, 429)
+        self.assertGreater(int(blocked.headers["Retry-After"]), 0)
+
+    def test_download_url_is_limited_by_installation(self):
+        limited_root = Path(self.tmp.name) / "download-url-limit"
+        with patch.dict(
+            os.environ,
+            {
+                "MAP_PLATFORM_DATA_ROOT": str(limited_root),
+                "MAP_PLATFORM_DOWNLOAD_URL_LIMIT_PER_HOUR": "1",
+            },
+            clear=False,
+        ):
+            client = TestClient(create_app())
+            try:
+                credential = client.post("/v1/installations").json()
+                headers = {
+                    "X-Installation-Token": credential["clientInstallationToken"]
+                }
+                created = client.post(
+                    "/v1/map-jobs",
+                    headers=headers,
+                    json={
+                        "mode": "custom_bbox",
+                        "bbox": [103.75, 1.24, 103.93, 1.37],
+                        "clientInstallationId": credential["clientInstallationId"],
+                        "clientRequestId": "download-limit-request",
+                    },
+                ).json()
+                job_path = limited_root / "jobs" / f"{created['jobId']}.json"
+                job = json.loads(job_path.read_text())
+                pack_path = limited_root / "download-limit-map.zip"
+                pack_path.write_bytes(b"download-limit-map")
+                job.update(
+                    status="ready",
+                    mapId="download-limit-map",
+                    packPath=str(pack_path),
+                )
+                job_path.write_text(json.dumps(job))
+                params = {
+                    "clientInstallationId": credential["clientInstallationId"],
+                    "jobId": created["jobId"],
+                }
+                first = client.post(
+                    "/v1/map-packs/download-limit-map/download-url",
+                    headers=headers,
+                    params=params,
+                )
+                blocked = client.post(
+                    "/v1/map-packs/download-limit-map/download-url",
+                    headers=headers,
+                    params=params,
+                )
+            finally:
+                client.close()
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(blocked.status_code, 429)
+        self.assertGreater(int(blocked.headers["Retry-After"]), 0)
+
+    def test_anonymous_map_creation_is_limited_by_client_address(self):
+        limited_root = Path(self.tmp.name) / "anonymous-map-create-limit"
+        with patch.dict(
+            os.environ,
+            {
+                "MAP_PLATFORM_DATA_ROOT": str(limited_root),
+                "MAP_PLATFORM_MAP_CREATE_IP_LIMIT_PER_DAY": "1",
+            },
+            clear=False,
+        ):
+            client = TestClient(create_app())
+            try:
+                payload = {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+                first = client.post("/v1/map-jobs", json=payload)
+                blocked = client.post("/v1/map-jobs", json=payload)
+            finally:
+                client.close()
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(blocked.status_code, 429)
+        self.assertGreater(int(blocked.headers["Retry-After"]), 0)
+
+    def test_public_limit_does_not_interfere_with_admin_authentication(self):
+        limited_root = Path(self.tmp.name) / "public-route-limit"
+        with patch.dict(
+            os.environ,
+            {
+                "MAP_PLATFORM_DATA_ROOT": str(limited_root),
+                "MAP_PLATFORM_PUBLIC_REQUEST_LIMIT_PER_MINUTE": "1",
+            },
+            clear=False,
+        ):
+            client = TestClient(create_app())
+            try:
+                public = client.get("/v1/source-regions")
+                run = client.post("/v1/map-jobs/missing-job/run")
+                cache = client.post("/v1/source-regions/sg/cache")
+            finally:
+                client.close()
+
+        self.assertEqual(public.status_code, 200)
+        self.assertEqual(run.status_code, 401)
+        self.assertEqual(cache.status_code, 401)
+
+    def test_legacy_global_bearer_does_not_replace_installation_credential(self):
+        credential = self.client.post("/v1/installations").json()
+        response = self.client.post(
+            "/v1/map-jobs",
+            headers={"Authorization": "Bearer previously-embedded-token"},
+            json={
+                "mode": "custom_bbox",
+                "bbox": [103.75, 1.24, 103.93, 1.37],
+                "clientInstallationId": credential["clientInstallationId"],
+                "clientRequestId": "missing-installation-proof",
+            },
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["detail"], "installation credential is required")
 
     def test_download_inventory_records_real_receipts_names_and_redacts_installations(self):
         credential = self.client.post("/v1/installations").json()
