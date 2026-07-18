@@ -473,8 +473,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var routeLineWidth: Double = 4
     @Published var streetLineWidthBoost: Double = 0
     @Published var positionMarkerScale: Double = 2
-    @Published var displayRotation: Int = 0 
-    @Published var mapRotationMode: Int = 0 // 0=North Up, 1=Course Up  // 0-3: 0°, 90°, 180°, 270°
+    @Published var mapRotationMode: Int = 0 // 0=North Up, 1=Course Up
     @Published var zoomLevel: Int = 2 // 0-4: 0=super-zoom, 1=closest, 4=farthest
     @Published var mapPlusNavigationMinPolygonSize = MapPlusNavigationDefaults.minPolygonSize
     @Published var mapPlusNavigationDetailLevel = MapPlusNavigationDefaults.detailLevel
@@ -604,7 +603,6 @@ class BLEManager: NSObject, ObservableObject {
         static let routeLineWidth = "mapSettings.routeLineWidth"
         static let streetLineWidthBoost = "mapSettings.streetLineWidthBoost"
         static let positionMarkerScale = "mapSettings.positionMarkerScale"
-        static let displayRotation = "mapSettings.displayRotation"
         static let mapRotationMode = "mapSettings.mapRotationMode"
         static let resetMapRotationModeToNorthUp = "mapSettings.resetMapRotationModeToNorthUp.v1"
         static let zoomLevel = "mapSettings.zoomLevel"
@@ -705,7 +703,6 @@ class BLEManager: NSObject, ObservableObject {
         routeLineWidth = defaults.object(forKey: SettingsKeys.routeLineWidth) as? Double ?? 4.0
         streetLineWidthBoost = defaults.object(forKey: SettingsKeys.streetLineWidthBoost) as? Double ?? 0.0
         positionMarkerScale = defaults.object(forKey: SettingsKeys.positionMarkerScale) as? Double ?? 2.0
-        displayRotation = defaults.object(forKey: SettingsKeys.displayRotation) as? Int ?? 0
         if defaults.bool(forKey: SettingsKeys.resetMapRotationModeToNorthUp) {
             mapRotationMode = defaults.object(forKey: SettingsKeys.mapRotationMode) as? Int ?? 0
         } else {
@@ -875,7 +872,6 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(routeLineWidth, forKey: SettingsKeys.routeLineWidth)
         defaults.set(streetLineWidthBoost, forKey: SettingsKeys.streetLineWidthBoost)
         defaults.set(positionMarkerScale, forKey: SettingsKeys.positionMarkerScale)
-        defaults.set(displayRotation, forKey: SettingsKeys.displayRotation)
         defaults.set(mapRotationMode, forKey: SettingsKeys.mapRotationMode)
         defaults.set(zoomLevel, forKey: SettingsKeys.zoomLevel)
         defaults.set(mapPlusNavigationMinPolygonSize, forKey: SettingsKeys.mapPlusNavigationMinPolygonSize)
@@ -2221,7 +2217,6 @@ class BLEManager: NSObject, ObservableObject {
         updateTrustedPeripheralDescription()
         log("BLE peripheral authenticated")
         requestDeviceCapabilities()
-        sendSetting(id: 4, value: Int32(displayRotation))
         sendSetting(id: 6, value: Int32(mapRotationMode))
         sendSetting(id: 11, value: tapToSwitchScreens ? 1 : 0)
         sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(deviceBrightnessPercent))

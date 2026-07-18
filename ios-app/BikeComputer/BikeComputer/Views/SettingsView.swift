@@ -791,17 +791,6 @@ private struct UICustomizationSettingsView: View {
             .disabled(!bleManager.supportsDeviceSettings ||
                       !bleManager.hasReceivedDeviceCapabilities)
 
-            Section(header: Text("Display Rotation"), footer: Text("Rotate display 90° CCW. Requires reboot.")) {
-                Toggle("Rotate 90°", isOn: Binding(
-                    get: { bleManager.displayRotation == 1 },
-                    set: { newValue in
-                        bleManager.displayRotation = newValue ? 1 : 0
-                        bleManager.sendSetting(id: 4, value: Int32(bleManager.displayRotation))
-                    }
-                ))
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
             Section(header: Text("Map Mode"), footer: Text("Applies only to the Map screen. Map + Navigation automatically uses course-up while navigating.")) {
                 Picker("Rotation", selection: $bleManager.mapRotationMode) {
                     Text("North Up").tag(0)
