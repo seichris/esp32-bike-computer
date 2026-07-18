@@ -10,6 +10,11 @@
 		57A0000C2F00000100000001 /* BikeComputerWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 57A000012F00000100000001 /* BikeComputerWatch.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		57A001032F00000100000001 /* WorkoutContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A001002F00000100000001 /* WorkoutContractTests.swift */; };
 		57A001042F00000100000001 /* WorkoutContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A001002F00000100000001 /* WorkoutContractTests.swift */; };
+		57A002012F00000100000001 /* WatchWorkoutRecoveryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A002002F00000100000001 /* WatchWorkoutRecoveryStore.swift */; };
+		57A002022F00000100000001 /* WatchWorkoutRecoveryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A002002F00000100000001 /* WatchWorkoutRecoveryStore.swift */; };
+		57A003032F00000100000001 /* WatchWorkoutManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A003002F00000100000001 /* WatchWorkoutManager.swift */; };
+		57A003042F00000100000001 /* WatchRouteRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A003012F00000100000001 /* WatchRouteRecorder.swift */; };
+		57A003052F00000100000001 /* WatchWorkoutManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A003022F00000100000001 /* WatchWorkoutManagerTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -42,6 +47,10 @@
 		57A001002F00000100000001 /* WorkoutContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = WorkoutContractTests.swift; path = ../BikeComputerTests/WorkoutContractTests.swift; sourceTree = "<group>"; };
 		57A001012F00000100000001 /* WorkoutContractiOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WorkoutContractiOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		57A001022F00000100000001 /* WorkoutContractWatchTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WorkoutContractWatchTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		57A002002F00000100000001 /* WatchWorkoutRecoveryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WatchWorkoutRecoveryStore.swift (Tests)"; path = BikeComputerWatch/Managers/WatchWorkoutRecoveryStore.swift; sourceTree = "<group>"; };
+		57A003002F00000100000001 /* WatchWorkoutManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WatchWorkoutManager.swift (Tests)"; path = BikeComputerWatch/Managers/WatchWorkoutManager.swift; sourceTree = "<group>"; };
+		57A003012F00000100000001 /* WatchRouteRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WatchRouteRecorder.swift (Tests)"; path = BikeComputerWatch/Managers/WatchRouteRecorder.swift; sourceTree = "<group>"; };
+		57A003022F00000100000001 /* WatchWorkoutManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputerWatchTests/WatchWorkoutManagerTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -125,6 +134,10 @@
 				57A000022F00000100000001 /* BikeComputerWatch */,
 				57A0000F2F00000100000001 /* WorkoutShared */,
 				57A001002F00000100000001 /* WorkoutContractTests.swift */,
+				57A002002F00000100000001 /* WatchWorkoutRecoveryStore.swift */,
+				57A003002F00000100000001 /* WatchWorkoutManager.swift */,
+				57A003012F00000100000001 /* WatchRouteRecorder.swift */,
+				57A003022F00000100000001 /* WatchWorkoutManagerTests.swift */,
 				83E6EF982EED853C00AE5F9B /* Products */,
 			);
 			sourceTree = "<group>";
@@ -333,6 +346,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				57A001032F00000100000001 /* WorkoutContractTests.swift in Sources */,
+				57A002012F00000100000001 /* WatchWorkoutRecoveryStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -341,6 +355,10 @@
 			buildActionMask = 2147483647;
 			files = (
 				57A001042F00000100000001 /* WorkoutContractTests.swift in Sources */,
+				57A002022F00000100000001 /* WatchWorkoutRecoveryStore.swift in Sources */,
+				57A003032F00000100000001 /* WatchWorkoutManager.swift in Sources */,
+				57A003042F00000100000001 /* WatchRouteRecorder.swift in Sources */,
+				57A003052F00000100000001 /* WatchWorkoutManagerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

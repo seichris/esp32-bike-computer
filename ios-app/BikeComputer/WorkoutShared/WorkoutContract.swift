@@ -1,7 +1,7 @@
 import Foundation
 
 nonisolated struct WorkoutSchemaVersion: Codable, Equatable, Sendable {
-    static let current = Self(major: 1, minor: 0)
+    static let current = Self(major: 1, minor: 1)
 
     let major: UInt16
     let minor: UInt16
@@ -193,6 +193,7 @@ nonisolated struct WorkoutEnvelopeV1: Codable, Equatable, Sendable {
     let kind: WorkoutMessageKind
     let sessionID: UUID
     let sessionToken: UInt16
+    let transportGenerationID: UUID?
     let sequence: UInt64
     let capturedAt: Date
     let snapshot: WorkoutSnapshotV1?
@@ -205,6 +206,7 @@ nonisolated struct WorkoutEnvelopeV1: Codable, Equatable, Sendable {
         kind: WorkoutMessageKind,
         sessionID: UUID,
         sessionToken: UInt16,
+        transportGenerationID: UUID? = nil,
         sequence: UInt64,
         capturedAt: Date,
         snapshot: WorkoutSnapshotV1? = nil,
@@ -216,6 +218,7 @@ nonisolated struct WorkoutEnvelopeV1: Codable, Equatable, Sendable {
         self.kind = kind
         self.sessionID = sessionID
         self.sessionToken = sessionToken
+        self.transportGenerationID = transportGenerationID
         self.sequence = sequence
         self.capturedAt = capturedAt
         self.snapshot = snapshot
@@ -280,6 +283,9 @@ nonisolated enum WorkoutContractCodec {
         }
         guard envelope.sessionToken != 0 else {
             throw WorkoutContractError.zeroSessionToken
+        }
+        guard envelope.transportGenerationID != emptyUUID else {
+            throw WorkoutContractError.invalidEnvelopePayload
         }
         guard envelope.capturedAt.timeIntervalSinceReferenceDate.isFinite else {
             throw WorkoutContractError.invalidDate
@@ -549,13 +555,33 @@ nonisolated enum WorkoutContractCodec {
 nonisolated struct WorkoutEnvelopeSequenceGate: Sendable {
     private(set) var highestSequenceBySession: [UUID: UInt64] = [:]
     private(set) var sessionTokenBySession: [UUID: UInt16] = [:]
+    private(set) var transportGenerationBySession: [UUID: UUID] = [:]
+    private(set) var seenTransportGenerationsBySession: [UUID: Set<UUID>] = [:]
     private(set) var startDateBySession: [UUID: Date] = [:]
+    private(set) var latestCapturedAtBySession: [UUID: Date] = [:]
     private(set) var currentSnapshotEnvelope: WorkoutEnvelopeV1?
 
     mutating func ingest(_ envelope: WorkoutEnvelopeV1) throws -> Bool {
         try WorkoutContractCodec.validate(envelope)
-        if let canonicalToken = sessionTokenBySession[envelope.sessionID],
-           canonicalToken != envelope.sessionToken {
+        let canonicalToken = sessionTokenBySession[envelope.sessionID]
+        let canonicalGeneration = transportGenerationBySession[envelope.sessionID]
+        if canonicalGeneration != nil,
+           envelope.transportGenerationID == nil {
+            return false
+        }
+        let tokenChanged = canonicalToken != nil
+            && canonicalToken != envelope.sessionToken
+        let explicitGenerationChanged = canonicalToken != nil
+            && envelope.transportGenerationID != nil
+            && canonicalGeneration != envelope.transportGenerationID
+        let transportIdentityChanged = tokenChanged || explicitGenerationChanged
+        let isGenerationReset: Bool
+        if transportIdentityChanged {
+            isGenerationReset = canAcceptGenerationReset(envelope)
+        } else {
+            isGenerationReset = false
+        }
+        if transportIdentityChanged, !isGenerationReset {
             return false
         }
         if let snapshot = envelope.snapshot,
@@ -564,7 +590,8 @@ nonisolated struct WorkoutEnvelopeSequenceGate: Sendable {
            snapshot.startDate != canonicalStartDate {
             return false
         }
-        if let highestSequence = highestSequenceBySession[envelope.sessionID],
+        if !isGenerationReset,
+           let highestSequence = highestSequenceBySession[envelope.sessionID],
            envelope.sequence <= highestSequence {
                 return false
         }
@@ -576,6 +603,12 @@ nonisolated struct WorkoutEnvelopeSequenceGate: Sendable {
 
         highestSequenceBySession[envelope.sessionID] = envelope.sequence
         sessionTokenBySession[envelope.sessionID] = envelope.sessionToken
+        if let generation = envelope.transportGenerationID {
+            transportGenerationBySession[envelope.sessionID] = generation
+            seenTransportGenerationsBySession[envelope.sessionID, default: []]
+                .insert(generation)
+        }
+        latestCapturedAtBySession[envelope.sessionID] = envelope.capturedAt
         if let snapshot = envelope.snapshot {
             if snapshot.state != .idle,
                startDateBySession[envelope.sessionID] == nil,
@@ -585,6 +618,30 @@ nonisolated struct WorkoutEnvelopeSequenceGate: Sendable {
             currentSnapshotEnvelope = envelope
         }
         return true
+    }
+
+    private func canAcceptGenerationReset(
+        _ envelope: WorkoutEnvelopeV1
+    ) -> Bool {
+        guard let snapshot = envelope.snapshot,
+              snapshot.state.isActive || snapshot.state == .ended,
+              let canonicalStartDate = startDateBySession[envelope.sessionID],
+              snapshot.startDate == canonicalStartDate,
+              let latestCapturedAt = latestCapturedAtBySession[envelope.sessionID],
+              envelope.capturedAt > latestCapturedAt else {
+            return false
+        }
+        if let generation = envelope.transportGenerationID {
+            return generation
+                    != transportGenerationBySession[envelope.sessionID]
+                && !(seenTransportGenerationsBySession[envelope.sessionID] ?? [])
+                    .contains(generation)
+        }
+        // Backward compatibility for v1.0 senders. v1.1 and later carry an
+        // explicit generation on every snapshot, so reconnect can begin at
+        // any sequence without reopening a retired generation.
+        return transportGenerationBySession[envelope.sessionID] == nil
+            && envelope.sequence == 1
     }
 
     mutating func ingestBatch(_ envelopes: [WorkoutEnvelopeV1]) -> WorkoutEnvelopeBatchResult {

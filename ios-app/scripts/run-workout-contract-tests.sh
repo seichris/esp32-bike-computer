@@ -12,9 +12,13 @@ cd "${REPO_DIR}"
 xcrun swiftc \
   -parse-as-library \
   -default-isolation MainActor \
+  -D WORKOUT_CONTRACT_HOST \
   -o "${OUT}" \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
+  ios-app/BikeComputer/BikeComputerWatch/Managers/WatchWorkoutRecoveryStore.swift \
   ios-app/BikeComputerTests/WorkoutContractTests.swift
 
 "${OUT}"

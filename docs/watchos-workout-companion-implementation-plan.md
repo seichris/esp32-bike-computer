@@ -261,6 +261,8 @@ WorkoutEnvelopeV1 contains:
 - message kind: snapshot, control, acknowledgement, or error;
 - session UUID;
 - non-zero UInt16 device session token;
+- optional durable transport-generation UUID, repeated on every v1.1-or-newer
+  snapshot so a receiver can recover even if the first sequence was missed;
 - monotonically increasing UInt64 sequence;
 - capturedAt timestamp.
 
@@ -299,6 +301,9 @@ Decoder rules:
 - reject empty session IDs, token zero, non-finite numbers, impossible negative
   totals, and invalid coordinates;
 - keep the highest sequence per session and discard older snapshots;
+- permit a same-session token change only for an unseen explicit transport
+  generation with the canonical start date and a newer capture time; remember
+  retired generations so they cannot resume, even with newer sequence numbers;
 - process a batched array in order, then publish only the latest coherent
   state;
 - never let an older session overwrite a newer active session.
@@ -368,14 +373,18 @@ HKWorkoutSessionDelegate.
 The Watch owns finalization:
 
 1. Transition to ending and publish that state.
-2. End the primary session.
-3. End live builder collection at the authoritative end date.
-4. Finish the workout and receive the saved HKWorkout.
-5. If valid route points exist, finish HKWorkoutRouteBuilder against that
-   saved workout.
-6. Publish one final ended snapshot and summary.
+2. Stop location collection and call `stopActivity(with:)` on the primary
+   session, retaining workout-session mode while the save completes.
+3. After HealthKit reports the session stopped, flush valid points to the
+   associated HKWorkoutRouteBuilder.
+4. End live builder collection at the authoritative stop date.
+5. Finish the workout. HealthKit automatically finalizes an associated route
+   builder with its workout; never call `finishRoute` on a route builder
+   obtained from `HKWorkoutBuilder.seriesBuilder(for:)`.
+6. Call `end()` on the primary session only after the builder was finished or
+   discarded, then publish one final ended snapshot and summary.
 7. Stop mirroring only after final state delivery has been attempted.
-8. Clear in-memory raw route points.
+8. Clear in-memory raw route points and the durable finish request.
 
 An iPhone End action sends a request-end control to Watch so Watch can perform
 this ordered finalization. If Watch is unreachable, iPhone explains that the
@@ -384,11 +393,41 @@ workout continues on Watch and offers no fake local completion.
 The Watch UI must also offer an explicit discard path. Discarding must not save
 an HKWorkout or route.
 
+If builder collection or workout saving fails after the rider chose Save,
+retain the stopped session, builder, associated route, durable finish request,
+and finalization phase. Show a retryable save state and reconcile HealthKit
+before retrying; do not convert a transient save failure into an implicit
+discard.
+
+Persist finalization as requested, collection-ended, finish-attempted, and
+workout-saved. Write the finish-attempted marker before calling
+`finishWorkout`. After a crash in that commit-unknown window, a matching
+readable workout proves success, but an empty query does not prove absence:
+HealthKit intentionally hides read-denial status. Keep the save unresolved and
+never call `finishWorkout` again until non-commit is proven. A delivered finish
+error may durably return to collection-ended for a safe retry.
+
+Persist associated-route status before the finish attempt as present,
+unavailable, or unknown. Recovery must never display an unknown route as
+unavailable merely because it could not be queried.
+
 ### Recovery
 
 - On Watch relaunch, implement active-workout recovery and reattach the
   session, builder, data source, delegates, route recorder, and snapshot
   publisher.
+- Reconcile stopped and ended recovered sessions when a finish request exists;
+  preserve an unexpectedly ended ride with a default save request.
+- Treat a detached durable-save reconciliation separately from an attached
+  HealthKit session. A late `handleActiveWorkoutRecovery` callback must retry
+  attachment whenever no session is attached, even if the UI is already in an
+  ending or reconciled state. After HealthKit confirms no session and the
+  workout is known saved, atomically archive its stable UUID into a separate
+  bounded terminal tombstone before releasing the summary and new-workout
+  admission. A genuinely late session matches that tombstone through builder
+  metadata and is only stopped/ended; it is never saved again. If tombstone
+  persistence fails, keep the summary visible, offer Retry Recovery, and block
+  new-workout admission rather than overwrite the only proof.
 - Configure the iOS mirroring start handler during app launch, before SwiftUI
   views depend on it.
 - Replace the iOS mirrored-session reference when HealthKit reconnects and
