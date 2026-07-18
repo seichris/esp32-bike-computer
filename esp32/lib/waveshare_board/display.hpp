@@ -48,14 +48,4 @@ constexpr uint8_t DEFAULT_ROTATION = ROTATION_0;
 constexpr bool ROTATION_90_ENABLED = false;
 #endif
 
-constexpr uint8_t CO5300_CASET = 0x2A;
-constexpr uint8_t CO5300_PASET = 0x2B;
-constexpr uint8_t CO5300_MADCTL = 0x36;
-constexpr uint8_t CO5300_MADCTL_MV = 0x20;
-constexpr uint8_t CO5300_MADCTL_X_FLIP = 0x02;
-constexpr uint8_t CO5300_MADCTL_RGB = 0x00;
-constexpr uint8_t CO5300_MADCTL_ROTATION_0 = CO5300_MADCTL_RGB;
-constexpr uint8_t CO5300_MADCTL_ROTATION_90 =
-    CO5300_MADCTL_RGB | CO5300_MADCTL_MV | CO5300_MADCTL_X_FLIP;
-
 } // namespace waveshare_board::display
