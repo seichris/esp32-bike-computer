@@ -83,7 +83,7 @@ void updateWaitingOwnershipStatus(const char *deviceName, bool claimed,
                         ? "Bike Computer"
                         : deviceName);
   if (pairingCode >= 0) {
-    lv_label_set_text_fmt(waitingMessage, "Match %06ld\nthen press BOOT.",
+    lv_label_set_text_fmt(waitingMessage, "Match %06ld\nthen press a button.",
                           static_cast<long>(pairingCode));
   } else if (claimed) {
     lv_label_set_text(waitingMessage, "Waiting for\nyour iPhone.");

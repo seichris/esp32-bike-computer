@@ -16,7 +16,7 @@ struct KnownBikeComputerDevice: Codable, Equatable, Identifiable {
         guard !isLegacy, deviceID.count >= 8 else {
             return String(peripheralIdentifier.uuidString.prefix(4)).uppercased()
         }
-        return String(deviceID.suffix(8)).uppercased()
+        return String(deviceID.suffix(4)).uppercased()
     }
 }
 
@@ -24,6 +24,7 @@ struct DiscoveredBikeComputerDevice: Equatable, Identifiable {
     let peripheralIdentifier: UUID
     var advertisedName: String
     var shortIdentifier: String
+    var identitySuffix: String?
     var isClaimed: Bool?
     var rssi: Int
     var lastSeenAt: Date
@@ -38,6 +39,7 @@ struct DiscoveredBikeComputerDevice: Equatable, Identifiable {
         now: Date = Date()
     ) -> DiscoveredBikeComputerDevice {
         var shortIdentifier = String(peripheralIdentifier.uuidString.prefix(4)).uppercased()
+        var identitySuffix: String?
         var isClaimed: Bool?
         if let data = manufacturerData,
            data.count == DeviceOwnershipProtocol.advertisementLength,
@@ -45,12 +47,15 @@ struct DiscoveredBikeComputerDevice: Equatable, Identifiable {
            data[1] == 0xFF,
            data[2] == DeviceOwnershipProtocol.version {
             isClaimed = data[3] & DeviceOwnershipProtocol.claimedFlag != 0
-            shortIdentifier = data.subdata(in: 4..<8).ownershipHex.uppercased()
+            let parsedIdentitySuffix = data.subdata(in: 4..<8).ownershipHex.uppercased()
+            identitySuffix = parsedIdentitySuffix
+            shortIdentifier = String(parsedIdentitySuffix.suffix(4))
         }
         return DiscoveredBikeComputerDevice(
             peripheralIdentifier: peripheralIdentifier,
             advertisedName: localName.nilIfEmpty ?? "BikeComputer \(shortIdentifier.suffix(4))",
             shortIdentifier: shortIdentifier,
+            identitySuffix: identitySuffix,
             isClaimed: isClaimed,
             rssi: rssi,
             lastSeenAt: now
@@ -63,6 +68,7 @@ struct BikeComputerPairingPrompt: Equatable, Identifiable {
     let deviceName: String
     let shortIdentifier: String
     let comparisonCode: Int
+    let isReplacingExistingRegistration: Bool
 
     var id: UUID { peripheralIdentifier }
     var formattedCode: String { String(format: "%06d", comparisonCode) }
@@ -94,6 +100,258 @@ enum DeviceOwnershipProtocol {
             result = candidate
         }
         return result.isEmpty ? defaultDeviceName : result
+    }
+
+    static func resolvedName(
+        reportedName: String,
+        existingName: String?,
+        peripheralName: String?
+    ) -> String {
+        if !reportedName.isEmpty { return normalizedName(reportedName) }
+        if let existingName, !existingName.isEmpty {
+            return normalizedName(existingName)
+        }
+        if let peripheralName, !peripheralName.isEmpty {
+            return normalizedName(peripheralName)
+        }
+        return defaultDeviceName
+    }
+
+    static func resolvedInfoName(
+        reportedName: String,
+        isClaimed: Bool,
+        existingName: String?,
+        peripheralName: String?
+    ) -> String {
+        resolvedName(
+            reportedName: isClaimed && existingName != nil ? "" : reportedName,
+            existingName: existingName,
+            peripheralName: peripheralName
+        )
+    }
+}
+
+enum DeviceOwnershipFlowPolicy {
+    static func allowsLegacyFallback(
+        knownDevice: KnownBikeComputerDevice?,
+        pairingCandidate: DiscoveredBikeComputerDevice?
+    ) -> Bool {
+        guard pairingCandidate?.isClaimed == nil else { return false }
+        return knownDevice?.isLegacy == true
+    }
+}
+
+enum BLEDiscoveryFreshnessPolicy {
+    static let maximumAge: TimeInterval = 6
+
+    static func retained(
+        _ devices: [DiscoveredBikeComputerDevice],
+        now: Date = Date(),
+        maximumAge: TimeInterval = maximumAge
+    ) -> [DiscoveredBikeComputerDevice] {
+        devices.filter { now.timeIntervalSince($0.lastSeenAt) <= maximumAge }
+    }
+}
+
+enum BLEPairingCancellationPolicy {
+    static func shouldDisconnect(
+        connectedPeripheralIdentifier: UUID?,
+        pairingPeripheralIdentifier: UUID?,
+        hasActivePairing: Bool
+    ) -> Bool {
+        hasActivePairing && connectedPeripheralIdentifier != nil &&
+            connectedPeripheralIdentifier == pairingPeripheralIdentifier
+    }
+}
+
+enum BLEOwnershipLifecyclePhase: Equatable {
+    case idle
+    case discovering
+    case pairing(UUID)
+    case comparisonReady(UUID)
+    case submitting(UUID)
+}
+
+struct BLEOwnershipCancellation: Equatable {
+    let pairingPeripheralIdentifier: UUID?
+    let shouldDisconnectPairingPeripheral: Bool
+}
+
+/// Owns the user-driven registration lifecycle independently of CoreBluetooth.
+/// BLEManager uses every transition below, while host tests can exercise the
+/// same handoff, cancellation, and single-submit decisions deterministically.
+struct BLEOwnershipLifecycle {
+    private(set) var phase: BLEOwnershipLifecyclePhase = .idle
+
+    mutating func beginDiscovery() {
+        phase = .discovering
+    }
+
+    mutating func endDiscovery(resumeAutoReconnect: Bool) -> Bool {
+        phase = .idle
+        return resumeAutoReconnect
+    }
+
+    mutating func beginPairing(
+        candidateIdentifier: UUID,
+        connectedIdentifier: UUID?
+    ) -> Bool {
+        phase = .pairing(candidateIdentifier)
+        return connectedIdentifier != nil &&
+            connectedIdentifier != candidateIdentifier
+    }
+
+    mutating func markComparisonReady(for candidateIdentifier: UUID) -> Bool {
+        guard phase == .pairing(candidateIdentifier) else { return false }
+        phase = .comparisonReady(candidateIdentifier)
+        return true
+    }
+
+    mutating func beginConfirmation(for candidateIdentifier: UUID) -> Bool {
+        guard phase == .comparisonReady(candidateIdentifier) else { return false }
+        phase = .submitting(candidateIdentifier)
+        return true
+    }
+
+    mutating func cancel(connectedIdentifier: UUID?) -> BLEOwnershipCancellation {
+        let candidateIdentifier: UUID?
+        switch phase {
+        case .pairing(let identifier),
+             .comparisonReady(let identifier),
+             .submitting(let identifier):
+            candidateIdentifier = identifier
+        case .idle, .discovering:
+            candidateIdentifier = nil
+        }
+        let cancellation = BLEOwnershipCancellation(
+            pairingPeripheralIdentifier: candidateIdentifier,
+            shouldDisconnectPairingPeripheral:
+                BLEPairingCancellationPolicy.shouldDisconnect(
+                    connectedPeripheralIdentifier: connectedIdentifier,
+                    pairingPeripheralIdentifier: candidateIdentifier,
+                    hasActivePairing: candidateIdentifier != nil
+                )
+        )
+        phase = .discovering
+        return cancellation
+    }
+
+    mutating func interrupt() {
+        phase = .idle
+    }
+
+    mutating func complete() {
+        phase = .idle
+    }
+}
+
+enum BLEIdentityObservationPolicy {
+    static func conflictingDeviceIDs(
+        knownDevices: [KnownBikeComputerDevice],
+        peripheralIdentifier: UUID,
+        observedDeviceID: String
+    ) -> Set<String> {
+        Set(knownDevices.compactMap { device in
+            guard device.peripheralIdentifier == peripheralIdentifier,
+                  device.deviceID != observedDeviceID else { return nil }
+            return device.deviceID
+        })
+    }
+}
+
+enum BLEReconnectBackoff {
+    static func delay(
+        attempt: Int,
+        base: TimeInterval = 1,
+        maximum: TimeInterval = 60
+    ) -> TimeInterval {
+        let boundedAttempt = min(max(attempt, 0), 30)
+        return min(base * pow(2, Double(boundedAttempt)), maximum)
+    }
+}
+
+enum BLEConnectionPersistence {
+    // Trusted-device connects intentionally remain pending in CoreBluetooth so
+    // iOS can complete them when the accessory reappears, including while the
+    // app is suspended. Interactive pairing attempts remain bounded.
+    static func shouldCancelTimedOutConnection(isPairing: Bool) -> Bool {
+        isPairing
+    }
+}
+
+enum BLEPendingHandoffPolicy {
+    static func consume(_ pendingIdentifier: inout UUID?) -> UUID? {
+        defer { pendingIdentifier = nil }
+        return pendingIdentifier
+    }
+}
+
+enum BLEDeviceOperationPolicy {
+    static func canStartPairing(operationDeviceID: String?) -> Bool {
+        operationDeviceID == nil
+    }
+}
+
+enum BikeComputerRemovalAction: Equatable {
+    case deregister
+    case forget
+}
+
+enum BikeComputerRemovalPolicy {
+    static func action(
+        isConnected: Bool,
+        isLegacy: Bool
+    ) -> BikeComputerRemovalAction {
+        isConnected && !isLegacy ? .deregister : .forget
+    }
+}
+
+enum BLELocalForgetPolicy {
+    static func acceptsCallback(
+        peripheralIdentifier: UUID,
+        currentIdentifier: UUID?,
+        forgottenIdentifiers: Set<UUID>
+    ) -> Bool {
+        currentIdentifier == peripheralIdentifier &&
+            !forgottenIdentifiers.contains(peripheralIdentifier)
+    }
+
+    static func shouldStopScanning(
+        wasActive: Bool,
+        hadPendingTransport: Bool,
+        hasSuccessor: Bool
+    ) -> Bool {
+        (wasActive || hadPendingTransport) && !hasSuccessor
+    }
+}
+
+enum BLENavigationNotificationPolicy {
+    static func accepts(
+        isAuthenticated: Bool,
+        isLegacyDevice: Bool,
+        hasProtectedSession: Bool,
+        isProtectedFrame: Bool
+    ) -> Bool {
+        guard isAuthenticated else { return false }
+        if hasProtectedSession { return isProtectedFrame }
+        return isLegacyDevice && !isProtectedFrame
+    }
+}
+
+enum BLERestorationPolicy {
+    static func selectedIdentifier(
+        from available: [UUID],
+        trustedIdentifier: UUID?
+    ) -> UUID? {
+        guard let trustedIdentifier else { return nil }
+        return available.contains(trustedIdentifier) ? trustedIdentifier : nil
+    }
+
+    static func identifiersToCancel(
+        from available: [UUID],
+        keeping selectedIdentifier: UUID
+    ) -> [UUID] {
+        available.filter { $0 != selectedIdentifier }
     }
 }
 
@@ -144,6 +402,10 @@ struct DevicePairingSession {
 
     var pairingCommand: String {
         "PAIR|\(ownerID.ownershipHex)|\(privateKey.publicKey.x963Representation.ownershipHex)"
+    }
+
+    func matches(peripheralIdentifier: UUID) -> Bool {
+        self.peripheralIdentifier == peripheralIdentifier
     }
 
     func material(from response: String) throws -> DevicePairingMaterial {
@@ -220,17 +482,27 @@ enum DeviceOwnerAuthenticator {
     static func serverMessage(
         deviceID: String,
         ownerID: Data,
-        nonce: String
+        clientNonce: String,
+        serverNonce: String
     ) -> String {
-        "server2|\(deviceID)|\(ownerID.ownershipHex)|\(nonce)"
+        "server2|\(deviceID)|\(ownerID.ownershipHex)|\(clientNonce)|\(serverNonce)"
     }
 
     static func clientMessage(
         deviceID: String,
         ownerID: Data,
+        clientNonce: String,
+        serverNonce: String
+    ) -> String {
+        "client2|\(deviceID)|\(ownerID.ownershipHex)|\(clientNonce)|\(serverNonce)"
+    }
+
+    static func revocationMessage(
+        deviceID: String,
+        ownerID: Data,
         nonce: String
     ) -> String {
-        "client2|\(deviceID)|\(ownerID.ownershipHex)|\(nonce)"
+        "revoked2|\(deviceID)|\(ownerID.ownershipHex)|\(nonce)"
     }
 
     static func proof(key: Data, message: String) -> String {
@@ -251,6 +523,155 @@ enum DeviceOwnerAuthenticator {
             difference |= suppliedData[index] ^ expectedData[index]
         }
         return difference == 0
+    }
+
+    static func isValidRevocationReceipt(
+        suppliedProof: String,
+        key: Data,
+        deviceID: String,
+        ownerID: Data,
+        nonce: String
+    ) -> Bool {
+        guard Data(ownershipHex: nonce)?.count == 16,
+              Data(ownershipHex: suppliedProof)?.count == 32 else {
+            return false
+        }
+        return isValidProof(
+            suppliedProof,
+            expected: proof(
+                key: key,
+                message: revocationMessage(
+                    deviceID: deviceID,
+                    ownerID: ownerID,
+                    nonce: nonce
+                )
+            )
+        )
+    }
+}
+
+enum AuthenticatedBLEChannel: UInt8 {
+    case auth = 1
+    case navigation = 2
+    case route = 3
+    case gps = 4
+    case settings = 5
+}
+
+final class AuthenticatedBLEWriteSession {
+    static let frameOverhead = 22
+
+    private let writeKey: SymmetricKey
+    private let notifyKey: SymmetricKey
+    private var nextSequence: [AuthenticatedBLEChannel: UInt32] = [:]
+    private var lastNotificationSequence: [AuthenticatedBLEChannel: UInt32] = [:]
+
+    init(
+        ownerKey: Data,
+        deviceID: String,
+        clientNonce: String,
+        serverNonce: String
+    ) {
+        let context = "\(deviceID)|\(clientNonce)|\(serverNonce)"
+        writeKey = SymmetricKey(data: HMAC<SHA256>.authenticationCode(
+            for: Data("session2-write|\(context)".utf8),
+            using: SymmetricKey(data: ownerKey)
+        ))
+        notifyKey = SymmetricKey(data: HMAC<SHA256>.authenticationCode(
+            for: Data("session2-notify|\(context)".utf8),
+            using: SymmetricKey(data: ownerKey)
+        ))
+    }
+
+    func frame(payload: Data, channel: AuthenticatedBLEChannel) -> Data? {
+        let (sequence, overflow) = (nextSequence[channel] ?? 0)
+            .addingReportingOverflow(1)
+        guard !overflow else { return nil }
+        nextSequence[channel] = sequence
+        let sequenceBytes: [UInt8] = [
+            UInt8((sequence >> 24) & 0xFF),
+            UInt8((sequence >> 16) & 0xFF),
+            UInt8((sequence >> 8) & 0xFF),
+            UInt8(sequence & 0xFF)
+        ]
+        guard let nonce = try? AES.GCM.Nonce(data: nonceData(
+            channel: channel,
+            sequenceBytes: sequenceBytes
+        )) else { return nil }
+        let aad = authenticatedData(
+            prefix: "write2|",
+            channel: channel,
+            sequenceBytes: sequenceBytes
+        )
+        guard let sealed = try? AES.GCM.seal(
+            payload,
+            using: writeKey,
+            nonce: nonce,
+            authenticating: aad
+        ) else { return nil }
+        var frame = Data([0x53, 0x32])
+        frame.append(contentsOf: sequenceBytes)
+        frame.append(sealed.ciphertext)
+        frame.append(sealed.tag)
+        return frame
+    }
+
+    func notificationPayload(
+        from frame: Data,
+        channel: AuthenticatedBLEChannel
+    ) -> Data? {
+        guard frame.count >= Self.frameOverhead,
+              frame[0] == 0x52, frame[1] == 0x32 else { return nil }
+        let sequenceBytes = Array(frame[2..<6])
+        let sequence = sequenceBytes.reduce(UInt32(0)) {
+            ($0 << 8) | UInt32($1)
+        }
+        guard sequence > (lastNotificationSequence[channel] ?? 0),
+              let nonce = try? AES.GCM.Nonce(data: nonceData(
+                channel: channel,
+                sequenceBytes: sequenceBytes
+              )) else { return nil }
+        let ciphertext = frame.subdata(in: 6..<(frame.count - 16))
+        let tag = frame.suffix(16)
+        let box: AES.GCM.SealedBox
+        do {
+            box = try AES.GCM.SealedBox(
+                nonce: nonce,
+                ciphertext: ciphertext,
+                tag: tag
+            )
+            let plaintext = try AES.GCM.open(
+                box,
+                using: notifyKey,
+                authenticating: authenticatedData(
+                    prefix: "notify2|",
+                    channel: channel,
+                    sequenceBytes: sequenceBytes
+                )
+            )
+            lastNotificationSequence[channel] = sequence
+            return plaintext
+        } catch {
+            return nil
+        }
+    }
+
+    private func nonceData(
+        channel: AuthenticatedBLEChannel,
+        sequenceBytes: [UInt8]
+    ) -> Data {
+        Data([channel.rawValue, 0, 0, 0, 0, 0, 0, 0] + sequenceBytes)
+    }
+
+    private func authenticatedData(
+        prefix: String,
+        channel: AuthenticatedBLEChannel,
+        sequenceBytes: [UInt8]
+    ) -> Data {
+        var data = Data(prefix.utf8)
+        data.append(channel.rawValue)
+        data.append(contentsOf: sequenceBytes)
+        return data
     }
 }
 
@@ -306,12 +727,14 @@ final class KeychainDeviceCredentialStore: DeviceCredentialStoring {
 #if HOST_TESTING
 final class InMemoryDeviceCredentialStore: DeviceCredentialStoring {
     private var values: [String: Data] = [:]
+    var shouldFailRemoval = false
     func data(account: String) -> Data? { values[account] }
     func set(_ data: Data, account: String) -> Bool {
         values[account] = data
         return true
     }
     func remove(account: String) -> Bool {
+        if shouldFailRemoval { return false }
         values.removeValue(forKey: account)
         return true
     }
@@ -322,8 +745,17 @@ final class BikeComputerDeviceRegistry {
     private enum Keys {
         static let devices = "ble.knownDevices.v2"
         static let activeDeviceID = "ble.activeDeviceID.v2"
+        static func provisionalConfirmed(deviceID: String) -> String {
+            "ble.provisionalOwnerConfirmed.\(deviceID)"
+        }
+        static func provisionalReplacementAuthorized(deviceID: String) -> String {
+            "ble.provisionalReplacementAuthorized.\(deviceID)"
+        }
         static let installationOwnerID = "installation-owner-id"
         static func ownerKey(deviceID: String) -> String { "owner-key-\(deviceID)" }
+        static func provisionalOwnerKey(deviceID: String) -> String {
+            "provisional-owner-key-\(deviceID)"
+        }
     }
 
     private let defaults: UserDefaults
@@ -389,21 +821,140 @@ final class BikeComputerDeviceRegistry {
         return credentialStore.set(key, account: Keys.ownerKey(deviceID: deviceID))
     }
 
+    func provisionalOwnerKey(deviceID: String) -> Data? {
+        credentialStore.data(account: Keys.provisionalOwnerKey(deviceID: deviceID))
+    }
+
+    @discardableResult
+    func saveProvisionalOwnerKey(_ key: Data, deviceID: String) -> Bool {
+        guard key.count == DeviceOwnershipProtocol.ownerKeyLength else { return false }
+        defaults.removeObject(forKey: Keys.provisionalConfirmed(deviceID: deviceID))
+        defaults.removeObject(
+            forKey: Keys.provisionalReplacementAuthorized(deviceID: deviceID)
+        )
+        return credentialStore.set(
+            key,
+            account: Keys.provisionalOwnerKey(deviceID: deviceID)
+        )
+    }
+
+    func markProvisionalOwnerKeyConfirmed(deviceID: String) {
+        defaults.set(true, forKey: Keys.provisionalConfirmed(deviceID: deviceID))
+    }
+
+    func isProvisionalOwnerKeyConfirmed(deviceID: String) -> Bool {
+        defaults.bool(forKey: Keys.provisionalConfirmed(deviceID: deviceID))
+    }
+
+    func authorizeProvisionalCredentialReplacement(deviceID: String) {
+        defaults.set(
+            true,
+            forKey: Keys.provisionalReplacementAuthorized(deviceID: deviceID)
+        )
+    }
+
+    func isProvisionalCredentialReplacementAuthorized(
+        deviceID: String
+    ) -> Bool {
+        defaults.bool(
+            forKey: Keys.provisionalReplacementAuthorized(deviceID: deviceID)
+        )
+    }
+
+    func hasConfirmedReplacementCredential(deviceID: String) -> Bool {
+        isProvisionalOwnerKeyConfirmed(deviceID: deviceID) &&
+            isProvisionalCredentialReplacementAuthorized(deviceID: deviceID) &&
+            provisionalOwnerKey(deviceID: deviceID) != nil
+    }
+
+    @discardableResult
+    func promoteProvisionalOwnerKey(
+        deviceID: String,
+        allowReplacingExisting: Bool = false
+    ) -> Bool {
+        guard let key = provisionalOwnerKey(deviceID: deviceID) else {
+            return false
+        }
+        // A stable DeviceID is an identifier, not proof of continuity. Never
+        // let an ordinary pairing flow replace a different credential for the
+        // same ID; that requires an explicit recovery/reset flow.
+        if let existing = ownerKey(deviceID: deviceID),
+           existing != key,
+           !allowReplacingExisting {
+            return false
+        }
+        guard saveOwnerKey(key, deviceID: deviceID) else { return false }
+        let removed = credentialStore.remove(
+            account: Keys.provisionalOwnerKey(deviceID: deviceID)
+        )
+        if removed {
+            defaults.removeObject(forKey: Keys.provisionalConfirmed(deviceID: deviceID))
+            defaults.removeObject(
+                forKey: Keys.provisionalReplacementAuthorized(deviceID: deviceID)
+            )
+        }
+        return removed
+    }
+
+    func removeProvisionalOwnerKey(deviceID: String) {
+        credentialStore.remove(
+            account: Keys.provisionalOwnerKey(deviceID: deviceID)
+        )
+        defaults.removeObject(forKey: Keys.provisionalConfirmed(deviceID: deviceID))
+        defaults.removeObject(
+            forKey: Keys.provisionalReplacementAuthorized(deviceID: deviceID)
+        )
+    }
+
     func upsert(_ device: KnownBikeComputerDevice, makeActive: Bool = false) {
-        var current = devices.filter { $0.deviceID != device.deviceID }
+        let previous = devices
+        let replacedActiveAlias = previous.contains {
+            $0.peripheralIdentifier == device.peripheralIdentifier &&
+                $0.deviceID == activeDeviceID
+        }
+        var current = previous.filter {
+            $0.deviceID != device.deviceID &&
+                $0.peripheralIdentifier != device.peripheralIdentifier
+        }
         current.append(device)
         devices = current
-        if makeActive || activeDeviceID == nil {
+        if makeActive || activeDeviceID == nil || replacedActiveAlias ||
+            !current.contains(where: { $0.deviceID == activeDeviceID }) {
             activeDeviceID = device.deviceID
         }
     }
 
-    func remove(deviceID: String) {
+    @discardableResult
+    func remove(deviceID: String) -> Bool {
+        let ownerAccount = Keys.ownerKey(deviceID: deviceID)
+        let provisionalAccount = Keys.provisionalOwnerKey(deviceID: deviceID)
+        let ownerKey = credentialStore.data(account: ownerAccount)
+        let provisionalKey = credentialStore.data(account: provisionalAccount)
+
+        let removedOwner = credentialStore.remove(account: ownerAccount)
+        let removedProvisional = credentialStore.remove(account: provisionalAccount)
+        guard removedOwner && removedProvisional else {
+            // Keychain has no transaction primitive. Restore whichever secrets
+            // were present so a partial deletion cannot hide a device while
+            // leaving the registry and credentials out of sync.
+            if let ownerKey {
+                _ = credentialStore.set(ownerKey, account: ownerAccount)
+            }
+            if let provisionalKey {
+                _ = credentialStore.set(provisionalKey, account: provisionalAccount)
+            }
+            return false
+        }
+
         devices = devices.filter { $0.deviceID != deviceID }
-        credentialStore.remove(account: Keys.ownerKey(deviceID: deviceID))
+        defaults.removeObject(forKey: Keys.provisionalConfirmed(deviceID: deviceID))
+        defaults.removeObject(
+            forKey: Keys.provisionalReplacementAuthorized(deviceID: deviceID)
+        )
         if activeDeviceID == deviceID {
             activeDeviceID = devices.first?.deviceID
         }
+        return true
     }
 }
 

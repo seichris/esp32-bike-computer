@@ -41,6 +41,7 @@ struct BikeComputersSettingsView: View {
                                 DiscoveredBikeComputerRow(device: device)
                             }
                             .buttonStyle(.plain)
+                            .disabled(bleManager.deviceOperationDeviceID != nil)
                         }
                     }
                 } header: {
@@ -61,6 +62,7 @@ struct BikeComputersSettingsView: View {
                     } label: {
                         Label("Add Bike Computer", systemImage: "plus.circle")
                     }
+                    .disabled(bleManager.deviceOperationDeviceID != nil)
                 }
             }
 
@@ -92,10 +94,16 @@ struct BikeComputersSettingsView: View {
             PairBikeComputerSheet(candidate: candidate)
                 .environmentObject(bleManager)
         }
-        .onDisappear {
-            if bleManager.isScanning {
-                bleManager.cancelDeviceDiscovery()
+        .onAppear {
+            bleManager.startDeviceDiscovery()
+        }
+        .onChange(of: bleManager.centralStateDescription) { state in
+            if state == "powered on", selectedCandidate == nil {
+                bleManager.startDeviceDiscovery()
             }
+        }
+        .onDisappear {
+            bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
         }
     }
 }
@@ -120,6 +128,10 @@ private struct KnownBikeComputerRow: View {
                 Text("Connected")
                     .font(.caption)
                     .foregroundStyle(.green)
+            } else if bleManager.hasObservedIdentityMismatch(for: device) {
+                Text("Needs Setup")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             } else if bleManager.activeDeviceID == device.deviceID {
                 Text("Current")
                     .font(.caption)
@@ -190,18 +202,35 @@ private struct PairBikeComputerSheet: View {
                     } header: {
                         Text("Confirm the Code")
                     } footer: {
-                        Text("If this exact code is also displayed on your Bike Computer, press its BOOT button to confirm physical access.")
+                        if prompt.isReplacingExistingRegistration {
+                            Text("This Bike Computer was reset. Match this code, then press either button on the device to replace its old registration on this iPhone.")
+                        } else {
+                            Text("If this exact code is also displayed on your Bike Computer, press either button on the device to confirm physical access.")
+                        }
                     }
 
-                    if bleManager.isPairingConfirmedOnDevice {
+                    if bleManager.isPairingConfirmationSubmitting {
                         Section {
                             HStack(spacing: 12) {
                                 ProgressView()
                                 Text("Registering this iPhone…")
                             }
                         }
+                    } else if bleManager.isPairingConfirmedOnDevice {
+                        Section {
+                            Button(
+                                prompt.isReplacingExistingRegistration
+                                    ? "Codes Match — Replace Registration"
+                                    : "Codes Match — Register This iPhone",
+                                role: prompt.isReplacingExistingRegistration
+                                    ? .destructive
+                                    : nil
+                            ) {
+                                bleManager.confirmPairingAfterCodeMatch()
+                            }
+                        }
                     }
-                } else if didStart {
+                } else if didStart, bleManager.pairingError == nil {
                     Section {
                         HStack(spacing: 12) {
                             ProgressView()
@@ -230,6 +259,10 @@ private struct PairBikeComputerSheet: View {
                     Section {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
+                        Button("Try Again") {
+                            bleManager.cancelPairing()
+                            didStart = false
+                        }
                     }
                 }
             }
@@ -249,6 +282,9 @@ private struct PairBikeComputerSheet: View {
                           $0.peripheralIdentifier == candidate.peripheralIdentifier
                       }) else { return }
                 dismiss()
+            }
+            .onDisappear {
+                bleManager.cancelPairing()
             }
         }
     }
@@ -272,6 +308,7 @@ private struct BikeComputerDetailView: View {
     let deviceID: String
     @State private var editedName = ""
     @State private var showingDeregisterConfirmation = false
+    @State private var showingForgetConfirmation = false
 
     private var device: KnownBikeComputerDevice? {
         bleManager.knownDevices.first { $0.deviceID == deviceID }
@@ -290,32 +327,63 @@ private struct BikeComputerDetailView: View {
                     )
                 }
 
-                Section {
-                    if bleManager.isConnected(to: device) {
-                        Button("Save Name") {
-                            bleManager.rename(device: device, to: editedName)
+                if !bleManager.isConnected(to: device) || !device.isLegacy {
+                    Section {
+                        if bleManager.isConnected(to: device) {
+                            Button("Save Name") {
+                                bleManager.rename(device: device, to: editedName)
+                            }
+                            .disabled(
+                                bleManager.deviceOperationDeviceID != nil ||
+                                DeviceOwnershipProtocol.normalizedName(editedName) == device.name
+                            )
+                        } else {
+                            Button("Set as Current and Connect") {
+                                bleManager.connect(to: device)
+                            }
                         }
-                        .disabled(
-                            device.isLegacy ||
-                            DeviceOwnershipProtocol.normalizedName(editedName) == device.name
-                        )
-                    } else {
-                        Button("Set as Current and Connect") {
-                            bleManager.connect(to: device)
+                    }
+                }
+
+                if bleManager.deviceFeedbackDeviceID == device.deviceID,
+                   let error = bleManager.pairingError {
+                    Section {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                    }
+                } else if bleManager.deviceFeedbackDeviceID == device.deviceID,
+                          let status = bleManager.pairingStatusMessage {
+                    Section {
+                        HStack(spacing: 12) {
+                            if !status.contains("deregistered") { ProgressView() }
+                            Text(status)
                         }
                     }
                 }
 
                 Section {
-                    Button("Deregister from This iPhone", role: .destructive) {
-                        showingDeregisterConfirmation = true
+                    if BikeComputerRemovalPolicy.action(
+                        isConnected: bleManager.isConnected(to: device),
+                        isLegacy: device.isLegacy
+                    ) == .deregister {
+                        Button("Deregister from This iPhone", role: .destructive) {
+                            showingDeregisterConfirmation = true
+                        }
+                        .disabled(
+                            device.isLegacy ||
+                            bleManager.deviceOperationDeviceID != nil
+                        )
+                    } else {
+                        Button("Forget on This iPhone", role: .destructive) {
+                            showingForgetConfirmation = true
+                        }
+                        .disabled(bleManager.deviceOperationDeviceID != nil)
                     }
-                    .disabled(!bleManager.isConnected(to: device) || device.isLegacy)
                 } footer: {
                     if device.isLegacy {
-                        Text("Install ownership-capable firmware, then add this device again to enable secure registration.")
+                        Text("You can forget this legacy entry here, or install ownership-capable firmware and add it again.")
                     } else if !bleManager.isConnected(to: device) {
-                        Text("Connect to this device before deregistering so ownership is removed from both the iPhone and Bike Computer.")
+                        Text("Forgetting removes this iPhone’s local credential only. Use this if the Bike Computer was reset, transferred, or is no longer available.")
                     } else {
                         Text("The Bike Computer will restart and become available for another iPhone.")
                     }
@@ -331,6 +399,18 @@ private struct BikeComputerDetailView: View {
                     Button("Cancel", role: .cancel) { }
                 } message: {
                     Text("This removes the secure owner credential from both devices.")
+                }
+                .confirmationDialog(
+                    "Forget \(device.name) on this iPhone?",
+                    isPresented: $showingForgetConfirmation,
+                    titleVisibility: .visible
+                ) {
+                    Button("Forget", role: .destructive) {
+                        bleManager.forgetLocally(device: device)
+                    }
+                    Button("Cancel", role: .cancel) { }
+                } message: {
+                    Text("This removes the saved credential from this iPhone. It does not change the Bike Computer.")
                 }
             }
         }
