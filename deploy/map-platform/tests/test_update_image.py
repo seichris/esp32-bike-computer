@@ -70,6 +70,34 @@ class UpdateImageTests(unittest.TestCase):
             self.assertEqual(deployment.worker_digest, digest)
             self.assertNotIn(":latest", target.read_text(encoding="utf-8"))
 
+    def test_pending_worker_can_be_preserved_while_control_plane_advances(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            current = self.copy_compose(directory)
+            pending = Path(directory) / "pending-compose.yaml"
+            pending.write_text(current.read_text(encoding="utf-8"), encoding="utf-8")
+            pending_worker_digest = "sha256:" + "e" * 64
+            pending_worker_commit = "f" * 40
+            update_image.update_manifest(
+                pending,
+                control_plane_digest="sha256:" + "1" * 64,
+                worker_digest=pending_worker_digest,
+                source_commit=pending_worker_commit,
+            )
+
+            preserved = update_image.validate_manifest(pending)
+            deployment = update_image.update_manifest(
+                current,
+                control_plane_digest="sha256:" + "2" * 64,
+                source_commit="3" * 40,
+                worker_digest=preserved.worker_digest,
+                worker_source_commit=preserved.worker_source_commit,
+            )
+
+            self.assertEqual(deployment.control_plane_source_commit, "3" * 40)
+            self.assertEqual(deployment.control_plane_digest, "sha256:" + "2" * 64)
+            self.assertEqual(deployment.worker_source_commit, pending_worker_commit)
+            self.assertEqual(deployment.worker_digest, pending_worker_digest)
+
     def test_update_rejects_mutable_or_malformed_digest(self) -> None:
         for digest in ("latest", "sha256:1234", "sha256:" + "A" * 64):
             with self.subTest(digest=digest), self.assertRaisesRegex(
@@ -99,6 +127,39 @@ class UpdateImageTests(unittest.TestCase):
         for mutated in mutations:
             with self.subTest(), self.assertRaises(ValueError):
                 update_image.validate_manifest_text(mutated)
+
+    def test_validation_rejects_swapped_api_and_worker_aliases(self) -> None:
+        original = self.compose.read_text(encoding="utf-8")
+        api_marker = "  map-platform-api:\n    image: *map-platform-control-plane-image"
+        worker_marker = "  map-platform-worker:\n    image: *map-platform-worker-image"
+        swapped = original.replace(
+            api_marker,
+            "  map-platform-api:\n    image: *map-platform-worker-image",
+        ).replace(
+            worker_marker,
+            "  map-platform-worker:\n    image: *map-platform-control-plane-image",
+        )
+
+        with self.assertRaisesRegex(ValueError, "API service"):
+            update_image.validate_manifest_text(swapped)
+
+    def test_validation_requires_worker_identity_in_environment(self) -> None:
+        original = self.compose.read_text(encoding="utf-8")
+        identity = (
+            "      MAP_PLATFORM_WORKER_IMAGE_REFERENCE: "
+            "*map-platform-worker-image\n"
+        )
+        moved_to_labels = original.replace(identity, "", 1).replace(
+            "    volumes:\n",
+            "    labels:\n"
+            "      MAP_PLATFORM_WORKER_IMAGE_REFERENCE: "
+            "*map-platform-worker-image\n"
+            "    volumes:\n",
+            1,
+        )
+
+        with self.assertRaisesRegex(ValueError, "API service must receive"):
+            update_image.validate_manifest_text(moved_to_labels)
 
 
 if __name__ == "__main__":

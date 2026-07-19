@@ -72,9 +72,10 @@ and native platform/architecture inventory. The worker recomputes it at startup;
 the production image executes from that same hashed source tree and rejects a
 separately installed runtime package. No CI variable or runtime setting can
 assert it. The image reference must be
-digest-pinned as `registry/repository@sha256:<digest>`. Require the deployment
-registry's signature/provenance admission policy to verify that digest, and keep
-the exact image available through approval and rollout.
+digest-pinned as `registry/repository@sha256:<digest>`. Require promotion CI to
+verify registry availability, the required platform, and GitHub provenance from
+the protected `main` branch before merge, and keep the exact image available
+through approval and rollout.
 
 Put these secrets only on the worker service:
 
@@ -187,8 +188,8 @@ alter the derived worker component identity. Keep the worker image anchor in
 `registry/repository@sha256:<digest>` reference exercised by the hardware report
 and deploy it without rebuilding it. The production lock passes that value as
 both the worker service image and the API/worker admission identity; the
-deployment registry policy must verify the image signature/provenance before
-launch. Its separate control-plane image anchor may advance to include the
+promotion CI policy must verify the image platform and `main`-branch provenance
+before merge. Its separate control-plane image anchor may advance to include the
 approval registry. The worker signs its derived content identity into every
 stream manifest and records the exact public-key fingerprint in the
 key-specific artifact identity. The API

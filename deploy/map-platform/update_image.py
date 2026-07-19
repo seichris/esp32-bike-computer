@@ -43,6 +43,10 @@ IDENTITY_ENV_PATTERN = re.compile(
     r"^      MAP_PLATFORM_WORKER_IMAGE_REFERENCE: \*map-platform-worker-image$",
     re.MULTILINE,
 )
+SERVICE_PATTERN_TEMPLATE = r"^  {service}:\n(?P<body>(?:^(?:    |\s*$).*\n?)*)"
+SERVICE_MAPPING_PATTERN_TEMPLATE = (
+    r"^    {mapping}:\n(?P<body>(?:^(?:      |\s*$).*\n?)*)"
+)
 
 
 @dataclass(frozen=True)
@@ -75,6 +79,35 @@ def _single_match(pattern: re.Pattern[str], text: str, description: str) -> re.M
     return matches[0]
 
 
+def _service_body(text: str, service: str) -> str:
+    pattern = re.compile(
+        SERVICE_PATTERN_TEMPLATE.format(service=re.escape(service)),
+        re.MULTILINE,
+    )
+    return _single_match(pattern, text, f"{service} service").group("body")
+
+
+def _require_service_line(
+    body: str,
+    pattern: re.Pattern[str],
+    description: str,
+) -> None:
+    if len(pattern.findall(body)) != 1:
+        raise ValueError(description)
+
+
+def _service_mapping_body(service_body: str, mapping: str, service: str) -> str:
+    pattern = re.compile(
+        SERVICE_MAPPING_PATTERN_TEMPLATE.format(mapping=re.escape(mapping)),
+        re.MULTILINE,
+    )
+    return _single_match(
+        pattern,
+        service_body,
+        f"{service} {mapping} mapping",
+    ).group("body")
+
+
 def validate_manifest_text(text: str) -> DeploymentImages:
     control_source = _single_match(
         CONTROL_SOURCE_PATTERN,
@@ -96,12 +129,42 @@ def validate_manifest_text(text: str) -> DeploymentImages:
         text,
         "pinned worker image anchor",
     )
+    api = _service_body(text, "map-platform-api")
+    worker = _service_body(text, "map-platform-worker")
+    maintenance = _service_body(text, "map-platform-maintenance")
+    api_environment = _service_mapping_body(api, "environment", "API")
+    worker_environment = _service_mapping_body(worker, "environment", "worker")
+    _require_service_line(
+        api,
+        CONTROL_SERVICE_IMAGE_PATTERN,
+        "the API service must use the pinned control-plane image",
+    )
+    _require_service_line(
+        worker,
+        WORKER_SERVICE_IMAGE_PATTERN,
+        "the worker service must use the pinned worker image",
+    )
+    _require_service_line(
+        maintenance,
+        CONTROL_SERVICE_IMAGE_PATTERN,
+        "the maintenance service must use the pinned control-plane image",
+    )
+    _require_service_line(
+        api_environment,
+        IDENTITY_ENV_PATTERN,
+        "the API service must receive the pinned worker image identity",
+    )
+    _require_service_line(
+        worker_environment,
+        IDENTITY_ENV_PATTERN,
+        "the worker service must receive the pinned worker image identity",
+    )
     if len(CONTROL_SERVICE_IMAGE_PATTERN.findall(text)) != 2:
-        raise ValueError("API and maintenance must use the pinned control-plane image")
+        raise ValueError("only API and maintenance may use the control-plane image")
     if len(WORKER_SERVICE_IMAGE_PATTERN.findall(text)) != 1:
-        raise ValueError("the worker service must use the pinned worker image")
+        raise ValueError("only the worker service may use the worker image")
     if len(IDENTITY_ENV_PATTERN.findall(text)) != 2:
-        raise ValueError("API and worker must receive the pinned worker image identity")
+        raise ValueError("only API and worker may receive the worker image identity")
     if "MAP_PLATFORM_WORKER_IMAGE}" in text or "MAP_PLATFORM_WORKER_IMAGE:-" in text:
         raise ValueError("production Compose must not depend on a mutable Coolify image variable")
 
@@ -134,6 +197,7 @@ def update_manifest(
     control_plane_digest: str,
     source_commit: str,
     worker_digest: str | None = None,
+    worker_source_commit: str | None = None,
 ) -> DeploymentImages:
     _validate_update_value(
         control_plane_digest,
@@ -146,11 +210,20 @@ def update_manifest(
             DIGEST_PATTERN,
             "worker digest must be sha256 followed by 64 lowercase hexadecimal characters",
         )
+    if worker_source_commit is not None and worker_digest is None:
+        raise ValueError("worker source commit requires a worker digest")
     _validate_update_value(
         source_commit,
         COMMIT_PATTERN,
         "source commit must be a full 40-character lowercase Git SHA",
     )
+    requested_worker_source = worker_source_commit or source_commit
+    if worker_digest is not None:
+        _validate_update_value(
+            requested_worker_source,
+            COMMIT_PATTERN,
+            "worker source commit must be a full 40-character lowercase Git SHA",
+        )
 
     text = path.read_text(encoding="utf-8")
     validate_manifest_text(text)
@@ -166,7 +239,7 @@ def update_manifest(
     if worker_digest is not None:
         worker_reference = f"{IMAGE_REPOSITORY}@{worker_digest}"
         updated = WORKER_SOURCE_PATTERN.sub(
-            f"# worker-source-commit: {source_commit}",
+            f"# worker-source-commit: {requested_worker_source}",
             updated,
         )
         updated = WORKER_IMAGE_PATTERN.sub(
@@ -181,7 +254,7 @@ def update_manifest(
     ):
         raise ValueError("control-plane update did not persist the requested identity")
     if worker_digest is not None and (
-        deployment.worker_source_commit != source_commit
+        deployment.worker_source_commit != requested_worker_source
         or deployment.worker_digest != worker_digest
     ):
         raise ValueError("worker update did not persist the requested identity")
@@ -198,21 +271,34 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--control-plane-digest")
-    parser.add_argument("--worker-digest")
+    worker_mode = parser.add_mutually_exclusive_group()
+    worker_mode.add_argument("--worker-digest")
+    worker_mode.add_argument("--preserve-worker-from", type=Path)
     parser.add_argument("--source-commit")
     args = parser.parse_args()
 
     if args.check:
-        if args.worker_digest is not None or args.source_commit is not None:
+        if (
+            args.worker_digest is not None
+            or args.preserve_worker_from is not None
+            or args.source_commit is not None
+        ):
             parser.error("update arguments are not valid with --check")
         deployment = validate_manifest(args.compose)
     else:
         if args.source_commit is None:
             parser.error("--source-commit is required with --control-plane-digest")
+        worker_digest = args.worker_digest
+        worker_source_commit = None
+        if args.preserve_worker_from is not None:
+            pending = validate_manifest(args.preserve_worker_from)
+            worker_digest = pending.worker_digest
+            worker_source_commit = pending.worker_source_commit
         deployment = update_manifest(
             args.compose,
             control_plane_digest=args.control_plane_digest,
-            worker_digest=args.worker_digest,
+            worker_digest=worker_digest,
+            worker_source_commit=worker_source_commit,
             source_commit=args.source_commit,
         )
     print(

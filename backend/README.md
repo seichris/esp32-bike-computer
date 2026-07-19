@@ -173,8 +173,10 @@ identity match that approval. Pin the image anchor in
 promoting. The worker pin supplies both the worker service image and the
 API/worker admission identity, while the independently pinned control-plane
 image can advance to carry a reviewed approval record without replacing that
-tested worker. Registry signature/provenance policy verifies both digests before
-deployment. See
+tested worker. CI verifies that both digests resolve for Linux/AMD64 and carry
+GitHub provenance from this repository's image workflow before the promotion
+can merge. Coolify then deploys the reviewed immutable references without
+selecting an image tag at runtime. See
 `docs/map-stream-rollout-runbook.md` for commissioning, hardware acceptance,
 promotion, rollback, retention, and rotation.
 

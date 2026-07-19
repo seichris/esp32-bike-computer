@@ -15,6 +15,18 @@ In repository **Settings > Actions > General > Workflow permissions**, enable
 write access only to its promotion job. GitHub uses this repository switch to
 decide whether `GITHUB_TOKEN` may open the digest-promotion pull request.
 
+Protect `main` with a ruleset or classic branch protection that:
+
+- requires changes to arrive through a pull request (zero required approvals is
+  acceptable for a solo-maintainer repository),
+- requires the `Map Backend` status check before merge, and
+- requires branches to be up to date before merging, and
+- blocks force pushes and branch deletion.
+
+This is the repository-side deployment admission control: without it, a direct
+push could change the watched production Compose without passing pull-request
+CI.
+
 ## One-time Coolify configuration
 
 Update the existing `open-bike-computer-map-platform` resource rather than
@@ -46,8 +58,34 @@ successful build from `main`, it opens or refreshes the automation-owned
 `deploy/map-platform-production` pull request with the new control-plane digest
 and source commit. When the Git range changes an input used by the signed worker
 identity, the same PR also advances the worker pin. Manual workflow dispatches
-conservatively propose both pins for explicit review. The workflow never changes
-production directly.
+from `main` conservatively propose both pins for explicit review; select the
+`main` branch in the dispatch form. A dispatch from another branch publishes a
+candidate image but cannot open a production promotion. `latest` tracks the
+most recent successful image-building commit on `main`; production never reads
+that mutable tag.
+
+The workflow refuses to guess when a control-only push arrives while the open
+promotion moves the worker pin. Re-run **Map Platform Image** manually on `main`
+and choose one of the explicit `pending_worker` policies:
+
+- `preserve-pending` carries the open PR's worker into the new control-plane
+  candidate, for example after intentionally committing its bound approval. It
+  is rejected if later commits changed any worker input.
+- `promote-candidate` replaces the pending worker with the newly built
+  candidate; run the required worker and hardware gates before merging it.
+- `auto` is safe only when no open promotion moves the worker; it fails closed
+  rather than inferring intent. For a manual rebuild with no moving pending
+  worker, it conservatively proposes both the control and worker pins so a
+  dependency-only rebuild can be tested and promoted.
+
+The control plane and worker share backend code and persistent job state, so the
+workflow never offers an unsafe "new API with old worker" override after worker
+inputs have changed. Resolve the pending candidate or build a dedicated,
+reviewed compatibility release instead.
+
+The PR body reports worker movement from the final manifest diff, not merely
+the latest commit's path classification. The workflow never changes production
+directly.
 
 Review and merge that promotion pull request when the candidate is ready. The
 merge changes `compose.yaml`, which matches the Coolify watch path and deploys
@@ -66,16 +104,27 @@ python3 deploy/map-platform/update_image.py \
   deploy/map-platform/compose.yaml \
   --check
 
+python3 deploy/map-platform/verify_registry_images.py \
+  deploy/map-platform/compose.yaml
+
 MAP_PLATFORM_DOWNLOAD_SECRET=ci-download-secret \
 MAP_PLATFORM_INSTALLATION_SECRET=ci-installation-secret-32-bytes-minimum \
 MAP_PLATFORM_TRUSTED_PROXY_CIDRS=172.16.0.0/12 \
 docker compose -f deploy/map-platform/compose.yaml config
 ```
 
+The registry check requires Docker Buildx and an authenticated GitHub CLI. It
+confirms that both immutable references resolve to Linux/AMD64 images and that
+GitHub recorded provenance from this repository's image workflow for each
+adjacent source commit.
+
 ## Rollback
 
-Revert the promotion commit or open a new promotion pull request restoring a
-previously known-good digest. Git history records the exact source commit and
-image used by every deployment. Coolify's rollback remains available for
-incident response, but follow it with a Git revert so declared production state
-matches the running state.
+Revert the promotion commit or restore the complete previously known-good lock
+in a new promotion pull request: both image anchors and both adjacent source
+commit markers. Restoring a digest without its matching marker fails provenance
+verification. The safest manual rollback is to restore the historical
+`compose.yaml` as a unit. Git history records the exact source commit and image
+used by every deployment. Coolify's rollback remains available for incident
+response, but follow it with a Git revert so declared production state matches
+the running state.
