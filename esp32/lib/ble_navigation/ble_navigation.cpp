@@ -9,6 +9,7 @@
 #include "device_screen_protocol.hpp"
 #include "map_profile_persistence.hpp"
 #include "transfer_control_dispatch.hpp"
+#include "workout_telemetry_protocol.hpp"
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
 #include "../gui/src/globalGuiDef.h"
@@ -1827,6 +1828,19 @@ public:
       return;
     }
 
+    if (hasPrefix(value, workout_telemetry_protocol::FALLBACK_PREFIX)) {
+      if (!requireAuthenticated("fallback workout telemetry")) {
+        return;
+      }
+      // Phase 4 declares the transport but intentionally leaves capability
+      // bit 7 clear. Phase 5 installs the shared parser/state/UI before any
+      // client is invited to send health metrics.
+      Serial.printf("BLE Workout: ignored unsupported fallback frame (%u bytes)\n",
+                    (unsigned)(value.length() -
+                               workout_telemetry_protocol::FALLBACK_PREFIX_SIZE));
+      return;
+    }
+
     if (hasPrefix(value, "MAPR")) {
       if (!requireAuthenticated("fallback route geometry")) {
         return;
@@ -1937,6 +1951,21 @@ public:
     }
 
     handleGpsPayload((const uint8_t *)value.data(), value.length(), "native");
+  }
+};
+
+class MyWorkoutTelemetryCharacteristicCallbacks
+    : public NimBLECharacteristicCallbacks {
+public:
+  void onWrite(NimBLECharacteristic *pChar) override {
+    const std::string value = pChar->getValue();
+    if (!requireAuthenticated("workout telemetry")) {
+      return;
+    }
+    // Capability bit 7 remains clear until Phase 5 adds the shared parser,
+    // RAM-only state and Ride Stats presentation. Do not log payload bytes.
+    Serial.printf("BLE Workout: ignored unsupported native frame (%u bytes)\n",
+                  (unsigned)value.length());
   }
 };
 
@@ -2145,6 +2174,14 @@ void BLENavigationServer::init(const char *deviceName) {
           NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   pSettingsCharacteristic->setCallbacks(
       new MySettingsCharacteristicCallbacks());
+
+  // Declare the Phase 4 transport without advertising capability bit 7.
+  // Phase 5 enables the capability only after the authenticated parser,
+  // RAM-only state and Ride Stats presentation are all installed.
+  pWorkoutTelemetryCharacteristic = pService->createCharacteristic(
+      WORKOUT_TELEMETRY_CHAR_UUID, NIMBLE_PROPERTY::WRITE_NR);
+  pWorkoutTelemetryCharacteristic->setCallbacks(
+      new MyWorkoutTelemetryCharacteristicCallbacks());
 
   // Start service
   pService->start();

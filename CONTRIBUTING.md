@@ -153,11 +153,17 @@ Current characteristics:
 | `2A6F` | iOS -> device | Binary route geometry |
 | `2A72` | iOS -> device | GPS position, heading, time, and optional ride telemetry |
 | `2A73` | iOS -> device | Runtime map/display settings |
+| `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003` | iOS -> device | Fixed 16-byte Watch workout telemetry frames |
 
 When iOS has an older cached GATT table, the app falls back to framed binary
 writes over authenticated `2A6E` using `MAPR`, `GPSP`, and `MSET` frame
 prefixes. Keep new device firmware compatible with both the direct
 characteristics and the fallback framing path.
+
+Workout telemetry uses the `WTLM` prefix plus the same 16-byte native payload;
+the resulting fallback packet is exactly 20 bytes. Devices must keep capability
+bit `7` clear until their authenticated parser, RAM-only state, and Ride Stats
+presentation are all available.
 
 Before changing BLE formats, update the shared builders/parsers, iOS protocol
 tests, ESP32 firmware, XIAO native tests, and [docs/ble-protocol.md](docs/ble-protocol.md)

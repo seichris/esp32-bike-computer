@@ -70,6 +70,7 @@ class BikeComputerCoordinator: ObservableObject {
     private let directionsFactory: NavigationDirectionsFactory
     private let startServices: Bool
     private let now: () -> Date
+    private var workoutDeviceRelay: WorkoutDeviceRelay?
 
     // MARK: - Published State (UI Observable)
 
@@ -155,6 +156,11 @@ class BikeComputerCoordinator: ObservableObject {
         self.directionsFactory = directionsFactory
         self.startServices = startServices
         self.now = now
+        self.workoutDeviceRelay = WorkoutDeviceRelay(
+            store: self.workoutMetricsStore,
+            bleManager: bleManager,
+            now: now
+        )
         setupManagerBindings()
         setupManagers(startServices: startServices)
     }

@@ -19,6 +19,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
   ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/WorkoutDeviceRelay.swift \
   ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \
   ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamFormat.swift \
   ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift \

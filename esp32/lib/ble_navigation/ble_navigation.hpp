@@ -10,6 +10,7 @@
  * - 2A72: GPS position
  * - 2A73: Map settings
  * - 9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002: local auth handshake
+ * - 9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003: workout telemetry
  */
 
 #include <Arduino.h>
@@ -219,15 +220,19 @@ private:
       "2A73"; // Map Settings (runtime configuration)
   static constexpr const char *AUTH_CHAR_UUID =
       "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002";
+  static constexpr const char *WORKOUT_TELEMETRY_CHAR_UUID =
+      "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003";
 
   NimBLEServer *pServer = nullptr;
   NimBLECharacteristic *pNavCharacteristic = nullptr;
   NimBLECharacteristic *pRouteCharacteristic = nullptr;
   NimBLECharacteristic *pAuthCharacteristic = nullptr;
+  NimBLECharacteristic *pWorkoutTelemetryCharacteristic = nullptr;
 
   friend class MyBLEServerCallbacks;
   friend class MyNavCharacteristicCallbacks;
   friend class MyRouteCharacteristicCallbacks;
+  friend class MyWorkoutTelemetryCharacteristicCallbacks;
   friend class MyAuthCharacteristicCallbacks;
 };
 

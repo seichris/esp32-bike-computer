@@ -16,13 +16,15 @@ navigation-ready.
 | `2A6F` | iOS -> ESP32 | Binary route geometry | Upcoming route polyline for the device map view. |
 | `2A72` | iOS -> ESP32 | Binary GPS position | Current device position and heading for the map view. |
 | `2A73` | iOS -> ESP32 | Binary setting packet | Runtime map-renderer, device-screen, and phone-status values. |
+| `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003` | iOS -> ESP32 | Fixed 16-byte workout frame | Watch-owned workout state and optional live metrics for Ride Stats. |
 
 `DistanceMeters` is an unsigned 16-bit decimal value (`0...65535`). The iOS
 sender saturates larger maneuver distances at `65535` instead of allowing the
 firmware field to wrap.
 
 If iOS has cached an older GATT table and does not discover `2A6F`, `2A72`,
-or `2A73`, the app falls back to framed binary writes over authenticated `2A6E`.
+`2A73`, or the workout characteristic, the app falls back to framed binary
+writes over authenticated `2A6E`.
 Fallback frame prefixes:
 
 | Prefix | Payload |
@@ -30,6 +32,7 @@ Fallback frame prefixes:
 | `MAPR` | route geometry packet |
 | `GPSP` | GPS position packet |
 | `MSET` | map setting packet |
+| `WTLM` | one fixed 16-byte workout frame; prefix plus payload is exactly 20 bytes |
 
 ## Auth
 
@@ -82,6 +85,76 @@ coordinates are converted from GCJ-02 to WGS-84 before writing. Firmware accepts
 the original 8-byte lat/lon payload, the 10-byte lat/lon/heading payload, the
 14-byte payload with Unix time, and the extended 30-byte telemetry payload. The
 Waveshare firmware uses the optional Unix time to sync the onboard PCF85063 RTC.
+
+## Watch Workout Telemetry (`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003`)
+
+Workout telemetry is iOS-to-device, write-without-response, RAM-only, and
+accepted only after the existing local authentication handshake. The native
+payload is exactly 16 bytes. A cached GATT table uses the authenticated `2A6E`
+fallback instead:
+
+```text
+"WTLM" | 16-byte workout frame
+```
+
+The fallback is exactly 20 bytes. Native and fallback payloads use the same
+parser. iOS sends no workout frames unless capability bit `7` is present, so
+older firmware continues using the existing GPS ride fields unchanged.
+
+### Core frame, kind `1`
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| `0` | 1 | frame kind `1` |
+| `1` | 1 | session state |
+| `2` | 2 | session token, `UInt16LE` |
+| `4` | 4 | elapsed seconds, `UInt32LE` |
+| `8` | 4 | distance meters, `UInt32LE` |
+| `12` | 2 | speed centimeters/second, `UInt16LE` |
+| `14` | 2 | current heart rate BPM, `UInt16LE` |
+
+Session states are `0` idle/clear, `1` starting, `2` running, `3` paused, `4`
+ending, `5` ended/final summary, and `6` failed. Idle requires token zero; every
+other state requires a non-zero token. A native iPhone session-ended callback
+does not produce state `5` until the final authoritative Watch snapshot arrives;
+the interim `ending` frame carries unavailable numeric sentinels rather than
+heartbeat-replaying a frozen snapshot.
+
+### Extended frame, kind `2`
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| `0` | 1 | frame kind `2` |
+| `1` | 1 | source/availability flags |
+| `2` | 2 | session token, `UInt16LE` |
+| `4` | 2 | average heart rate BPM, `UInt16LE` |
+| `6` | 2 | active energy in tenths of a kilocalorie, `UInt16LE` |
+| `8` | 2 | cycling power watts, `UInt16LE` |
+| `10` | 2 | cycling cadence in tenths of an RPM, `UInt16LE` |
+| `12` | 1 | current one-based heart-rate zone; zero unavailable |
+| `13` | 2 | altitude meters, `Int16LE` |
+| `15` | 1 | zone count; zero unavailable |
+
+Source flag bit `0` means paired cycling-speed sensor, bit `1` Watch GPS speed,
+bit `2` HealthKit cycling distance, bit `3` valid Watch altitude, and bit `4`
+live HealthKit zone data. Bits `5...7` are reserved and zero. A valid iPhone
+location fallback may supply altitude without setting bit `3`.
+
+For unsigned 16-bit metric fields, `0xFFFF` means unavailable. For elapsed and
+distance, `0xFFFFFFFF` means unavailable. Altitude uses `Int16.min` (`0x8000`)
+as unavailable. Valid values saturate one step below their sentinel rather than
+wrapping; valid altitude saturates to `-32767...32767`. Non-finite and negative
+unsigned metrics are unavailable. Heart rate must be positive; zero remains a
+valid speed, energy, power, or cadence value. Active energy therefore ranges
+from `0` through `6553.4` kcal.
+
+iOS coalesces numeric changes to at most one update per second, sends
+state/token and fresh-to-stale transitions immediately, sends the extended
+frame at least every five seconds, and resends both latest frames after an
+authenticated reconnect. Stale or disconnected live sessions preserve their
+state and token but send unavailable numeric fields and zero source flags.
+Authoritative ended summaries retain final numeric values until an explicit
+idle frame, a newer session, or device reboot.
 
 ## Map Settings (`2A73`)
 
@@ -227,7 +300,8 @@ classes. Version `4` advertises that the client understands Battery Status
 screen settings so the device can distinguish a current screen mask from one
 sent by an older four-screen app; older app masks preserve the device's
 existing Battery Status preference. Version `5` advertises destination-catalog
-and device-originated route-request support. Receiving a `CAPS` request alone does not
+and device-originated route-request support. Version `6` advertises that the
+client understands the dedicated Watch-workout telemetry contract. Receiving a `CAPS` request alone does not
 switch the firmware's
 setting semantics: a session switches to independent profiles only after the
 first setting ID in `16...22` is received. This keeps legacy IDs shared when a
@@ -262,6 +336,13 @@ also keeps the preference intact when a `CAPS` response is lost.
 Flag bit `6` reports firmware support for the destination picker described
 below. iOS does not send destination data until this bit is present, so older
 firmware and other board targets continue to use the existing navigation UI.
+
+Flag bit `7` reports complete workout-telemetry support: the dedicated
+characteristic, authenticated native and `WTLM` parsers, RAM-only state, and
+Ride Stats presentation must all be available before firmware sets this bit.
+iOS sends no workout health metrics when the bit is absent. A reconnect or a
+later valid capability response that enables bit `7` triggers one full
+core-plus-extended resynchronization.
 
 ## Destination Picker
 

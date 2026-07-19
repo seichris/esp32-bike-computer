@@ -522,6 +522,12 @@ struct NavigationProtocolTests {
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
         testDeviceBLEProtocolConstants()
+        testWorkoutDeviceFrameVectors()
+        testWorkoutDeviceFrameSentinelsAndSaturation()
+        testWorkoutDeviceTelemetryMapping()
+        testWorkoutDeviceRelayScheduling()
+        testWorkoutDeviceRelayPublicationIntegration()
+        testWorkoutTelemetryBLETransport()
         testDevicePacketRouting()
         testDeviceSoundProtocol()
         testDeviceCapabilitiesProtocol()
@@ -7851,6 +7857,26 @@ struct NavigationProtocolTests {
         assertEqual(protectedWrites, [Data([1]), Data([2]), Data([3])],
                     "later queue pressure cannot fragment an accepted atomic message")
 
+        var rejectedCoalescingDropCount = 0
+        var fullProtectedCoalescingQueue = NavigationWriteQueue(maxCount: 2)
+        assert(fullProtectedCoalescingQueue.enqueueAtomically([
+            NavigationWrite(data: Data([1]), label: "atomic-1"),
+            NavigationWrite(data: Data([2]), label: "atomic-2"),
+        ]), "an atomic batch fills the queue for coalescing rejection coverage")
+        assert(!fullProtectedCoalescingQueue.enqueueCoalescing(
+            NavigationWrite(
+                data: Data([3]),
+                label: "rejected-telemetry",
+                onDrop: { rejectedCoalescingDropCount += 1 },
+                coalescingKey: "workout-core"
+            ),
+            prioritized: false
+        ), "a coalesced write reports rejection behind a full protected batch")
+        assertEqual(rejectedCoalescingDropCount, 0,
+                    "a never-admitted write does not also fire its queued-drop callback")
+        assertEqual(fullProtectedCoalescingQueue.count, 2,
+                    "coalescing rejection preserves the full atomic batch")
+
         var prioritizedQueue = NavigationWriteQueue(maxCount: 3)
         var droppedRegularWrite = false
         prioritizedQueue.enqueue(NavigationWrite(
@@ -7902,6 +7928,36 @@ struct NavigationProtocolTests {
                     [Data([9]), Data([4]), Data([5]), Data([6])],
                     "priority replacement preserves the complete catalog batch")
 
+        var mixedPriorityQueue = NavigationWriteQueue(
+            maxCount: 3,
+            priorityMaxCount: 2
+        )
+        assert(mixedPriorityQueue.enqueueCoalescing(NavigationWrite(
+            data: Data([7]),
+            label: "workout-core",
+            coalescingKey: "workout-telemetry-core"
+        ), prioritized: true), "workout core uses one priority slot")
+        var replacedDestinationStatusWasDropped = false
+        assert(mixedPriorityQueue.enqueueCoalescing(NavigationWrite(
+            data: Data([8]),
+            label: "calculating-status",
+            onDrop: { replacedDestinationStatusWasDropped = true },
+            coalescingKey: "destination-status"
+        ), prioritized: true), "calculating status uses the other priority slot")
+        assert(mixedPriorityQueue.enqueueCoalescing(NavigationWrite(
+            data: Data([9]),
+            label: "terminal-status",
+            coalescingKey: "destination-status"
+        ), prioritized: true), "terminal status replaces only its predecessor")
+        assert(replacedDestinationStatusWasDropped,
+               "capacity-two replacement reports the superseded status")
+        var mixedPriorityWrites: [Data] = []
+        mixedPriorityQueue.flush(canSend: { true }) {
+            mixedPriorityWrites.append($0.data)
+        }
+        assertEqual(mixedPriorityWrites, [Data([7]), Data([9])],
+                    "unrelated workout priority survives latest-status replacement")
+
         var catalogWriteFailureWasReported = false
         var failureTrackingQueue = NavigationWriteQueue(maxCount: 1)
         assert(failureTrackingQueue.enqueueAtomically([
@@ -7943,7 +7999,13 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.extendedMapVisibilityCapabilityMask, 16, "extended map visibility uses capability bit 4")
         assertEqual(DeviceBLEProtocol.batteryStatusScreenCapabilityMask, 32, "Battery Status support uses capability bit 5")
         assertEqual(DeviceBLEProtocol.destinationPickerCapabilityMask, 64, "destination picker support uses capability bit 6")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 5, "capability version advertises destination picker support")
+        assertEqual(DeviceBLEProtocol.workoutTelemetryCapabilityMask, 128, "workout telemetry uses capability bit 7")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 6, "capability version advertises workout telemetry support")
+        assertEqual(DeviceBLEProtocol.workoutTelemetryCharacteristicUUIDString,
+                    "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
+                    "workout telemetry uses the dedicated 128-bit characteristic")
+        assertEqual(DeviceBLEProtocol.workoutTelemetryFallbackPrefix, "WTLM",
+                    "workout telemetry fallback remains explicitly framed")
         assertEqual(DeviceBLEProtocol.serviceRoadsVisibilityMask, 0x400, "service roads use visibility bit 10")
         assertEqual(DeviceBLEProtocol.tracksVisibilityMask, 0x800, "tracks use visibility bit 11")
         assertEqual(DeviceBLEProtocol.extendedVisibilityMarker, 0x1000, "extended visibility uses marker bit 12")
@@ -8015,6 +8077,772 @@ struct NavigationProtocolTests {
             supportedMask: DeviceScreen.legacyScreensMask
         ), .mapPlusNavigation,
         "legacy firmware never receives Battery Status as its default")
+    }
+
+    static func workoutDeviceSample(
+        state: WorkoutDeviceSessionState = .running,
+        sessionToken: UInt16 = 0x1234,
+        hasLiveNumerics: Bool = true,
+        elapsedSeconds: Double? = 3_661,
+        distanceMeters: Double? = 12_345,
+        speedMetersPerSecond: Double? = 12.34,
+        currentHeartRateBPM: Double? = 157,
+        averageHeartRateBPM: Double? = 148,
+        activeEnergyKilocalories: Double? = 456.7,
+        cyclingPowerWatts: Double? = 321,
+        cyclingCadenceRPM: Double? = 87.6,
+        currentHeartRateZone: UInt8? = 4,
+        altitudeMeters: Double? = -12,
+        heartRateZoneCount: UInt8? = 5,
+        sourceFlags: WorkoutDeviceSourceFlags = [
+            .pairedSpeedSensor,
+            .watchSpeed,
+            .healthKitDistance,
+            .watchAltitude,
+            .liveHealthKitZone,
+        ]
+    ) -> WorkoutDeviceTelemetrySample {
+        WorkoutDeviceTelemetrySample(
+            state: state,
+            sessionToken: sessionToken,
+            hasLiveNumerics: hasLiveNumerics,
+            elapsedSeconds: elapsedSeconds,
+            distanceMeters: distanceMeters,
+            speedMetersPerSecond: speedMetersPerSecond,
+            currentHeartRateBPM: currentHeartRateBPM,
+            averageHeartRateBPM: averageHeartRateBPM,
+            activeEnergyKilocalories: activeEnergyKilocalories,
+            cyclingPowerWatts: cyclingPowerWatts,
+            cyclingCadenceRPM: cyclingCadenceRPM,
+            currentHeartRateZone: currentHeartRateZone,
+            altitudeMeters: altitudeMeters,
+            heartRateZoneCount: heartRateZoneCount,
+            sourceFlags: sourceFlags
+        )
+    }
+
+    static func testWorkoutDeviceFrameVectors() {
+        guard let frames = WorkoutDeviceFrameBuilder.frames(
+            for: workoutDeviceSample()
+        ) else {
+            assert(false, "valid workout telemetry produces frames")
+            return
+        }
+        assertEqual(frames.core, Data([
+            0x01, 0x02, 0x34, 0x12,
+            0x4D, 0x0E, 0x00, 0x00,
+            0x39, 0x30, 0x00, 0x00,
+            0xD2, 0x04, 0x9D, 0x00,
+        ]), "core workout frame matches the protocol byte vector")
+        assertEqual(frames.extended, Data([
+            0x02, 0x1F, 0x34, 0x12,
+            0x94, 0x00, 0xD7, 0x11,
+            0x41, 0x01, 0x6C, 0x03,
+            0x04, 0xF4, 0xFF, 0x05,
+        ]), "extended workout frame matches the protocol byte vector")
+        assertEqual(frames.core.count, 16, "core workout frame is exactly 16 bytes")
+        assertEqual(frames.extended.count, 16, "extended workout frame is exactly 16 bytes")
+
+        let maskedFlags = WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
+            sourceFlags: WorkoutDeviceSourceFlags(rawValue: 0xFF)
+        ))
+        assertEqual(maskedFlags?.extended[1], 0x1F,
+                    "reserved workout source-flag bits are always zero on the wire")
+
+        assertEqual(WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
+            state: .running,
+            sessionToken: 0
+        )), nil, "active workout frames reject token zero")
+        assertEqual(WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
+            state: .idle,
+            sessionToken: 1
+        )), nil, "idle workout frames require token zero")
+        let idle = WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
+            state: .idle,
+            sessionToken: 0,
+            hasLiveNumerics: false
+        ))
+        assertEqual(idle?.core[1], WorkoutDeviceSessionState.idle.rawValue,
+                    "idle frame explicitly clears device workout state")
+        assertEqual(readUInt16LE(idle?.core ?? Data(repeating: 0, count: 16), offset: 2), 0,
+                    "idle clear frame carries token zero")
+    }
+
+    static func testWorkoutDeviceFrameSentinelsAndSaturation() {
+        let unavailable = WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
+            elapsedSeconds: -.infinity,
+            distanceMeters: -1,
+            speedMetersPerSecond: .nan,
+            currentHeartRateBPM: 0,
+            averageHeartRateBPM: -.infinity,
+            activeEnergyKilocalories: -0.1,
+            cyclingPowerWatts: .nan,
+            cyclingCadenceRPM: -1,
+            currentHeartRateZone: 6,
+            altitudeMeters: .infinity,
+            heartRateZoneCount: 5
+        ))!
+        assertEqual(readUInt32LE(unavailable.core, offset: 4), UInt32.max,
+                    "non-finite elapsed time is unavailable")
+        assertEqual(readUInt32LE(unavailable.core, offset: 8), UInt32.max,
+                    "negative distance is unavailable")
+        assertEqual(readUInt16LE(unavailable.core, offset: 12), UInt16.max,
+                    "non-finite speed is unavailable")
+        assertEqual(readUInt16LE(unavailable.core, offset: 14), UInt16.max,
+                    "zero heart rate is unavailable")
+        for offset in [4, 6, 8, 10] {
+            assertEqual(readUInt16LE(unavailable.extended, offset: offset), UInt16.max,
+                        "invalid extended UInt16 metric uses the sentinel")
+        }
+        assertEqual(unavailable.extended[12], 0,
+                    "invalid current zone stays unavailable")
+        assertEqual(readUInt16LE(unavailable.extended, offset: 13), 0x8000,
+                    "invalid altitude uses Int16.min sentinel")
+        assertEqual(unavailable.extended[15], 0,
+                    "invalid zone count stays unavailable")
+        assertEqual(unavailable.extended[1], 0,
+                    "source flags clear when their values are unavailable")
+
+        let saturated = WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
+            elapsedSeconds: Double(UInt32.max) * 2,
+            distanceMeters: Double(UInt32.max) * 2,
+            speedMetersPerSecond: Double(UInt16.max),
+            currentHeartRateBPM: Double(UInt16.max) * 2,
+            averageHeartRateBPM: Double(UInt16.max) * 2,
+            activeEnergyKilocalories: 6_553.5,
+            cyclingPowerWatts: Double(UInt16.max) * 2,
+            cyclingCadenceRPM: Double(UInt16.max),
+            altitudeMeters: Double(Int16.min)
+        ))!
+        assertEqual(readUInt32LE(saturated.core, offset: 4), UInt32.max - 1,
+                    "elapsed time saturates below its sentinel")
+        assertEqual(readUInt32LE(saturated.core, offset: 8), UInt32.max - 1,
+                    "distance saturates below its sentinel")
+        assertEqual(readUInt16LE(saturated.core, offset: 12), UInt16.max - 1,
+                    "speed saturates below its sentinel")
+        assertEqual(readUInt16LE(saturated.core, offset: 14), UInt16.max - 1,
+                    "current heart rate saturates below its sentinel")
+        for offset in [4, 6, 8, 10] {
+            assertEqual(readUInt16LE(saturated.extended, offset: offset), UInt16.max - 1,
+                        "extended values saturate below their sentinel")
+        }
+        assertEqual(readUInt16LE(saturated.extended, offset: 13), 0x8001,
+                    "valid low altitude saturates above Int16.min")
+
+        let stale = WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
+            hasLiveNumerics: false
+        ))!
+        assertEqual(stale.core[1], WorkoutDeviceSessionState.running.rawValue,
+                    "stale frame preserves session state")
+        assertEqual(readUInt16LE(stale.core, offset: 2), 0x1234,
+                    "stale frame preserves session token")
+        assertEqual(readUInt32LE(stale.core, offset: 4), UInt32.max,
+                    "stale frame strips core numerics")
+        assertEqual(stale.extended[1], 0,
+                    "stale frame strips source flags")
+        assertEqual(readUInt16LE(stale.extended, offset: 4), UInt16.max,
+                    "stale frame strips extended numerics")
+    }
+
+    static func testWorkoutDeviceTelemetryMapping() {
+        let date = Date(timeIntervalSince1970: 1_000)
+        let sessionID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        func metric(
+            _ value: Double,
+            _ unit: WorkoutMetricUnitV1,
+            source: WorkoutMetricSourceV1? = nil
+        ) -> WorkoutMetricV1 {
+            WorkoutMetricV1(
+                value: value,
+                unit: unit,
+                capturedAt: date,
+                source: source
+            )
+        }
+        let watchLocation = WorkoutLocationV1(
+            latitude: 1,
+            longitude: 2,
+            capturedAt: date,
+            horizontalAccuracy: 3,
+            altitude: 42,
+            verticalAccuracy: 4,
+            course: nil,
+            speed: 8
+        )
+        let snapshot = WorkoutSnapshotV1(
+            state: .running,
+            startDate: date,
+            elapsedTime: metric(10, .seconds),
+            currentHeartRate: metric(150, .beatsPerMinute, source: .healthKit),
+            averageHeartRate: metric(140, .beatsPerMinute, source: .healthKit),
+            activeEnergy: metric(20, .kilocalories, source: .healthKit),
+            cyclingDistance: metric(100, .meters, source: .healthKit),
+            currentSpeed: metric(8, .metersPerSecond, source: .pairedCyclingSensor),
+            cyclingPower: metric(250, .watts, source: .pairedCyclingSensor),
+            cyclingCadence: metric(90, .revolutionsPerMinute, source: .pairedCyclingSensor),
+            currentHeartRateZone: 3,
+            heartRateZoneCount: 5,
+            location: watchLocation,
+            availability: [
+                .elapsedTime, .currentHeartRate, .averageHeartRate,
+                .activeEnergy, .cyclingDistance, .currentSpeed,
+                .cyclingPower, .cyclingCadence, .heartRateZone,
+                .location, .altitude,
+            ]
+        )
+        let envelope = WorkoutEnvelopeV1(
+            kind: .snapshot,
+            sessionID: sessionID,
+            sessionToken: 77,
+            sequence: 1,
+            capturedAt: date,
+            snapshot: snapshot
+        )
+        func presentation(
+            connectionState: WorkoutMirrorConnectionStateV1,
+            snapshot presentedSnapshot: WorkoutSnapshotV1 = snapshot,
+            confirmedState: WorkoutSessionStateV1? = nil,
+            finalSnapshot: WorkoutSnapshotV1? = nil
+        ) -> WorkoutMirrorPresentationV1 {
+            WorkoutMirrorPresentationV1(
+                connectionState: connectionState,
+                snapshot: presentedSnapshot,
+                sessionID: sessionID,
+                capturedAt: date,
+                receivedAt: date,
+                confirmedSessionState: confirmedState,
+                errorCode: nil,
+                pendingControl: nil,
+                finalSnapshot: finalSnapshot,
+                navigation: .empty
+            )
+        }
+
+        let live = WorkoutDeviceTelemetryMapper.sample(
+            presentation: presentation(connectionState: .connected),
+            envelope: envelope
+        )
+        assertEqual(live?.state, .running,
+                    "mapper preserves authoritative running state")
+        assertEqual(live?.sessionToken, 77,
+                    "mapper preserves the Watch session token")
+        assert(live?.hasLiveNumerics == true,
+               "connected coherent snapshots retain live numerics")
+        assert(live?.sourceFlags.contains(.pairedSpeedSensor) == true,
+               "mapper reports paired speed source")
+        assert(live?.sourceFlags.contains(.healthKitDistance) == true,
+               "mapper reports HealthKit distance source")
+        assert(live?.sourceFlags.contains(.watchAltitude) == true,
+               "mapper reports authoritative Watch altitude")
+        assert(live?.sourceFlags.contains(.liveHealthKitZone) == true,
+               "mapper reports live HealthKit zone availability")
+
+        let stale = WorkoutDeviceTelemetryMapper.sample(
+            presentation: presentation(connectionState: .stale),
+            envelope: envelope
+        )
+        assertEqual(stale?.state, .running,
+                    "stale mapping preserves active session state")
+        assert(stale?.hasLiveNumerics == false,
+               "stale mapping strips live numerics")
+
+        let awaitingFinal = WorkoutDeviceTelemetryMapper.sample(
+            presentation: presentation(
+                connectionState: .ended,
+                confirmedState: .ended
+            ),
+            envelope: envelope
+        )
+        assertEqual(awaitingFinal?.state, .ending,
+                    "native end without a final Watch snapshot stays ending")
+        assert(awaitingFinal?.hasLiveNumerics == false,
+               "awaiting-final state cannot heartbeat frozen health metrics")
+
+        let endedSnapshot = WorkoutSnapshotV1(
+            state: .ended,
+            startDate: date,
+            elapsedTime: metric(10, .seconds),
+            currentHeartRate: metric(150, .beatsPerMinute, source: .healthKit),
+            availability: [.elapsedTime, .currentHeartRate],
+            terminalOutcome: .saved
+        )
+        let endedEnvelope = WorkoutEnvelopeV1(
+            kind: .snapshot,
+            sessionID: sessionID,
+            sessionToken: 77,
+            sequence: 2,
+            capturedAt: date,
+            snapshot: endedSnapshot
+        )
+        let ended = WorkoutDeviceTelemetryMapper.sample(
+            presentation: presentation(
+                connectionState: .ended,
+                snapshot: endedSnapshot,
+                finalSnapshot: endedSnapshot
+            ),
+            envelope: endedEnvelope
+        )
+        assertEqual(ended?.state, .ended,
+                    "authoritative final Watch snapshot maps to ended")
+        assert(ended?.hasLiveNumerics == true,
+               "authoritative ended summary retains final numerics")
+
+        let phoneLocation = WorkoutLocationV1(
+            latitude: 1,
+            longitude: 2,
+            capturedAt: date,
+            horizontalAccuracy: 3,
+            altitude: 99,
+            verticalAccuracy: 4,
+            course: nil,
+            speed: 8
+        )
+        let rawWithoutLocation = WorkoutSnapshotV1(
+            state: .running,
+            startDate: date,
+            elapsedTime: metric(10, .seconds),
+            availability: [.elapsedTime]
+        )
+        let mergedWithPhoneAltitude = WorkoutSnapshotV1(
+            state: .running,
+            startDate: date,
+            elapsedTime: metric(10, .seconds),
+            location: phoneLocation,
+            availability: [.elapsedTime, .location, .altitude]
+        )
+        let rawEnvelope = WorkoutEnvelopeV1(
+            kind: .snapshot,
+            sessionID: sessionID,
+            sessionToken: 77,
+            sequence: 3,
+            capturedAt: date,
+            snapshot: rawWithoutLocation
+        )
+        let phoneAltitude = WorkoutDeviceTelemetryMapper.sample(
+            presentation: presentation(
+                connectionState: .connected,
+                snapshot: mergedWithPhoneAltitude
+            ),
+            envelope: rawEnvelope
+        )
+        assertEqual(phoneAltitude?.altitudeMeters, 99,
+                    "valid iPhone altitude remains a relay fallback")
+        assert(phoneAltitude?.sourceFlags.contains(.watchAltitude) == false,
+               "iPhone altitude is not mislabeled as Watch altitude")
+
+        assertEqual(WorkoutDeviceTelemetryMapper.sample(
+            presentation: presentation(connectionState: .connected),
+            envelope: WorkoutEnvelopeV1(
+                kind: .snapshot,
+                sessionID: UUID(),
+                sessionToken: 77,
+                sequence: 1,
+                capturedAt: date,
+                snapshot: snapshot
+            )
+        ), nil, "mapper rejects a mismatched session envelope")
+    }
+
+    static func testWorkoutDeviceRelayScheduling() {
+        let start = Date(timeIntervalSince1970: 10_000)
+        let initial = WorkoutDeviceFrameBuilder.frames(
+            for: workoutDeviceSample()
+        )!
+        let changed = WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
+            speedMetersPerSecond: 13,
+            activeEnergyKilocalories: 457
+        ))!
+        let paused = WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
+            state: .paused,
+            speedMetersPerSecond: 0
+        ))!
+        let stale = WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
+            state: .paused,
+            hasLiveNumerics: false
+        ))!
+
+        var scheduler = WorkoutDeviceRelayScheduler()
+        var schedule = scheduler.update(
+            frames: initial,
+            transportReady: true,
+            at: start
+        )
+        assertEqual(schedule.transmissions.map(\.kind), [.core, .extended],
+                    "authentication sends both latest workout frames")
+        assert(schedule.transmissions.first?.prioritized == true,
+               "initial core synchronization uses the priority lane")
+        for transmission in schedule.transmissions {
+            scheduler.didWrite(
+                kind: transmission.kind,
+                data: transmission.data,
+                at: start
+            )
+        }
+
+        schedule = scheduler.update(
+            frames: changed,
+            transportReady: true,
+            at: start.addingTimeInterval(0.2)
+        )
+        assert(schedule.transmissions.isEmpty,
+               "high-rate numeric changes coalesce for one second")
+        assertEqual(schedule.nextEvaluationAt, start.addingTimeInterval(1),
+                    "coalesced change schedules the next exact deadline")
+
+        schedule = scheduler.update(
+            frames: changed,
+            transportReady: true,
+            at: start.addingTimeInterval(1)
+        )
+        assertEqual(schedule.transmissions.map(\.kind), [.core, .extended],
+                    "coalesced changed frames send when due")
+        for transmission in schedule.transmissions {
+            scheduler.didWrite(
+                kind: transmission.kind,
+                data: transmission.data,
+                at: start.addingTimeInterval(1)
+            )
+        }
+
+        schedule = scheduler.update(
+            frames: paused,
+            transportReady: true,
+            at: start.addingTimeInterval(1.1)
+        )
+        assertEqual(schedule.transmissions.map(\.kind), [.core, .extended],
+                    "session-state transitions bypass metric coalescing")
+        assert(schedule.transmissions[0].prioritized,
+               "session-state core transition is prioritized")
+        for transmission in schedule.transmissions {
+            scheduler.didWrite(
+                kind: transmission.kind,
+                data: transmission.data,
+                at: start.addingTimeInterval(1.1)
+            )
+        }
+
+        schedule = scheduler.update(
+            frames: stale,
+            transportReady: true,
+            at: start.addingTimeInterval(1.2)
+        )
+        assertEqual(schedule.transmissions.map(\.kind), [.core, .extended],
+                    "fresh-to-stale transition sends sentinels immediately")
+        for transmission in schedule.transmissions {
+            scheduler.didWrite(
+                kind: transmission.kind,
+                data: transmission.data,
+                at: start.addingTimeInterval(1.2)
+            )
+        }
+
+        _ = scheduler.update(
+            frames: stale,
+            transportReady: false,
+            at: start.addingTimeInterval(2)
+        )
+        schedule = scheduler.update(
+            frames: stale,
+            transportReady: true,
+            at: start.addingTimeInterval(2.1)
+        )
+        assertEqual(schedule.transmissions.map(\.kind), [.core, .extended],
+                    "reconnect resynchronizes both latest frames once")
+
+        var heartbeatScheduler = WorkoutDeviceRelayScheduler()
+        let heartbeatStart = heartbeatScheduler.update(
+            frames: initial,
+            transportReady: true,
+            at: start
+        )
+        for transmission in heartbeatStart.transmissions {
+            heartbeatScheduler.didWrite(
+                kind: transmission.kind,
+                data: transmission.data,
+                at: start
+            )
+        }
+        assert(heartbeatScheduler.update(
+            frames: initial,
+            transportReady: true,
+            at: start.addingTimeInterval(4.9)
+        ).transmissions.isEmpty, "extended heartbeat waits five seconds")
+        assertEqual(heartbeatScheduler.update(
+            frames: initial,
+            transportReady: true,
+            at: start.addingTimeInterval(5)
+        ).transmissions.map(\.kind), [.extended],
+        "unchanged extended frame heartbeats every five seconds")
+    }
+
+    @MainActor
+    static func testWorkoutDeviceRelayPublicationIntegration() {
+        let clock = TestClock(Date(timeIntervalSince1970: 20_000))
+        let sessionID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        let store = WorkoutMetricsStore(now: clock.now)
+        store.attachMirroredSession(at: clock.now())
+        _ = store.ingestBatch([
+            WorkoutEnvelopeV1(
+                kind: .snapshot,
+                sessionID: sessionID,
+                sessionToken: 91,
+                sequence: 1,
+                capturedAt: clock.now(),
+                snapshot: WorkoutSnapshotV1(
+                    state: .running,
+                    startDate: clock.now()
+                )
+            ),
+        ], receivedAt: clock.now())
+
+        let manager = BLEManager()
+        var writes: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { writes.append($0) }
+        ))
+        func workoutWrites() -> [Data] {
+            writes.filter {
+                String(data: $0.prefix(4), encoding: .utf8) ==
+                    DeviceBLEProtocol.workoutTelemetryFallbackPrefix
+            }
+        }
+        let relay = WorkoutDeviceRelay(
+            store: store,
+            bleManager: manager,
+            now: clock.now
+        )
+
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let capability = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.workoutTelemetryCapabilityMask])
+        assert(manager.handleDeviceCapabilitiesNotification(capability),
+               "publisher integration accepts workout capability")
+        assert(waitForMainLoop(timeout: 1) { workoutWrites().count == 2 },
+               "one capability-enable event resynchronizes core and extended frames")
+        assertEqual(workoutWrites().map { $0[4] }, [1, 2],
+                    "publisher integration sends both fallback frame kinds")
+        assertEqual(workoutWrites()[0][5], WorkoutDeviceSessionState.running.rawValue,
+                    "readiness publication relays the committed running state")
+
+        writes.removeAll()
+        clock.advance(by: 0.1)
+        _ = store.ingestBatch([
+            WorkoutEnvelopeV1(
+                kind: .snapshot,
+                sessionID: sessionID,
+                sessionToken: 91,
+                sequence: 2,
+                capturedAt: clock.now(),
+                snapshot: WorkoutSnapshotV1(
+                    state: .paused,
+                    startDate: Date(timeIntervalSince1970: 20_000)
+                )
+            ),
+        ], receivedAt: clock.now())
+        assert(waitForMainLoop(timeout: 1) { workoutWrites().count == 2 },
+               "one presentation publication sends the latest state transition")
+        assertEqual(workoutWrites()[0][5], WorkoutDeviceSessionState.paused.rawValue,
+                    "relay reads the committed paused presentation, not the prior revision")
+
+        assert(manager.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8)
+        ), "malformed capability response disables telemetry for reconnect coverage")
+        assert(!manager.supportsWorkoutTelemetry,
+               "capability is disabled synchronously before immediate reenable")
+        writes.removeAll()
+        assert(manager.handleDeviceCapabilitiesNotification(capability),
+               "back-to-back valid capability response reenables telemetry")
+        assert(waitForMainLoop(timeout: 1) { workoutWrites().count == 2 },
+               "rapid disable/reenable still resynchronizes both latest frames")
+        assertEqual(workoutWrites()[0][5], WorkoutDeviceSessionState.paused.rawValue,
+                    "reconnect resynchronization uses the latest committed state")
+        withExtendedLifetime(relay) {}
+    }
+
+    static func testWorkoutTelemetryBLETransport() {
+        let capability = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.workoutTelemetryCapabilityMask])
+        let frame = WorkoutDeviceFrameBuilder.frames(
+            for: workoutDeviceSample()
+        )!.core
+        let extendedFrame = WorkoutDeviceFrameBuilder.frames(
+            for: workoutDeviceSample()
+        )!.extended
+
+        let unauthenticated = BLEManager()
+        assert(unauthenticated.handleDeviceCapabilitiesNotification(capability),
+               "workout capability response is consumed")
+        unauthenticated.isConnected = true
+        unauthenticated.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { _ in }
+        ))
+        assert(!unauthenticated.sendWorkoutTelemetryFrame(frame),
+               "workout telemetry is rejected before authentication readiness")
+
+        let oldFirmware = BLEManager()
+        assert(oldFirmware.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) + Data([0])
+        ), "legacy capability response is consumed")
+        oldFirmware.isConnected = true
+        oldFirmware.isNavigationReady = true
+        oldFirmware.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { _ in }
+        ))
+        assert(!oldFirmware.sendWorkoutTelemetryFrame(frame),
+               "new app sends no workout frames to old firmware")
+
+        let fallbackManager = BLEManager()
+        assert(fallbackManager.handleDeviceCapabilitiesNotification(capability),
+               "workout capability enables telemetry")
+        assert(fallbackManager.supportsWorkoutTelemetry,
+               "CAPS bit 7 is published")
+        fallbackManager.isConnected = true
+        fallbackManager.isNavigationReady = true
+        var fallbackWrites: [Data] = []
+        fallbackManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { fallbackWrites.append($0) }
+        ))
+        assert(fallbackManager.sendWorkoutTelemetryFrame(frame),
+               "capable authenticated connection accepts workout telemetry")
+        assertEqual(fallbackWrites.count, 1,
+                    "fallback emits one workout packet")
+        assertEqual(fallbackWrites[0].count, 20,
+                    "WTLM plus core frame fits the minimum ATT payload")
+        assertEqual(String(data: fallbackWrites[0].prefix(4), encoding: .utf8),
+                    "WTLM", "cached-GATT fallback uses WTLM")
+        assertEqual(Data(fallbackWrites[0].dropFirst(4)), frame,
+                    "WTLM fallback preserves the exact frame bytes")
+
+        var malformedKind = Data(repeating: 0, count: 16)
+        malformedKind[0] = 3
+        assert(!fallbackManager.sendWorkoutTelemetryFrame(Data(repeating: 1, count: 15)),
+               "short workout frame is rejected")
+        assert(!fallbackManager.sendWorkoutTelemetryFrame(malformedKind),
+               "unknown workout frame kind is rejected")
+
+        let nativeManager = BLEManager()
+        assert(nativeManager.handleDeviceCapabilitiesNotification(capability),
+               "native manager receives workout capability")
+        nativeManager.isConnected = true
+        nativeManager.isNavigationReady = true
+        var nativeWrites: [Data] = []
+        var laterNavigationWrites: [Data] = []
+        nativeManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            expectsWriteResponse: true,
+            canSend: { true },
+            write: { laterNavigationWrites.append($0) }
+        ))
+        nativeManager.installWorkoutTelemetryWriteEndpoint(
+            WorkoutTelemetryWriteEndpoint(
+                maximumWriteLength: 20,
+                write: { nativeWrites.append($0) }
+            )
+        )
+        assert(nativeManager.sendWorkoutTelemetryFrame(frame),
+               "native workout characteristic accepts the frame")
+        assert(nativeManager.sendWorkoutTelemetryFrame(extendedFrame),
+               "native extended workout frame drains after the core frame")
+        assertEqual(nativeWrites, [frame, extendedFrame],
+                    "native without-response writes ignore fallback response semantics")
+        assert(nativeManager.requestDeviceCapabilities(),
+               "navigation traffic still drains after native workout writes")
+        assertEqual(laterNavigationWrites,
+                    [Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+                        Data([DeviceBLEProtocol.deviceCapabilitiesVersion])],
+                    "native workout traffic cannot wedge later response-backed navigation writes")
+
+        let coalescingManager = BLEManager()
+        assert(coalescingManager.handleDeviceCapabilitiesNotification(capability),
+               "coalescing manager receives workout capability")
+        coalescingManager.isConnected = true
+        coalescingManager.isNavigationReady = true
+        var transportReady = false
+        var coalescedWrites: [Data] = []
+        var dropped = 0
+        coalescingManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { transportReady },
+            write: { coalescedWrites.append($0) }
+        ))
+        let secondFrame = WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
+            speedMetersPerSecond: 13
+        ))!.core
+        let latestFrame = WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
+            state: .paused,
+            speedMetersPerSecond: 0
+        ))!.core
+        assert(coalescingManager.sendWorkoutTelemetryFrame(
+            frame,
+            onDrop: { dropped += 1 }
+        ), "first blocked workout frame queues")
+        assert(coalescingManager.sendWorkoutTelemetryFrame(
+            secondFrame,
+            onDrop: { dropped += 1 }
+        ), "newer blocked workout frame replaces the first")
+        assert(coalescingManager.sendWorkoutTelemetryFrame(
+            latestFrame,
+            prioritized: true,
+            onDrop: { dropped += 1 }
+        ), "urgent state replaces older queued workout data")
+        assertEqual(dropped, 2,
+                    "each obsolete queued workout core reports its drop")
+        transportReady = true
+        coalescingManager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(coalescedWrites.count, 1,
+                    "coalescing sends only the latest pending core")
+        assertEqual(Data(coalescedWrites[0].dropFirst(4)), latestFrame,
+                    "coalescing cannot replay stale workout state")
+
+        let downgradeManager = BLEManager()
+        assert(downgradeManager.handleDeviceCapabilitiesNotification(capability),
+               "downgrade manager initially receives workout capability")
+        downgradeManager.isConnected = true
+        downgradeManager.isNavigationReady = true
+        var downgradeTransportReady = false
+        var downgradeWrites: [Data] = []
+        var downgradeDrops = 0
+        downgradeManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { downgradeTransportReady },
+            write: { downgradeWrites.append($0) }
+        ))
+        assert(downgradeManager.sendWorkoutTelemetryFrame(
+            frame,
+            onDrop: { downgradeDrops += 1 }
+        ), "blocked core is admitted while capability bit 7 is present")
+        assert(downgradeManager.sendWorkoutTelemetryFrame(
+            extendedFrame,
+            onDrop: { downgradeDrops += 1 }
+        ), "blocked extended frame is admitted while capability bit 7 is present")
+        assert(downgradeManager.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) + Data([0])
+        ), "same-connection capability downgrade is consumed")
+        assertEqual(downgradeDrops, 2,
+                    "capability downgrade purges both queued health frames")
+        downgradeTransportReady = true
+        downgradeManager.completeNavigationWriteForTesting(error: nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        assert(downgradeWrites.allSatisfy {
+            String(data: $0.prefix(4), encoding: .utf8) !=
+                DeviceBLEProtocol.workoutTelemetryFallbackPrefix
+        },
+               "purged health frames cannot transmit after bit 7 is revoked")
+
+        let malformedCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8)
+        assert(fallbackManager.handleDeviceCapabilitiesNotification(malformedCapabilities),
+               "malformed capability response is consumed")
+        assert(!fallbackManager.supportsWorkoutTelemetry,
+               "malformed capability response disables workout telemetry")
     }
 
     static func testDeviceSoundProtocol() {
