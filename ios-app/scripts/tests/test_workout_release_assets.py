@@ -1,0 +1,201 @@
+import json
+import plistlib
+import unittest
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+IOS_PROJECT = REPO_ROOT / "ios-app" / "BikeComputer"
+PRIVACY_POLICY_URL = (
+    "https://github.com/seichris/open-bike-computer/blob/main/PRIVACY_POLICY.md"
+)
+
+
+def load_plist(path: Path) -> dict:
+    with path.open("rb") as handle:
+        return plistlib.load(handle)
+
+
+class WorkoutReleaseAssetsTests(unittest.TestCase):
+    def test_privacy_policy_is_reachable_and_covers_release_obligations(self):
+        shared_policy = (
+            IOS_PROJECT / "WorkoutShared" / "AppPrivacyPolicy.swift"
+        ).read_text()
+        ios_settings = (
+            IOS_PROJECT / "BikeComputer" / "Views" / "SettingsView.swift"
+        ).read_text()
+        watch_start = (
+            IOS_PROJECT
+            / "BikeComputerWatch"
+            / "Views"
+            / "WorkoutStartView.swift"
+        ).read_text()
+        public_policy = (REPO_ROOT / "PRIVACY_POLICY.md").read_text()
+        normalized_policy = " ".join(public_policy.split())
+        disclosures = (
+            REPO_ROOT / "docs" / "app-store-privacy-disclosures.md"
+        ).read_text()
+
+        self.assertIn(PRIVACY_POLICY_URL, shared_policy)
+        self.assertIn("AppPrivacyPolicy.url", ios_settings)
+        self.assertIn("AppPrivacyPolicy.url", watch_start)
+        self.assertIn("same or equivalent privacy protection", normalized_policy)
+        self.assertIn("30 days after a map job becomes ready", normalized_policy)
+        self.assertIn("renaming or downloading a map does not extend", normalized_policy)
+        self.assertIn("scheduled maintenance process", normalized_policy)
+        self.assertIn("until you request its deletion", normalized_policy)
+        self.assertIn(PRIVACY_POLICY_URL, disclosures)
+
+    def test_permission_copy_and_entitlements_match_workout_ownership(self):
+        ios_info = load_plist(IOS_PROJECT / "BikeComputer" / "Info.plist")
+        watch_info = load_plist(IOS_PROJECT / "BikeComputerWatch" / "Info.plist")
+        ios_entitlements = load_plist(
+            IOS_PROJECT / "BikeComputer" / "BikeComputer.entitlements"
+        )
+        watch_entitlements = load_plist(
+            IOS_PROJECT
+            / "BikeComputerWatch"
+            / "BikeComputerWatch.entitlements"
+        )
+
+        self.assertIn("Apple Watch", ios_info["NSHealthShareUsageDescription"])
+        self.assertIn("cycling workouts", watch_info["NSHealthUpdateUsageDescription"])
+        self.assertIn("cycling metrics", watch_info["NSHealthShareUsageDescription"])
+        self.assertIn("route", watch_info["NSLocationWhenInUseUsageDescription"])
+        self.assertIn("workout-processing", watch_info["WKBackgroundModes"])
+        self.assertTrue(watch_info["WKRunsIndependentlyOfCompanionApp"])
+        self.assertEqual(
+            watch_info["WKCompanionAppBundleIdentifier"],
+            "LetItRide.BikeComputer",
+        )
+        self.assertTrue(ios_entitlements["com.apple.developer.healthkit"])
+        self.assertTrue(watch_entitlements["com.apple.developer.healthkit"])
+
+    def test_privacy_manifests_distinguish_backend_collection_from_healthkit(self):
+        ios_privacy = load_plist(
+            IOS_PROJECT / "BikeComputer" / "PrivacyInfo.xcprivacy"
+        )
+        watch_privacy = load_plist(
+            IOS_PROJECT / "BikeComputerWatch" / "PrivacyInfo.xcprivacy"
+        )
+
+        self.assertFalse(ios_privacy["NSPrivacyTracking"])
+        self.assertEqual(ios_privacy["NSPrivacyTrackingDomains"], [])
+        collected = {
+            entry["NSPrivacyCollectedDataType"]: entry
+            for entry in ios_privacy["NSPrivacyCollectedDataTypes"]
+        }
+        self.assertEqual(
+            set(collected),
+            {
+                "NSPrivacyCollectedDataTypePreciseLocation",
+                "NSPrivacyCollectedDataTypeDeviceID",
+                "NSPrivacyCollectedDataTypeOtherUserContent",
+                "NSPrivacyCollectedDataTypeProductInteraction",
+            },
+        )
+        for entry in collected.values():
+            self.assertTrue(entry["NSPrivacyCollectedDataTypeLinked"])
+            self.assertFalse(entry["NSPrivacyCollectedDataTypeTracking"])
+            self.assertEqual(
+                entry["NSPrivacyCollectedDataTypePurposes"],
+                ["NSPrivacyCollectedDataTypePurposeAppFunctionality"],
+            )
+
+        accessed = {
+            entry["NSPrivacyAccessedAPIType"]: set(
+                entry["NSPrivacyAccessedAPITypeReasons"]
+            )
+            for entry in ios_privacy["NSPrivacyAccessedAPITypes"]
+        }
+        self.assertEqual(
+            accessed,
+            {
+                "NSPrivacyAccessedAPICategoryUserDefaults": {"CA92.1"},
+                "NSPrivacyAccessedAPICategoryFileTimestamp": {"C617.1"},
+            },
+        )
+        self.assertFalse(watch_privacy["NSPrivacyTracking"])
+        self.assertEqual(watch_privacy["NSPrivacyCollectedDataTypes"], [])
+        self.assertEqual(watch_privacy["NSPrivacyAccessedAPITypes"], [])
+
+    def test_watch_app_has_a_platform_icon_and_release_assets(self):
+        icon_contents = json.loads(
+            (
+                IOS_PROJECT
+                / "BikeComputer"
+                / "Assets.xcassets"
+                / "AppIcon.appiconset"
+                / "Contents.json"
+            ).read_text()
+        )
+        watch_icons = [
+            image
+            for image in icon_contents["images"]
+            if image.get("platform") == "watchos"
+        ]
+        self.assertEqual(len(watch_icons), 1)
+        self.assertEqual(watch_icons[0]["size"], "1024x1024")
+        self.assertTrue(watch_icons[0].get("filename"))
+
+        project = (
+            IOS_PROJECT / "BikeComputer.xcodeproj" / "project.pbxproj"
+        ).read_text()
+        self.assertIn("Assets.xcassets in Resources", project)
+        self.assertGreaterEqual(
+            project.count("ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;"),
+            3,
+        )
+
+        required_files = [
+            REPO_ROOT / "PRIVACY_POLICY.md",
+            REPO_ROOT / "ios-app" / "README.md",
+            REPO_ROOT / "docs" / "app-store-privacy-disclosures.md",
+            REPO_ROOT
+            / "docs"
+            / "releases"
+            / "watchos-workout-companion.md",
+            REPO_ROOT / "docs" / "watchos-workout-companion-validation.md",
+            REPO_ROOT
+            / "ios-app"
+            / "AppStoreScreenshots"
+            / "public"
+            / "screenshots"
+            / "watch"
+            / "watch-live-workout.jpg",
+        ]
+        for path in required_files:
+            self.assertTrue(path.is_file(), path)
+
+    def test_screenshot_release_package_is_source_bound_in_ci(self):
+        screenshot_root = REPO_ROOT / "ios-app" / "AppStoreScreenshots"
+        provenance = json.loads(
+            (
+                screenshot_root
+                / "exports"
+                / "app-store-screenshots"
+                / "_provenance.json"
+            ).read_text()
+        )
+        source_paths = {entry["path"] for entry in provenance["sources"]}
+        self.assertEqual(provenance["schemaVersion"], 1)
+        self.assertIn("src/app/page.tsx", source_paths)
+        self.assertIn("src/app/styles.css", source_paths)
+        self.assertIn(
+            "public/screenshots/watch/watch-live-workout.jpg",
+            source_paths,
+        )
+        self.assertIn("scripts/export-playwright.ts", source_paths)
+        self.assertIn("scripts/release-package.ts", source_paths)
+
+        package = json.loads((screenshot_root / "package.json").read_text())
+        self.assertEqual(
+            package["scripts"]["verify:release"],
+            "tsx scripts/release-package.ts",
+        )
+        workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        self.assertIn("bun run verify:release", workflow)
+
+
+if __name__ == "__main__":
+    unittest.main()

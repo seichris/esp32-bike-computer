@@ -35,6 +35,9 @@ struct WorkoutStartView: View {
                     }
                     .buttonStyle(.borderless)
                 }
+
+                Link("Privacy Policy", destination: AppPrivacyPolicy.url)
+                    .font(.caption2)
             }
             .padding(.horizontal, 8)
         }

@@ -109,6 +109,12 @@ button {
   background: #ffffff;
 }
 
+.slideFour {
+  background:
+    radial-gradient(circle at 50% 63%, rgba(255, 62, 70, 0.4), transparent 30%),
+    linear-gradient(155deg, #22060a 0%, #090b0c 48%, #181b1b 100%);
+}
+
 .headline {
   letter-spacing: 0;
   line-height: 0.94;
@@ -215,6 +221,34 @@ button {
   width: 780px;
 }
 
+.captionFour {
+  left: 76px;
+  position: absolute;
+  top: 132px;
+  width: 1040px;
+  z-index: 6;
+}
+
+.captionFour .label,
+.captionFour .headline,
+.captionFour .subhead {
+  color: #ffffff;
+}
+
+.captionFour .headline {
+  font-size: 112px;
+  font-weight: 900;
+  margin-top: 34px;
+}
+
+.captionFour .subhead {
+  color: rgba(255, 255, 255, 0.74);
+  font-size: 44px;
+  font-weight: 650;
+  margin-top: 32px;
+  width: 870px;
+}
+
 .phoneFrame {
   aspect-ratio: 430 / 932;
   background: linear-gradient(180deg, #2c2c2e 0%, #111113 100%);
@@ -291,6 +325,111 @@ button {
   transform: translateX(-50%);
   width: 1320px;
   z-index: 3;
+}
+
+.watchProduct {
+  height: 1488px;
+  left: 50%;
+  position: absolute;
+  top: 1030px;
+  transform: translateX(-50%);
+  width: 820px;
+  z-index: 4;
+}
+
+.watchBand {
+  background: linear-gradient(90deg, #242729 0%, #4a4f50 50%, #242729 100%);
+  border: 3px solid rgba(255, 255, 255, 0.09);
+  left: 50%;
+  position: absolute;
+  transform: translateX(-50%);
+  width: 370px;
+}
+
+.watchBandTop {
+  border-radius: 82px 82px 26px 26px;
+  height: 390px;
+  top: 0;
+}
+
+.watchBandBottom {
+  border-radius: 26px 26px 82px 82px;
+  bottom: 0;
+  height: 390px;
+}
+
+.watchCase {
+  background: linear-gradient(145deg, #989e9d 0%, #313536 32%, #0e1011 68%, #777d7c 100%);
+  border-radius: 154px;
+  box-shadow:
+    inset 0 0 0 5px rgba(255, 255, 255, 0.14),
+    0 56px 120px rgba(0, 0, 0, 0.56);
+  height: 976px;
+  left: 50%;
+  padding: 30px;
+  position: absolute;
+  top: 256px;
+  transform: translateX(-50%);
+  width: 820px;
+}
+
+.watchScreen {
+  background: #000000;
+  border-radius: 128px;
+  height: 100%;
+  overflow: hidden;
+  width: 100%;
+}
+
+.watchScreen img {
+  display: block;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.watchCrown {
+  background: linear-gradient(90deg, #323738, #8b9190);
+  border-radius: 24px;
+  height: 138px;
+  position: absolute;
+  right: -34px;
+  top: 404px;
+  width: 58px;
+  z-index: 2;
+}
+
+.workoutGlow {
+  background: rgba(255, 23, 23, 0.22);
+  border-radius: 50%;
+  filter: blur(24px);
+  height: 940px;
+  left: 190px;
+  position: absolute;
+  top: 1280px;
+  width: 940px;
+}
+
+.workoutPill {
+  backdrop-filter: blur(24px);
+  background: rgba(255, 255, 255, 0.12);
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  bottom: 104px;
+  color: #ffffff;
+  font-size: 29px;
+  font-weight: 760;
+  padding: 22px 30px;
+  position: absolute;
+  z-index: 7;
+}
+
+.workoutPillLeft {
+  left: 70px;
+}
+
+.workoutPillRight {
+  right: 70px;
 }
 
 .mapTile {

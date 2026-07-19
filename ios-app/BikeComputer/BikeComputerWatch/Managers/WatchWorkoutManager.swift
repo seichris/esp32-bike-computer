@@ -408,6 +408,12 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var terminalRouteDistance: WorkoutMetricCandidate?
 
     override convenience init() {
+#if DEBUG
+        let isAppStoreScreenshotPreview = ProcessInfo.processInfo.arguments
+            .contains("--app-store-screenshot-live-workout")
+#else
+        let isAppStoreScreenshotPreview = false
+#endif
         self.init(
             healthStore: HKHealthStore(),
             routeRecorder: WatchRouteRecorder(),
@@ -433,8 +439,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             mirrorShutdownEndSession: nil,
             mirrorRetryDelay: 5,
             mirrorShutdownDeliveryTimeout: 10,
-            initializeOnLaunch: true
+            initializeOnLaunch: !isAppStoreScreenshotPreview
         )
+#if DEBUG
+        if isAppStoreScreenshotPreview {
+            configureAppStoreScreenshotPreview()
+        }
+#endif
     }
 
     init(
@@ -3022,6 +3033,81 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     }
 
 #if DEBUG
+    private func configureAppStoreScreenshotPreview() {
+        let capturedAt = Date(timeIntervalSinceReferenceDate: 800_000_000)
+
+        lifecycle = WorkoutLifecycleReducer()
+        _ = lifecycle.apply(.requestStart)
+        _ = lifecycle.apply(.sessionRunning)
+        setupState = .ready
+        isRecovering = false
+        snapshot = WorkoutSnapshotV1(
+            state: .running,
+            startDate: capturedAt.addingTimeInterval(-2_863),
+            elapsedTime: WorkoutMetricV1(
+                value: 2_863,
+                unit: .seconds,
+                capturedAt: capturedAt,
+                source: .healthKit
+            ),
+            currentHeartRate: WorkoutMetricV1(
+                value: 148,
+                unit: .beatsPerMinute,
+                capturedAt: capturedAt,
+                source: .healthKit
+            ),
+            averageHeartRate: WorkoutMetricV1(
+                value: 143,
+                unit: .beatsPerMinute,
+                capturedAt: capturedAt,
+                source: .healthKit
+            ),
+            activeEnergy: WorkoutMetricV1(
+                value: 487,
+                unit: .kilocalories,
+                capturedAt: capturedAt,
+                source: .healthKit
+            ),
+            cyclingDistance: WorkoutMetricV1(
+                value: 8_420,
+                unit: .meters,
+                capturedAt: capturedAt,
+                source: .healthKit
+            ),
+            currentSpeed: WorkoutMetricV1(
+                value: 8.3,
+                unit: .metersPerSecond,
+                capturedAt: capturedAt,
+                source: .pairedCyclingSensor
+            ),
+            cyclingPower: WorkoutMetricV1(
+                value: 238,
+                unit: .watts,
+                capturedAt: capturedAt,
+                source: .pairedCyclingSensor
+            ),
+            cyclingCadence: WorkoutMetricV1(
+                value: 91,
+                unit: .revolutionsPerMinute,
+                capturedAt: capturedAt,
+                source: .pairedCyclingSensor
+            ),
+            currentHeartRateZone: 3,
+            heartRateZoneCount: 5,
+            availability: [
+                .elapsedTime,
+                .currentHeartRate,
+                .averageHeartRate,
+                .activeEnergy,
+                .cyclingDistance,
+                .currentSpeed,
+                .cyclingPower,
+                .cyclingCadence,
+                .heartRateZone,
+            ]
+        )
+    }
+
     func configureMirrorRuntimeForTesting(
         session: HKWorkoutSession,
         identity: WatchWorkoutRecoveryStore.Identity,

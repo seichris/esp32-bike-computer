@@ -8,7 +8,9 @@
     "start": "next start -H 127.0.0.1",
     "test": "tsx --test scripts/*.test.ts",
     "export:iphone": "tsx scripts/export-playwright.ts --url http://127.0.0.1:3000 --width 1242 --height 2688 --out exports/app-store-screenshots --locale en-US --device iphone-6.5 --theme shibuya-red",
-    "validate": "tsx scripts/validate-exports.ts --dir exports/app-store-screenshots/screenshots --allow 1242x2688 --output exports/app-store-screenshots/_validation.txt"
+    "validate": "tsx scripts/validate-exports.ts --dir exports/app-store-screenshots/screenshots --allow 1242x2688 --output exports/app-store-screenshots/_validation.txt",
+    "validate:watch": "tsx scripts/validate-exports.ts --dir public/screenshots/watch --allow 416x496 --output exports/apple-watch-validation.txt",
+    "verify:release": "tsx scripts/release-package.ts"
   },
   "dependencies": {
     "jszip": "^3.10.1",

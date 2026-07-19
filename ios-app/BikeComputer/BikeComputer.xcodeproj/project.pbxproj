@@ -18,6 +18,7 @@
 		57A004032F00000100000001 /* WorkoutMirrorManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A004002F00000100000001 /* WorkoutMirrorManager.swift */; };
 		57A004042F00000100000001 /* WorkoutMetricsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A004012F00000100000001 /* WorkoutMetricsStore.swift */; };
 		57A004052F00000100000001 /* WorkoutMirrorManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A004022F00000100000001 /* WorkoutMirrorManagerTests.swift */; };
+		57A005012F00000100000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 57A005002F00000100000001 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,6 +58,7 @@
 		57A004002F00000100000001 /* WorkoutMirrorManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Managers/WorkoutMirrorManager.swift; sourceTree = "<group>"; };
 		57A004012F00000100000001 /* WorkoutMetricsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Managers/WorkoutMetricsStore.swift; sourceTree = "<group>"; };
 		57A004022F00000100000001 /* WorkoutMirrorManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../BikeComputerTests/WorkoutMirrorManagerTests.swift; sourceTree = "<group>"; };
+		57A005002F00000100000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = BikeComputer/Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -147,6 +149,7 @@
 				57A004002F00000100000001 /* WorkoutMirrorManager.swift */,
 				57A004012F00000100000001 /* WorkoutMetricsStore.swift */,
 				57A004022F00000100000001 /* WorkoutMirrorManagerTests.swift */,
+				57A005002F00000100000001 /* Assets.xcassets */,
 				83E6EF982EED853C00AE5F9B /* Products */,
 			);
 			sourceTree = "<group>";
@@ -316,6 +319,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				57A005012F00000100000001 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -615,6 +619,7 @@
 		57A000082F00000100000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = BikeComputerWatch/BikeComputerWatch.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 3;
@@ -646,6 +651,7 @@
 		57A000092F00000100000001 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = BikeComputerWatch/BikeComputerWatch.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 3;

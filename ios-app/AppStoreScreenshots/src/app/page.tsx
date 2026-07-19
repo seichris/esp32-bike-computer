@@ -14,6 +14,11 @@ const SLIDES = [
     src: "/screenshots/appstorepic3.png",
     alt: "Bike computer device navigation screens",
   },
+  {
+    id: "04-watch-workout",
+    src: "/screenshots/watch/watch-live-workout.jpg",
+    alt: "Live outdoor cycling workout metrics in the BikeComputer Apple Watch app",
+  },
 ] as const;
 
 function Phone({ src, alt, className }: { src: string; alt: string; className: string }) {
@@ -24,6 +29,21 @@ function Phone({ src, alt, className }: { src: string; alt: string; className: s
       </div>
       <div className="phoneIsland" />
       <div className="phoneOutline" />
+    </div>
+  );
+}
+
+function Watch({ src, alt }: { src: string; alt: string }) {
+  return (
+    <div className="watchProduct">
+      <div className="watchBand watchBandTop" />
+      <div className="watchBand watchBandBottom" />
+      <div className="watchCrown" />
+      <div className="watchCase">
+        <div className="watchScreen">
+          <img src={src} alt={alt} draggable={false} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -102,6 +122,28 @@ function SlideThree() {
   );
 }
 
+function SlideFour() {
+  return (
+    <section className="slide slideFour" data-export-slide={SLIDES[3].id}>
+      <div className="slideInner">
+        <div className="workoutGlow" />
+        <div className="captionFour">
+          <div className="label">Apple Watch Workout</div>
+          <h1 className="headline">
+            Your ride,
+            <br />
+            live at a glance
+          </h1>
+          <p className="subhead">Record on Watch. Mirror metrics to iPhone and your handlebar display.</p>
+        </div>
+        <Watch src={SLIDES[3].src} alt={SLIDES[3].alt} />
+        <div className="workoutPill workoutPillLeft">Watch-owned workout</div>
+        <div className="workoutPill workoutPillRight">One save to Health</div>
+      </div>
+    </section>
+  );
+}
+
 export default function ScreenshotsPage() {
   return (
     <main className="page">
@@ -120,6 +162,7 @@ export default function ScreenshotsPage() {
         <SlideOne />
         <SlideTwo />
         <SlideThree />
+        <SlideFour />
       </div>
     </main>
   );

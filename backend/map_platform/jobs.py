@@ -21,6 +21,27 @@ from .reuse import parent_contains_child_blocks
 from .sources import SourceIndex, SourceResolutionError
 
 
+class ArtifactGarbageCollectionError(RuntimeError):
+    def __init__(self, *, removed: int, failures: list[tuple[str, Exception]]):
+        self.removed = removed
+        self.failed_object_keys = tuple(key for key, _ in failures)
+        self.causes = tuple(exc for _, exc in failures)
+        super().__init__(
+            f"artifact garbage collection failed for {len(failures)} object(s) "
+            f"after deleting {removed}"
+        )
+
+
+class JobRecordEnumerationError(RuntimeError):
+    def __init__(self, failures: list[tuple[Path, Exception]]):
+        self.failed_paths = tuple(path for path, _ in failures)
+        self.causes = tuple(exc for _, exc in failures)
+        super().__init__(
+            f"failed to read {len(failures)} job record(s); "
+            "destructive cleanup was skipped"
+        )
+
+
 class JobStore:
     _local_queue_locks_guard = threading.Lock()
     _local_queue_locks: dict[str, threading.Lock] = {}
@@ -66,7 +87,27 @@ class JobStore:
         return MapJob.from_dict(json.loads(path.read_text()))
 
     def list(self) -> list[MapJob]:
-        return [MapJob.from_dict(json.loads(path.read_text())) for path in sorted(self.root.glob("*.json"))]
+        jobs, _ = self.list_with_failures()
+        return jobs
+
+    def list_with_failures(
+        self,
+    ) -> tuple[list[MapJob], list[tuple[Path, Exception]]]:
+        """Enumerate usable records without letting one corrupt file starve peers."""
+        jobs: list[MapJob] = []
+        failures: list[tuple[Path, Exception]] = []
+        for path in sorted(self.root.glob("*.json")):
+            try:
+                jobs.append(MapJob.from_dict(json.loads(path.read_text())))
+            except Exception as exc:
+                failures.append((path, exc))
+        return jobs, failures
+
+    def _list_for_destructive_cleanup(self) -> list[MapJob]:
+        jobs, failures = self.list_with_failures()
+        if failures:
+            raise JobRecordEnumerationError(failures)
+        return jobs
 
     def list_for_installation(self, client_installation_id: str) -> list[MapJob]:
         """Read only records named by the per-installation lookup index."""
@@ -78,7 +119,7 @@ class JobStore:
                 if entry.get("clientInstallationId") != client_installation_id:
                     continue
                 job = self.get(entry["jobId"])
-            except (KeyError, OSError, ValueError, TypeError, json.JSONDecodeError):
+            except Exception:
                 continue
             if job.client_installation_id == client_installation_id:
                 matches.append(job)
@@ -93,7 +134,7 @@ class JobStore:
                 if entry.get("mapId") != map_id:
                     continue
                 job = self.get(entry["jobId"])
-            except (KeyError, OSError, ValueError, TypeError, json.JSONDecodeError):
+            except Exception:
                 continue
             if job.map_id == map_id:
                 matches.append(job)
@@ -104,7 +145,7 @@ class JobStore:
         for path in sorted(self.active_index_root.glob("*.idx")):
             try:
                 job = self.get(path.stem)
-            except (KeyError, OSError, ValueError, TypeError, json.JSONDecodeError):
+            except Exception:
                 continue
             if job.status in ACTIVE_STATUSES:
                 active.append(job)
@@ -114,10 +155,16 @@ class JobStore:
     def lock_artifact_references(self):
         """Hold the queue lock while artifact references are inspected and pruned."""
         with self._queue_lock():
-            yield self.list()
+            yield self._list_for_destructive_cleanup()
 
     @contextmanager
     def lock_job_creation(self):
+        with self._queue_lock():
+            yield
+
+    @contextmanager
+    def lock_job_records(self):
+        """Fence maintenance decisions against job creation and transitions."""
         with self._queue_lock():
             yield
 
@@ -149,7 +196,7 @@ class JobStore:
             return None
         try:
             job = self.get(path.read_text().strip())
-        except (KeyError, OSError, ValueError, json.JSONDecodeError):
+        except Exception:
             return None
         if (
             job.client_installation_id != client_installation_id
@@ -192,7 +239,7 @@ class JobStore:
             for path in sorted(self.root.glob("*.json")):
                 try:
                     job = MapJob.from_dict(json.loads(path.read_text()))
-                except (KeyError, OSError, ValueError, TypeError, json.JSONDecodeError):
+                except Exception:
                     continue
                 self._index_job_ownership(job)
                 self._index_map_id(job)
@@ -393,7 +440,15 @@ class JobStore:
             job.progress_total = None
         if status in {JobStatus.VALIDATING, JobStatus.RESOLVING_SOURCE, JobStatus.EXTRACTING_PBF} and job.started_at is None:
             job.started_at = job.updated_at
-        if finished or status in {JobStatus.READY, JobStatus.FAILED, JobStatus.EXPIRED, JobStatus.CANCELLED}:
+        if (
+            status == JobStatus.READY
+            and previous_status == JobStatus.READY
+            and job.finished_at is not None
+        ):
+            # READY metadata may be refreshed after completion. Keep the
+            # immutable completion timestamp used by artifact retention.
+            pass
+        elif finished or status in {JobStatus.READY, JobStatus.FAILED, JobStatus.EXPIRED, JobStatus.CANCELLED}:
             job.finished_at = job.updated_at
         else:
             job.finished_at = None
@@ -543,7 +598,7 @@ class JobStore:
             raise ValueError("artifact GC item limit must be positive")
         terminal_statuses = {JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.EXPIRED}
         with self._queue_lock():
-            jobs = self.list()
+            jobs = self._list_for_destructive_cleanup()
             staging_budget = max_items
             for job in jobs:
                 if staging_budget == 0:
@@ -602,32 +657,46 @@ class JobStore:
                 self.artifact_gc_cursor_path.write_text(ordered_candidates[-1])
 
         removed = 0
+        failures: list[tuple[str, Exception]] = []
         for object_key in ordered_candidates:
-            with self._artifact_key_lock(object_key):
-                with self._queue_lock():
-                    jobs = self.list()
-                    protected = any(
-                        object_key in job.pending_artifact_keys
-                        or (
-                            job.status != JobStatus.EXPIRED
-                            and any(
-                                artifact.object_key == object_key
-                                for artifact in job.artifacts
+            try:
+                with self._artifact_key_lock(object_key):
+                    with self._queue_lock():
+                        jobs = self._list_for_destructive_cleanup()
+                        protected = any(
+                            object_key in job.pending_artifact_keys
+                            or (
+                                job.status != JobStatus.EXPIRED
+                                and any(
+                                    artifact.object_key == object_key
+                                    for artifact in job.artifacts
+                                )
                             )
+                            for job in jobs
                         )
-                        for job in jobs
-                    )
-                    if protected:
-                        self._remove_gc_key_unlocked(jobs, object_key)
-                        continue
-                try:
+                        if protected:
+                            self._remove_gc_key_unlocked(jobs, object_key)
+                            continue
                     deleted = artifact_store.delete(object_key)
-                except Exception:
-                    continue
-                with self._queue_lock():
-                    self._remove_gc_key_unlocked(self.list(), object_key)
-                if deleted:
-                    removed += 1
+                    # Count the physical deletion before clearing durable GC
+                    # metadata. If that bookkeeping fails, the retained key is
+                    # retried later but this iteration still reports the exact
+                    # deletion progress.
+                    if deleted:
+                        removed += 1
+                    with self._queue_lock():
+                        self._remove_gc_key_unlocked(
+                            self._list_for_destructive_cleanup(),
+                            object_key,
+                        )
+            except Exception as exc:
+                failures.append((object_key, exc))
+                continue
+        if failures:
+            raise ArtifactGarbageCollectionError(
+                removed=removed,
+                failures=failures,
+            )
         return removed
 
     def _remove_gc_key_unlocked(self, jobs: list[MapJob], object_key: str) -> None:
@@ -806,20 +875,20 @@ class JobStore:
                 if any(
                     job.pack_path == str(pack_path)
                     and job.status != JobStatus.EXPIRED
-                    for job in self.list()
+                    for job in self._list_for_destructive_cleanup()
                 ):
                     return False
             try:
                 if not pack_path.exists():
                     return False
                 pack_path.unlink()
-                try:
-                    pack_path.parent.rmdir()
-                except OSError:
-                    pass
-                return True
-            except OSError:
+            except FileNotFoundError:
                 return False
+            try:
+                pack_path.parent.rmdir()
+            except OSError:
+                pass
+            return True
 
     def cancel_if_active(self, job_id: str) -> MapJob:
         terminal_statuses = {

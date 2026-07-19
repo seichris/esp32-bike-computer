@@ -8,6 +8,7 @@ from map_platform.rate_limits import (
     PersistentRateLimiter,
     RateLimitExceeded,
     RateLimitPolicy,
+    purge_expired_rate_limits,
 )
 
 
@@ -58,6 +59,44 @@ class PersistentRateLimiterTests(unittest.TestCase):
         self.limiter.consume(first, "installation-a")
         with self.assertRaises(RateLimitExceeded):
             self.limiter.consume(first, "installation-a")
+
+    def test_scheduled_cleanup_removes_expired_rows_without_later_traffic(self):
+        policy = RateLimitPolicy("daily-ip", 3, 86_400)
+        self.limiter.consume(policy, "203.0.113.10")
+        self.now += 172_800
+
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM rate_limits").fetchone()[0],
+                1,
+            )
+
+        self.assertEqual(purge_expired_rate_limits(self.path, now=self.now), 1)
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM rate_limits").fetchone()[0],
+                0,
+            )
+
+    def test_startup_purges_expired_rows_and_missing_database_is_safe(self):
+        policy = RateLimitPolicy("daily-ip", 3, 86_400)
+        self.limiter.consume(policy, "203.0.113.11")
+        self.now += 172_800
+
+        PersistentRateLimiter(
+            self.path,
+            "test-rate-limit-secret-at-least-32-bytes",
+            clock=lambda: self.now,
+        )
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM rate_limits").fetchone()[0],
+                0,
+            )
+        self.assertEqual(
+            purge_expired_rate_limits(Path(self.tmp.name) / "missing.sqlite3"),
+            0,
+        )
 
 
 class ClientAddressResolverTests(unittest.TestCase):

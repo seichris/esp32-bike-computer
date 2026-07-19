@@ -33,6 +33,15 @@ jobs:
           --allow 1242x2688
           --output /tmp/app-store-screenshots-validation.txt
           --json /tmp/app-store-screenshots-validation.json
+      - name: Validate Apple Watch screenshot
+        run: >-
+          bun x tsx scripts/validate-exports.ts
+          --dir public/screenshots/watch
+          --allow 416x496
+          --output /tmp/apple-watch-screenshot-validation.txt
+          --json /tmp/apple-watch-screenshot-validation.json
+      - name: Verify committed release package provenance and ZIP
+        run: bun run verify:release
 
   esp32:
     name: ESP32 (${{ matrix.target }})

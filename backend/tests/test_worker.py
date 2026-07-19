@@ -1,16 +1,31 @@
 import json
+import shutil
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from map_platform.artifacts import ArtifactRecord, FileSystemArtifactStore, sha256_file
-from map_platform.jobs import JobClaimError, JobStore, MapJobService
-from map_platform.models import Bounds, JobStatus, SourceRegion
+from map_platform.jobs import (
+    ArtifactGarbageCollectionError,
+    JobClaimError,
+    JobRecordEnumerationError,
+    JobStore,
+    MapJobService,
+)
+from map_platform.models import Bounds, JobStatus, MapDownloadReceipt, SourceRegion
 from map_platform.pipeline import MapBuildResult, run_job
 from map_platform.sources import SourceIndex
-from map_platform.worker import MapWorker, cleanup_work_dirs, expire_ready_jobs
+from map_platform.worker import (
+    ExpiredArtifactCleanupError,
+    MapWorker,
+    WorkDirectoryCleanupError,
+    cleanup_expired_pack_artifacts,
+    cleanup_work_dirs,
+    expire_ready_jobs,
+)
 
 
 class FakePipeline:
@@ -379,6 +394,7 @@ class WorkerTests(unittest.TestCase):
             job_path = root / "jobs" / f"{job.job_id}.json"
             persisted = json.loads(job_path.read_text())
             persisted["updatedAt"] = "2020-01-01T00:00:00Z"
+            persisted["finishedAt"] = "2020-01-01T00:00:00Z"
             job_path.write_text(json.dumps(persisted))
             expired = expire_ready_jobs(store, older_than_days=1)
 
@@ -391,6 +407,416 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(removed, 1)
             with self.assertRaisesRegex(ValueError, "between 1 and 3650"):
                 expire_ready_jobs(store, older_than_days=0)
+
+    def test_work_cleanup_reports_partial_progress_after_attempting_all_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            work_root = root / "work"
+            deleted_before_path = work_root / "a-deleted-before"
+            failed_path = work_root / "b-failed"
+            deleted_after_path = work_root / "c-deleted-after"
+            for path in (
+                deleted_before_path,
+                failed_path,
+                deleted_after_path,
+            ):
+                path.mkdir(parents=True)
+            original_rmtree = shutil.rmtree
+
+            def selective_rmtree(path, *args, **kwargs):
+                if (
+                    path.parent.name == ".cleanup"
+                    and path.name.startswith(f"{failed_path.name}-")
+                ):
+                    raise PermissionError("work cleanup blocked")
+                return original_rmtree(path, *args, **kwargs)
+
+            with patch("map_platform.worker.shutil.rmtree", selective_rmtree):
+                with self.assertRaises(WorkDirectoryCleanupError) as context:
+                    cleanup_work_dirs(work_root, store)
+
+            self.assertEqual(context.exception.removed, 2)
+            self.assertEqual(len(context.exception.failed_paths), 1)
+            retained_tombstone = context.exception.failed_paths[0]
+            self.assertEqual(retained_tombstone.parent.name, ".cleanup")
+            self.assertTrue(
+                retained_tombstone.name.startswith(f"{failed_path.name}-")
+            )
+            self.assertFalse(deleted_before_path.exists())
+            self.assertFalse(failed_path.exists())
+            self.assertFalse(deleted_after_path.exists())
+            self.assertTrue(retained_tombstone.exists())
+
+    def test_work_cleanup_aggregates_inspection_failure_and_continues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            work_root = root / "work"
+            deleted_before_path = work_root / "a-deleted-before"
+            failed_path = work_root / "b-inspection-fails"
+            deleted_after_path = work_root / "c-deleted-after"
+            for path in (
+                deleted_before_path,
+                failed_path,
+                deleted_after_path,
+            ):
+                path.mkdir(parents=True)
+            original_is_dir = Path.is_dir
+
+            def selective_is_dir(path):
+                if path == failed_path:
+                    raise PermissionError(13, "directory inspection blocked")
+                return original_is_dir(path)
+
+            with patch.object(Path, "is_dir", selective_is_dir):
+                with self.assertRaises(WorkDirectoryCleanupError) as context:
+                    cleanup_work_dirs(work_root, store)
+
+            self.assertEqual(context.exception.removed, 2)
+            self.assertEqual(context.exception.failed_paths, (failed_path,))
+            self.assertFalse(deleted_before_path.exists())
+            self.assertTrue(failed_path.exists())
+            self.assertFalse(deleted_after_path.exists())
+
+    def test_work_cleanup_enumerates_retained_jobs_once_per_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            work_root = root / "work"
+            for name in ("a-stale", "b-stale", "c-stale"):
+                (work_root / name).mkdir(parents=True)
+
+            original_list_with_failures = store.list_with_failures
+            with patch.object(
+                store,
+                "list_with_failures",
+                wraps=original_list_with_failures,
+            ) as enumerate_jobs:
+                removed = cleanup_work_dirs(work_root, store)
+
+            self.assertEqual(removed, 3)
+            self.assertEqual(enumerate_jobs.call_count, 1)
+
+    def test_work_cleanup_rechecks_active_status_under_job_record_fence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+            )
+            store.update_status(job.job_id, JobStatus.FAILED, finished=True)
+            work_root = root / "work"
+            job_work_dir = work_root / job.job_id
+            job_work_dir.mkdir(parents=True)
+            enumerated = threading.Event()
+            resume = threading.Event()
+            original_iterdir = Path.iterdir
+            result = []
+
+            def paused_iterdir(path):
+                entries = list(original_iterdir(path))
+                if path == work_root:
+                    enumerated.set()
+                    self.assertTrue(resume.wait(timeout=2))
+                return iter(entries)
+
+            def run_cleanup():
+                result.append(cleanup_work_dirs(work_root, store))
+
+            with patch.object(Path, "iterdir", paused_iterdir):
+                cleanup = threading.Thread(target=run_cleanup)
+                cleanup.start()
+                self.assertTrue(enumerated.wait(timeout=1))
+                with store.lock_job_records():
+                    active = store.get(job.job_id)
+                    active.status = JobStatus.VALIDATING
+                    store.save(active)
+                    resume.set()
+                cleanup.join(timeout=2)
+
+            self.assertFalse(cleanup.is_alive())
+            self.assertEqual(result, [0])
+            self.assertTrue(job_work_dir.exists())
+
+    def test_work_cleanup_deletes_tombstone_without_holding_job_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+            )
+            store.update_status(job.job_id, JobStatus.FAILED, finished=True)
+            work_root = root / "work"
+            job_work_dir = work_root / job.job_id
+            job_work_dir.mkdir(parents=True)
+            delete_started = threading.Event()
+            release_delete = threading.Event()
+            transition_finished = threading.Event()
+            original_rmtree = shutil.rmtree
+            result = []
+
+            def blocking_rmtree(path, *args, **kwargs):
+                if path.parent.name == ".cleanup":
+                    delete_started.set()
+                    self.assertTrue(release_delete.wait(timeout=2))
+                return original_rmtree(path, *args, **kwargs)
+
+            def run_cleanup():
+                result.append(cleanup_work_dirs(work_root, store))
+
+            def reactivate_job():
+                store.update_status(job.job_id, JobStatus.VALIDATING)
+                job_work_dir.mkdir(parents=True)
+                transition_finished.set()
+
+            with patch("map_platform.worker.shutil.rmtree", blocking_rmtree):
+                cleanup = threading.Thread(target=run_cleanup)
+                cleanup.start()
+                self.assertTrue(delete_started.wait(timeout=1))
+                transition = threading.Thread(target=reactivate_job)
+                transition.start()
+                self.assertTrue(transition_finished.wait(timeout=1))
+                release_delete.set()
+                transition.join(timeout=2)
+                cleanup.join(timeout=2)
+
+            self.assertFalse(cleanup.is_alive())
+            self.assertFalse(transition.is_alive())
+            self.assertEqual(result, [1])
+            self.assertTrue(job_work_dir.exists())
+
+    def test_expiry_failure_preserves_progress_and_still_cleans_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            ready_jobs = []
+            for index in range(3):
+                job = service.create_job(
+                    {
+                        "mode": "custom_bbox",
+                        "bbox": [
+                            103.75 + index * 0.001,
+                            1.24,
+                            103.93,
+                            1.37,
+                        ],
+                    }
+                )
+                ready = store.update_status(
+                    job.job_id,
+                    JobStatus.READY,
+                    finished=True,
+                )
+                ready.finished_at = "2000-01-01T00:00:00Z"
+                store.save(ready)
+                ready_jobs.append(ready)
+            ordered_ready = sorted(ready_jobs, key=lambda job: job.job_id)
+            blocked_job = ordered_ready[1]
+
+            legacy_path = root / "packs" / "already-expired.zip"
+            legacy_path.parent.mkdir(parents=True)
+            legacy_path.write_bytes(b"expired")
+            legacy_job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.8, 1.24, 103.93, 1.37],
+                }
+            )
+            store.update_status(
+                legacy_job.job_id,
+                JobStatus.EXPIRED,
+                pack_path=str(legacy_path),
+                finished=True,
+            )
+
+            original_update_status = store.update_status
+
+            def selective_update(job_id, status, *args, **kwargs):
+                if job_id == blocked_job.job_id and status == JobStatus.EXPIRED:
+                    raise PermissionError(13, "job status write blocked")
+                return original_update_status(job_id, status, *args, **kwargs)
+
+            with patch.object(
+                store,
+                "update_status",
+                side_effect=selective_update,
+            ):
+                with self.assertRaises(ExpiredArtifactCleanupError) as context:
+                    expire_ready_jobs(store, older_than_days=30)
+
+            self.assertEqual(context.exception.expired_jobs, 2)
+            self.assertEqual(context.exception.removed, 1)
+            self.assertEqual(
+                context.exception.failed_expiry_job_ids,
+                (blocked_job.job_id,),
+            )
+            self.assertEqual(store.get(blocked_job.job_id).status, JobStatus.READY)
+            self.assertEqual(
+                [
+                    store.get(job.job_id).status
+                    for job in (ordered_ready[0], ordered_ready[2])
+                ],
+                [JobStatus.EXPIRED, JobStatus.EXPIRED],
+            )
+            self.assertFalse(legacy_path.exists())
+
+    def test_corrupt_job_record_does_not_starve_valid_expiry_or_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            ready_job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+            )
+            ready = store.update_status(
+                ready_job.job_id,
+                JobStatus.READY,
+                finished=True,
+            )
+            ready.finished_at = "2000-01-01T00:00:00Z"
+            store.save(ready)
+
+            legacy_path = root / "packs" / "already-expired.zip"
+            legacy_path.parent.mkdir(parents=True)
+            legacy_path.write_bytes(b"expired")
+            legacy_job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.8, 1.24, 103.93, 1.37],
+                }
+            )
+            store.update_status(
+                legacy_job.job_id,
+                JobStatus.EXPIRED,
+                pack_path=str(legacy_path),
+                finished=True,
+            )
+            corrupt_path = root / "jobs" / "corrupt-job.json"
+            corrupt_path.write_text("{\"jobId\":")
+
+            with self.assertRaises(ExpiredArtifactCleanupError) as context:
+                expire_ready_jobs(store, older_than_days=30)
+
+            self.assertEqual(context.exception.expired_jobs, 1)
+            self.assertEqual(context.exception.removed, 0)
+            self.assertEqual(
+                context.exception.failed_job_record_paths,
+                (corrupt_path,),
+            )
+            self.assertEqual(store.get(ready_job.job_id).status, JobStatus.EXPIRED)
+            self.assertTrue(legacy_path.exists())
+            self.assertTrue(corrupt_path.exists())
+
+    def test_corrupt_ready_record_blocks_shared_pack_and_object_deletion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            shared_path = root / "packs" / "shared.zip"
+            shared_path.parent.mkdir(parents=True)
+            shared_path.write_bytes(b"shared")
+            object_key = "maps/map/stream/shared.bmap"
+            artifact = ArtifactRecord(
+                format="test-artifact-v1",
+                media_type="application/octet-stream",
+                filename="shared.bmap",
+                object_key=object_key,
+                bytes=6,
+                sha256="1" * 64,
+            )
+
+            expired_job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+            )
+            expired = store.update_status(
+                expired_job.job_id,
+                JobStatus.EXPIRED,
+                pack_path=str(shared_path),
+                finished=True,
+            )
+            expired.artifact_gc_keys = [object_key]
+            store.save(expired)
+
+            ready_job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.76, 1.24, 103.93, 1.37],
+                }
+            )
+            store.update_status(
+                ready_job.job_id,
+                JobStatus.READY,
+                pack_path=str(shared_path),
+                artifacts=[artifact],
+                finished=True,
+            )
+            ready_path = root / "jobs" / f"{ready_job.job_id}.json"
+            ready_record = ready_path.read_text()
+            ready_path.write_text("{\"jobId\":")
+
+            with self.assertRaises(ExpiredArtifactCleanupError) as context:
+                cleanup_expired_pack_artifacts(store)
+            self.assertEqual(context.exception.removed, 0)
+            self.assertTrue(shared_path.exists())
+
+            class TrackingDeleteStore:
+                def __init__(self):
+                    self.deleted = []
+
+                def delete(self, key):
+                    self.deleted.append(key)
+                    return True
+
+            artifact_store = TrackingDeleteStore()
+            with self.assertRaises(JobRecordEnumerationError):
+                store.cleanup_artifact_garbage(artifact_store)
+            self.assertEqual(artifact_store.deleted, [])
+
+            ready_path.write_text(ready_record)
+            restored = store.get(ready_job.job_id)
+            self.assertEqual(restored.status, JobStatus.READY)
+            self.assertEqual(restored.pack_path, str(shared_path))
+            self.assertEqual(restored.artifacts[0].object_key, object_key)
+
+    def test_malformed_nested_job_schema_isolated_at_startup_and_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+            )
+            job_path = root / "jobs" / f"{job.job_id}.json"
+            malformed = json.loads(job_path.read_text())
+            malformed["request"] = []
+            job_path.write_text(json.dumps(malformed))
+
+            reopened = JobStore(root / "jobs")
+            jobs, failures = reopened.list_with_failures()
+
+            self.assertEqual(jobs, [])
+            self.assertEqual(len(failures), 1)
+            self.assertEqual(failures[0][0], job_path)
+            self.assertIsInstance(failures[0][1], AttributeError)
 
     def test_expiry_removes_only_unreferenced_pack_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -427,6 +853,7 @@ class WorkerTests(unittest.TestCase):
             for stale in [stale_unique, stale_shared]:
                 persisted = store.get(stale.job_id)
                 persisted.updated_at = "2000-01-01T00:00:00Z"
+                persisted.finished_at = "2000-01-01T00:00:00Z"
                 store.save(persisted)
 
             expired = expire_ready_jobs(store, older_than_days=30)
@@ -435,6 +862,49 @@ class WorkerTests(unittest.TestCase):
             self.assertFalse(unique_path.exists())
             self.assertTrue(shared_path.exists())
             self.assertEqual(store.get(live_shared.job_id).status, JobStatus.READY)
+
+    def test_ready_retention_is_not_extended_by_label_or_download_activity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+            pack_path = root / "packs" / "retained.zip"
+            pack_path.parent.mkdir(parents=True)
+            pack_path.write_bytes(b"retained")
+            ready = store.update_status(
+                job.job_id,
+                JobStatus.READY,
+                map_id="map-retention-anchor",
+                pack_path=str(pack_path),
+                finished=True,
+            )
+            ready.finished_at = "2000-01-01T00:00:00Z"
+            store.save(ready)
+
+            store.update_user_label(job.job_id, "Recent label")
+            store.update_status(
+                job.job_id,
+                JobStatus.READY,
+                event="ready metadata refreshed",
+            )
+            store.record_download(
+                job.job_id,
+                MapDownloadReceipt(
+                    receipt_id="receipt-recent",
+                    artifact_format="zip-stored-v1",
+                    bytes=len(b"retained"),
+                    downloaded_at="2026-07-19T00:00:00Z",
+                ),
+            )
+            active = store.get(job.job_id)
+            self.assertNotEqual(active.updated_at, active.finished_at)
+
+            self.assertEqual(expire_ready_jobs(store, older_than_days=30), 1)
+            self.assertEqual(store.get(job.job_id).status, JobStatus.EXPIRED)
+            self.assertFalse(pack_path.exists())
 
     def test_expiry_removes_only_unreferenced_content_addressed_objects(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -501,6 +971,7 @@ class WorkerTests(unittest.TestCase):
                 )
                 if job != live_shared:
                     ready.updated_at = "2000-01-01T00:00:00Z"
+                    ready.finished_at = "2000-01-01T00:00:00Z"
                     store.save(ready)
 
             expired = expire_ready_jobs(
@@ -552,7 +1023,10 @@ class WorkerTests(unittest.TestCase):
                     raise RuntimeError(f"temporary delete failure for {key}")
 
             self.assertEqual(store.queue_terminal_pending_artifacts(job.job_id), 1)
-            self.assertEqual(store.cleanup_artifact_garbage(FailingDeleteStore()), 0)
+            with self.assertRaises(ArtifactGarbageCollectionError) as context:
+                store.cleanup_artifact_garbage(FailingDeleteStore())
+            self.assertEqual(context.exception.removed, 0)
+            self.assertEqual(context.exception.failed_object_keys, (object_key,))
             self.assertEqual(store.get(job.job_id).pending_artifact_keys, [])
             self.assertEqual(store.get(job.job_id).artifact_gc_keys, [object_key])
             self.assertIsNotNone(artifact_store.local_path(object_key))
@@ -561,6 +1035,224 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(store.get(job.job_id).pending_artifact_keys, [])
             self.assertEqual(store.get(job.job_id).artifact_gc_keys, [])
             self.assertIsNone(artifact_store.local_path(object_key))
+
+    def test_expiry_surfaces_delete_failure_after_attempting_the_full_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp) / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+            failed_key = "maps/map/stream/retention-failure.bmap"
+            deleted_key = "maps/map/stream/retention-success.bmap"
+            ready = store.update_status(
+                job.job_id,
+                JobStatus.READY,
+                artifacts=[
+                    ArtifactRecord(
+                        format="test-artifact-v1",
+                        media_type="application/octet-stream",
+                        filename="retention-failure.bmap",
+                        object_key=failed_key,
+                        bytes=10,
+                        sha256="1" * 64,
+                    ),
+                    ArtifactRecord(
+                        format="test-artifact-v1",
+                        media_type="application/octet-stream",
+                        filename="retention-success.bmap",
+                        object_key=deleted_key,
+                        bytes=10,
+                        sha256="2" * 64,
+                    ),
+                ],
+                finished=True,
+            )
+            ready.finished_at = "2000-01-01T00:00:00Z"
+            store.save(ready)
+
+            class PartiallyFailingDeleteStore:
+                def __init__(self):
+                    self.deleted = []
+
+                def delete(self, key):
+                    if key == failed_key:
+                        raise PermissionError(key)
+                    self.deleted.append(key)
+                    return True
+
+            artifact_store = PartiallyFailingDeleteStore()
+            with self.assertRaises(ExpiredArtifactCleanupError) as context:
+                expire_ready_jobs(
+                    store,
+                    older_than_days=30,
+                    artifact_store=artifact_store,
+                )
+
+            self.assertEqual(context.exception.removed, 1)
+            self.assertIsNotNone(context.exception.object_failure)
+            self.assertEqual(
+                context.exception.object_failure.failed_object_keys,
+                (failed_key,),
+            )
+            self.assertEqual(artifact_store.deleted, [deleted_key])
+            expired = store.get(job.job_id)
+            self.assertEqual(expired.status, JobStatus.EXPIRED)
+            self.assertEqual(expired.artifacts, [])
+            self.assertEqual(expired.artifact_gc_keys, [failed_key])
+
+    def test_legacy_pack_failure_is_aggregated_after_later_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            failed_path = root / "packs" / "failed" / "map.zip"
+            deleted_path = root / "packs" / "deleted" / "map.zip"
+            for path in (failed_path, deleted_path):
+                path.parent.mkdir(parents=True)
+                path.write_bytes(path.parent.name.encode())
+                job = service.create_job(
+                    {
+                        "mode": "custom_bbox",
+                        "bbox": [103.75, 1.24, 103.93, 1.37],
+                    }
+                )
+                store.update_status(
+                    job.job_id,
+                    JobStatus.EXPIRED,
+                    pack_path=str(path),
+                    finished=True,
+                )
+
+            original_unlink = Path.unlink
+
+            def selective_unlink(path, *args, **kwargs):
+                if path == failed_path:
+                    raise PermissionError("legacy pack delete blocked")
+                return original_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", selective_unlink):
+                with self.assertRaises(ExpiredArtifactCleanupError) as context:
+                    cleanup_expired_pack_artifacts(store)
+
+            self.assertEqual(context.exception.removed, 1)
+            self.assertEqual(
+                context.exception.failed_legacy_paths,
+                (failed_path,),
+            )
+            self.assertTrue(failed_path.exists())
+            self.assertFalse(deleted_path.exists())
+
+    def test_unexpected_object_gc_failure_is_aggregated_after_legacy_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            legacy_path = root / "packs" / "legacy" / "map.zip"
+            legacy_path.parent.mkdir(parents=True)
+            legacy_path.write_bytes(b"legacy")
+            job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+            )
+            store.update_status(
+                job.job_id,
+                JobStatus.EXPIRED,
+                pack_path=str(legacy_path),
+                finished=True,
+            )
+            failure = RuntimeError("artifact GC cursor failed")
+
+            with patch.object(
+                store,
+                "cleanup_artifact_garbage",
+                side_effect=failure,
+            ):
+                with self.assertRaises(ExpiredArtifactCleanupError) as context:
+                    cleanup_expired_pack_artifacts(
+                        store,
+                        artifact_store=object(),
+                    )
+
+            self.assertEqual(context.exception.removed, 1)
+            self.assertIs(context.exception.object_failure, failure)
+            self.assertFalse(legacy_path.exists())
+
+    def test_object_gc_counts_deletes_before_retryable_metadata_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            keys = [
+                "maps/map/stream/a-deleted.bmap",
+                "maps/map/stream/b-metadata-failure.bmap",
+            ]
+            for index, key in enumerate(keys):
+                job = service.create_job(
+                    {
+                        "mode": "custom_bbox",
+                        "bbox": [
+                            103.75 + index * 0.001,
+                            1.24,
+                            103.93,
+                            1.37,
+                        ],
+                    }
+                )
+                job.status = JobStatus.FAILED
+                job.artifact_gc_keys = [key]
+                store.save(job)
+
+            class TrackingDeleteStore:
+                def __init__(self, object_keys):
+                    self.existing = set(object_keys)
+                    self.deleted = []
+
+                def delete(self, key):
+                    existed = key in self.existing
+                    self.existing.discard(key)
+                    self.deleted.append(key)
+                    return existed
+
+            artifact_store = TrackingDeleteStore(keys)
+            original_remove_gc_key = store._remove_gc_key_unlocked
+
+            def selective_remove(jobs, object_key):
+                if object_key == keys[1]:
+                    raise PermissionError(13, "metadata update blocked")
+                return original_remove_gc_key(jobs, object_key)
+
+            with patch.object(
+                store,
+                "_remove_gc_key_unlocked",
+                side_effect=selective_remove,
+            ):
+                with self.assertRaises(ArtifactGarbageCollectionError) as context:
+                    store.cleanup_artifact_garbage(artifact_store)
+
+            self.assertEqual(context.exception.removed, 2)
+            self.assertEqual(
+                context.exception.failed_object_keys,
+                (keys[1],),
+            )
+            self.assertEqual(artifact_store.deleted, keys)
+            remaining = {
+                key
+                for job in store.list()
+                for key in job.artifact_gc_keys
+            }
+            self.assertEqual(remaining, {keys[1]})
+            self.assertEqual(store.cleanup_artifact_garbage(artifact_store), 0)
+            self.assertEqual(
+                {
+                    key
+                    for job in store.list()
+                    for key in job.artifact_gc_keys
+                },
+                set(),
+            )
 
     def test_publication_lease_fences_cancellation_gc_through_object_put(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -778,7 +1470,8 @@ class WorkerTests(unittest.TestCase):
                 def delete(self, key):
                     raise RuntimeError(key)
 
-            store.cleanup_artifact_garbage(FailingDeleteStore(), max_items=1)
+            with self.assertRaises(ArtifactGarbageCollectionError):
+                store.cleanup_artifact_garbage(FailingDeleteStore(), max_items=1)
             jobs = store.list()
             self.assertEqual(sum(bool(job.artifact_gc_keys) for job in jobs), 1)
             self.assertEqual(sum(bool(job.pending_artifact_keys) for job in jobs), 2)
@@ -810,10 +1503,8 @@ class WorkerTests(unittest.TestCase):
                     return True
 
             artifact_store = PartiallyFailingStore()
-            self.assertEqual(
-                store.cleanup_artifact_garbage(artifact_store, max_items=1),
-                0,
-            )
+            with self.assertRaises(ArtifactGarbageCollectionError):
+                store.cleanup_artifact_garbage(artifact_store, max_items=1)
             self.assertEqual(
                 store.cleanup_artifact_garbage(artifact_store, max_items=1),
                 1,
