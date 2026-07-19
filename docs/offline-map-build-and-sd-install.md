@@ -1,4 +1,4 @@
-# Offline Maps
+# Build and Install Offline Maps Manually
 
 Use the `OSM_Extract` toolchain to generate OpenStreetMap vector blocks for the
 device map renderer. The recommended path is the provided Docker environment,
