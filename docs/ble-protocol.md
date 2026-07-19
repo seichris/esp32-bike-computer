@@ -113,12 +113,24 @@ older firmware continues using the existing GPS ride fields unchanged.
 | `12` | 2 | speed centimeters/second, `UInt16LE` |
 | `14` | 2 | current heart rate BPM, `UInt16LE` |
 
+For the current relay contract, bits `6...7` of the core state byte carry a
+non-zero pair generation (`1...3`); the session state remains in the low six
+bits. Generation zero is the immediately preceding relay contract.
+
 Session states are `0` idle/clear, `1` starting, `2` running, `3` paused, `4`
 ending, `5` ended/final summary, and `6` failed. Idle requires token zero; every
 other state requires a non-zero token. A native iPhone session-ended callback
 does not produce state `5` until the final authoritative Watch snapshot arrives;
 the interim `ending` frame carries unavailable numeric sentinels rather than
 heartbeat-replaying a frozen snapshot.
+
+When firmware has no retained core state, any valid non-idle generation-zero
+core may seed the RAM snapshot so authentication or device-reboot
+resynchronization can restore an ending, ended, or failed presentation. Once a
+generation-zero session is retained, only an active starting/running/paused
+core may replace it with a different token. A complete correlated current-pair
+publication may replace a retained token in any non-idle state, including a
+newer terminal snapshot that was published as the latest batched state.
 
 ### Extended frame, kind `2`
 
@@ -137,8 +149,20 @@ heartbeat-replaying a frozen snapshot.
 
 Source flag bit `0` means paired cycling-speed sensor, bit `1` Watch GPS speed,
 bit `2` HealthKit cycling distance, bit `3` valid Watch altitude, and bit `4`
-live HealthKit zone data. Bits `5...7` are reserved and zero. A valid iPhone
-location fallback may supply altitude without setting bit `3`.
+live HealthKit zone data. Bit `5` means the iPhone's mirrored snapshot is
+current, even when every individual metric is unavailable. Bits `6...7` carry
+the same pair generation (`1...3`) as the core state byte. Generation zero is
+the legacy relay contract. A valid iPhone location fallback may supply altitude
+without setting bit `3`. For compatibility with the immediately preceding
+relay contract, firmware also treats a generation-zero active extended frame
+without bit `5` as current when its preceding core was populated, and uses its
+heartbeat to refresh the retained core. The predecessor contract encoded a
+current-all-unavailable snapshot and transport loss with identical
+generation-zero bytes. Firmware handles that ambiguous all-unavailable pair as
+current-but-unavailable for one 10-second grace window, clears values instead
+of presenting retained speed as live, and does not let later empty
+extended-only heartbeats refresh core freshness. A later populated core or
+extended frame proves recovery.
 
 For unsigned 16-bit metric fields, `0xFFFF` means unavailable. For elapsed and
 distance, `0xFFFFFFFF` means unavailable. Altitude uses `Int16.min` (`0x8000`)
@@ -148,13 +172,62 @@ unsigned metrics are unavailable. Heart rate must be positive; zero remains a
 valid speed, energy, power, or cadence value. Active energy therefore ranges
 from `0` through `6553.4` kcal.
 
-iOS coalesces numeric changes to at most one update per second, sends
-state/token and fresh-to-stale transitions immediately, sends the extended
-frame at least every five seconds, and resends both latest frames after an
-authenticated reconnect. Stale or disconnected live sessions preserve their
-state and token but send unavailable numeric fields and zero source flags.
+iOS coalesces numeric changes to at most one update per second and sends
+state/token and fresh-to-stale transitions immediately. Every new-contract
+publication contains a core and extended frame stamped with the same cycling
+generation; changes and heartbeats are therefore applied as one coherent pair.
+The pair is sent at least every five seconds, including while paused or stale.
+Both latest frames are resent after an authenticated reconnect. Current live
+sessions set source flag bit `5`; an `ending` state that is currently awaiting
+its authoritative final Watch snapshot also sets bit `5` while keeping numeric
+fields unavailable.
+Stale or disconnected live sessions preserve their state and token but send
+unavailable numeric fields with all source flags, including bit `5`, clear.
 Authoritative ended summaries retain final numeric values until an explicit
 idle frame, a newer session, or device reboot.
+
+Firmware decodes native and `WTLM` frames through one authenticated parser and
+keeps the resulting workout state in RAM, separate from legacy `2A72` GPS
+telemetry. For correlated generation `1...3` publications, malformed,
+mismatched, partial, or wrong-generation frames leave the last coherent workout
+state unchanged. A generation `1...3` core is staged and
+becomes visible only after a valid extended frame with the same token and
+generation arrives. This also lets a complete authenticated pair for a newer
+terminal session replace an older retained session without exposing partial
+state. Same-token state changes follow the shared workout transition matrix;
+ending, ended, and failed cannot regress to a live state. A starting core after
+an ended or failed snapshot is treated as an explicit new-session boundary so
+a valid 16-bit token collision cannot hide the newer workout. If authentication
+resynchronizes a colliding newer workout after it has crossed any transition
+that would otherwise be invalid from a retained ending/ended/failed state,
+firmware also accepts the complete correlated pair as a replacement, but only when
+extended bit `5` proves that the resynchronized snapshot is current. This
+includes active, ending, and cross-terminal outcomes. Partial or stale
+same-token pairs leave the retained terminal snapshot unchanged. A live core
+becomes stale after 10 seconds without a confirmed current
+pair; Ride Stats then marks the Watch link lost and suppresses stale speed while
+retaining the last received non-speed values. An all-unavailable active core is
+held without refreshing freshness until its matching extended frame arrives.
+Extended bit `5` set means the current snapshot genuinely has no available
+metrics, so firmware clears the old values without marking the link stale. Bit
+`5` clear on a correlated pair with every field unavailable marks upstream
+transport loss immediately and retains the last snapshot. Explicit idle clears
+the workout state. Ended summaries remain visible until idle, a new session, or
+reboot. Successful local authentication
+starts a transactional resynchronization: firmware keeps displaying the prior
+RAM snapshot until a complete valid replacement core/extended pair arrives,
+then swaps the pair atomically. A missing, malformed, partial, or disconnected
+resynchronization therefore cannot erase the retained snapshot. GPS updates
+continue to populate the legacy ride fields and cannot clear or overwrite Watch
+workout state.
+
+Ride Stats uses the Watch workout state whenever a non-idle core frame has been
+accepted, otherwise it displays the legacy GPS ride fields. The Live page shows
+speed, current heart rate and zone, distance, elapsed time, power, and cadence.
+The Summary page shows average heart rate, active energy, altitude, route
+remaining, and source/freshness. Unavailable workout values display as `--`.
+A long press toggles pages; the existing short-tap and hardware screen cycling
+remain unchanged.
 
 ## Map Settings (`2A73`)
 

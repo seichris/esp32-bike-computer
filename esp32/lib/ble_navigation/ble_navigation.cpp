@@ -7,9 +7,11 @@
 
 #include "ble_navigation.hpp"
 #include "device_screen_protocol.hpp"
+#include "gps_position_protocol.hpp"
 #include "map_profile_persistence.hpp"
 #include "transfer_control_dispatch.hpp"
 #include "workout_telemetry_protocol.hpp"
+#include "workout_telemetry_runtime.hpp"
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
 #include "../gui/src/globalGuiDef.h"
@@ -583,6 +585,10 @@ static void handleAuthPayload(const std::string &value) {
       return;
     }
 
+    // Authentication begins a transactional core/extended resynchronization.
+    // Keep the displayed snapshot until a complete valid replacement arrives,
+    // while allowing that replacement to carry a newer terminal token.
+    workout_telemetry_runtime::beginAuthenticatedResynchronization();
     bleSessionAuthenticated = true;
     bleDebugStats.authenticated = true;
     bleDebugStats.authSuccessCount++;
@@ -1017,7 +1023,8 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
           map_profile_protocol::CAPABILITY_MASK |
           CAPABILITY_EXTENDED_MAP_VISIBILITY |
           CAPABILITY_BATTERY_STATUS_SCREEN |
-          destination_picker_protocol::CAPABILITY_MASK),
+          destination_picker_protocol::CAPABILITY_MASK |
+          workout_telemetry_protocol::CAPABILITY_MASK),
   };
   size_t responseSize = 5;
   waveshare_board::speaker::PowerButtonHonkConfig config{};
@@ -1370,9 +1377,8 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     gps.gpsData.longitude = (double)routeStartLon / 1000000.0;
     gpsReceivedFromApp = true;
     pendingTransitionToMap = true;
-    Serial.printf(
-        "BLE route geometry: seeded map start %.6f,%.6f; transitioning to map\n",
-        gps.gpsData.latitude, gps.gpsData.longitude);
+    Serial.println(
+        "BLE route geometry: seeded map start; transitioning to map");
   }
 
   routeOverlay.parseRouteData(data, len);
@@ -1381,84 +1387,24 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
 
 static void handleGpsPayload(const uint8_t *data, size_t len,
                              const char *source) {
-  if (data == nullptr || len < 8) {
+  gps_position_protocol::Packet packet{};
+  if (!gps_position_protocol::decodeAndApply(data, len, gps.gpsData,
+                                             &packet)) {
     Serial.printf("BLE: Rejected %s GPS position: expected at least 8 bytes\n",
                   source == nullptr ? "unknown" : source);
     return;
   }
 
-  int32_t lat;
-  int32_t lon;
-  memcpy(&lat, data, sizeof(lat));
-  memcpy(&lon, data + 4, sizeof(lon));
-
-  gps.gpsData.latitude = (double)lat / 1000000.0;
-  gps.gpsData.longitude = (double)lon / 1000000.0;
-  gps.gpsData.fixMode = 3;
-  gps.gpsData.satellites = 10;
-  gps.gpsData.speed = 0;
-  gps.gpsData.altitude = 0;
-  gps.gpsData.distanceTraveled = 0;
-  gps.gpsData.elapsedSeconds = 0;
-  gps.gpsData.routeRemaining = 0;
-  gps.gpsData.hasRouteRemaining = false;
-
-  if (len >= 10) {
-    uint16_t headingVal;
-    memcpy(&headingVal, data + 8, sizeof(headingVal));
-    gps.gpsData.heading = headingVal;
-  }
-
-  if (len >= 16) {
-    uint16_t speedCmps;
-    memcpy(&speedCmps, data + 14, sizeof(speedCmps));
-    if (speedCmps != 0xFFFF) {
-      gps.gpsData.speed = (uint16_t)((speedCmps * 36U + 500U) / 1000U);
-    } else {
-      gps.gpsData.speed = 0;
-    }
-  }
-
-  if (len >= 18) {
-    int16_t altitudeMeters;
-    memcpy(&altitudeMeters, data + 16, sizeof(altitudeMeters));
-    gps.gpsData.altitude = altitudeMeters;
-  }
-
-  if (len >= 22) {
-    uint32_t distanceMeters;
-    memcpy(&distanceMeters, data + 18, sizeof(distanceMeters));
-    gps.gpsData.distanceTraveled = distanceMeters;
-  }
-
-  if (len >= 26) {
-    uint32_t elapsedSeconds;
-    memcpy(&elapsedSeconds, data + 22, sizeof(elapsedSeconds));
-    gps.gpsData.elapsedSeconds = elapsedSeconds;
-  }
-
-  if (len >= 30) {
-    uint32_t routeRemainingMeters;
-    memcpy(&routeRemainingMeters, data + 26, sizeof(routeRemainingMeters));
-    gps.gpsData.hasRouteRemaining = routeRemainingMeters != 0xFFFFFFFF;
-    if (gps.gpsData.hasRouteRemaining) {
-      gps.gpsData.routeRemaining = routeRemainingMeters;
-    }
-  }
-
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   bool rtcTimestampSynced = false;
-  if (len >= 14) {
-    uint32_t unixTime = 0;
-    memcpy(&unixTime, data + 10, sizeof(unixTime));
-
+  if (packet.hasUnixTime) {
     const uint32_t now = millis();
     const waveshare_board::rtc::Status &rtcStatus =
         waveshare_board::rtc::status();
     if (!rtcStatus.timeValid || lastBleRtcSyncMs == 0 ||
         now - lastBleRtcSyncMs >= BLE_RTC_SYNC_INTERVAL_MS) {
       rtcTimestampSynced = waveshare_board::rtc::syncFromUnixTime(
-          static_cast<time_t>(unixTime), "BLE GPS timestamp");
+          static_cast<time_t>(packet.unixTime), "BLE GPS timestamp");
       if (rtcTimestampSynced) {
         lastBleRtcSyncMs = now;
       }
@@ -1466,14 +1412,13 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
   }
 #endif
 
-  Serial.printf(
-      "BLE: %s GPS position received: lat=%ld lon=%ld heading=%u rtcSync=%d\n",
-      source == nullptr ? "unknown" : source, (long)lat, (long)lon,
-      (unsigned)gps.gpsData.heading,
+  Serial.printf("BLE: %s GPS position received: heading=%u rtcSync=%d\n",
+                source == nullptr ? "unknown" : source,
+                (unsigned)gps.gpsData.heading,
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-      rtcTimestampSynced
+                rtcTimestampSynced
 #else
-      0
+                0
 #endif
   );
   bleDebugStats.gpsPacketCount++;
@@ -1486,6 +1431,26 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
   }
 
   triggerMapRedraw();
+}
+
+static void handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
+                                          const char *source) {
+  if (!requireAuthenticated("workout telemetry")) {
+    return;
+  }
+  const workout_telemetry::ApplyResult result =
+      workout_telemetry_runtime::ingestFrame(data, len, millis(), true);
+  switch (result) {
+  case workout_telemetry::ApplyResult::Applied:
+  case workout_telemetry::ApplyResult::Cleared:
+    // Health metrics remain RAM-only and are intentionally absent from logs.
+    return;
+  default:
+    Serial.printf("BLE Workout: rejected %s frame (%s)\n",
+                  source == nullptr ? "unknown" : source,
+                  workout_telemetry::applyResultName(result));
+    return;
+  }
 }
 
 static void handleMapSetting(uint8_t settingId, int32_t settingValue,
@@ -1829,15 +1794,11 @@ public:
     }
 
     if (hasPrefix(value, workout_telemetry_protocol::FALLBACK_PREFIX)) {
-      if (!requireAuthenticated("fallback workout telemetry")) {
-        return;
-      }
-      // Phase 4 declares the transport but intentionally leaves capability
-      // bit 7 clear. Phase 5 installs the shared parser/state/UI before any
-      // client is invited to send health metrics.
-      Serial.printf("BLE Workout: ignored unsupported fallback frame (%u bytes)\n",
-                    (unsigned)(value.length() -
-                               workout_telemetry_protocol::FALLBACK_PREFIX_SIZE));
+      handleWorkoutTelemetryPayload(
+          reinterpret_cast<const uint8_t *>(value.data()) +
+              workout_telemetry_protocol::FALLBACK_PREFIX_SIZE,
+          value.length() - workout_telemetry_protocol::FALLBACK_PREFIX_SIZE,
+          "fallback");
       return;
     }
 
@@ -1959,13 +1920,9 @@ class MyWorkoutTelemetryCharacteristicCallbacks
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
     const std::string value = pChar->getValue();
-    if (!requireAuthenticated("workout telemetry")) {
-      return;
-    }
-    // Capability bit 7 remains clear until Phase 5 adds the shared parser,
-    // RAM-only state and Ride Stats presentation. Do not log payload bytes.
-    Serial.printf("BLE Workout: ignored unsupported native frame (%u bytes)\n",
-                  (unsigned)value.length());
+    handleWorkoutTelemetryPayload(
+        reinterpret_cast<const uint8_t *>(value.data()), value.length(),
+        "native");
   }
 };
 
@@ -2175,9 +2132,8 @@ void BLENavigationServer::init(const char *deviceName) {
   pSettingsCharacteristic->setCallbacks(
       new MySettingsCharacteristicCallbacks());
 
-  // Declare the Phase 4 transport without advertising capability bit 7.
-  // Phase 5 enables the capability only after the authenticated parser,
-  // RAM-only state and Ride Stats presentation are all installed.
+  // Workout frames are accepted only after the same local authentication
+  // handshake as navigation traffic and remain in RAM-only telemetry state.
   pWorkoutTelemetryCharacteristic = pService->createCharacteristic(
       WORKOUT_TELEMETRY_CHAR_UUID, NIMBLE_PROPERTY::WRITE_NR);
   pWorkoutTelemetryCharacteristic->setCallbacks(

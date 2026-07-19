@@ -31,12 +31,14 @@ struct WorkoutDeviceSourceFlags: OptionSet, Equatable, Sendable {
     static let healthKitDistance = Self(rawValue: 1 << 2)
     static let watchAltitude = Self(rawValue: 1 << 3)
     static let liveHealthKitZone = Self(rawValue: 1 << 4)
+    static let currentSnapshot = Self(rawValue: 1 << 5)
 }
 
 struct WorkoutDeviceTelemetrySample: Equatable, Sendable {
     let state: WorkoutDeviceSessionState
     let sessionToken: UInt16
     let hasLiveNumerics: Bool
+    let isCurrentSnapshot: Bool
     let elapsedSeconds: Double?
     let distanceMeters: Double?
     let speedMetersPerSecond: Double?
@@ -56,6 +58,7 @@ struct WorkoutDeviceFrames: Equatable, Sendable {
         let state: WorkoutDeviceSessionState
         let sessionToken: UInt16
         let hasLiveNumerics: Bool
+        let isCurrentSnapshot: Bool
     }
 
     let core: Data
@@ -68,7 +71,7 @@ enum WorkoutDeviceFrameBuilder {
     static let unavailableUInt16 = UInt16.max
     static let unavailableUInt32 = UInt32.max
     static let unavailableAltitude = Int16.min
-    private static let knownSourceFlagsMask: UInt8 = 0x1F
+    private static let metricSourceFlagsMask: UInt8 = 0x1F
 
     static func frames(for sample: WorkoutDeviceTelemetrySample) -> WorkoutDeviceFrames? {
         guard (sample.state == .idle && sample.sessionToken == 0)
@@ -103,7 +106,7 @@ enum WorkoutDeviceFrameBuilder {
             : unavailableAltitude
         var flags = WorkoutDeviceSourceFlags(
             rawValue: numerics
-                ? sample.sourceFlags.rawValue & knownSourceFlagsMask
+                ? sample.sourceFlags.rawValue & metricSourceFlagsMask
                 : 0
         )
         if encodeUInt16(sample.speedMetersPerSecond, scale: 100) == unavailableUInt16 {
@@ -117,6 +120,9 @@ enum WorkoutDeviceFrameBuilder {
         }
         if zone == nil {
             flags.remove(.liveHealthKitZone)
+        }
+        if sample.isCurrentSnapshot {
+            flags.insert(.currentSnapshot)
         }
 
         var extended = Data(capacity: frameLength)
@@ -148,7 +154,8 @@ enum WorkoutDeviceFrameBuilder {
             identity: .init(
                 state: sample.state,
                 sessionToken: sample.sessionToken,
-                hasLiveNumerics: sample.hasLiveNumerics
+                hasLiveNumerics: sample.hasLiveNumerics,
+                isCurrentSnapshot: sample.isCurrentSnapshot
             )
         )
     }
@@ -225,18 +232,39 @@ enum WorkoutDeviceTelemetryMapper {
             ? (presentation.finalSnapshot ?? presentation.snapshot)
             : presentation.snapshot
         let hasLiveNumerics: Bool
+        let isCurrentSnapshot: Bool
         switch presentation.connectionState {
         case .connected:
-            hasLiveNumerics = true
+            // HealthKit can stop producing live samples before the final
+            // authoritative Watch snapshot arrives. Keep that ending update
+            // current, but do not replay the last running values as live.
+            hasLiveNumerics = state != .ending
+            isCurrentSnapshot = true
         case .ended:
             hasLiveNumerics = state == .ended && hasAuthoritativeEnd
-        case .unsupported, .idle, .launchingWatch, .awaitingFirstSnapshot,
-             .stale, .disconnected, .failed:
+            // The mirrored end callback is current even while its final
+            // authoritative snapshot is still pending. Keep freshness
+            // independent from whether numeric fields may be relayed.
+            isCurrentSnapshot = state == .ending || hasLiveNumerics
+        case .failed:
             hasLiveNumerics = false
+            // A terminal failure envelope is authoritative even though it
+            // carries no live numerics. Transport/launch failures have no
+            // matching failed envelope and therefore remain non-current.
+            isCurrentSnapshot = state == .failed
+                && envelope.snapshot?.state == .failed
+        case .unsupported, .idle, .launchingWatch, .awaitingFirstSnapshot,
+             .stale, .disconnected:
+            hasLiveNumerics = false
+            isCurrentSnapshot = false
         }
 
         guard hasLiveNumerics else {
-            return emptySample(state: state, token: envelope.sessionToken)
+            return emptySample(
+                state: state,
+                token: envelope.sessionToken,
+                isCurrentSnapshot: isCurrentSnapshot
+            )
         }
 
         var flags: WorkoutDeviceSourceFlags = []
@@ -267,6 +295,7 @@ enum WorkoutDeviceTelemetryMapper {
             state: state,
             sessionToken: envelope.sessionToken,
             hasLiveNumerics: true,
+            isCurrentSnapshot: true,
             elapsedSeconds: metric(snapshot.elapsedTime, unit: .seconds),
             distanceMeters: metric(snapshot.cyclingDistance, unit: .meters),
             speedMetersPerSecond: metric(
@@ -299,12 +328,14 @@ enum WorkoutDeviceTelemetryMapper {
 
     private static func emptySample(
         state: WorkoutDeviceSessionState,
-        token: UInt16
+        token: UInt16,
+        isCurrentSnapshot: Bool = false
     ) -> WorkoutDeviceTelemetrySample {
         WorkoutDeviceTelemetrySample(
             state: state,
             sessionToken: token,
             hasLiveNumerics: false,
+            isCurrentSnapshot: isCurrentSnapshot,
             elapsedSeconds: nil,
             distanceMeters: nil,
             speedMetersPerSecond: nil,
@@ -347,10 +378,10 @@ struct WorkoutDeviceRelaySchedule: Equatable, Sendable {
 
 struct WorkoutDeviceRelayScheduler: Sendable {
     let coalescingInterval: TimeInterval
+    let coreHeartbeatInterval: TimeInterval
     let extendedHeartbeatInterval: TimeInterval
 
     private var wasTransportReady = false
-    private var latestFrames: WorkoutDeviceFrames?
     private var lastCoreFrame: Data?
     private var lastExtendedFrame: Data?
     private var lastCoreSentAt: Date?
@@ -358,12 +389,16 @@ struct WorkoutDeviceRelayScheduler: Sendable {
     private var lastCoreIdentity: WorkoutDeviceFrames.Identity?
     private var pendingCoreFrame: Data?
     private var pendingExtendedFrame: Data?
+    private var pendingPairIdentity: WorkoutDeviceFrames.Identity?
+    private var nextPairGeneration: UInt8 = 1
 
     init(
         coalescingInterval: TimeInterval = 1,
+        coreHeartbeatInterval: TimeInterval = 5,
         extendedHeartbeatInterval: TimeInterval = 5
     ) {
         self.coalescingInterval = max(0, coalescingInterval)
+        self.coreHeartbeatInterval = max(0, coreHeartbeatInterval)
         self.extendedHeartbeatInterval = max(0, extendedHeartbeatInterval)
     }
 
@@ -372,11 +407,11 @@ struct WorkoutDeviceRelayScheduler: Sendable {
         transportReady: Bool,
         at date: Date
     ) -> WorkoutDeviceRelaySchedule {
-        latestFrames = frames
         guard transportReady, let frames else {
             wasTransportReady = false
             pendingCoreFrame = nil
             pendingExtendedFrame = nil
+            pendingPairIdentity = nil
             return WorkoutDeviceRelaySchedule(
                 transmissions: [],
                 nextEvaluationAt: nil
@@ -386,23 +421,43 @@ struct WorkoutDeviceRelayScheduler: Sendable {
         let becameReady = !wasTransportReady
         wasTransportReady = true
         let urgent = becameReady || lastCoreIdentity != frames.identity
-        var transmissions: [WorkoutDeviceTransmission] = []
+        guard pendingCoreFrame == nil, pendingExtendedFrame == nil else {
+            return WorkoutDeviceRelaySchedule(
+                transmissions: [],
+                nextEvaluationAt: nil
+            )
+        }
 
-        if pendingCoreFrame != frames.core,
-           urgent || isChangedFrameDue(
+        if frames.identity.state == .idle {
+            guard urgent || isChangedFrameDue(
                 frames.core,
                 lastFrame: lastCoreFrame,
                 lastSentAt: lastCoreSentAt,
                 at: date
-           ) {
+            ) else {
+                return WorkoutDeviceRelaySchedule(
+                    transmissions: [],
+                    nextEvaluationAt: nil
+                )
+            }
             pendingCoreFrame = frames.core
-            transmissions.append(WorkoutDeviceTransmission(
-                kind: .core,
-                data: frames.core,
-                prioritized: urgent
-            ))
+            pendingPairIdentity = frames.identity
+            return WorkoutDeviceRelaySchedule(
+                transmissions: [WorkoutDeviceTransmission(
+                    kind: .core,
+                    data: frames.core,
+                    prioritized: true
+                )],
+                nextEvaluationAt: nil
+            )
         }
 
+        let coreHeartbeatDue = shouldHeartbeatCore(frames)
+            && isDue(
+                lastCoreSentAt,
+                interval: coreHeartbeatInterval,
+                at: date
+            )
         let extendedChangedDue = isChangedFrameDue(
             frames.extended,
             lastFrame: lastExtendedFrame,
@@ -414,19 +469,45 @@ struct WorkoutDeviceRelayScheduler: Sendable {
             interval: extendedHeartbeatInterval,
             at: date
         )
-        if pendingExtendedFrame != frames.extended,
-           urgent || extendedChangedDue || extendedHeartbeatDue {
-            pendingExtendedFrame = frames.extended
-            transmissions.append(WorkoutDeviceTransmission(
-                kind: .extended,
-                data: frames.extended,
-                prioritized: false
-            ))
+        let coreChangedDue = isChangedFrameDue(
+            frames.core,
+            lastFrame: lastCoreFrame,
+            lastSentAt: lastCoreSentAt,
+            at: date
+        )
+        guard urgent || coreChangedDue || coreHeartbeatDue
+                || extendedChangedDue || extendedHeartbeatDue else {
+            return WorkoutDeviceRelaySchedule(
+                transmissions: [],
+                nextEvaluationAt: nextEvaluationDate(for: frames, at: date)
+            )
         }
 
+        let generation = nextPairGeneration
+        nextPairGeneration = generation == 3 ? 1 : generation + 1
+        let core = stampedCore(frames.core, generation: generation)
+        let extended = stampedExtended(
+            frames.extended,
+            generation: generation
+        )
+        pendingCoreFrame = core
+        pendingExtendedFrame = extended
+        pendingPairIdentity = frames.identity
+
         return WorkoutDeviceRelaySchedule(
-            transmissions: transmissions,
-            nextEvaluationAt: nextEvaluationDate(for: frames, at: date)
+            transmissions: [
+                WorkoutDeviceTransmission(
+                    kind: .core,
+                    data: core,
+                    prioritized: urgent
+                ),
+                WorkoutDeviceTransmission(
+                    kind: .extended,
+                    data: extended,
+                    prioritized: false
+                ),
+            ],
+            nextEvaluationAt: nil
         )
     }
 
@@ -438,15 +519,16 @@ struct WorkoutDeviceRelayScheduler: Sendable {
         switch kind {
         case .core:
             if pendingCoreFrame == data { pendingCoreFrame = nil }
-            lastCoreFrame = data
+            lastCoreFrame = canonicalCore(data)
             lastCoreSentAt = date
-            if latestFrames?.core == data {
-                lastCoreIdentity = latestFrames?.identity
-            }
+            lastCoreIdentity = pendingPairIdentity
         case .extended:
             if pendingExtendedFrame == data { pendingExtendedFrame = nil }
-            lastExtendedFrame = data
+            lastExtendedFrame = canonicalExtended(data)
             lastExtendedSentAt = date
+        }
+        if pendingCoreFrame == nil, pendingExtendedFrame == nil {
+            pendingPairIdentity = nil
         }
     }
 
@@ -460,6 +542,16 @@ struct WorkoutDeviceRelayScheduler: Sendable {
         case .extended:
             if pendingExtendedFrame == data { pendingExtendedFrame = nil }
         }
+        // A partial pair is never a successful publication. Force the next
+        // evaluation to resend both correlated frames.
+        lastCoreFrame = nil
+        lastExtendedFrame = nil
+        lastCoreSentAt = nil
+        lastExtendedSentAt = nil
+        lastCoreIdentity = nil
+        if pendingCoreFrame == nil, pendingExtendedFrame == nil {
+            pendingPairIdentity = nil
+        }
     }
 
     mutating func didFail(
@@ -467,25 +559,13 @@ struct WorkoutDeviceRelayScheduler: Sendable {
         data: Data
     ) {
         didNotWrite(kind: kind, data: data)
-        switch kind {
-        case .core:
-            if lastCoreFrame == data {
-                lastCoreFrame = nil
-                lastCoreSentAt = nil
-                lastCoreIdentity = nil
-            }
-        case .extended:
-            if lastExtendedFrame == data {
-                lastExtendedFrame = nil
-                lastExtendedSentAt = nil
-            }
-        }
     }
 
     mutating func transportDidBecomeUnavailable() {
         wasTransportReady = false
         pendingCoreFrame = nil
         pendingExtendedFrame = nil
+        pendingPairIdentity = nil
     }
 
     private func isChangedFrameDue(
@@ -511,19 +591,75 @@ struct WorkoutDeviceRelayScheduler: Sendable {
         for frames: WorkoutDeviceFrames,
         at date: Date
     ) -> Date? {
+        guard pendingCoreFrame == nil, pendingExtendedFrame == nil,
+              frames.identity.state != .idle else {
+            return nil
+        }
         var dates: [Date] = []
-        if pendingCoreFrame == nil, frames.core != lastCoreFrame {
+        if frames.core != lastCoreFrame {
             dates.append(lastCoreSentAt?.addingTimeInterval(coalescingInterval) ?? date)
         }
-        if pendingExtendedFrame == nil, frames.extended != lastExtendedFrame {
+        if shouldHeartbeatCore(frames),
+           let lastCoreSentAt {
+            dates.append(lastCoreSentAt.addingTimeInterval(
+                coreHeartbeatInterval
+            ))
+        }
+        if frames.extended != lastExtendedFrame {
             dates.append(lastExtendedSentAt?.addingTimeInterval(coalescingInterval) ?? date)
         }
-        if pendingExtendedFrame == nil, let lastExtendedSentAt {
+        if let lastExtendedSentAt {
             dates.append(lastExtendedSentAt.addingTimeInterval(
                 extendedHeartbeatInterval
             ))
         }
         return dates.min()
+    }
+
+    private func stampedCore(_ data: Data, generation: UInt8) -> Data {
+        guard data.count == WorkoutDeviceFrameBuilder.frameLength else {
+            return data
+        }
+        var stamped = data
+        stamped[1] = (stamped[1] & 0x3F) | ((generation & 0x03) << 6)
+        return stamped
+    }
+
+    private func stampedExtended(_ data: Data, generation: UInt8) -> Data {
+        guard data.count == WorkoutDeviceFrameBuilder.frameLength else {
+            return data
+        }
+        var stamped = data
+        stamped[1] = (stamped[1] & 0x3F) | ((generation & 0x03) << 6)
+        return stamped
+    }
+
+    private func canonicalCore(_ data: Data) -> Data {
+        guard data.count == WorkoutDeviceFrameBuilder.frameLength else {
+            return data
+        }
+        var canonical = data
+        canonical[1] &= 0x3F
+        return canonical
+    }
+
+    private func canonicalExtended(_ data: Data) -> Data {
+        guard data.count == WorkoutDeviceFrameBuilder.frameLength else {
+            return data
+        }
+        var canonical = data
+        canonical[1] &= 0x3F
+        return canonical
+    }
+
+    private func shouldHeartbeatCore(_ frames: WorkoutDeviceFrames) -> Bool {
+        guard frames.identity.hasLiveNumerics else { return false }
+        switch frames.identity.state {
+        case .starting, .running, .paused:
+            return true
+        case .idle, .ending, .ended, .failed:
+            return false
+        }
     }
 }
 

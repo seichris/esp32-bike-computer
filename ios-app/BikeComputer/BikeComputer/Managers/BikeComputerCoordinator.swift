@@ -981,11 +981,11 @@ extension BikeComputerCoordinator {
             let routeLocation = CoordinateConverter.mapKitRouteLocation(fromGPSLocation: currentLoc)
             let item = MKMapItem(placemark: MKPlacemark(coordinate: routeLocation.coordinate))
             item.name = "Current Location"
-            print("Using current location: \(routeLocation.coordinate.latitude), \(routeLocation.coordinate.longitude)")
+            print("Using current location for route calculation")
             completion(item)
 
         case .mapItem(let item):
-            print("\(role): \(item.name ?? "Map Item") at \(item.placemark.coordinate.latitude), \(item.placemark.coordinate.longitude)")
+            print("\(role): \(item.name ?? "Map Item")")
             completion(item)
 
         case .query(let query):
@@ -1032,7 +1032,7 @@ extension BikeComputerCoordinator {
                     return
                 }
 
-                print("\(role) found: \(item.name ?? "Unknown") at \(item.placemark.coordinate.latitude), \(item.placemark.coordinate.longitude)")
+                print("\(role) found: \(item.name ?? "Unknown")")
                 completion(item)
             }
         }

@@ -1126,7 +1126,7 @@ class BLEManager: NSObject, ObservableObject {
                     self.writeDeviceData(payload, to: characteristic, on: peripheral)
                 }
             )
-            log(String(format: "Queued native GPS position: %.6f, %.6f heading=%.0f", lat, lon, heading))
+            log(String(format: "Queued native GPS position: heading=%.0f", heading))
             return
         }
 

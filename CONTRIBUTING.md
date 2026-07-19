@@ -163,7 +163,9 @@ characteristics and the fallback framing path.
 Workout telemetry uses the `WTLM` prefix plus the same 16-byte native payload;
 the resulting fallback packet is exactly 20 bytes. Devices must keep capability
 bit `7` clear until their authenticated parser, RAM-only state, and Ride Stats
-presentation are all available.
+presentation are all available. The Waveshare targets implement that complete
+path and advertise bit `7`; new targets must meet the same gate before enabling
+it.
 
 Before changing BLE formats, update the shared builders/parsers, iOS protocol
 tests, ESP32 firmware, XIAO native tests, and [docs/ble-protocol.md](docs/ble-protocol.md)

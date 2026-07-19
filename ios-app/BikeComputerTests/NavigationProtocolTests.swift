@@ -8083,6 +8083,7 @@ struct NavigationProtocolTests {
         state: WorkoutDeviceSessionState = .running,
         sessionToken: UInt16 = 0x1234,
         hasLiveNumerics: Bool = true,
+        isCurrentSnapshot: Bool? = nil,
         elapsedSeconds: Double? = 3_661,
         distanceMeters: Double? = 12_345,
         speedMetersPerSecond: Double? = 12.34,
@@ -8106,6 +8107,7 @@ struct NavigationProtocolTests {
             state: state,
             sessionToken: sessionToken,
             hasLiveNumerics: hasLiveNumerics,
+            isCurrentSnapshot: isCurrentSnapshot ?? hasLiveNumerics,
             elapsedSeconds: elapsedSeconds,
             distanceMeters: distanceMeters,
             speedMetersPerSecond: speedMetersPerSecond,
@@ -8135,7 +8137,7 @@ struct NavigationProtocolTests {
             0xD2, 0x04, 0x9D, 0x00,
         ]), "core workout frame matches the protocol byte vector")
         assertEqual(frames.extended, Data([
-            0x02, 0x1F, 0x34, 0x12,
+            0x02, 0x3F, 0x34, 0x12,
             0x94, 0x00, 0xD7, 0x11,
             0x41, 0x01, 0x6C, 0x03,
             0x04, 0xF4, 0xFF, 0x05,
@@ -8146,8 +8148,8 @@ struct NavigationProtocolTests {
         let maskedFlags = WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
             sourceFlags: WorkoutDeviceSourceFlags(rawValue: 0xFF)
         ))
-        assertEqual(maskedFlags?.extended[1], 0x1F,
-                    "reserved workout source-flag bits are always zero on the wire")
+        assertEqual(maskedFlags?.extended[1], 0x3F,
+                    "pair-generation bits are assigned only by the relay scheduler")
 
         assertEqual(WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
             state: .running,
@@ -8200,8 +8202,8 @@ struct NavigationProtocolTests {
                     "invalid altitude uses Int16.min sentinel")
         assertEqual(unavailable.extended[15], 0,
                     "invalid zone count stays unavailable")
-        assertEqual(unavailable.extended[1], 0,
-                    "source flags clear when their values are unavailable")
+        assertEqual(unavailable.extended[1], 0x20,
+                    "a current snapshot remains distinguishable when every metric is unavailable")
 
         let saturated = WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
             elapsedSeconds: Double(UInt32.max) * 2,
@@ -8239,7 +8241,7 @@ struct NavigationProtocolTests {
         assertEqual(readUInt32LE(stale.core, offset: 4), UInt32.max,
                     "stale frame strips core numerics")
         assertEqual(stale.extended[1], 0,
-                    "stale frame strips source flags")
+                    "stale frame strips source flags and current-snapshot freshness")
         assertEqual(readUInt16LE(stale.extended, offset: 4), UInt16.max,
                     "stale frame strips extended numerics")
     }
@@ -8346,6 +8348,20 @@ struct NavigationProtocolTests {
         assert(stale?.hasLiveNumerics == false,
                "stale mapping strips live numerics")
 
+        let stoppedAwaitingFinal = WorkoutDeviceTelemetryMapper.sample(
+            presentation: presentation(
+                connectionState: .connected,
+                confirmedState: .ending
+            ),
+            envelope: envelope
+        )
+        assertEqual(stoppedAwaitingFinal?.state, .ending,
+                    "a connected stopped callback remains ending")
+        assert(stoppedAwaitingFinal?.hasLiveNumerics == false,
+               "connected ending cannot replay frozen running metrics")
+        assert(stoppedAwaitingFinal?.isCurrentSnapshot == true,
+               "connected ending remains a current awaiting-final update")
+
         let awaitingFinal = WorkoutDeviceTelemetryMapper.sample(
             presentation: presentation(
                 connectionState: .ended,
@@ -8357,6 +8373,33 @@ struct NavigationProtocolTests {
                     "native end without a final Watch snapshot stays ending")
         assert(awaitingFinal?.hasLiveNumerics == false,
                "awaiting-final state cannot heartbeat frozen health metrics")
+        assert(awaitingFinal?.isCurrentSnapshot == true,
+               "awaiting-final state remains a current mirrored snapshot")
+        let awaitingFinalFrames = awaitingFinal.flatMap {
+            WorkoutDeviceFrameBuilder.frames(for: $0)
+        }
+        assertEqual(
+            awaitingFinalFrames?.extended[1],
+            WorkoutDeviceSourceFlags.currentSnapshot.rawValue,
+            "awaiting-final pair distinguishes current unavailable metrics"
+        )
+
+        let disconnectedEnding = WorkoutDeviceTelemetryMapper.sample(
+            presentation: presentation(
+                connectionState: .disconnected,
+                confirmedState: .ended
+            ),
+            envelope: envelope
+        )
+        assertEqual(disconnectedEnding?.state, .ending,
+                    "disconnected finalization stays in ending state")
+        assert(disconnectedEnding?.isCurrentSnapshot == false,
+               "disconnected finalization is not marked current")
+        let disconnectedEndingFrames = disconnectedEnding.flatMap {
+            WorkoutDeviceFrameBuilder.frames(for: $0)
+        }
+        assertEqual(disconnectedEndingFrames?.extended[1], 0,
+                    "disconnected ending pair carries no freshness bit")
 
         let endedSnapshot = WorkoutSnapshotV1(
             state: .ended,
@@ -8387,6 +8430,40 @@ struct NavigationProtocolTests {
         assert(ended?.hasLiveNumerics == true,
                "authoritative ended summary retains final numerics")
 
+        let failedSnapshot = WorkoutSnapshotV1(
+            state: .failed,
+            errorCode: .sessionFailed
+        )
+        let failedEnvelope = WorkoutEnvelopeV1(
+            kind: .snapshot,
+            sessionID: sessionID,
+            sessionToken: 77,
+            sequence: 3,
+            capturedAt: date,
+            snapshot: failedSnapshot
+        )
+        let failed = WorkoutDeviceTelemetryMapper.sample(
+            presentation: presentation(
+                connectionState: .failed,
+                snapshot: failedSnapshot,
+                confirmedState: .failed
+            ),
+            envelope: failedEnvelope
+        )
+        assertEqual(failed?.state, .failed,
+                    "authoritative Watch failure maps to failed")
+        assert(failed?.hasLiveNumerics == false,
+               "failed sessions do not relay frozen live metrics")
+        assert(failed?.isCurrentSnapshot == true,
+               "an authoritative failed envelope remains current")
+        assertEqual(
+            failed.flatMap {
+                WorkoutDeviceFrameBuilder.frames(for: $0)
+            }?.extended[1],
+            WorkoutDeviceSourceFlags.currentSnapshot.rawValue,
+            "authoritative failure can cross a same-token collision boundary"
+        )
+
         let phoneLocation = WorkoutLocationV1(
             latitude: 1,
             longitude: 2,
@@ -8414,7 +8491,7 @@ struct NavigationProtocolTests {
             kind: .snapshot,
             sessionID: sessionID,
             sessionToken: 77,
-            sequence: 3,
+            sequence: 4,
             capturedAt: date,
             snapshot: rawWithoutLocation
         )
@@ -8460,6 +8537,20 @@ struct NavigationProtocolTests {
             state: .paused,
             hasLiveNumerics: false
         ))!
+        let currentEnding = WorkoutDeviceFrameBuilder.frames(
+            for: workoutDeviceSample(
+                state: .ending,
+                hasLiveNumerics: false,
+                isCurrentSnapshot: true
+            )
+        )!
+        let disconnectedEnding = WorkoutDeviceFrameBuilder.frames(
+            for: workoutDeviceSample(
+                state: .ending,
+                hasLiveNumerics: false,
+                isCurrentSnapshot: false
+            )
+        )!
 
         var scheduler = WorkoutDeviceRelayScheduler()
         var schedule = scheduler.update(
@@ -8471,6 +8562,15 @@ struct NavigationProtocolTests {
                     "authentication sends both latest workout frames")
         assert(schedule.transmissions.first?.prioritized == true,
                "initial core synchronization uses the priority lane")
+        let initialPairGeneration = schedule.transmissions[0].data[1] >> 6
+        assert(initialPairGeneration > 0,
+               "new relay frames carry a non-zero pair generation")
+        assertEqual(schedule.transmissions[1].data[1] >> 6,
+                    initialPairGeneration,
+                    "core and extended frames share one pair generation")
+        assertEqual(schedule.transmissions[0].data[1] & 0x3F,
+                    WorkoutDeviceSessionState.running.rawValue,
+                    "pair generation leaves the core session state intact")
         for transmission in schedule.transmissions {
             scheduler.didWrite(
                 kind: transmission.kind,
@@ -8567,12 +8667,136 @@ struct NavigationProtocolTests {
             transportReady: true,
             at: start.addingTimeInterval(4.9)
         ).transmissions.isEmpty, "extended heartbeat waits five seconds")
-        assertEqual(heartbeatScheduler.update(
+        let firstLiveHeartbeat = heartbeatScheduler.update(
             frames: initial,
             transportReady: true,
             at: start.addingTimeInterval(5)
-        ).transmissions.map(\.kind), [.extended],
-        "unchanged extended frame heartbeats every five seconds")
+        )
+        assertEqual(firstLiveHeartbeat.transmissions.map(\.kind), [.core, .extended],
+                    "unchanged live frames heartbeat every five seconds")
+        for transmission in firstLiveHeartbeat.transmissions {
+            heartbeatScheduler.didWrite(
+                kind: transmission.kind,
+                data: transmission.data,
+                at: start.addingTimeInterval(5)
+            )
+        }
+        assert(heartbeatScheduler.update(
+            frames: initial,
+            transportReady: true,
+            at: start.addingTimeInterval(9.9)
+        ).transmissions.isEmpty, "the recurring heartbeat waits for its next interval")
+        assertEqual(heartbeatScheduler.update(
+            frames: initial,
+            transportReady: true,
+            at: start.addingTimeInterval(10)
+        ).transmissions.map(\.kind), [.core, .extended],
+        "live core and extended heartbeats recur beyond the first interval")
+
+        var pausedHeartbeatScheduler = WorkoutDeviceRelayScheduler()
+        let pausedHeartbeatStart = pausedHeartbeatScheduler.update(
+            frames: paused,
+            transportReady: true,
+            at: start
+        )
+        for transmission in pausedHeartbeatStart.transmissions {
+            pausedHeartbeatScheduler.didWrite(
+                kind: transmission.kind,
+                data: transmission.data,
+                at: start
+            )
+        }
+        let firstPausedHeartbeat = pausedHeartbeatScheduler.update(
+            frames: paused,
+            transportReady: true,
+            at: start.addingTimeInterval(5)
+        )
+        assertEqual(firstPausedHeartbeat.transmissions.map(\.kind), [.core, .extended],
+                    "a healthy paused workout keeps core freshness alive")
+        for transmission in firstPausedHeartbeat.transmissions {
+            pausedHeartbeatScheduler.didWrite(
+                kind: transmission.kind,
+                data: transmission.data,
+                at: start.addingTimeInterval(5)
+            )
+        }
+        assertEqual(pausedHeartbeatScheduler.update(
+            frames: paused,
+            transportReady: true,
+            at: start.addingTimeInterval(10)
+        ).transmissions.map(\.kind), [.core, .extended],
+        "paused core freshness continues across recurring heartbeat intervals")
+
+        var staleHeartbeatScheduler = WorkoutDeviceRelayScheduler()
+        let staleHeartbeatStart = staleHeartbeatScheduler.update(
+            frames: stale,
+            transportReady: true,
+            at: start
+        )
+        for transmission in staleHeartbeatStart.transmissions {
+            staleHeartbeatScheduler.didWrite(
+                kind: transmission.kind,
+                data: transmission.data,
+                at: start
+            )
+        }
+        assertEqual(staleHeartbeatScheduler.update(
+            frames: stale,
+            transportReady: true,
+            at: start.addingTimeInterval(5)
+        ).transmissions.map(\.kind), [.core, .extended],
+        "stale heartbeats remain a complete transactional pair")
+
+        var partialPairScheduler = WorkoutDeviceRelayScheduler()
+        let partialPair = partialPairScheduler.update(
+            frames: initial,
+            transportReady: true,
+            at: start
+        )
+        partialPairScheduler.didWrite(
+            kind: .core,
+            data: partialPair.transmissions[0].data,
+            at: start
+        )
+        partialPairScheduler.didNotWrite(
+            kind: .extended,
+            data: partialPair.transmissions[1].data
+        )
+        let retriedPair = partialPairScheduler.update(
+            frames: initial,
+            transportReady: true,
+            at: start.addingTimeInterval(0.1)
+        )
+        assertEqual(retriedPair.transmissions.map(\.kind), [.core, .extended],
+                    "a partial pair retries both frames")
+        assert(retriedPair.transmissions[0].data[1] >> 6 != initialPairGeneration,
+               "a retried pair advances its correlation generation")
+
+        var endingFreshnessScheduler = WorkoutDeviceRelayScheduler()
+        let currentEndingPair = endingFreshnessScheduler.update(
+            frames: currentEnding,
+            transportReady: true,
+            at: start
+        )
+        for transmission in currentEndingPair.transmissions {
+            endingFreshnessScheduler.didWrite(
+                kind: transmission.kind,
+                data: transmission.data,
+                at: start
+            )
+        }
+        let disconnectedEndingPair = endingFreshnessScheduler.update(
+            frames: disconnectedEnding,
+            transportReady: true,
+            at: start.addingTimeInterval(0.1)
+        )
+        assertEqual(
+            disconnectedEndingPair.transmissions.map(\.kind),
+            [.core, .extended],
+            "current-ending to disconnected-ending bypasses coalescing"
+        )
+        assert(disconnectedEndingPair.transmissions.first?.prioritized == true,
+               "ending freshness loss uses the priority lane")
     }
 
     @MainActor
@@ -8624,7 +8848,7 @@ struct NavigationProtocolTests {
                "one capability-enable event resynchronizes core and extended frames")
         assertEqual(workoutWrites().map { $0[4] }, [1, 2],
                     "publisher integration sends both fallback frame kinds")
-        assertEqual(workoutWrites()[0][5], WorkoutDeviceSessionState.running.rawValue,
+        assertEqual(workoutWrites()[0][5] & 0x3F, WorkoutDeviceSessionState.running.rawValue,
                     "readiness publication relays the committed running state")
 
         writes.removeAll()
@@ -8644,7 +8868,7 @@ struct NavigationProtocolTests {
         ], receivedAt: clock.now())
         assert(waitForMainLoop(timeout: 1) { workoutWrites().count == 2 },
                "one presentation publication sends the latest state transition")
-        assertEqual(workoutWrites()[0][5], WorkoutDeviceSessionState.paused.rawValue,
+        assertEqual(workoutWrites()[0][5] & 0x3F, WorkoutDeviceSessionState.paused.rawValue,
                     "relay reads the committed paused presentation, not the prior revision")
 
         assert(manager.handleDeviceCapabilitiesNotification(
@@ -8657,7 +8881,7 @@ struct NavigationProtocolTests {
                "back-to-back valid capability response reenables telemetry")
         assert(waitForMainLoop(timeout: 1) { workoutWrites().count == 2 },
                "rapid disable/reenable still resynchronizes both latest frames")
-        assertEqual(workoutWrites()[0][5], WorkoutDeviceSessionState.paused.rawValue,
+        assertEqual(workoutWrites()[0][5] & 0x3F, WorkoutDeviceSessionState.paused.rawValue,
                     "reconnect resynchronization uses the latest committed state")
         withExtendedLifetime(relay) {}
     }

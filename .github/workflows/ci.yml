@@ -240,6 +240,12 @@ jobs:
             tools/tests/test_workout_telemetry_protocol.cpp \
             -o /tmp/test_workout_telemetry_protocol
           /tmp/test_workout_telemetry_protocol
+      - name: Workout telemetry state and presentation host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_workout_telemetry_state.cpp \
+            -o /tmp/test_workout_telemetry_state
+          /tmp/test_workout_telemetry_state
       - name: Map profile persistence host tests
         run: |
           g++ -std=c++17 \

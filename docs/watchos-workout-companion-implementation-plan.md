@@ -646,7 +646,8 @@ Initial flag allocation:
 | 2 | Distance came from HealthKit distance-cycling statistics |
 | 3 | Altitude came from a valid Watch location |
 | 4 | Live HealthKit zone API supplied the zone |
-| 5...7 | Reserved and sent as zero |
+| 5 | Mirrored snapshot is current, including current-but-unavailable metrics |
+| 6...7 | Correlated frame-pair generation; zero is the legacy relay contract |
 
 Encoding rules:
 
@@ -662,6 +663,19 @@ Encoding rules:
 - Ignore an extended frame whose token does not match the active core token.
 - Ended preserves a final summary until an explicit idle frame, a new session,
   or reboot.
+- Current-snapshot freshness is independent from numeric availability, so an
+  awaiting-final ending state can be current while carrying sentinels.
+- Correlated generation `1...3` pairs commit atomically. Same-token transitions
+  follow the shared workout state machine, while starting after ended/failed is
+  an explicit replacement boundary for the rare UInt16 token-collision case.
+- At an authenticated reconnect boundary, a complete current correlated pair
+  may cross an otherwise-invalid transition from a retained ending/ended/failed
+  snapshot with the same token, including active, ending, and cross-terminal
+  outcomes. A partial or stale pair cannot cross that boundary.
+- Generation-zero current-all-unavailable and transport-loss pairs are
+  inherently identical. Firmware clears ambiguous values, grants one
+  10-second freshness window, and does not let empty extended-only heartbeats
+  extend that window.
 
 Document this extension in docs/ble-protocol.md and add exact byte-vector tests
 on both iOS and firmware sides.

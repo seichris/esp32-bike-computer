@@ -11,7 +11,22 @@ constexpr std::size_t FALLBACK_FRAME_SIZE =
     FALLBACK_PREFIX_SIZE + FRAME_SIZE;
 constexpr char FALLBACK_PREFIX[] = "WTLM";
 constexpr uint8_t CAPABILITY_MASK = 1 << 7;
-constexpr uint8_t KNOWN_SOURCE_FLAGS_MASK = 0x1F;
+constexpr uint8_t SOURCE_PAIRED_SPEED_SENSOR = 1 << 0;
+constexpr uint8_t SOURCE_WATCH_GPS_SPEED = 1 << 1;
+constexpr uint8_t SOURCE_HEALTHKIT_DISTANCE = 1 << 2;
+constexpr uint8_t SOURCE_WATCH_ALTITUDE = 1 << 3;
+constexpr uint8_t SOURCE_LIVE_HEART_RATE_ZONE = 1 << 4;
+constexpr uint8_t METRIC_SOURCE_FLAGS_MASK =
+    SOURCE_PAIRED_SPEED_SENSOR | SOURCE_WATCH_GPS_SPEED |
+    SOURCE_HEALTHKIT_DISTANCE | SOURCE_WATCH_ALTITUDE |
+    SOURCE_LIVE_HEART_RATE_ZONE;
+constexpr uint8_t SOURCE_CURRENT_SNAPSHOT = 1 << 5;
+constexpr uint8_t PAIR_GENERATION_SHIFT = 6;
+constexpr uint8_t PAIR_GENERATION_MASK = 0xC0;
+constexpr uint8_t SESSION_STATE_MASK = 0x3F;
+constexpr uint8_t KNOWN_SOURCE_FLAGS_MASK =
+    METRIC_SOURCE_FLAGS_MASK | SOURCE_CURRENT_SNAPSHOT |
+    PAIR_GENERATION_MASK;
 constexpr uint16_t UNAVAILABLE_UINT16 = UINT16_MAX;
 constexpr uint32_t UNAVAILABLE_UINT32 = UINT32_MAX;
 constexpr int16_t UNAVAILABLE_ALTITUDE = INT16_MIN;
@@ -30,6 +45,14 @@ enum class SessionState : uint8_t {
   Ended = 5,
   Failed = 6,
 };
+
+constexpr uint8_t pairGenerationBits(uint8_t value) {
+  return value & PAIR_GENERATION_MASK;
+}
+
+constexpr uint8_t pairGenerationValue(uint8_t value) {
+  return pairGenerationBits(value) >> PAIR_GENERATION_SHIFT;
+}
 
 constexpr uint16_t readUInt16LE(const uint8_t *bytes, std::size_t offset) {
   return static_cast<uint16_t>(bytes[offset]) |
