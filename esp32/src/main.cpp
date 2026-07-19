@@ -47,7 +47,9 @@
 #include "imu.hpp"
 #endif
 
+#ifdef HAS_HARDWARE_GPS
 extern xSemaphoreHandle gpsMutex;
+#endif
 
 #ifndef DISABLE_WEB_SERVER
 #include "webpage.h"
@@ -284,7 +286,8 @@ static void logSystemDebugHeartbeat() {
   lastLogMs = now;
 
   BLEDebugStats bleStats = bleNavServer.getDebugStats();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)) &&       \
+    defined(WAVESHARE_IMU_DIAGNOSTICS)
   const waveshare_board::i2c::Stats &i2cStats = waveshare_board::i2c::stats();
   const waveshare_board::rtc::Status &rtcStatus =
       waveshare_board::rtc::status();
@@ -292,6 +295,10 @@ static void logSystemDebugHeartbeat() {
       waveshare_board::imu::status();
   const waveshare_board::imu::Sample &imuSample =
       waveshare_board::imu::lastSample();
+#elif defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  const waveshare_board::i2c::Stats &i2cStats = waveshare_board::i2c::stats();
+  const waveshare_board::rtc::Status &rtcStatus =
+      waveshare_board::rtc::status();
 #endif
   const char *screenName = "unknown";
   lv_obj_t *activeScreen = lv_scr_act();
@@ -301,7 +308,8 @@ static void logSystemDebugHeartbeat() {
     screenName = "main";
   }
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)) &&       \
+    defined(WAVESHARE_IMU_DIAGNOSTICS)
   Serial.printf("IMU: p=%d cfg=%d valid=%d addr=0x%02X n=%lu zero=%lu fail=%lu "
                 "a=%.0f,%.0f,%.0f g=%.1f,%.1f,%.1f mag=%.0f vib=%.1f "
                 "orient=%s moving=%d\n",
@@ -316,7 +324,9 @@ static void logSystemDebugHeartbeat() {
                 imuStatus.vibrationDps,
                 waveshare_board::imu::orientationName(imuStatus.orientation),
                 imuStatus.moving);
+#endif
 
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   Serial.printf("SYS: up=%lus heap=%lu psram=%lu screen=%s tile=%s "
                 "waitRefresh=%d gpsFromApp=%d pendingMap=%d lat=%.6f "
                 "lon=%.6f heading=%u routePts=%u mapFound=%d mapBlocks=%u "
@@ -447,7 +457,9 @@ static void processDisconnectedShutdown() {
  *
  */
 void setup() {
+#ifdef HAS_HARDWARE_GPS
   gpsMutex = xSemaphoreCreateMutex();
+#endif
   esp_log_level_set("*", ESP_LOG_DEBUG);
   esp_log_level_set("storage", ESP_LOG_DEBUG);
 
@@ -530,7 +542,11 @@ void setup() {
   Serial.println("Waveshare display probe: skipping RTC and IMU init");
 #else
   waveshare_board::rtc::restoreSystemTimeFromRtc();
+#ifdef WAVESHARE_IMU_DIAGNOSTICS
   waveshare_board::imu::begin();
+#else
+  waveshare_board::imu::disable();
+#endif
 #endif
 #endif
 
@@ -629,17 +645,21 @@ void setup() {
                   TFT_HEIGHT);
 
   loadPreferences();
+#ifdef HAS_HARDWARE_GPS
   gps.init();
+#endif
   initLVGL();
   log_i("Checkpoint A: LVGL Init Done");
 
   // Get init Latitude and Longitude
   gps.gpsData.latitude = gps.getLat();
   gps.gpsData.longitude = gps.getLon();
-  log_i("Checkpoint B: GPS Data Retrieved");
+  log_i("Checkpoint B: Position Data Initialized");
 
+#ifdef HAS_HARDWARE_GPS
   initGpsTask();
   log_i("Checkpoint C: GPS Task Init Done");
+#endif
 
 #ifndef DISABLE_CLI
   initCLI();
@@ -751,7 +771,8 @@ void loop() {
   bleNavServer.process();
   processDisconnectedShutdown();
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)) &&       \
+    defined(WAVESHARE_IMU_DIAGNOSTICS)
   waveshare_board::imu::process();
 #endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)

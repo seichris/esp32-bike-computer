@@ -8,7 +8,9 @@
 
 #pragma once
 
+#ifdef HAS_HARDWARE_GPS
 #include "gps.hpp"
+#endif
 #ifdef BME280
 #include "bme.hpp"
 #endif
@@ -26,8 +28,10 @@
 
 #define TASK_SLEEP_PERIOD_MS 5
 
+#ifdef HAS_HARDWARE_GPS
 void gpsTask(void *pvParameters);
 void initGpsTask();
+#endif
 
 #ifndef DISABLE_CLI
 void cliTask(void *param);

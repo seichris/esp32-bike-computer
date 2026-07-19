@@ -230,6 +230,7 @@ void loadPreferences() {
  * @param gpsBaud
  */
 void saveGPSBaud(uint16_t gpsBaud) {
+#ifdef HAS_HARDWARE_GPS
   cfg.saveShort(PKEYS::KGPS_SPEED, gpsBaud);
   if (gpsBaud != 4) {
 #ifdef AT6558D_GPS
@@ -258,6 +259,9 @@ void saveGPSBaud(uint16_t gpsBaud) {
       delay(500);
     }
   }
+#else
+  (void)gpsBaud;
+#endif
 }
 
 /**
@@ -266,6 +270,7 @@ void saveGPSBaud(uint16_t gpsBaud) {
  * @param gpsUpdateRate
  */
 void saveGPSUpdateRate(uint16_t gpsUpdateRate) {
+#ifdef HAS_HARDWARE_GPS
   cfg.saveShort(PKEYS::KGPS_RATE, gpsUpdateRate);
 #ifdef AT6558D_GPS
   gpsPort.flush();
@@ -274,6 +279,9 @@ void saveGPSUpdateRate(uint16_t gpsUpdateRate) {
   gpsPort.println("$PCAS00*01\r\n");
   gpsPort.flush();
   delay(500);
+#endif
+#else
+  (void)gpsUpdateRate;
 #endif
 }
 
