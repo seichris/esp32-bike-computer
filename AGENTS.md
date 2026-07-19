@@ -1,137 +1,119 @@
-# Agent Notes (esp32-bike-computer)
+# Agent Notes (open-bike-computer)
 
-This repo contains:
-- `esp32/`: ESP32-S3 firmware (PlatformIO + Arduino + LVGL + NimBLE), currently based on the local IceNav-v3 map-renderer snapshot.
-- `ios-app/`: iOS companion app (SwiftUI + MapKit + CoreBluetooth + CoreLocation).
-- `tools/OSM_Extract/`: offline vector-map build pipeline (Docker-based).
-- `waveshare_test/`: hardware bring-up sketches for the Waveshare board.
+## Repository map
+
+- `esp32/`: PlatformIO/Arduino firmware for the Waveshare 1.75-inch and
+  2.06-inch ESP32-S3 devices, including LVGL, BLE navigation, SD map rendering,
+  device settings, telemetry, audio, and firmware updates.
+- `ios-app/`: SwiftUI companion app using MapKit, CoreBluetooth, and
+  CoreLocation for route planning, navigation, device settings, firmware
+  updates, and offline-map creation/download/installation.
+- `backend/`: FastAPI map platform with installation-scoped authentication,
+  rate limits, persistent jobs, immutable artifacts, and separate API, worker,
+  and maintenance processes.
+- `deploy/map-platform/`: digest-pinned production Compose lock plus image
+  validation and promotion tooling.
+- `tools/OSM_Extract/`: Dockerized OSM/PBF extraction and vector-map pipeline
+  used by the backend worker.
+- `config/`: checked-in map-stream trust, rollout approval, and hardware-gate
+  configuration.
+- `hardware/`: authoritative Waveshare pinouts, board findings, schematics,
+  datasheets, and physical validation records. Read `hardware/README.md` before
+  changing board-specific firmware.
+- `docs/`: protocol, rollout, and implementation documentation.
 
 ## Quick commands
 
-### ESP32 (PlatformIO)
+### ESP32 firmware
 
-- Build: `cd esp32 && pio run`
-- Flash: `cd esp32 && pio run -t upload`
-- Serial monitor: `cd esp32 && pio device monitor -b 115200`
-- List ports (macOS): `pio device list` or `ls /dev/cu.usbmodem*`
+Before the first build/upload/device-debug action in a task, ask which physical
+device is connected. Do not assume 1.75 versus 2.06.
 
-Bootloader mode: if upload fails, hold **BOOT (GPIO0)** while re-plugging USB.
-For Python/pyserial captures on `/dev/cu.usbmodem*`, open at `115200` and set
-`ser.dtr = False` plus `ser.rts = False` immediately after opening. Leaving
-RTS/DTR asserted can reset or hold the ESP32-S3 USB serial path and produce an
-empty monitor.
-
-#### ESP32 on Chris's Mac over USB-C
-
-Before the first device action in a thread (build/upload/serial capture/device
-debugging), ask which physical device is currently connected. Do not assume
-`WAVESHARE_AMOLED_175` vs `WAVESHARE_AMOLED_206`; flashing the wrong
-environment can leave the screen black even when upload succeeds.
-
-Observed working device/port:
-- ESP32-S3 USB CDC/JTAG enumerated as `/dev/cu.usbmodem2101`.
-- `pio device list` described it as `USB JTAG/serial debug unit` with VID:PID `303A:1001`.
-- Working upload shape: `cd esp32 && pio run -e WAVESHARE_AMOLED_175 -t upload --upload-port /dev/cu.usbmodem2101`.
-
-Local PlatformIO/Python gotcha seen on 2026-06-30:
-- The global `pio` at `/Library/Frameworks/Python.framework/Versions/3.11/bin/pio` hung because that Python 3.11 install was unhealthy.
-- The global `~/.platformio/penv` also pointed at that broken Python, which caused pioarduino dependency setup to hang.
-- Prefer a healthy Python in the pioarduino-supported range, currently Python 3.10-3.13 for the cached platform.
-- If only Python 3.14 is available, a temporary PlatformIO install plus temporary `PLATFORMIO_CORE_DIR` worked, reusing existing `~/.platformio` packages/platforms via symlinks. If the cached pioarduino platform rejects Python 3.14, temporarily widen `~/.platformio/platforms/espressif32/platform.py` from `< (3, 14)` to `< (3, 15)`, run build/upload, then restore that cached file.
-
-Temporary setup pattern:
 ```sh
-rm -rf /tmp/esp32-bike-pio-314 /tmp/esp32-bike-pio-core-314
-/opt/homebrew/bin/python3.14 -m venv /tmp/esp32-bike-pio-314
-/tmp/esp32-bike-pio-314/bin/python -m pip install --upgrade pip setuptools wheel platformio
-mkdir -p /tmp/esp32-bike-pio-core-314
-ln -s ~/.platformio/packages /tmp/esp32-bike-pio-core-314/packages
-ln -s ~/.platformio/platforms /tmp/esp32-bike-pio-core-314/platforms
-ln -s ~/.platformio/.cache /tmp/esp32-bike-pio-core-314/.cache
 cd esp32
-PLATFORMIO_CORE_DIR=/tmp/esp32-bike-pio-core-314 /tmp/esp32-bike-pio-314/bin/pio run -e WAVESHARE_AMOLED_175
-PLATFORMIO_CORE_DIR=/tmp/esp32-bike-pio-core-314 /tmp/esp32-bike-pio-314/bin/pio run -e WAVESHARE_AMOLED_175 -t upload --upload-port /dev/cu.usbmodem2101
+pio run -e WAVESHARE_AMOLED_175
+pio run -e WAVESHARE_AMOLED_206
+pio device list
+pio run -e WAVESHARE_AMOLED_175 -t upload --upload-port /dev/cu.usbmodemXXXX
+pio device monitor -b 115200
 ```
 
-`pio device monitor` can fail inside non-interactive PTYs with
-`termios.error: (19, 'Operation not supported by device')`. Use pyserial
-instead. To capture from reset:
+Use the matching `WAVESHARE_AMOLED_206` environment for a 2.06-inch board. If
+upload fails, hold BOOT (`GPIO0`) while reconnecting USB and retry.
+
+### iOS app
+
+Open `ios-app/BikeComputer/BikeComputer.xcodeproj`. Run the portable Swift
+navigation/BLE tests with:
+
 ```sh
-/tmp/esp32-bike-pio-314/bin/python - <<'PY'
-import serial, time, sys
-port = "/dev/cu.usbmodem2101"
-ser = serial.Serial(port, 115200, timeout=0.05)
-print(f"--- reset + serial capture {port} @ 115200 ---")
-ser.dtr = False
-ser.rts = True
-time.sleep(0.25)
-ser.rts = False
-start = time.time()
-while time.time() - start < 35:
-    data = ser.read(8192)
-    if data:
-        sys.stdout.write(data.decode("utf-8", errors="replace"))
-        sys.stdout.flush()
-ser.close()
-print("\n--- end serial capture ---")
-PY
+cd ios-app
+./scripts/run-navigation-tests.sh
 ```
 
-Healthy boot log checkpoints from the Waveshare board:
-- AXP2101 found and display power enabled.
-- TCA9554 found and touch reset completed.
-- Display, LVGL, and UI initialized.
-- BLE host started and server advertising.
-- SD card initialized, or a clear SD init failure.
-- `Setup complete!` followed by `Waiting for iPhone connection...`.
+The CI build shape is:
 
-### iOS
+```sh
+cd ios-app
+xcodebuild -project BikeComputer/BikeComputer.xcodeproj \
+  -scheme BikeComputer -destination 'generic/platform=iOS' \
+  CODE_SIGNING_ALLOWED=NO build
+```
 
-- Open: `ios-app/BikeComputer/BikeComputer.xcodeproj`
+### Map backend
+
+```sh
+cd backend
+python -m pip install -e '.[api,test,object-storage]'
+python -m unittest discover -s tests
+python -m unittest discover -s ../deploy/map-platform/tests
+MAP_PLATFORM_INSTALLATION_SECRET='local-development-secret-at-least-32-bytes' \
+  uvicorn --factory map_platform.api:create_app --reload --port 8080
+```
+
+See `backend/README.md` for local API/worker commands and
+`deploy/map-platform/README.md` for production promotion and rollback.
+
+## App/backend authentication contract
+
+The production map endpoint is defined by
+`OfflineMapServiceConfig.productionServerURLString` in the iOS app. The public
+app must not contain a server-wide API key: it obtains an installation-scoped
+credential from `POST /v1/installations`, stores it in the Keychain, and uses it
+only for that installation's resources. Public issuance and map operations are
+protected by persistent server-side limits. Preserve this model when changing
+the app or backend.
+
+Coordinate request/response changes across `backend/map_platform/`,
+`ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift`, and
+`ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift`, with tests
+on both sides.
+
+## Production map backend updates
+
+For changes under `backend/` or other image inputs listed in
+`.github/workflows/map-platform-image.yml`:
+
+1. Merge the code through a pull request to `main`; do not deploy `:latest` or
+   change server-side image-selection variables.
+2. Wait for **Map Platform Image** to publish and attest the image, then review
+   the generated `deploy/map-platform-production` pull request. Production is
+   defined by the immutable digest pins in `deploy/map-platform/compose.yaml`.
+3. If the promotion moves the signed worker, complete the worker/hardware gates
+   in `docs/map-stream-rollout-runbook.md`. Merge only after **Map Backend** CI
+   passes; the manifest merge triggers the production deployment.
+4. Verify the deployment and `/healthz`. Roll back through a pull request that
+   restores the complete previous Compose lock, including both image anchors
+   and both source markers.
+
+If promotion automation needs an explicit pending-worker decision, follow
+`deploy/map-platform/README.md`; never bypass the digest/provenance checks.
 
 ## BLE contract
 
-Current firmware implements BLE service UUID
-`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800` in `esp32/lib/ble_navigation/`.
-The full protocol is documented in `docs/ble-protocol.md`.
-
-Core navigation characteristic:
-- Characteristic UUID `2A6E` (write without response)
-- Payload (UTF-8): `IconID|DistanceMeters|Instruction`
-
-Map-view characteristics:
-- Route geometry UUID `2A6F`
-- GPS position UUID `2A72`
-- Map settings UUID `2A73`
-- Auth UUID `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002`
-
-If you add/remove/rename BLE characteristics, update both:
-- `esp32/lib/ble_navigation/ble_navigation.cpp`
-- `esp32/lib/ble_navigation/ble_navigation.hpp`
-- `ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift`
-
-## Hardware gotchas (Waveshare ESP32-S3-Touch-AMOLED-1.75)
-
-Definitive pinout + quirks: [hardware/README.md](hardware/README.md)
-
-Highlights:
-- Display power must be enabled via **AXP2101** (I2C `0x34`) or the screen stays black.
-- Touch reset is via **TCA9554 P0** (I2C `0x20`) — do **not** toggle GPIO20 (USB D+).
-- SD card is SPI on `CS=41, MOSI=1, MISO=3, SCK=2` (firmware uses HSPI to avoid the display QSPI bus).
-- Touch input is interrupt-gated on CST9217 `INT=GPIO21`; do not return to rapid polling. Arduino Core 3.x `Wire.requestFrom()` failures against the CST9217 can crash the I2C ISR if reads are attempted while no touch data is ready.
-
-## Offline maps (OSM_Extract)
-
-Preferred workflow is Docker:
-- `cd tools/OSM_Extract && docker compose run --rm tools bash`
-- Run scripts from `/scripts` in the container; outputs land in `tools/OSM_Extract/maps/` on the host.
-
-Config:
-- feature selection: `tools/OSM_Extract/conf/conf_extract.yaml`
-- styling: `tools/OSM_Extract/conf/conf_styles.yaml`
-
-## Change hygiene
-
-- Keep edits focused: avoid sweeping refactors/reformatting.
-- Keep the restored IceNav-derived renderer architecture intact unless a task explicitly targets a refactor.
-- When touching LVGL/display code, preserve the “full screen buffer + full_refresh” strategy unless you have a measured reason to change it (it was chosen to avoid partial-update corruption on this AMOLED panel).
+Hardware documentation does not replace the cross-device protocol contract.
+Treat `docs/ble-protocol.md` as the source of truth instead of duplicating UUIDs
+here. When changing BLE services, characteristics, framing, or payloads, update
+the firmware implementation under `esp32/lib/ble_navigation/`, the iOS
+implementation in `BLEManager.swift` and `NavigationProtocol.swift`, the
+relevant host/Swift tests, and the protocol document in the same change.
