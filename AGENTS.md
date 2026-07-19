@@ -89,25 +89,6 @@ Healthy boot log checkpoints from the Waveshare board:
 
 - Open: `ios-app/BikeComputer/BikeComputer.xcodeproj`
 
-### Map backend production updates
-
-For changes under `backend/` or other image inputs listed in
-`.github/workflows/map-platform-image.yml`:
-
-1. Merge the code through a pull request to `main`; do not deploy `:latest` or
-   change server-side image-selection variables.
-2. Wait for **Map Platform Image** to publish and attest the image, then review
-   the generated `deploy/map-platform-production` pull request. Production is
-   defined by the immutable digest pins in `deploy/map-platform/compose.yaml`.
-3. If the promotion moves the signed worker, complete the worker/hardware gates
-   in `docs/map-stream-rollout-runbook.md`. Merge only after **Map Backend** CI
-   passes; the manifest merge triggers the production deployment.
-4. Verify the deployment and `/healthz`. Roll back through a pull request that
-   restores the complete previous Compose lock (both images and source markers).
-
-If promotion automation needs an explicit pending-worker decision, follow
-`deploy/map-platform/README.md`; never bypass the digest/provenance checks.
-
 ## BLE contract
 
 Current firmware implements BLE service UUID
