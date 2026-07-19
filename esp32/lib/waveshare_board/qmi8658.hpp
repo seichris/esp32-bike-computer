@@ -11,6 +11,9 @@
 
 namespace waveshare_board::imu {
 
+bool disable();
+
+#ifdef WAVESHARE_IMU_DIAGNOSTICS
 enum class Orientation : uint8_t {
   Unknown,
   FaceUp,
@@ -52,6 +55,7 @@ bool readSample(Sample &sample);
 const Status &status();
 const Sample &lastSample();
 const char *orientationName(Orientation orientation);
+#endif
 
 } // namespace waveshare_board::imu
 

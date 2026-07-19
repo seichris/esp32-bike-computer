@@ -9,11 +9,14 @@
 #include "tasks.hpp"
 
 TaskHandle_t LVGLTaskHandler;
+#ifdef HAS_HARDWARE_GPS
 xSemaphoreHandle gpsMutex;
 extern Gps gps;
+#endif
 
 static const char* TAG PROGMEM = "Task";
 
+#ifdef HAS_HARDWARE_GPS
 /**
  * @brief Read GPS data
  *
@@ -58,6 +61,7 @@ void initGpsTask()
   xTaskCreatePinnedToCore(gpsTask, PSTR("GPS Task"), 8192, NULL, 1, NULL, 0);
   delay(500);
 }
+#endif
 
 /**
  * @brief CLI task
@@ -84,5 +88,4 @@ void cliTask(void *param)
 void initCLITask() { xTaskCreatePinnedToCore(cliTask, "cliTask ", 20000, NULL, 1, NULL, 1); }
 
 #endif
-
 

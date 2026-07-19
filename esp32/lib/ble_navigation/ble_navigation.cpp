@@ -21,7 +21,6 @@
 #include "../route_overlay/route_overlay.hpp"
 #include "../speaker/speaker.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-#include "../waveshare_board/display.hpp"
 #include "../waveshare_board/pcf85063.hpp"
 #endif
 #include <NimBLEDevice.h>
@@ -383,28 +382,6 @@ static void initBleIdentityAndSecurity(const char *deviceName) {
                 advertisedAddress[0] == '\0'
                     ? NimBLEDevice::getAddress().toString().c_str()
                     : advertisedAddress);
-}
-
-static uint8_t sanitizeMapDisplayRotation(uint8_t requestedRotation,
-                                          const char *source) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  if (requestedRotation > waveshare_board::display::MAX_SUPPORTED_ROTATION) {
-    Serial.printf("BLE Settings: %s displayRotation %u unsupported, clamping "
-                  "to 0\n",
-                  source, requestedRotation);
-    return waveshare_board::display::ROTATION_0;
-  }
-  if (requestedRotation == waveshare_board::display::ROTATION_90 &&
-      !waveshare_board::display::EXPERIMENTAL_90_ROTATION_ENABLED) {
-    Serial.printf("BLE Settings: %s displayRotation 1 disabled on Waveshare "
-                  "until CO5300 window is verified; using 0\n",
-                  source);
-    return waveshare_board::display::ROTATION_0;
-  }
-#else
-  (void)source;
-#endif
-  return requestedRotation;
 }
 
 /**
@@ -1633,15 +1610,8 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     break;
   }
   case 4:
-    mapRenderSettings.displayRotation =
-        (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)3);
-    mapRenderSettings.displayRotation =
-        sanitizeMapDisplayRotation(mapRenderSettings.displayRotation, "write");
-    settingsPrefs.begin("mapSettings", false);
-    settingsPrefs.putUChar("rotation", mapRenderSettings.displayRotation);
-    settingsPrefs.end();
-    Serial.printf("BLE Settings: displayRotation = %d (reboot to apply)\n",
-                  mapRenderSettings.displayRotation);
+    Serial.println("BLE Settings: ignoring legacy displayRotation; rotation "
+                   "is selected by the firmware target");
     break;
   case 5:
     Serial.println("BLE Settings: Reboot command received! Restarting...");
@@ -2071,8 +2041,6 @@ static void loadSettingsFromNVS() {
 
   map_profile_persistence::load(prefs, mapRenderSettings.mapStyle,
                                 mapRenderSettings.mapNavigationStyle);
-  mapRenderSettings.displayRotation =
-      sanitizeMapDisplayRotation(prefs.getUChar("rotation", 0), "NVS");
   mapRenderSettings.mapRotationMode = prefs.getUChar("mapRotMode", 0);
   mapRenderSettings.tapToSwitchScreens = prefs.getUChar("tapSwitch", 0);
   uint8_t storedScreenMask =
@@ -2098,14 +2066,13 @@ static void loadSettingsFromNVS() {
 
   Serial.printf("BLE: Loaded settings from NVS - minPolySize=%d, "
                 "detailLevel=%d, routeWidth=%d, streetBoost=%d, "
-                "markerScale=%d, rotation=%d, tapSwitch=%d, "
+                "markerScale=%d, tapSwitch=%d, "
                 "screenMask=0x%02X, defaultScreen=%d, discSleepSec=%lu\n",
                 mapRenderSettings.mapStyle.minPolygonSize,
                 mapRenderSettings.mapStyle.detailLevel,
                 mapRenderSettings.mapStyle.routeLineWidth,
                 mapRenderSettings.mapStyle.streetLineWidthBoost,
                 mapRenderSettings.mapStyle.positionMarkerScale,
-                mapRenderSettings.displayRotation,
                 mapRenderSettings.tapToSwitchScreens,
                 mapRenderSettings.enabledScreensMask,
                 mapRenderSettings.defaultScreen,

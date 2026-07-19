@@ -33,9 +33,10 @@ struct NavigationData {
 /**
  * @brief Map rendering settings (configurable via BLE from iOS app)
  * IDs 1,2,3,7,8,9,10 configure the Map screen. IDs 16-22 configure
- * Map + Navigation. IDs 4,6,11-15 configure shared/device behavior, and IDs
+ * Map + Navigation. IDs 6,11-15 configure shared/device behavior, and IDs
  * 23-24 carry the connected phone's transient battery percentage and charging
- * state.
+ * state. Legacy ID 4 is ignored because display rotation is selected by the
+ * hardware target.
  */
 enum DeviceScreenSetting : uint8_t {
   DEVICE_SCREEN_MAP = 0,
@@ -98,8 +99,6 @@ struct ScreenMapRenderSettings {
 struct MapRenderSettings {
   ScreenMapRenderSettings mapStyle;
   ScreenMapRenderSettings mapNavigationStyle;
-  uint8_t displayRotation =
-      0; // 0-3: Display rotation (0=0°, 1=90°, 2=180°, 3=270°)
   uint8_t mapRotationMode = 0; // 0=North Up, 1=Course Up
   uint8_t tapToSwitchScreens = 0; // 0=off, 1=short tap cycles main screens
   uint8_t enabledScreensMask =
