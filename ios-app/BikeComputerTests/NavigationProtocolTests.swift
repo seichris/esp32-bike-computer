@@ -588,6 +588,7 @@ struct NavigationProtocolTests {
         testOfflineMapJobProgressDecoding()
         testOfflineMapJobProgressAbsentFallback()
         testOfflineMapProgressPresentation()
+        testOfflineMapOnboardingPolicy()
         testMapActivationProgressPresentation()
         testMapUploadProgressReconciliation()
         testOfflineMapDownloadingSectionPresentation()
@@ -3874,6 +3875,59 @@ struct NavigationProtocolTests {
         assertEqual(identified.clientInstallationId, "installation-test", "request includes installation identity")
         assertEqual(identified.clientRequestId, "request-test-123", "request includes idempotency identity")
         assertEqual(identified.installOnDevice, true, "request preserves install workflow intent")
+    }
+
+    static func testOfflineMapOnboardingPolicy() {
+        assert(
+            OfflineMapOnboardingPolicy.shouldOfferDownload(
+                isLocationAuthorized: true,
+                isNavigationReady: true,
+                hasSDCard: true,
+                activeMapId: "",
+                mapFoundForCurrentLocation: false
+            ),
+            "a ready device with no installed map offers the download onboarding"
+        )
+        assert(
+            !OfflineMapOnboardingPolicy.shouldOfferDownload(
+                isLocationAuthorized: true,
+                isNavigationReady: true,
+                hasSDCard: true,
+                activeMapId: "custom-map-6354c43431",
+                mapFoundForCurrentLocation: false
+            ),
+            "an installed map suppresses onboarding even outside its current coverage"
+        )
+        assert(
+            !OfflineMapOnboardingPolicy.shouldOfferDownload(
+                isLocationAuthorized: true,
+                isNavigationReady: true,
+                hasSDCard: true,
+                activeMapId: "",
+                mapFoundForCurrentLocation: nil
+            ),
+            "unknown device coverage does not show a premature download prompt"
+        )
+        assert(
+            !OfflineMapOnboardingPolicy.shouldOfferDownload(
+                isLocationAuthorized: true,
+                isNavigationReady: true,
+                hasSDCard: true,
+                activeMapId: "",
+                mapFoundForCurrentLocation: true
+            ),
+            "current map coverage suppresses onboarding"
+        )
+        assert(
+            !OfflineMapOnboardingPolicy.shouldOfferDownload(
+                isLocationAuthorized: false,
+                isNavigationReady: true,
+                hasSDCard: true,
+                activeMapId: "",
+                mapFoundForCurrentLocation: false
+            ),
+            "the device-specific prompt waits for location authorization"
+        )
     }
 
     static func testOfflineMapPreparationTimeEstimate() {

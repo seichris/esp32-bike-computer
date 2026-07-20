@@ -219,10 +219,13 @@ struct ContentView: View {
     }
 
     private var deviceMapMissingCandidate: Bool {
-        coordinator.isLocationAuthorized &&
-            coordinator.bleManager.isNavigationReady &&
-            coordinator.bleManager.deviceHasSDCard == true &&
-            coordinator.bleManager.deviceMapFoundForCurrentLocation == false
+        OfflineMapOnboardingPolicy.shouldOfferDownload(
+            isLocationAuthorized: coordinator.isLocationAuthorized,
+            isNavigationReady: coordinator.bleManager.isNavigationReady,
+            hasSDCard: coordinator.bleManager.deviceHasSDCard,
+            activeMapId: coordinator.bleManager.mapTransferActiveMapId,
+            mapFoundForCurrentLocation: coordinator.bleManager.deviceMapFoundForCurrentLocation
+        )
     }
 
     private var shouldShowOfflineMapOnboarding: Bool {

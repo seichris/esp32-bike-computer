@@ -803,6 +803,22 @@ nonisolated enum OfflineMapPollingRetryPolicy {
     }
 }
 
+nonisolated enum OfflineMapOnboardingPolicy {
+    static func shouldOfferDownload(
+        isLocationAuthorized: Bool,
+        isNavigationReady: Bool,
+        hasSDCard: Bool?,
+        activeMapId: String,
+        mapFoundForCurrentLocation: Bool?
+    ) -> Bool {
+        isLocationAuthorized &&
+            isNavigationReady &&
+            hasSDCard == true &&
+            activeMapId.isEmpty &&
+            mapFoundForCurrentLocation == false
+    }
+}
+
 @MainActor
 enum OfflineMapJobPoller {
     static func waitForReady(
