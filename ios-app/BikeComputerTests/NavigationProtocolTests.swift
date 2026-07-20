@@ -8888,6 +8888,25 @@ struct NavigationProtocolTests {
     }
 
     static func testWorkoutTelemetryBLETransport() {
+        let channelManager = BLEManager()
+        let nativeWorkoutPayload = Data(ownershipHex:
+            "0102030405060708090a0b0c0d0e0f10")!
+        let workoutWriteSession = AuthenticatedBLEWriteSession(
+            ownerKey: Data((0..<32).map(UInt8.init)),
+            deviceID: "00112233445566778899aabbccddeeff",
+            clientNonce: "102132435465768798a9babbdcddedef",
+            serverNonce: "ffeeddccbbaa99887766554433221100"
+        )
+        assertEqual(
+            channelManager.devicePayloadForTesting(
+                nativeWorkoutPayload,
+                for: DeviceBLEProtocol.workoutTelemetryCharacteristicUUID,
+                authenticatedWriteSession: workoutWriteSession
+            ),
+            Data(ownershipHex:
+                "53320000000127d330a9033a32ec8bf92a85e20f859fa7efe9559f559083f8f9e48720130a16"),
+            "production native workout payload path emits the exact protected channel-six frame"
+        )
         let capability = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
             Data([DeviceBLEProtocol.workoutTelemetryCapabilityMask])
         let frame = WorkoutDeviceFrameBuilder.frames(
@@ -9987,6 +10006,21 @@ struct NavigationProtocolTests {
             protectedSession.frame(payload: Data(), channel: .route),
             Data(ownershipHex: "533200000001c981669fdeb1b029019459478ef19ff6"),
             "empty protected route payload has a valid authenticated frame"
+        )
+        let workoutWriteSession = AuthenticatedBLEWriteSession(
+            ownerKey: goldenOwnerKey,
+            deviceID: goldenDeviceID,
+            clientNonce: goldenClientNonce,
+            serverNonce: goldenServerNonce
+        )
+        assertEqual(
+            workoutWriteSession.frame(
+                payload: Data(ownershipHex: "0102030405060708090a0b0c0d0e0f10")!,
+                channel: .workout
+            ),
+            Data(ownershipHex:
+                "53320000000127d330a9033a32ec8bf92a85e20f859fa7efe9559f559083f8f9e48720130a16"),
+            "native workout write matches the shared channel-six AES-GCM vector"
         )
         let goldenNotifyFrame = Data(ownershipHex:
             "523200000001f19f6c8cd9263269e34a54aa910f37738270d42cb7d8632c8f0e20bfa6a4588d369304ab9662")!

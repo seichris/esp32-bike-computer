@@ -1,4 +1,5 @@
 #include "../../lib/ble_navigation/device_ownership.hpp"
+#include "../../lib/ble_navigation/authenticated_workout_telemetry.hpp"
 #include "../../lib/ble_navigation/ble_connection_policy.hpp"
 #include "../../lib/ble_navigation/disconnected_shutdown_policy.hpp"
 #include "../../lib/ble_navigation/ownership_button_policy.hpp"
@@ -782,6 +783,44 @@ int main() {
       binary("533200000001c981669fdeb1b029019459478ef19ff6"),
       plaintext));
   assert(plaintext.empty());
+
+  const std::string workoutPayload =
+      binary("0102030405060708090a0b0c0d0e0f10");
+  const std::string goldenWorkoutFrame = binary(
+      "53320000000127d330a9033a32ec8bf92a85e20f859fa7efe9559f559083f8f9e48720130a16");
+  DeviceOwnership workoutWire;
+  workoutWire.setAuthenticatedSessionKeysForTesting(goldenWriteKey,
+                                                     goldenNotifyKey);
+  bool workoutHandled = false;
+  assert(workout_telemetry_transport::dispatchAuthenticatedNativeFrame(
+      goldenWorkoutFrame,
+      [&workoutWire](const std::string &frame, std::string &payload) {
+        return workoutWire.unwrapAuthenticatedPayload(
+            AuthenticatedChannel::Workout, frame, payload);
+      },
+      [&workoutHandled, &workoutPayload](const uint8_t *bytes,
+                                        std::size_t length) {
+        assert(std::string(reinterpret_cast<const char *>(bytes), length) ==
+               workoutPayload);
+        workoutHandled = true;
+      }));
+  assert(workoutHandled);
+  workoutHandled = false;
+  assert(!workout_telemetry_transport::dispatchAuthenticatedNativeFrame(
+      goldenWorkoutFrame,
+      [&workoutWire](const std::string &frame, std::string &payload) {
+        return workoutWire.unwrapAuthenticatedPayload(
+            AuthenticatedChannel::Workout, frame, payload);
+      },
+      [&workoutHandled](const uint8_t *, std::size_t) {
+        workoutHandled = true;
+      }));
+  assert(!workoutHandled);
+  DeviceOwnership workoutWrongChannel;
+  workoutWrongChannel.setAuthenticatedSessionKeysForTesting(goldenWriteKey,
+                                                             goldenNotifyKey);
+  assert(!workoutWrongChannel.unwrapAuthenticatedPayload(
+      AuthenticatedChannel::Navigation, goldenWorkoutFrame, plaintext));
 
   DeviceOwnership notifier;
   notifier.setAuthenticatedSessionKeysForTesting(goldenWriteKey,

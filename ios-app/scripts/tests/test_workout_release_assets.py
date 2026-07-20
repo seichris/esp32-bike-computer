@@ -142,6 +142,22 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             IOS_PROJECT / "BikeComputer.xcodeproj" / "project.pbxproj"
         ).read_text()
         self.assertIn("Assets.xcassets in Resources", project)
+        self.assertEqual(
+            project.count(
+                "CODE_SIGN_ENTITLEMENTS = "
+                "BikeComputer/BikeComputer.entitlements;"
+            ),
+            2,
+            "iPhone Debug and Release must both reference HealthKit entitlements",
+        )
+        self.assertEqual(
+            project.count(
+                "CODE_SIGN_ENTITLEMENTS = "
+                "BikeComputerWatch/BikeComputerWatch.entitlements;"
+            ),
+            2,
+            "Watch Debug and Release must both reference HealthKit entitlements",
+        )
         self.assertGreaterEqual(
             project.count("ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;"),
             3,

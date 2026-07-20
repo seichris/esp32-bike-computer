@@ -103,14 +103,21 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
         working-directory: ios-app
-      - name: Build app
+      - name: Build Release app container
         run: |
           xcodebuild \
             -project BikeComputer/BikeComputer.xcodeproj \
             -scheme BikeComputer \
+            -configuration Release \
             -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/bike-computer-release" \
             CODE_SIGNING_ALLOWED=NO \
             build
+        working-directory: ios-app
+      - name: Validate Release app container
+        run: >-
+          bash ./scripts/verify-release-container.sh
+          "$RUNNER_TEMP/bike-computer-release/Build/Products/Release-iphoneos/BikeComputer.app"
         working-directory: ios-app
 
   osm:

@@ -60,9 +60,11 @@ old data as current. Reconnection requests the newest coherent snapshot.
 ## Compatible bike computer firmware
 
 Firmware with BLE capability bit 7 accepts the authenticated workout telemetry
-frames and exposes Watch values on the Ride Stats pages. Older firmware keeps
-the legacy GPS/ride display, and newer firmware remains idle when used with an
-older iPhone app. Release compatible firmware before or alongside the app.
+frames and exposes Watch values on the Ride Stats pages. The ownership-capable
+app can migrate a previously saved legacy peripheral and keeps its old
+firmware's GPS/ride display; a fresh install does not silently trust an unknown
+shared-key device. Ownership-v2 firmware rejects the old app-wide key, so
+release and install the compatible app before that firmware.
 
 The full wire contract is in [`../docs/ble-protocol.md`](../docs/ble-protocol.md).
 The release acceptance matrix is in

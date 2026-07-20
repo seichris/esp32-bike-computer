@@ -3707,24 +3707,28 @@ class BLEManager: NSObject, ObservableObject {
             log("Cannot write characteristic \(characteristic.uuid): unsupported properties")
             return
         }
-        let payload: Data
-        if let authenticatedWriteSession {
-            guard let channel = authenticatedChannel(for: characteristic.uuid),
-                  let frame = authenticatedWriteSession.frame(
-                    payload: data,
-                    channel: channel
-                  ) else {
-                log("Cannot protect write for characteristic \(characteristic.uuid)")
-                return
-            }
-            payload = frame
-        } else {
-            payload = data
+        guard let payload = devicePayload(
+            data,
+            for: characteristic.uuid,
+            authenticatedWriteSession: authenticatedWriteSession
+        ) else {
+            log("Cannot protect write for characteristic \(characteristic.uuid)")
+            return
         }
         if writeType == .withResponse {
             writeWithResponseInFlight = true
         }
         peripheral.writeValue(payload, for: characteristic, type: writeType)
+    }
+
+    private func devicePayload(
+        _ data: Data,
+        for uuid: CBUUID,
+        authenticatedWriteSession: AuthenticatedBLEWriteSession?
+    ) -> Data? {
+        guard let authenticatedWriteSession else { return data }
+        guard let channel = authenticatedChannel(for: uuid) else { return nil }
+        return authenticatedWriteSession.frame(payload: data, channel: channel)
     }
 
     private func authenticatedChannel(for uuid: CBUUID) -> AuthenticatedBLEChannel? {
@@ -3733,8 +3737,23 @@ class BLEManager: NSObject, ObservableObject {
         if uuid == routeGeometryCharacteristicUUID { return .route }
         if uuid == gpsPositionCharacteristicUUID { return .gps }
         if uuid == settingsCharacteristicUUID { return .settings }
+        if uuid == workoutTelemetryCharacteristicUUID { return .workout }
         return nil
     }
+
+#if HOST_TESTING
+    func devicePayloadForTesting(
+        _ data: Data,
+        for uuid: CBUUID,
+        authenticatedWriteSession: AuthenticatedBLEWriteSession?
+    ) -> Data? {
+        devicePayload(
+            data,
+            for: uuid,
+            authenticatedWriteSession: authenticatedWriteSession
+        )
+    }
+#endif
 
     private func scheduleNavigationFlushRetryIfNeeded() {
         guard navigationWriteQueue.count > 0,

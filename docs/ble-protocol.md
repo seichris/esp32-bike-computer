@@ -45,7 +45,7 @@ Fallback frame prefixes:
 | `MAPR` | route geometry packet |
 | `GPSP` | GPS position packet |
 | `MSET` | map setting packet |
-| `WTLM` | one fixed 16-byte workout frame; prefix plus payload is exactly 20 bytes |
+| `WTLM` | one fixed 16-byte workout frame; prefix plus payload is exactly 20 plaintext bytes before the protected session envelope described below |
 
 ## Device ownership and authentication
 
@@ -114,7 +114,8 @@ owner name to apps.
 Every BLE connection performs a fresh mutual challenge using independent
 random 16-byte nonces from iOS and the ESP32. The device-generated nonce makes
 a captured handshake unusable on a later connection. No navigation, map,
-settings, rename, or deregistration command is accepted before this completes.
+settings, workout, rename, or deregistration command is accepted before this
+completes.
 
 1. iOS writes `OWNER|<OwnerID>|<ClientNonce>`.
 2. ESP32 notifies
@@ -126,8 +127,8 @@ settings, rename, or deregistration command is accepted before this completes.
 
 ### Protected session frames
 
-After `OK2`, all app-to-device writes on the auth, navigation, route, GPS, and
-settings characteristics use AES-256-GCM. Auth replies and every
+After `OK2`, all app-to-device writes on the auth, navigation, route, GPS,
+settings, and workout characteristics use AES-256-GCM. Auth replies and every
 device-to-app navigation notification—including destination requests,
 capabilities, acknowledgements, and transfer status—use the reverse protected
 direction. Plaintext notifications are rejected while a v2 session exists. The
@@ -147,7 +148,8 @@ Ciphertext: 0 or more bytes
 Tag: 16-byte AES-GCM tag
 ```
 
-Channels are `1=auth`, `2=navigation`, `3=route`, `4=GPS`, and `5=settings`.
+Channels are `1=auth`, `2=navigation`, `3=route`, `4=GPS`, `5=settings`, and
+`6=workout`.
 Each direction has an independent strictly increasing sequence per channel.
 Receivers reject zero, replayed, out-of-order, wrong-channel, or invalid-tag
 frames. The 12-byte nonce is `Channel || 7 zero bytes || Sequence`. Additional
@@ -280,17 +282,22 @@ Waveshare firmware uses the optional Unix time to sync the onboard PCF85063 RTC.
 ## Watch Workout Telemetry (`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003`)
 
 Workout telemetry is iOS-to-device, write-without-response, RAM-only, and
-accepted only after the existing local authentication handshake. The native
-payload is exactly 16 bytes. A cached GATT table uses the authenticated `2A6E`
-fallback instead:
+accepted only after the existing local authentication handshake. The logical
+native payload is exactly 16 bytes. In an ownership-v2 session it is carried in
+an `S2` frame on protected channel `6`, for a 38-byte native wire write. A
+cached GATT table carries the same logical payload in the authenticated `2A6E`
+navigation-channel fallback instead:
 
 ```text
 "WTLM" | 16-byte workout frame
 ```
 
-The fallback is exactly 20 bytes. Native and fallback payloads use the same
-parser. iOS sends no workout frames unless capability bit `7` is present, so
-older firmware continues using the existing GPS ride fields unchanged.
+The fallback plaintext is exactly 20 bytes before ownership-v2 protection and
+the protected fallback wire write is 42 bytes. Native and fallback payloads use
+the same parser after their authenticated channel is unwrapped. The ownership
+handshake already requires an ATT MTU large enough for either protected write.
+iOS sends no workout frames unless capability bit `7` is present, so older
+firmware continues using the existing GPS ride fields unchanged.
 
 ### Core frame, kind `1`
 

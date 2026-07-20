@@ -126,7 +126,8 @@ other sensitive location.
 
 Release is blocked while any required row is Pending or Failed. The user may
 elect to continue development while assuming a hardware path behaves as
-designed, but an assumption does not convert that row into release evidence. If optional
-external sensor hardware is unavailable, record that concrete blocker rather
-than substituting simulated data. Firmware must be released before or alongside
-the app, and App Store publication remains a separate authorized action.
+designed, but an assumption does not convert that row into release evidence. If
+optional external sensor hardware is unavailable, record that concrete blocker
+rather than substituting simulated data. The ownership-capable app must be
+available before ownership-v2 firmware, and App Store publication remains a
+separate authorized action.

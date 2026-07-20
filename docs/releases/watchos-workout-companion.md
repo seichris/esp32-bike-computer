@@ -46,15 +46,20 @@ computer hardware is not required to review the Watch/iPhone workflow.
 
 ## Firmware rollout notes
 
-Release firmware support for BLE capability bit 7 before or alongside this app
-version.
+Release this ownership-capable app version before ownership-v2 firmware with
+BLE capability bit 7.
 
-- New app + old firmware: navigation and legacy ride telemetry continue; Watch
+- New app + previously saved old firmware: the app can use its explicit legacy
+  migration path; navigation and legacy ride telemetry continue, while Watch
   workout values are not sent to the device.
-- Old app + new firmware: the workout characteristics remain idle; existing
-  navigation and GPS telemetry continue.
+- Fresh new-app install + unknown old firmware: the app does not silently trust
+  the shared app-wide key; update the device through an already registered
+  installation or install ownership-v2 firmware through the supported flow.
+- Old app + ownership-v2 firmware: authentication is intentionally rejected;
+  update the app before installing the firmware.
 - New app + new firmware: authenticated native workout characteristics are
-  preferred, with the documented 20-byte `WTLM` fallback where required.
+  preferred, with the documented 20-byte plaintext `WTLM` fallback (42 bytes
+  after ownership-v2 wire protection) where required.
 
 Do not advertise capability bit 7 in any firmware release that lacks the frame
 parser, RAM-only workout state, staleness handling, and Ride Stats UI.
@@ -66,5 +71,5 @@ complete every pending item in
 [`../watchos-workout-companion-validation.md`](../watchos-workout-companion-validation.md),
 export and visually approve the updated screenshots, verify the final App Store
 privacy answers and public policy against production, verify the in-app and App
-Store Connect privacy links resolve to the same policy, and release firmware in
-the order above.
+Store Connect privacy links resolve to the same policy, and release the app and
+firmware in the order above.

@@ -580,7 +580,8 @@ Properties:
 - direction: iOS to ESP32;
 - write without response;
 - accepted only after the existing local auth handshake;
-- fixed 16-byte native payload.
+- fixed 16-byte logical native payload, carried as a 38-byte protected wire
+  write in an ownership-v2 session.
 
 Capability negotiation:
 
@@ -595,8 +596,10 @@ existing authenticated command channel fallback:
 
     WTLM | 16-byte workout frame
 
-The four-byte prefix plus frame is exactly 20 bytes and fits the minimum ATT
-payload. Native and fallback frames use the same parser.
+The four-byte prefix plus frame is exactly 20 plaintext bytes. Ownership-v2
+protection expands the fallback to a 42-byte wire write; the ownership
+handshake requires an ATT MTU large enough for it. Native and fallback frames
+use the same parser after authenticated-channel unwrapping.
 
 ### Core frame: kind 1
 
@@ -847,9 +850,13 @@ Exit criteria:
 
 Exit criteria:
 
-- New app remains compatible with old firmware.
-- New firmware remains compatible with an old app.
-- Core plus WTLM fallback never exceeds 20 bytes.
+- New app keeps the saved-device migration path compatible with previously
+  paired old firmware; a fresh install does not silently trust an unknown
+  shared-key device.
+- Ownership-v2 firmware requires the ownership-capable app and intentionally
+  rejects the old app-wide shared key.
+- Core plus WTLM fallback is exactly 20 plaintext bytes; ownership-v2 transport
+  protection expands it to a 42-byte wire write after the MTU-gated handshake.
 - Missing metrics round-trip as unavailable.
 
 ### Phase 5: firmware telemetry and Ride Stats
@@ -874,8 +881,9 @@ Exit criteria:
 2. Measure end-to-end latency and battery use.
 3. Confirm Health/Fitness contains exactly one saved workout and route.
 4. Update privacy policy, App Store disclosures, screenshots, and release notes.
-5. Ship firmware before or alongside the app; capability negotiation keeps the
-   rollout backward compatible.
+5. Ship the ownership-capable app before ownership-v2 firmware. Existing users
+   can migrate a saved legacy device through the app; do not strand old-app
+   users by publishing the firmware first.
 
 ## Test strategy
 
@@ -994,13 +1002,16 @@ Product/release:
 
 ## Rollout order
 
-1. Release backward-compatible firmware support for capability bit 7 and the
-   workout frames.
-2. Release the iOS app containing the Watch companion.
-3. On older firmware, keep showing legacy ride telemetry and tell the user that
-   a firmware update enables Watch metrics on the device.
-4. On newer firmware with an older app, the new characteristic remains idle and
-   existing navigation behavior is unchanged.
+1. Release the ownership-capable iOS app containing the Watch companion while
+   existing users are still on old firmware.
+2. Let the app migrate previously saved legacy peripherals. A fresh install
+   does not use the shared app-wide key to trust an unknown old-firmware device.
+3. Release ownership-v2 firmware with capability bit 7 and workout frames only
+   after the compatible app is available.
+4. On old firmware registered before the upgrade, keep showing legacy ride
+   telemetry and tell the user that a firmware update enables Watch metrics.
+5. Ownership-v2 firmware intentionally rejects old-app shared-key
+   authentication; users must update the app before installing that firmware.
 
 ## Apple references
 

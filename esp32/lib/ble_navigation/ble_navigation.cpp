@@ -15,6 +15,7 @@
 #include "transfer_control_dispatch.hpp"
 #include "workout_telemetry_protocol.hpp"
 #include "workout_telemetry_runtime.hpp"
+#include "authenticated_workout_telemetry.hpp"
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
 #include "../gui/src/globalGuiDef.h"
@@ -656,6 +657,18 @@ static void notifyAuthResponse(const char *response) {
   if (response != nullptr) notifyAuthResponse(std::string(response));
 }
 
+static void completeBleSessionAuthentication() {
+  // Every authentication mechanism opens the same transactional workout
+  // replacement boundary. This prevents staged frames from crossing BLE
+  // connections and lets a complete current pair replace a retained terminal
+  // snapshot even when the 16-bit session token collides.
+  workout_telemetry_runtime::beginAuthenticatedResynchronization();
+  bleSessionAuthenticated = true;
+  bleDebugStats.authenticated = true;
+  bleDebugStats.authSuccessCount++;
+  bleDebugStats.lastAuthSuccessMs = millis();
+}
+
 static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
                                           const uint8_t *data, size_t length) {
   if (characteristic == nullptr || data == nullptr ||
@@ -796,10 +809,7 @@ static void handleAuthPayload(const std::string &frame) {
         Serial.println("BLE: Device ownership registered");
         break;
       case device_ownership::Event::Authenticated:
-        bleSessionAuthenticated = true;
-        bleDebugStats.authenticated = true;
-        bleDebugStats.authSuccessCount++;
-        bleDebugStats.lastAuthSuccessMs = millis();
+        completeBleSessionAuthentication();
         queueOwnershipUiUpdate();
         Serial.println("BLE: Owner session authenticated");
         break;
@@ -902,14 +912,7 @@ static void handleAuthPayload(const std::string &frame) {
       return;
     }
 
-    // Authentication begins a transactional core/extended resynchronization.
-    // Keep the displayed snapshot until a complete valid replacement arrives,
-    // while allowing that replacement to carry a newer terminal token.
-    workout_telemetry_runtime::beginAuthenticatedResynchronization();
-    bleSessionAuthenticated = true;
-    bleDebugStats.authenticated = true;
-    bleDebugStats.authSuccessCount++;
-    bleDebugStats.lastAuthSuccessMs = millis();
+    completeBleSessionAuthentication();
     pendingAuthNonce[0] = '\0';
     char response[40];
     snprintf(response, sizeof(response), "OK|%s", nonce);
@@ -2352,10 +2355,17 @@ class MyWorkoutTelemetryCharacteristicCallbacks
     : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
-    const std::string value = pChar->getValue();
-    handleWorkoutTelemetryPayload(
-        reinterpret_cast<const uint8_t *>(value.data()), value.length(),
-        "native");
+    const std::string frame = pChar->getValue();
+    workout_telemetry_transport::dispatchAuthenticatedNativeFrame(
+        frame,
+        [](const std::string &protectedFrame, std::string &payload) {
+          return unwrapOwnerAuthenticatedPayload(
+              device_ownership::AuthenticatedChannel::Workout,
+              protectedFrame, payload, "workout telemetry characteristic");
+        },
+        [](const uint8_t *payload, std::size_t length) {
+          handleWorkoutTelemetryPayload(payload, length, "native");
+        });
   }
 };
 
