@@ -791,6 +791,9 @@ final class WorkoutMirrorManager: NSObject {
             || result.latestSnapshotEnvelope?.snapshot?.state == .failed {
             completeTerminalFailureDrain(from: transport)
         }
+        if store.presentation.shouldAutomaticallyResetAfterDiscard {
+            _ = resetTerminalPresentation()
+        }
     }
 
     @available(iOS 17.0, *)

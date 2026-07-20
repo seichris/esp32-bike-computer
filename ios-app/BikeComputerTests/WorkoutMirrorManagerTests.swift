@@ -2536,7 +2536,7 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
                 XCTAssertNil(runtime.manager.store.presentation.errorCode)
                 XCTAssertEqual(
                     runtime.manager.store.presentation.connectionState,
-                    .ended
+                    control == .discard ? .idle : .ended
                 )
                 try await Task.sleep(for: .milliseconds(50))
                 XCTAssertNil(

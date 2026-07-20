@@ -336,6 +336,15 @@ nonisolated struct WorkoutMirrorPresentationV1: Equatable, Sendable {
         }
     }
 
+    var shouldAutomaticallyResetAfterDiscard: Bool {
+        guard connectionState == .ended,
+              pendingControl == nil,
+              errorCode == nil else {
+            return false
+        }
+        return (finalSnapshot ?? snapshot).terminalOutcome == .discarded
+    }
+
     func captureAge(at date: Date) -> TimeInterval? {
         capturedAt.map { max(0, date.timeIntervalSince($0)) }
     }

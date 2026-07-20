@@ -119,6 +119,7 @@ private struct WorkoutContractTestSuite {
         testWorkoutErrorCopyDistinguishesTerminalUncertainty()
         testTerminalErrorAndTakeoverCopyUseDurableDisposition()
         testWorkoutWatchAvailabilityPolicy()
+        testDiscardedWorkoutSummaryDismissalPolicy()
         testCrossAppWorkoutStartDisclosureRequiresExplicitConfirmation()
         testWorkoutDiscardDisclosureRequiresFinalConfirmation()
         testIPhoneStartsUseWatchAvailabilityAndWatchStartsKeepDisclosure()
@@ -4562,6 +4563,62 @@ private struct WorkoutContractTestSuite {
                 "an installed companion must be start-ready regardless of immediate messaging reachability"
             )
         }
+    }
+
+    private mutating func testDiscardedWorkoutSummaryDismissalPolicy() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_399_800)
+        let sessionID = UUID(
+            uuidString: "EEEEEEEE-0000-0000-0000-000000000000"
+        )!
+
+        func presentation(
+            outcome: WorkoutTerminalOutcomeV1,
+            errorCode: WorkoutSafeErrorCodeV1? = nil,
+            pendingControl: WorkoutControlV1? = nil
+        ) -> WorkoutMirrorPresentationV1 {
+            let snapshot = WorkoutSnapshotV1(
+                state: .ended,
+                startDate: now.addingTimeInterval(-30),
+                terminalOutcome: outcome
+            )
+            return WorkoutMirrorPresentationV1(
+                connectionState: .ended,
+                snapshot: snapshot,
+                sessionID: sessionID,
+                capturedAt: now,
+                receivedAt: now,
+                confirmedSessionState: .ended,
+                errorCode: errorCode,
+                pendingControl: pendingControl,
+                finalSnapshot: snapshot,
+                navigation: .empty
+            )
+        }
+
+        expect(
+            presentation(outcome: .discarded)
+                .shouldAutomaticallyResetAfterDiscard,
+            "a verified ordinary discard must return the main screen to idle"
+        )
+        expect(
+            !presentation(outcome: .saved)
+                .shouldAutomaticallyResetAfterDiscard,
+            "a saved workout must retain its completion summary"
+        )
+        expect(
+            !presentation(
+                outcome: .discarded,
+                errorCode: .anotherWorkoutActive
+            ).shouldAutomaticallyResetAfterDiscard,
+            "a terminal error must remain visible even when the displaced workout was discarded"
+        )
+        expect(
+            !presentation(
+                outcome: .discarded,
+                pendingControl: .discard
+            ).shouldAutomaticallyResetAfterDiscard,
+            "the UI must not reset before the discard command is confirmed"
+        )
     }
 
     private mutating func testWorkoutDiscardDisclosureRequiresFinalConfirmation() {
