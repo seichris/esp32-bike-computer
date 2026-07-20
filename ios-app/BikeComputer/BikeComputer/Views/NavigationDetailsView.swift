@@ -470,7 +470,7 @@ struct RideMetricsPanel: View {
                 action: onStartWorkout
             ) {
                 RideControlLabel(
-                    "Start workout",
+                    "Start Workout",
                     systemImage: "figure.outdoor.cycle"
                 )
             }

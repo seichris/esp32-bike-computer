@@ -5000,7 +5000,7 @@ private struct WorkoutContractTestSuite {
                 "HStack(alignment:.bottom,spacing:8){RouteSearchPanel("
             )
                 && compactContent.contains(
-                    "Label(\"Startworkout\",systemImage:\"figure.outdoor.cycle\")"
+                    "Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\")"
                 )
                 && compactContent.contains(
                     "WorkoutStartButton(watchAvailability:watchAvailability,action:workoutMirrorManager.startOutdoorCyclingOnWatch)"

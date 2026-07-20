@@ -360,7 +360,7 @@ struct ContentView: View {
                     watchAvailability: watchAvailability,
                     action: workoutMirrorManager.startOutdoorCyclingOnWatch
                 ) {
-                    Label("Start workout", systemImage: "figure.outdoor.cycle")
+                    Label("Start Workout", systemImage: "figure.outdoor.cycle")
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.72)
