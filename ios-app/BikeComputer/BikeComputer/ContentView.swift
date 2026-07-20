@@ -352,7 +352,7 @@ struct ContentView: View {
                     )
                 }
             )
-            .layoutPriority(1)
+            .layoutPriority(0)
 
             if !isSearchPanelExpanded,
                workoutStore.presentation.canStartNewWorkout {
@@ -361,6 +361,7 @@ struct ContentView: View {
                     action: workoutMirrorManager.startOutdoorCyclingOnWatch
                 ) {
                     Label("Start Workout", systemImage: "figure.outdoor.cycle")
+                        .labelStyle(.titleAndIcon)
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.72)
@@ -376,6 +377,8 @@ struct ContentView: View {
                         )
                 }
                 .buttonStyle(.plain)
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(1)
                 .accessibilityLabel("Start workout on Apple Watch")
             }
         }
