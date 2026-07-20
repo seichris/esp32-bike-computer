@@ -52,16 +52,6 @@ struct SettingsView: View {
                     }
                 }
 
-                Section {
-                    NavigationLink {
-                        BikeComputersSettingsView()
-                    } label: {
-                        Label("Bike Computers", systemImage: "bicycle")
-                    }
-                } footer: {
-                    Text("Choose, name, and securely register the Bike Computers that belong to this iPhone.")
-                }
-
                 MainFirmwareUpdateSection(manager: firmwareUpdateManager)
                 DeviceScreensSettingsSection()
                 SavedMapsSettingsSection(
@@ -78,6 +68,17 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    NavigationLink {
+                        BikeComputersSettingsView()
+                    } label: {
+                        Label(
+                            BikeComputersMenuPolicy.title(
+                                knownDeviceCount: bleManager.knownDevices.count
+                            ),
+                            systemImage: "bicycle"
+                        )
+                    }
+
                     NavigationLink {
                         UICustomizationSettingsView()
                     } label: {
@@ -1094,14 +1095,6 @@ private struct HardwareCustomizationSettingsView: View {
 
     var body: some View {
         Form {
-            Section(header: Text("Screen Navigation")) {
-                Toggle("Tap to Switch Screens", isOn: $bleManager.tapToSwitchScreens)
-                    .onChange(of: bleManager.tapToSwitchScreens) { newValue in
-                        bleManager.sendSetting(id: 11, value: newValue ? 1 : 0)
-                    }
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
             Section(header: Text("Device Brightness")) {
                 VStack(alignment: .leading) {
                     HStack {
@@ -1133,6 +1126,14 @@ private struct HardwareCustomizationSettingsView: View {
                         value: newValue.settingValue
                     )
                 }
+            }
+            .disabled(!bleManager.supportsDeviceSettings)
+
+            Section(header: Text("Screen Navigation")) {
+                Toggle("Tap to Switch Screens", isOn: $bleManager.tapToSwitchScreens)
+                    .onChange(of: bleManager.tapToSwitchScreens) { newValue in
+                        bleManager.sendSetting(id: 11, value: newValue ? 1 : 0)
+                    }
             }
             .disabled(!bleManager.supportsDeviceSettings)
         }

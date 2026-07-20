@@ -208,6 +208,7 @@ public:
   void noteOwnershipDisplayFlushCompleted();
   bool ownershipPairingRenderedRequest(uint32_t &pairingGeneration);
   bool armOwnershipPairingConfirmation(uint32_t pairingGeneration);
+  bool isOwnershipClaimed();
   bool hasOwnershipPairingCode();
   bool confirmOwnershipPairing();
 

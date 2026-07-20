@@ -3,10 +3,18 @@ import SwiftUI
 struct BikeComputersSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
     @State private var selectedCandidate: DiscoveredBikeComputerDevice?
+    @State private var presentedPairingCompletionGeneration: UInt64?
+    @State private var ownsDiscoveryLifecycle = false
+
+    private var menuTitle: String {
+        BikeComputersMenuPolicy.title(
+            knownDeviceCount: bleManager.knownDevices.count
+        )
+    }
 
     var body: some View {
         Form {
-            Section("My Bike Computers") {
+            Section {
                 if bleManager.knownDevices.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
                         Label("No Bike Computers", systemImage: "bicycle")
@@ -23,9 +31,14 @@ struct BikeComputersSettingsView: View {
                         }
                     }
                 }
+            } header: {
+                if !bleManager.knownDevices.isEmpty {
+                    Text(menuTitle)
+                }
             }
 
-            if bleManager.isScanning || !bleManager.discoveredDevices.isEmpty {
+            if bleManager.isDiscoveringDevices ||
+                !bleManager.discoveredDevices.isEmpty {
                 Section {
                     if bleManager.discoveredDevices.isEmpty {
                         HStack(spacing: 12) {
@@ -36,6 +49,8 @@ struct BikeComputersSettingsView: View {
                     } else {
                         ForEach(bleManager.discoveredDevices) { device in
                             Button {
+                                presentedPairingCompletionGeneration =
+                                    bleManager.completedPairingGeneration
                                 selectedCandidate = device
                             } label: {
                                 DiscoveredBikeComputerRow(device: device)
@@ -51,16 +66,17 @@ struct BikeComputersSettingsView: View {
                 }
             }
 
-            Section {
-                if bleManager.isScanning {
-                    Button("Stop Looking", role: .cancel) {
-                        bleManager.cancelDeviceDiscovery()
-                    }
-                } else {
+            if BikeComputersMenuPolicy.shouldShowConnectNewDeviceAction(
+                knownDeviceCount: bleManager.knownDevices.count
+            ), !bleManager.isDiscoveringDevices {
+                Section {
                     Button {
-                        bleManager.startDeviceDiscovery()
+                        beginDiscovery()
                     } label: {
-                        Label("Add Bike Computer", systemImage: "plus.circle")
+                        Label(
+                            "Connect a new Bike Computer",
+                            systemImage: "plus.circle"
+                        )
                     }
                     .disabled(bleManager.deviceOperationDeviceID != nil)
                 }
@@ -71,7 +87,8 @@ struct BikeComputersSettingsView: View {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
                 }
-            } else if let status = bleManager.pairingStatusMessage {
+            } else if let status = bleManager.pairingStatusMessage,
+                      !bleManager.isDiscoveringDevices {
                 Section {
                     HStack(spacing: 12) {
                         if !status.contains("deregistered") {
@@ -82,29 +99,75 @@ struct BikeComputersSettingsView: View {
                 }
             }
 
-            Section {
-                Text("A registered Bike Computer only accepts this iPhone. To recover after losing the phone, hold the device’s BOOT button for 8 seconds.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
         }
-        .navigationTitle("Bike Computers")
+        .navigationTitle(menuTitle)
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(item: $selectedCandidate) { candidate in
+        .sheet(item: $selectedCandidate, onDismiss: {
+            resumeOwnedDiscoveryIfNeeded()
+        }) { candidate in
             PairBikeComputerSheet(candidate: candidate)
                 .environmentObject(bleManager)
         }
         .onAppear {
-            bleManager.startDeviceDiscovery()
+            if BikeComputersMenuPolicy.shouldStartDiscoveryOnEntry(
+                knownDeviceCount: bleManager.knownDevices.count
+            ) {
+                beginDiscovery()
+            } else if bleManager.isDiscoveringDevices {
+                bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
+            }
         }
         .onChange(of: bleManager.centralStateDescription) { state in
-            if state == "powered on", selectedCandidate == nil {
+            if state == "powered on", ownsDiscoveryLifecycle,
+               selectedCandidate == nil {
                 bleManager.startDeviceDiscovery()
             }
         }
-        .onDisappear {
-            bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
+        .onChange(of: bleManager.knownDevices.count) { count in
+            if BikeComputersMenuPolicy.shouldStartDiscoveryOnEntry(
+                knownDeviceCount: count
+            ) {
+                if !ownsDiscoveryLifecycle {
+                    beginDiscovery()
+                }
+            } else if ownsDiscoveryLifecycle {
+                ownsDiscoveryLifecycle = false
+                bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
+            }
         }
+        .onDisappear {
+            if ownsDiscoveryLifecycle || bleManager.isDiscoveringDevices {
+                ownsDiscoveryLifecycle = false
+                bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
+            }
+        }
+    }
+
+    private func beginDiscovery() {
+        ownsDiscoveryLifecycle = true
+        bleManager.startDeviceDiscovery()
+    }
+
+    private func resumeOwnedDiscoveryIfNeeded() {
+        let pairingCompletedDuringPresentation =
+            presentedPairingCompletionGeneration.map {
+                bleManager.completedPairingGeneration != $0
+            } ?? false
+        presentedPairingCompletionGeneration = nil
+        guard BikeComputersMenuPolicy.shouldResumeOwnedDiscovery(
+            ownsDiscoveryLifecycle: ownsDiscoveryLifecycle,
+            isBluetoothPoweredOn:
+                bleManager.centralStateDescription == "powered on",
+            isDiscoveringDevices: bleManager.isDiscoveringDevices,
+            pairingCompletedDuringPresentation:
+                pairingCompletedDuringPresentation
+        ) else {
+            if pairingCompletedDuringPresentation {
+                ownsDiscoveryLifecycle = false
+            }
+            return
+        }
+        bleManager.startDeviceDiscovery()
     }
 }
 

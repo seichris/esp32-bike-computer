@@ -153,6 +153,48 @@ enum BLEDiscoveryFreshnessPolicy {
     }
 }
 
+enum BikeComputersMenuPolicy {
+    static func title(knownDeviceCount: Int) -> String {
+        switch knownDeviceCount {
+        case 0:
+            return "Connect Bike Computer"
+        case 1:
+            return "My Bike Computer"
+        default:
+            return "My Bike Computers"
+        }
+    }
+
+    static func shouldStartDiscoveryOnEntry(knownDeviceCount: Int) -> Bool {
+        knownDeviceCount == 0
+    }
+
+    static func shouldShowConnectNewDeviceAction(knownDeviceCount: Int) -> Bool {
+        knownDeviceCount > 0
+    }
+
+    static func shouldResumeOwnedDiscovery(
+        ownsDiscoveryLifecycle: Bool,
+        isBluetoothPoweredOn: Bool,
+        isDiscoveringDevices: Bool,
+        pairingCompletedDuringPresentation: Bool
+    ) -> Bool {
+        ownsDiscoveryLifecycle && isBluetoothPoweredOn &&
+            !isDiscoveringDevices && !pairingCompletedDuringPresentation
+    }
+}
+
+enum BLEPendingScanPolicy {
+    static let timeout: TimeInterval = 8
+
+    static func accepts(
+        discoveredIdentifier: UUID,
+        pendingIdentifier: UUID
+    ) -> Bool {
+        discoveredIdentifier == pendingIdentifier
+    }
+}
+
 enum BLEPairingCancellationPolicy {
     static func shouldDisconnect(
         connectedPeripheralIdentifier: UUID?,

@@ -8456,6 +8456,62 @@ struct NavigationProtocolTests {
             hasActivePairing: false
         ), "closing the pre-Continue naming sheet never disconnects hardware")
 
+        assertEqual(
+            BikeComputersMenuPolicy.title(knownDeviceCount: 0),
+            "Connect Bike Computer",
+            "an empty registry presents the connect menu"
+        )
+        assertEqual(
+            BikeComputersMenuPolicy.title(knownDeviceCount: 1),
+            "My Bike Computer",
+            "one registered device uses the singular menu title"
+        )
+        assertEqual(
+            BikeComputersMenuPolicy.title(knownDeviceCount: 2),
+            "My Bike Computers",
+            "multiple registered devices use the plural menu title"
+        )
+        assert(BikeComputersMenuPolicy.shouldStartDiscoveryOnEntry(
+            knownDeviceCount: 0
+        ), "an empty registry starts discovery on menu entry")
+        assert(!BikeComputersMenuPolicy.shouldStartDiscoveryOnEntry(
+            knownDeviceCount: 1
+        ), "a registered device keeps discovery opt-in")
+        assert(!BikeComputersMenuPolicy.shouldShowConnectNewDeviceAction(
+            knownDeviceCount: 0
+        ), "the empty state does not duplicate its automatic discovery action")
+        assert(BikeComputersMenuPolicy.shouldShowConnectNewDeviceAction(
+            knownDeviceCount: 1
+        ), "a registered device offers an explicit add-another action")
+        assert(BikeComputersMenuPolicy.shouldResumeOwnedDiscovery(
+            ownsDiscoveryLifecycle: true,
+            isBluetoothPoweredOn: true,
+            isDiscoveringDevices: false,
+            pairingCompletedDuringPresentation: false
+        ), "an interrupted owned discovery resumes after its sheet closes")
+        assert(!BikeComputersMenuPolicy.shouldResumeOwnedDiscovery(
+            ownsDiscoveryLifecycle: true,
+            isBluetoothPoweredOn: true,
+            isDiscoveringDevices: false,
+            pairingCompletedDuringPresentation: true
+        ), "successful pairing does not restart Nearby discovery")
+        assert(!BikeComputersMenuPolicy.shouldResumeOwnedDiscovery(
+            ownsDiscoveryLifecycle: true,
+            isBluetoothPoweredOn: false,
+            isDiscoveringDevices: false,
+            pairingCompletedDuringPresentation: false
+        ), "discovery waits for Bluetooth to become available")
+        assert(BLEPendingScanPolicy.accepts(
+            discoveredIdentifier: peripheralID,
+            pendingIdentifier: peripheralID
+        ), "fallback scanning accepts only the selected Bike Computer")
+        assert(!BLEPendingScanPolicy.accepts(
+            discoveredIdentifier: otherPeripheralID,
+            pendingIdentifier: peripheralID
+        ), "fallback scanning ignores a different nearby Bike Computer")
+        assertEqual(BLEPendingScanPolicy.timeout, 8,
+                    "fallback scanning has a bounded retry window")
+
         var lifecycle = BLEOwnershipLifecycle()
         lifecycle.beginDiscovery()
         assertEqual(lifecycle.phase, .discovering,

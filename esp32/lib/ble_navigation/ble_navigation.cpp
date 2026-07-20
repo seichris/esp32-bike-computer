@@ -2569,6 +2569,9 @@ void BLENavigationServer::init(const char *deviceName) {
                   effectiveDeviceName.c_str());
     queueOwnershipUiUpdate();
   } else {
+    portENTER_CRITICAL(&ownershipUiMux);
+    ownershipUiClaimed = true;
+    portEXIT_CRITICAL(&ownershipUiMux);
     Serial.println("BLE: Ownership storage unavailable; authentication locked");
   }
 
@@ -2820,6 +2823,13 @@ bool BLENavigationServer::hasOwnershipPairingCode() {
   const bool active = deviceOwnership.hasPairingCode();
   xSemaphoreGive(deviceOwnershipMutex);
   return active;
+}
+
+bool BLENavigationServer::isOwnershipClaimed() {
+  portENTER_CRITICAL(&ownershipUiMux);
+  const bool claimed = ownershipUiClaimed;
+  portEXIT_CRITICAL(&ownershipUiMux);
+  return claimed;
 }
 
 bool BLENavigationServer::confirmOwnershipPairing() {

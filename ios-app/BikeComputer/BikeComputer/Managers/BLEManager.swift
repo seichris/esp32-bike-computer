@@ -437,12 +437,14 @@ class BLEManager: NSObject, ObservableObject {
     @Published var trustedPeripheralDescription: String = "none"
     @Published private(set) var knownDevices: [KnownBikeComputerDevice] = []
     @Published private(set) var discoveredDevices: [DiscoveredBikeComputerDevice] = []
+    @Published private(set) var isDiscoveringDevices = false
     @Published private(set) var observedIdentityMismatchDeviceIDs: Set<String> = []
     @Published private(set) var activeDeviceID: String?
     @Published private(set) var connectedDeviceID: String?
     @Published private(set) var pairingPrompt: BikeComputerPairingPrompt?
     @Published private(set) var isPairingConfirmedOnDevice = false
     @Published private(set) var isPairingConfirmationSubmitting = false
+    @Published private(set) var completedPairingGeneration: UInt64 = 0
     @Published private(set) var pairingStatusMessage: String?
     @Published private(set) var pairingError: String?
     @Published private(set) var deviceOperationDeviceID: String?
@@ -581,7 +583,6 @@ class BLEManager: NSObject, ObservableObject {
     private var pendingDeregistrationDeviceID: String?
     private var pendingRenameDeviceID: String?
     private var deviceOperationTimeoutTimer: Timer?
-    private var isDiscoveringDevices = false
     private var pendingConnectionAfterDisconnect: UUID?
     private var pendingScannedConnectionIdentifier: UUID?
     private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
@@ -607,6 +608,7 @@ class BLEManager: NSObject, ObservableObject {
     private var writeWithResponseInFlight = false
     private var navigationWriteWithResponseFailureHandler: (() -> Void)?
     private var connectionTimeoutTimer: Timer?
+    private var pendingScannedConnectionTimeoutTimer: Timer?
     private var authRetryTimer: Timer?
     private var authTimeoutTimer: Timer?
     private var pendingPowerButtonHonkPacket: Data?
@@ -1133,6 +1135,10 @@ class BLEManager: NSObject, ObservableObject {
             pairingError = "Wait for the current Bike Computer change to finish."
             return
         }
+        guard centralManager.state == .poweredOn else {
+            pairingError = "Turn on Bluetooth to add a Bike Computer."
+            return
+        }
         guard let ownerID = deviceRegistry.installationOwnerID() else {
             pairingError = "Could not create a secure owner identity on this iPhone."
             return
@@ -1230,6 +1236,8 @@ class BLEManager: NSObject, ObservableObject {
         authFlowState = .idle
         pendingConnectionAfterDisconnect = nil
         pendingScannedConnectionIdentifier = nil
+        pendingScannedConnectionTimeoutTimer?.invalidate()
+        pendingScannedConnectionTimeoutTimer = nil
         isPairingMode = true
         isDiscoveringDevices = true
         autoReconnect = true
@@ -1255,6 +1263,8 @@ class BLEManager: NSObject, ObservableObject {
         isPairingConfirmationSubmitting = false
         pendingConnectionAfterDisconnect = nil
         pendingScannedConnectionIdentifier = nil
+        pendingScannedConnectionTimeoutTimer?.invalidate()
+        pendingScannedConnectionTimeoutTimer = nil
         isPairingMode = false
         isDiscoveringDevices = false
         discoveryFreshnessTimer?.invalidate()
@@ -1440,8 +1450,31 @@ class BLEManager: NSObject, ObservableObject {
             pairingError = nil
             pairingStatusMessage = "Looking for the selected Bike Computer…"
             isDiscoveringDevices = false
-            isPairingMode = false
+            // Keep pairing mode active: startScanning() intentionally rejects
+            // untrusted peripherals outside an explicit pairing operation.
+            startPendingScannedConnectionTimeout(for: identifier)
             startScanning()
+        }
+    }
+
+    private func startPendingScannedConnectionTimeout(for identifier: UUID) {
+        pendingScannedConnectionTimeoutTimer?.invalidate()
+        pendingScannedConnectionTimeoutTimer = Timer.scheduledTimer(
+            withTimeInterval: BLEPendingScanPolicy.timeout,
+            repeats: false
+        ) { [weak self] _ in
+            guard let self,
+                  self.pendingScannedConnectionIdentifier == identifier else {
+                return
+            }
+            self.pendingScannedConnectionIdentifier = nil
+            self.pendingScannedConnectionTimeoutTimer = nil
+            if self.isScanning {
+                self.stopScanning()
+            }
+            self.isPairingMode = false
+            self.pairingStatusMessage = nil
+            self.pairingError = "Could not find that Bike Computer. Move closer and try again."
         }
     }
 
@@ -3297,12 +3330,16 @@ class BLEManager: NSObject, ObservableObject {
                 isLegacy: true
             ), makeActive: pendingPairingSession != nil || knownDevices.isEmpty)
         }
+        let completedPairing = pendingPairingSession != nil
         refreshKnownDevices()
         pairingPrompt = nil
         isPairingConfirmedOnDevice = false
         isPairingConfirmationSubmitting = false
         pairingStatusMessage = nil
         pairingError = nil
+        if completedPairing {
+            completedPairingGeneration &+= 1
+        }
         pendingPairingSession = nil
         ownershipLifecycle.complete()
         pendingPairingMaterial = nil
@@ -3616,6 +3653,8 @@ extension BLEManager: CBCentralManagerDelegate {
             interruptPendingPairing("Pairing was interrupted because Bluetooth became unavailable. Start again when Bluetooth is on.")
             pendingConnectionAfterDisconnect = nil
             pendingScannedConnectionIdentifier = nil
+            pendingScannedConnectionTimeoutTimer?.invalidate()
+            pendingScannedConnectionTimeoutTimer = nil
             isDiscoveringDevices = false
             isPairingMode = false
             discoveryFreshnessTimer?.invalidate()
@@ -3698,8 +3737,17 @@ extension BLEManager: CBCentralManagerDelegate {
         }
         discoveredDevices.sort { $0.rssi > $1.rssi }
 
-        if pendingScannedConnectionIdentifier == peripheral.identifier {
+        if let pendingIdentifier = pendingScannedConnectionIdentifier {
+            guard BLEPendingScanPolicy.accepts(
+                discoveredIdentifier: peripheral.identifier,
+                pendingIdentifier: pendingIdentifier
+            ) else {
+                log("Ignoring non-selected Bike Computer while awaiting the chosen device")
+                return
+            }
             pendingScannedConnectionIdentifier = nil
+            pendingScannedConnectionTimeoutTimer?.invalidate()
+            pendingScannedConnectionTimeoutTimer = nil
             pairingStatusMessage = nil
             stopScanning()
             connectToPeripheral(peripheral)

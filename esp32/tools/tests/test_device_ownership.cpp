@@ -1,5 +1,6 @@
 #include "../../lib/ble_navigation/device_ownership.hpp"
 #include "../../lib/ble_navigation/ble_connection_policy.hpp"
+#include "../../lib/ble_navigation/disconnected_shutdown_policy.hpp"
 #include "../../lib/ble_navigation/ownership_button_policy.hpp"
 #include "host_stubs/Preferences.h"
 
@@ -155,6 +156,53 @@ struct AppPairing {
 };
 
 int main() {
+  assert(disconnected_shutdown_policy::effectiveTimeoutSeconds(120, true) ==
+         120);
+  assert(disconnected_shutdown_policy::effectiveTimeoutSeconds(120, false) ==
+         600);
+  assert(disconnected_shutdown_policy::effectiveTimeoutSeconds(600, false) ==
+         600);
+  assert(disconnected_shutdown_policy::effectiveTimeoutSeconds(0, false) ==
+         0);
+  disconnected_shutdown_policy::Tracker shutdownTracker;
+  auto shutdownResult = shutdownTracker.update(100, false, 120, false);
+  assert(shutdownResult.action ==
+         disconnected_shutdown_policy::Action::CountdownStarted);
+  assert(shutdownResult.timeoutSeconds == 600);
+  assert(shutdownResult.waitingForRegistration);
+  shutdownResult = shutdownTracker.update(600099, false, 120, false);
+  assert(shutdownResult.action == disconnected_shutdown_policy::Action::None);
+  shutdownResult = shutdownTracker.update(600100, false, 120, false);
+  assert(shutdownResult.action ==
+         disconnected_shutdown_policy::Action::ShutdownDue);
+  shutdownResult = shutdownTracker.update(600101, false, 120, false);
+  assert(shutdownResult.action ==
+         disconnected_shutdown_policy::Action::ShutdownRetry);
+
+  shutdownResult = shutdownTracker.update(700000, true, 120, false);
+  assert(shutdownResult.action == disconnected_shutdown_policy::Action::None);
+  shutdownResult = shutdownTracker.update(700001, false, 120, true);
+  assert(shutdownResult.action ==
+         disconnected_shutdown_policy::Action::CountdownStarted);
+  assert(shutdownResult.timeoutSeconds == 120);
+  assert(!shutdownResult.waitingForRegistration);
+  shutdownResult = shutdownTracker.update(800001, false, 0, true);
+  assert(shutdownResult.action == disconnected_shutdown_policy::Action::None);
+  shutdownResult = shutdownTracker.update(900001, false, 120, true);
+  assert(shutdownResult.action ==
+         disconnected_shutdown_policy::Action::CountdownStarted);
+  shutdownResult = shutdownTracker.update(950001, false, 300, true);
+  assert(shutdownResult.action ==
+         disconnected_shutdown_policy::Action::CountdownStarted);
+  shutdownResult = shutdownTracker.update(1250001, false, 300, true);
+  assert(shutdownResult.action ==
+         disconnected_shutdown_policy::Action::ShutdownDue);
+  shutdownResult = shutdownTracker.update(1300000, false, 600, false);
+  assert(shutdownResult.action ==
+         disconnected_shutdown_policy::Action::CountdownStarted);
+  shutdownResult = shutdownTracker.update(1400000, false, 600, true);
+  assert(shutdownResult.action ==
+         disconnected_shutdown_policy::Action::CountdownStarted);
   assert(ble_connection_policy::accepts(
       ble_connection_policy::noConnection, 7));
   assert(ble_connection_policy::accepts(7, 7));
