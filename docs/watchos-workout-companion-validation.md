@@ -13,8 +13,9 @@ criterion.
 | Phase 6 base | `cf52c1a26d4068f72d45dab216fb27535a580f92` |
 | Main integration checkpoint | `3b583669de7141c37f00d1f05713f46aced0fa1c` (includes `origin/main` / PR #111 at `e90118509d517bd34e0e5adabfb2f197fcd3ee23`) |
 | Candidate code commit | `40b8e034a75045de51ffd974d2155144bfa2911e` |
-| iPhone build | Exact-candidate unsigned Release container passed; pending final physical install |
-| Watch build | Exact-candidate embedded and standalone unsigned Release builds passed; pending final physical install |
+| Signed-archive evidence checkpoint | `0c1f64526327ba764d2d3fe5a73aef23e9c46ac6` (only this ledger differs from candidate code commit) |
+| iPhone build | Exact-candidate Apple Development-signed Release archive passed strict signature validation and was installed on an iPhone 16 Pro Max running iOS 26.5.2 through Xcode's paired network connection, 2026-07-20; pending final launch/matrix and App Store distribution export |
+| Watch build | Exact-candidate embedded Apple Development-signed Release archive passed strict signature validation and was installed on an Apple Watch Series 8 running watchOS 26.5 through Xcode's paired network connection, 2026-07-20; standalone unsigned Release also passed, and final launch/matrix plus App Store distribution export remain pending |
 | ESP32 1.75 firmware SHA | Pending final candidate flash |
 | ESP32 2.06 firmware SHA | Pending final candidate flash |
 
@@ -30,11 +31,12 @@ build into the final-candidate column.
 | iOS workout unit tests | Passed | 36 tests, zero failures/skips, iPhone 17 Pro Simulator from candidate `40b8e034`, 2026-07-20 |
 | watchOS workout unit tests | Passed | 92 tests, zero failures/skips, Series 11 Simulator from candidate `40b8e034`, 2026-07-20 |
 | iOS device and Simulator builds with embedded Watch app | Passed | Fresh unsigned Release containers in `/tmp/open-bike-postmerge-40b8e034-device` and `/tmp/open-bike-postmerge-40b8e034-simulator`, 2026-07-20 |
-| `ValidateEmbeddedBinary` | Passed | Both exact-candidate Release container builds, 2026-07-20 |
-| iPhone HealthKit entitlement | Pending final signed archive inspection | Source entitlement and Debug/Release target wiring tests pass; unsigned Release build cannot prove the signed artifact |
-| Watch HealthKit entitlement | Pending final signed archive inspection | Source entitlement and Debug/Release target wiring tests pass; unsigned Release build cannot prove the signed artifact |
-| Watch `workout-processing` background mode | Passed | Exact-candidate embedded Release Watch `Info.plist` contains `workout-processing`, 2026-07-20 |
-| iPhone and Watch privacy manifests in bundles | Passed | Source manifests matched the exact-candidate embedded Release device and Simulator bundles byte-for-byte; iPhone has all four declared collection types and Watch has none, 2026-07-20 |
+| Signed Release archive integrity | Passed for development signing / pending distribution export | `/tmp/open-bike-watch-companion-0c1f6452.xcarchive`; `xcodebuild clean archive` succeeded without provisioning updates, both nested signatures passed strict verification, archive version is 2, and signing team is `4H5PK8686H`, 2026-07-20. The installed identities are development identities, so this is not an App Store distribution export. |
+| `ValidateEmbeddedBinary` | Passed | Both exact-candidate Release container builds and the development-signed Release archive, 2026-07-20 |
+| iPhone HealthKit entitlement | Passed in signed Release archive | Signed application identifier `4H5PK8686H.LetItRide.BikeComputer`, team `4H5PK8686H`, and `com.apple.developer.healthkit = true`, 2026-07-20 |
+| Watch HealthKit entitlement | Passed in signed Release archive | Signed application identifier `4H5PK8686H.LetItRide.BikeComputer.watchkitapp`, team `4H5PK8686H`, and `com.apple.developer.healthkit = true`, 2026-07-20 |
+| Watch `workout-processing` background mode | Passed | Development-signed exact-candidate embedded Release Watch `Info.plist` contains `workout-processing` and points to companion `LetItRide.BikeComputer`, 2026-07-20 |
+| iPhone and Watch privacy manifests in bundles | Passed | Source manifests matched the exact-candidate unsigned containers and development-signed archive byte-for-byte; archive SHA-256 values are `5f51c506726d785bedd75dba4181b6a564dc0d0ca72de58858242ade6a24842b` (iPhone) and `521eb6ef8430773e5c010e1838fe9dd8fa5d62b7b76d1cea8d7d8daadcb144e2` (Watch), 2026-07-20 |
 | Watch app icon in bundle / asset validation | Passed | Exact-candidate Watch `Assets.car` and `CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconName = AppIcon` verified; a mutated missing-metadata fixture is rejected, 2026-07-20 |
 | In-app privacy-policy reachability | Passed automated / pending final tap | iPhone Settings and Watch start screen compile against one shared HTTPS URL; URL is present in both exact-candidate Release binaries and release-asset tests pass. Open it on the final installed build before submission. |
 | App Store Connect privacy-policy URL | Pending publication authorization | Enter the same documented public URL in App Store Connect and verify it resolves after merge. |
