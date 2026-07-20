@@ -110,11 +110,17 @@ struct OfflineMapOnboardingView: View {
             }
 
         case .checkingDevice:
-            VStack(spacing: 8) {
+            VStack(spacing: 12) {
                 ProgressView()
                 Text("Checking map storage…")
                     .font(.caption)
                     .foregroundColor(.secondary)
+
+                Button(action: onCheckDeviceMaps) {
+                    Label("Check Again", systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
             }
 
         case .download:

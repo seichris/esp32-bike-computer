@@ -545,6 +545,7 @@ struct ContentView: View {
             simulatedPosition: coordinator.simulatedPosition,
             isSimulationMode: coordinator.isSimulationMode,
             isNavigating: coordinator.isNavigating,
+            isUserLocationAuthorized: coordinator.isLocationAuthorized,
             offlineMapSelectionFrame: selectionFrame,
             onMapTapped: {
                 if isSearchPanelExpanded {
