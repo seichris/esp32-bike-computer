@@ -183,7 +183,8 @@ extern Arduino_CO5300 *gfx;
 LVGL 9.2.2 configuration:
 - `LV_COLOR_DEPTH = 16` (RGB565)
 - `LV_USE_STDLIB_MALLOC = LV_STDLIB_BUILTIN`
-- `LV_MEM_SIZE = 64KB`
+- `LV_MEM_SIZE = 96KB` (the full map UI plus LVGL's software image-blend
+  scratch buffer exceeds the earlier 64KB pool)
 - `LV_DEF_REFR_PERIOD = 33ms`
 - Canvas widget enabled (`LV_USE_CANVAS = 1`)
 
@@ -522,4 +523,3 @@ graph TD
     Touch --> TCA
     TCA --> LVGL
 ```
-

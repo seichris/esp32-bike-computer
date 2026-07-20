@@ -34,6 +34,15 @@ jobs:
           --allow 1242x2688
           --output /tmp/app-store-screenshots-validation.txt
           --json /tmp/app-store-screenshots-validation.json
+      - name: Validate Apple Watch screenshot
+        run: >-
+          bun x tsx scripts/validate-exports.ts
+          --dir public/screenshots/watch
+          --allow 416x496
+          --output /tmp/apple-watch-screenshot-validation.txt
+          --json /tmp/apple-watch-screenshot-validation.json
+      - name: Verify committed release package provenance and ZIP
+        run: bun run verify:release
 
   esp32:
     name: ESP32 (${{ matrix.target }})
@@ -70,14 +79,45 @@ jobs:
       - name: Run Swift helper tests
         run: ./scripts/run-navigation-tests.sh
         working-directory: ios-app
-      - name: Build app
+      - name: Run workout contract tests
+        run: ./scripts/run-workout-contract-tests.sh
+        working-directory: ios-app
+      - name: Run workout contract tests on iOS
+        run: ./scripts/run-workout-platform-tests.sh ios
+        working-directory: ios-app
+      - name: Run workout contract tests on watchOS
+        run: ./scripts/run-workout-platform-tests.sh watchos
+        working-directory: ios-app
+      - name: Build watch app
+        run: |
+          xcodebuild \
+            -project BikeComputer/BikeComputer.xcodeproj \
+            -target BikeComputerWatch \
+            -configuration Release \
+            -sdk watchos \
+            -arch arm64_32 \
+            ONLY_ACTIVE_ARCH=YES \
+            CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/bike-computer-watch" \
+            OBJROOT="$RUNNER_TEMP/bike-computer-watch-obj" \
+            SYMROOT="$RUNNER_TEMP/bike-computer-watch-sym" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+        working-directory: ios-app
+      - name: Build Release app container
         run: |
           xcodebuild \
             -project BikeComputer/BikeComputer.xcodeproj \
             -scheme BikeComputer \
+            -configuration Release \
             -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/bike-computer-release" \
             CODE_SIGNING_ALLOWED=NO \
             build
+        working-directory: ios-app
+      - name: Validate Release app container
+        run: >-
+          bash ./scripts/verify-release-container.sh
+          "$RUNNER_TEMP/bike-computer-release/Build/Products/Release-iphoneos/BikeComputer.app"
         working-directory: ios-app
 
   osm:
@@ -254,6 +294,18 @@ jobs:
             tools/tests/test_destination_picker_protocol.cpp \
             -o /tmp/test_destination_picker_protocol
           /tmp/test_destination_picker_protocol
+      - name: Workout telemetry protocol host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_workout_telemetry_protocol.cpp \
+            -o /tmp/test_workout_telemetry_protocol
+          /tmp/test_workout_telemetry_protocol
+      - name: Workout telemetry state and presentation host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_workout_telemetry_state.cpp \
+            -o /tmp/test_workout_telemetry_state
+          /tmp/test_workout_telemetry_state
       - name: Map profile persistence host tests
         run: |
           g++ -std=c++17 \

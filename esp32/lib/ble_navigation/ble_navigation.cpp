@@ -10,8 +10,12 @@
 #include "device_ownership.hpp"
 #include "ownership_button_policy.hpp"
 #include "device_screen_protocol.hpp"
+#include "gps_position_protocol.hpp"
 #include "map_profile_persistence.hpp"
 #include "transfer_control_dispatch.hpp"
+#include "workout_telemetry_protocol.hpp"
+#include "workout_telemetry_runtime.hpp"
+#include "authenticated_workout_telemetry.hpp"
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
 #include "../gui/src/globalGuiDef.h"
@@ -653,6 +657,18 @@ static void notifyAuthResponse(const char *response) {
   if (response != nullptr) notifyAuthResponse(std::string(response));
 }
 
+static void completeBleSessionAuthentication() {
+  // Every authentication mechanism opens the same transactional workout
+  // replacement boundary. This prevents staged frames from crossing BLE
+  // connections and lets a complete current pair replace a retained terminal
+  // snapshot even when the 16-bit session token collides.
+  workout_telemetry_runtime::beginAuthenticatedResynchronization();
+  bleSessionAuthenticated = true;
+  bleDebugStats.authenticated = true;
+  bleDebugStats.authSuccessCount++;
+  bleDebugStats.lastAuthSuccessMs = millis();
+}
+
 static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
                                           const uint8_t *data, size_t length) {
   if (characteristic == nullptr || data == nullptr ||
@@ -793,10 +809,7 @@ static void handleAuthPayload(const std::string &frame) {
         Serial.println("BLE: Device ownership registered");
         break;
       case device_ownership::Event::Authenticated:
-        bleSessionAuthenticated = true;
-        bleDebugStats.authenticated = true;
-        bleDebugStats.authSuccessCount++;
-        bleDebugStats.lastAuthSuccessMs = millis();
+        completeBleSessionAuthentication();
         queueOwnershipUiUpdate();
         Serial.println("BLE: Owner session authenticated");
         break;
@@ -899,10 +912,7 @@ static void handleAuthPayload(const std::string &frame) {
       return;
     }
 
-    bleSessionAuthenticated = true;
-    bleDebugStats.authenticated = true;
-    bleDebugStats.authSuccessCount++;
-    bleDebugStats.lastAuthSuccessMs = millis();
+    completeBleSessionAuthentication();
     pendingAuthNonce[0] = '\0';
     char response[40];
     snprintf(response, sizeof(response), "OK|%s", nonce);
@@ -1363,7 +1373,8 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
           map_profile_protocol::CAPABILITY_MASK |
           CAPABILITY_EXTENDED_MAP_VISIBILITY |
           CAPABILITY_BATTERY_STATUS_SCREEN |
-          destination_picker_protocol::CAPABILITY_MASK),
+          destination_picker_protocol::CAPABILITY_MASK |
+          workout_telemetry_protocol::CAPABILITY_MASK),
   };
   size_t responseSize = 5;
   waveshare_board::speaker::PowerButtonHonkConfig config{};
@@ -1720,9 +1731,8 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     gps.gpsData.longitude = (double)routeStartLon / 1000000.0;
     gpsReceivedFromApp = true;
     pendingTransitionToMap = true;
-    Serial.printf(
-        "BLE route geometry: seeded map start %.6f,%.6f; transitioning to map\n",
-        gps.gpsData.latitude, gps.gpsData.longitude);
+    Serial.println(
+        "BLE route geometry: seeded map start; transitioning to map");
   }
 
   routeOverlay.parseRouteData(data, len);
@@ -1731,84 +1741,24 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
 
 static void handleGpsPayload(const uint8_t *data, size_t len,
                              const char *source) {
-  if (data == nullptr || len < 8) {
+  gps_position_protocol::Packet packet{};
+  if (!gps_position_protocol::decodeAndApply(data, len, gps.gpsData,
+                                             &packet)) {
     Serial.printf("BLE: Rejected %s GPS position: expected at least 8 bytes\n",
                   source == nullptr ? "unknown" : source);
     return;
   }
 
-  int32_t lat;
-  int32_t lon;
-  memcpy(&lat, data, sizeof(lat));
-  memcpy(&lon, data + 4, sizeof(lon));
-
-  gps.gpsData.latitude = (double)lat / 1000000.0;
-  gps.gpsData.longitude = (double)lon / 1000000.0;
-  gps.gpsData.fixMode = 3;
-  gps.gpsData.satellites = 10;
-  gps.gpsData.speed = 0;
-  gps.gpsData.altitude = 0;
-  gps.gpsData.distanceTraveled = 0;
-  gps.gpsData.elapsedSeconds = 0;
-  gps.gpsData.routeRemaining = 0;
-  gps.gpsData.hasRouteRemaining = false;
-
-  if (len >= 10) {
-    uint16_t headingVal;
-    memcpy(&headingVal, data + 8, sizeof(headingVal));
-    gps.gpsData.heading = headingVal;
-  }
-
-  if (len >= 16) {
-    uint16_t speedCmps;
-    memcpy(&speedCmps, data + 14, sizeof(speedCmps));
-    if (speedCmps != 0xFFFF) {
-      gps.gpsData.speed = (uint16_t)((speedCmps * 36U + 500U) / 1000U);
-    } else {
-      gps.gpsData.speed = 0;
-    }
-  }
-
-  if (len >= 18) {
-    int16_t altitudeMeters;
-    memcpy(&altitudeMeters, data + 16, sizeof(altitudeMeters));
-    gps.gpsData.altitude = altitudeMeters;
-  }
-
-  if (len >= 22) {
-    uint32_t distanceMeters;
-    memcpy(&distanceMeters, data + 18, sizeof(distanceMeters));
-    gps.gpsData.distanceTraveled = distanceMeters;
-  }
-
-  if (len >= 26) {
-    uint32_t elapsedSeconds;
-    memcpy(&elapsedSeconds, data + 22, sizeof(elapsedSeconds));
-    gps.gpsData.elapsedSeconds = elapsedSeconds;
-  }
-
-  if (len >= 30) {
-    uint32_t routeRemainingMeters;
-    memcpy(&routeRemainingMeters, data + 26, sizeof(routeRemainingMeters));
-    gps.gpsData.hasRouteRemaining = routeRemainingMeters != 0xFFFFFFFF;
-    if (gps.gpsData.hasRouteRemaining) {
-      gps.gpsData.routeRemaining = routeRemainingMeters;
-    }
-  }
-
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   bool rtcTimestampSynced = false;
-  if (len >= 14) {
-    uint32_t unixTime = 0;
-    memcpy(&unixTime, data + 10, sizeof(unixTime));
-
+  if (packet.hasUnixTime) {
     const uint32_t now = millis();
     const waveshare_board::rtc::Status &rtcStatus =
         waveshare_board::rtc::status();
     if (!rtcStatus.timeValid || lastBleRtcSyncMs == 0 ||
         now - lastBleRtcSyncMs >= BLE_RTC_SYNC_INTERVAL_MS) {
       rtcTimestampSynced = waveshare_board::rtc::syncFromUnixTime(
-          static_cast<time_t>(unixTime), "BLE GPS timestamp");
+          static_cast<time_t>(packet.unixTime), "BLE GPS timestamp");
       if (rtcTimestampSynced) {
         lastBleRtcSyncMs = now;
       }
@@ -1816,14 +1766,13 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
   }
 #endif
 
-  Serial.printf(
-      "BLE: %s GPS position received: lat=%ld lon=%ld heading=%u rtcSync=%d\n",
-      source == nullptr ? "unknown" : source, (long)lat, (long)lon,
-      (unsigned)gps.gpsData.heading,
+  Serial.printf("BLE: %s GPS position received: heading=%u rtcSync=%d\n",
+                source == nullptr ? "unknown" : source,
+                (unsigned)gps.gpsData.heading,
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-      rtcTimestampSynced
+                rtcTimestampSynced
 #else
-      0
+                0
 #endif
   );
   bleDebugStats.gpsPacketCount++;
@@ -1836,6 +1785,26 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
   }
 
   triggerMapRedraw();
+}
+
+static void handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
+                                          const char *source) {
+  if (!requireAuthenticated("workout telemetry")) {
+    return;
+  }
+  const workout_telemetry::ApplyResult result =
+      workout_telemetry_runtime::ingestFrame(data, len, millis(), true);
+  switch (result) {
+  case workout_telemetry::ApplyResult::Applied:
+  case workout_telemetry::ApplyResult::Cleared:
+    // Health metrics remain RAM-only and are intentionally absent from logs.
+    return;
+  default:
+    Serial.printf("BLE Workout: rejected %s frame (%s)\n",
+                  source == nullptr ? "unknown" : source,
+                  workout_telemetry::applyResultName(result));
+    return;
+  }
 }
 
 static void handleMapSetting(uint8_t settingId, int32_t settingValue,
@@ -2248,6 +2217,15 @@ public:
       return;
     }
 
+    if (hasPrefix(value, workout_telemetry_protocol::FALLBACK_PREFIX)) {
+      handleWorkoutTelemetryPayload(
+          reinterpret_cast<const uint8_t *>(value.data()) +
+              workout_telemetry_protocol::FALLBACK_PREFIX_SIZE,
+          value.length() - workout_telemetry_protocol::FALLBACK_PREFIX_SIZE,
+          "fallback");
+      return;
+    }
+
     if (hasPrefix(value, "MAPR")) {
       if (!requireAuthenticated("fallback route geometry")) {
         return;
@@ -2370,6 +2348,24 @@ public:
     }
 
     handleGpsPayload((const uint8_t *)value.data(), value.length(), "native");
+  }
+};
+
+class MyWorkoutTelemetryCharacteristicCallbacks
+    : public NimBLECharacteristicCallbacks {
+public:
+  void onWrite(NimBLECharacteristic *pChar) override {
+    const std::string frame = pChar->getValue();
+    workout_telemetry_transport::dispatchAuthenticatedNativeFrame(
+        frame,
+        [](const std::string &protectedFrame, std::string &payload) {
+          return unwrapOwnerAuthenticatedPayload(
+              device_ownership::AuthenticatedChannel::Workout,
+              protectedFrame, payload, "workout telemetry characteristic");
+        },
+        [](const uint8_t *payload, std::size_t length) {
+          handleWorkoutTelemetryPayload(payload, length, "native");
+        });
   }
 };
 
@@ -2624,6 +2620,13 @@ void BLENavigationServer::init(const char *deviceName) {
           NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   pSettingsCharacteristic->setCallbacks(
       new MySettingsCharacteristicCallbacks());
+
+  // Workout frames are accepted only after the same local authentication
+  // handshake as navigation traffic and remain in RAM-only telemetry state.
+  pWorkoutTelemetryCharacteristic = pService->createCharacteristic(
+      WORKOUT_TELEMETRY_CHAR_UUID, NIMBLE_PROPERTY::WRITE_NR);
+  pWorkoutTelemetryCharacteristic->setCallbacks(
+      new MyWorkoutTelemetryCharacteristicCallbacks());
 
   // Start service
   pService->start();

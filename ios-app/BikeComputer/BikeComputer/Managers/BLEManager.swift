@@ -34,6 +34,22 @@ struct NavigationWriteEndpoint {
     }
 }
 
+struct WorkoutTelemetryWriteEndpoint {
+    let maximumWriteLength: Int
+    let canSend: () -> Bool
+    let write: (Data) -> Void
+
+    init(
+        maximumWriteLength: Int,
+        canSend: @escaping () -> Bool = { true },
+        write: @escaping (Data) -> Void
+    ) {
+        self.maximumWriteLength = maximumWriteLength
+        self.canSend = canSend
+        self.write = write
+    }
+}
+
 enum DeviceBLEProtocol {
     static let serviceUUIDString = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800"
     static let navigationCharacteristicUUIDString = "2A6E"
@@ -41,6 +57,8 @@ enum DeviceBLEProtocol {
     static let routeGeometryCharacteristicUUIDString = "2A6F"
     static let gpsPositionCharacteristicUUIDString = "2A72"
     static let settingsCharacteristicUUIDString = "2A73"
+    static let workoutTelemetryCharacteristicUUIDString =
+        "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003"
     static let deviceInformationServiceUUIDString = "180A"
     static let modelNumberCharacteristicUUIDString = "2A24"
     static let firmwareRevisionCharacteristicUUIDString = "2A26"
@@ -50,6 +68,7 @@ enum DeviceBLEProtocol {
     static let routeGeometryFallbackPrefix = "MAPR"
     static let gpsPositionFallbackPrefix = "GPSP"
     static let settingsFallbackPrefix = "MSET"
+    static let workoutTelemetryFallbackPrefix = "WTLM"
     static let mapTransferControlPrefix = "MTRN"
     static let mapTransferStatusPrefix = "MSTS"
     static let mapTransferStatusChunkPrefix = "MSTC"
@@ -70,7 +89,12 @@ enum DeviceBLEProtocol {
     static let extendedMapVisibilityCapabilityMask: UInt8 = 1 << 4
     static let batteryStatusScreenCapabilityMask: UInt8 = 1 << 5
     static let destinationPickerCapabilityMask: UInt8 = 1 << 6
-    static let deviceCapabilitiesVersion: UInt8 = 5
+    static let workoutTelemetryCapabilityMask: UInt8 = 1 << 7
+    static let deviceCapabilitiesVersion: UInt8 = 6
+    static let workoutTelemetryFrameLength = 16
+    static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
+    static let workoutTelemetryExtendedCoalescingKey =
+        "workout-telemetry-extended"
     // Large enough for the worst schema-v1 three-favorite catalog at the
     // minimum BLE write length, without retaining a long stale GPS backlog.
     static let fallbackWriteQueueCapacity = 64
@@ -100,6 +124,9 @@ enum DeviceBLEProtocol {
     static var routeGeometryCharacteristicUUID: CBUUID { CBUUID(string: routeGeometryCharacteristicUUIDString) }
     static var gpsPositionCharacteristicUUID: CBUUID { CBUUID(string: gpsPositionCharacteristicUUIDString) }
     static var settingsCharacteristicUUID: CBUUID { CBUUID(string: settingsCharacteristicUUIDString) }
+    static var workoutTelemetryCharacteristicUUID: CBUUID {
+        CBUUID(string: workoutTelemetryCharacteristicUUIDString)
+    }
     static var deviceInformationServiceUUID: CBUUID { CBUUID(string: deviceInformationServiceUUIDString) }
     static var modelNumberCharacteristicUUID: CBUUID { CBUUID(string: modelNumberCharacteristicUUIDString) }
     static var firmwareRevisionCharacteristicUUID: CBUUID { CBUUID(string: firmwareRevisionCharacteristicUUIDString) }
@@ -428,6 +455,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsExtendedMapVisibility: Bool = false
     @Published private(set) var supportsBatteryStatusScreen: Bool = false
     @Published private(set) var supportsDestinationPicker: Bool = false
+    @Published private(set) var supportsWorkoutTelemetry: Bool = false
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
@@ -536,6 +564,8 @@ class BLEManager: NSObject, ObservableObject {
     private let routeGeometryCharacteristicUUID = DeviceBLEProtocol.routeGeometryCharacteristicUUID
     private let gpsPositionCharacteristicUUID = DeviceBLEProtocol.gpsPositionCharacteristicUUID
     private let settingsCharacteristicUUID = DeviceBLEProtocol.settingsCharacteristicUUID
+    private let workoutTelemetryCharacteristicUUID =
+        DeviceBLEProtocol.workoutTelemetryCharacteristicUUID
     private let deviceInformationServiceUUID = DeviceBLEProtocol.deviceInformationServiceUUID
     private let modelNumberCharacteristicUUID = DeviceBLEProtocol.modelNumberCharacteristicUUID
     private let firmwareRevisionCharacteristicUUID = DeviceBLEProtocol.firmwareRevisionCharacteristicUUID
@@ -550,10 +580,13 @@ class BLEManager: NSObject, ObservableObject {
     private var routeGeometryCharacteristic: CBCharacteristic?
     private var gpsPositionCharacteristic: CBCharacteristic?
     private var settingsCharacteristic: CBCharacteristic?
+    private var workoutTelemetryCharacteristic: CBCharacteristic?
+    private var workoutTelemetryWriteEndpointForTesting: WorkoutTelemetryWriteEndpoint?
     private var deviceInformation: [CBUUID: String] = [:]
     private var navigationWriteEndpoint: NavigationWriteEndpoint?
     private var navigationWriteQueue = NavigationWriteQueue(
-        maxCount: DeviceBLEProtocol.fallbackWriteQueueCapacity
+        maxCount: DeviceBLEProtocol.fallbackWriteQueueCapacity,
+        priorityMaxCount: 2
     )
     private var lastNavigationQueuePendingLogAt = Date.distantPast
     private var isConnecting: Bool = false
@@ -1602,7 +1635,7 @@ class BLEManager: NSObject, ObservableObject {
                     self.writeDeviceData(payload, to: characteristic, on: peripheral)
                 }
             )
-            log(String(format: "Queued native GPS position: %.6f, %.6f heading=%.0f", lat, lon, heading))
+            log(String(format: "Queued native GPS position: heading=%.0f", heading))
             return
         }
 
@@ -1613,6 +1646,110 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
         sendFallbackMapPacket(fallback, label: "GPS position")
+    }
+
+    /// Relays one fixed workout frame only after authentication and explicit
+    /// capability negotiation. The native and WTLM fallback paths carry the
+    /// same 16-byte payload and share the existing BLE backpressure queue.
+    @discardableResult
+    func sendWorkoutTelemetryFrame(
+        _ frame: Data,
+        prioritized: Bool = false,
+        onWrite: (() -> Void)? = nil,
+        onDrop: (() -> Void)? = nil,
+        onWriteFailure: (() -> Void)? = nil
+    ) -> Bool {
+        guard frame.count == DeviceBLEProtocol.workoutTelemetryFrameLength,
+              frame.first == 1 || frame.first == 2 else {
+            log("Rejected malformed workout telemetry frame")
+            return false
+        }
+        guard isConnected,
+              isNavigationReady,
+              hasReceivedDeviceCapabilities,
+              supportsWorkoutTelemetry,
+              let navigationEndpoint = navigationWriteEndpoint else {
+            return false
+        }
+
+        let isCore = frame.first == 1
+        let coalescingKey = isCore
+            ? DeviceBLEProtocol.workoutTelemetryCoreCoalescingKey
+            : DeviceBLEProtocol.workoutTelemetryExtendedCoalescingKey
+        let payload: Data
+        let label: String
+        let transportWrite: ((Data) -> Void)?
+        let transportCanSend: (() -> Bool)?
+        let transportExpectsWriteResponse: Bool?
+
+        if let testEndpoint = workoutTelemetryWriteEndpointForTesting {
+            guard frame.count <= testEndpoint.maximumWriteLength else {
+                return false
+            }
+            payload = frame
+            label = "native workout telemetry"
+            transportWrite = testEndpoint.write
+            transportCanSend = testEndpoint.canSend
+            transportExpectsWriteResponse = false
+        } else if let peripheral = connectedPeripheral,
+                  let characteristic = workoutTelemetryCharacteristic,
+                  characteristic.properties.contains(.writeWithoutResponse) {
+            guard frame.count <= peripheral.maximumWriteValueLength(
+                for: .withoutResponse
+            ) else {
+                return false
+            }
+            payload = frame
+            label = "native workout telemetry"
+            transportCanSend = { [weak peripheral] in
+                peripheral?.canSendWriteWithoutResponse ?? false
+            }
+            transportExpectsWriteResponse = false
+            transportWrite = { [weak self, weak peripheral, weak characteristic] data in
+                guard let self, let peripheral, let characteristic else { return }
+                self.writeDeviceData(
+                    data,
+                    to: characteristic,
+                    on: peripheral,
+                    type: .withoutResponse
+                )
+            }
+        } else {
+            var fallback = Data(DeviceBLEProtocol.workoutTelemetryFallbackPrefix.utf8)
+            fallback.append(frame)
+            guard fallback.count == 20,
+                  fallback.count <= navigationEndpoint.maximumWriteLength else {
+                return false
+            }
+            payload = fallback
+            label = "fallback workout telemetry"
+            transportWrite = nil
+            transportCanSend = nil
+            transportExpectsWriteResponse = nil
+        }
+
+        let write = NavigationWrite(
+            data: payload,
+            label: label,
+            transportWrite: transportWrite,
+            onWrite: onWrite,
+            onDrop: onDrop,
+            onWriteFailure: onWriteFailure,
+            transportCanSend: transportCanSend,
+            transportExpectsWriteResponse: transportExpectsWriteResponse,
+            coalescingKey: coalescingKey
+        )
+        let didEnqueue = navigationWriteQueue.enqueueCoalescing(
+            write,
+            prioritized: prioritized && isCore
+        )
+        guard didEnqueue else {
+            log("Workout telemetry frame not queued: write queue unavailable")
+            return false
+        }
+        flushPendingNavigationWrites(endpoint: navigationEndpoint)
+        scheduleNavigationFlushRetryIfNeeded()
+        return true
     }
 
     /// Persist and send a runtime map setting to ESP32 when supported.
@@ -1788,6 +1925,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsExtendedMapVisibility = false
         supportsBatteryStatusScreen = false
         supportsDestinationPicker = false
+        updateWorkoutTelemetryCapability(false)
         nextDestinationCatalogTransferID = 1
         hasReceivedDeviceCapabilities = true
         log("Device capabilities unavailable; using baseline feature visibility")
@@ -2256,6 +2394,7 @@ class BLEManager: NSObject, ObservableObject {
             endpoint: endpoint,
             label: "destination status \(status)",
             prioritized: true,
+            coalescingKey: "destination-status",
             onWriteFailure: { [weak self] in
                 self?.scheduleDestinationStatusRetry(
                     generation: generation,
@@ -2362,6 +2501,7 @@ class BLEManager: NSObject, ObservableObject {
         routeGeometryCharacteristic = nil
         gpsPositionCharacteristic = nil
         settingsCharacteristic = nil
+        workoutTelemetryCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
         clearTransferState()
@@ -2429,6 +2569,7 @@ class BLEManager: NSObject, ObservableObject {
         routeGeometryCharacteristic = nil
         gpsPositionCharacteristic = nil
         settingsCharacteristic = nil
+        workoutTelemetryCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
         writeWithResponseInFlight = false
@@ -2510,6 +2651,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsExtendedMapVisibility = false
         supportsBatteryStatusScreen = false
         supportsDestinationPicker = false
+        updateWorkoutTelemetryCapability(false)
         powerButtonHonkConfigurationError = nil
         nextDestinationCatalogTransferID = 1
         destinationStatusSequence &+= 1
@@ -2564,6 +2706,14 @@ class BLEManager: NSObject, ObservableObject {
     func installNavigationWriteEndpoint(_ endpoint: NavigationWriteEndpoint?) {
         navigationWriteEndpoint = endpoint
     }
+
+#if HOST_TESTING
+    func installWorkoutTelemetryWriteEndpoint(
+        _ endpoint: WorkoutTelemetryWriteEndpoint?
+    ) {
+        workoutTelemetryWriteEndpointForTesting = endpoint
+    }
+#endif
 
     func installPowerButtonHonkRetryTiming(
         ackTimeout: TimeInterval,
@@ -3387,6 +3537,7 @@ class BLEManager: NSObject, ObservableObject {
         endpoint: NavigationWriteEndpoint,
         label: String,
         prioritized: Bool = false,
+        coalescingKey: String? = nil,
         onWriteFailure: (() -> Void)? = nil
     ) -> Bool {
         guard !frames.isEmpty,
@@ -3404,11 +3555,17 @@ class BLEManager: NSObject, ObservableObject {
                     guard let self, let peripheral, let characteristic else { return }
                     self.writeDeviceData(payload, to: characteristic, on: peripheral)
                 },
-                onWriteFailure: onWriteFailure
+                onWriteFailure: onWriteFailure,
+                coalescingKey: coalescingKey
             )
         }
         let didEnqueue: Bool
-        if prioritized {
+        if prioritized, writes.count == 1, coalescingKey != nil {
+            didEnqueue = navigationWriteQueue.enqueueCoalescing(
+                writes[0],
+                prioritized: true
+            )
+        } else if prioritized {
             didEnqueue = navigationWriteQueue.enqueuePrioritizedAtomically(writes)
         } else {
             didEnqueue = navigationWriteQueue.enqueueAtomically(writes)
@@ -3491,11 +3648,20 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
-        navigationWriteQueue.flush(canSend: endpoint.canSend, maxWrites: 1) { write in
-            if endpoint.expectsWriteResponse {
-                writeWithResponseInFlight = true
+        navigationWriteQueue.flush(canSend: { [weak self] write in
+            guard let self, !self.writeWithResponseInFlight else {
+                return false
             }
-            navigationWriteWithResponseFailureHandler = write.onWriteFailure
+            return write.transportCanSend?() ?? endpoint.canSend()
+        }, maxWrites: 1) { write in
+            let expectsWriteResponse = write.transportExpectsWriteResponse
+                ?? endpoint.expectsWriteResponse
+            if expectsWriteResponse {
+                writeWithResponseInFlight = true
+                navigationWriteWithResponseFailureHandler = write.onWriteFailure
+            } else {
+                navigationWriteWithResponseFailureHandler = nil
+            }
             write.perform(using: endpoint.write)
             if !writeWithResponseInFlight {
                 navigationWriteWithResponseFailureHandler = nil
@@ -3541,24 +3707,28 @@ class BLEManager: NSObject, ObservableObject {
             log("Cannot write characteristic \(characteristic.uuid): unsupported properties")
             return
         }
-        let payload: Data
-        if let authenticatedWriteSession {
-            guard let channel = authenticatedChannel(for: characteristic.uuid),
-                  let frame = authenticatedWriteSession.frame(
-                    payload: data,
-                    channel: channel
-                  ) else {
-                log("Cannot protect write for characteristic \(characteristic.uuid)")
-                return
-            }
-            payload = frame
-        } else {
-            payload = data
+        guard let payload = devicePayload(
+            data,
+            for: characteristic.uuid,
+            authenticatedWriteSession: authenticatedWriteSession
+        ) else {
+            log("Cannot protect write for characteristic \(characteristic.uuid)")
+            return
         }
         if writeType == .withResponse {
             writeWithResponseInFlight = true
         }
         peripheral.writeValue(payload, for: characteristic, type: writeType)
+    }
+
+    private func devicePayload(
+        _ data: Data,
+        for uuid: CBUUID,
+        authenticatedWriteSession: AuthenticatedBLEWriteSession?
+    ) -> Data? {
+        guard let authenticatedWriteSession else { return data }
+        guard let channel = authenticatedChannel(for: uuid) else { return nil }
+        return authenticatedWriteSession.frame(payload: data, channel: channel)
     }
 
     private func authenticatedChannel(for uuid: CBUUID) -> AuthenticatedBLEChannel? {
@@ -3567,8 +3737,23 @@ class BLEManager: NSObject, ObservableObject {
         if uuid == routeGeometryCharacteristicUUID { return .route }
         if uuid == gpsPositionCharacteristicUUID { return .gps }
         if uuid == settingsCharacteristicUUID { return .settings }
+        if uuid == workoutTelemetryCharacteristicUUID { return .workout }
         return nil
     }
+
+#if HOST_TESTING
+    func devicePayloadForTesting(
+        _ data: Data,
+        for uuid: CBUUID,
+        authenticatedWriteSession: AuthenticatedBLEWriteSession?
+    ) -> Data? {
+        devicePayload(
+            data,
+            for: uuid,
+            authenticatedWriteSession: authenticatedWriteSession
+        )
+    }
+#endif
 
     private func scheduleNavigationFlushRetryIfNeeded() {
         guard navigationWriteQueue.count > 0,
@@ -3836,6 +4021,7 @@ extension BLEManager: CBCentralManagerDelegate {
         routeGeometryCharacteristic = nil
         gpsPositionCharacteristic = nil
         settingsCharacteristic = nil
+        workoutTelemetryCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
         clearTransferState()
@@ -4077,6 +4263,14 @@ extension BLEManager: CBPeripheralDelegate {
                 settingsCharacteristic = characteristic
                 supportsDeviceSettings = true
             }
+
+            if characteristic.uuid == workoutTelemetryCharacteristicUUID {
+                guard characteristic.properties.contains(.writeWithoutResponse) else {
+                    log("Workout telemetry characteristic is not writable without response")
+                    continue
+                }
+                workoutTelemetryCharacteristic = characteristic
+            }
         }
     }
 
@@ -4225,6 +4419,23 @@ extension BLEManager: CBPeripheralDelegate {
         )
     }
 
+    private func updateWorkoutTelemetryCapability(_ supported: Bool) {
+        if !supported {
+            // A capability downgrade is an authorization boundary for health
+            // telemetry. Frames admitted while bit 7 was present must not
+            // survive backpressure and transmit after that boundary changes.
+            navigationWriteQueue.removePendingWrites(
+                withCoalescingKey:
+                    DeviceBLEProtocol.workoutTelemetryCoreCoalescingKey
+            )
+            navigationWriteQueue.removePendingWrites(
+                withCoalescingKey:
+                    DeviceBLEProtocol.workoutTelemetryExtendedCoalescingKey
+            )
+        }
+        supportsWorkoutTelemetry = supported
+    }
+
     @discardableResult
     func handleDeviceCapabilitiesNotification(_ data: Data) -> Bool {
         guard data.count >= 4,
@@ -4240,6 +4451,7 @@ extension BLEManager: CBPeripheralDelegate {
             supportsExtendedMapVisibility = false
             supportsBatteryStatusScreen = false
             supportsDestinationPicker = false
+            updateWorkoutTelemetryCapability(false)
             hasReceivedDeviceCapabilities = false
             hasSentScreenSettingsForConnection = false
             clearPendingPowerButtonHonkConfiguration()
@@ -4261,6 +4473,8 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.batteryStatusScreenCapabilityMask != 0
         let hasDestinationPicker =
             flags & DeviceBLEProtocol.destinationPickerCapabilityMask != 0
+        let hasWorkoutTelemetry =
+            flags & DeviceBLEProtocol.workoutTelemetryCapabilityMask != 0
         let hasDevicePowerButtonConfig = data.count == 8
         if hasDevicePowerButtonConfig {
             guard hasPowerButtonHonk,
@@ -4274,6 +4488,7 @@ extension BLEManager: CBPeripheralDelegate {
                 supportsExtendedMapVisibility = false
                 supportsBatteryStatusScreen = false
                 supportsDestinationPicker = false
+                updateWorkoutTelemetryCapability(false)
                 hasReceivedDeviceCapabilities = false
                 hasSentScreenSettingsForConnection = false
                 clearPendingPowerButtonHonkConfiguration()
@@ -4314,6 +4529,7 @@ extension BLEManager: CBPeripheralDelegate {
         supportsExtendedMapVisibility = hasExtendedMapVisibility
         supportsBatteryStatusScreen = hasBatteryStatusScreen
         supportsDestinationPicker = hasDestinationPicker
+        updateWorkoutTelemetryCapability(hasWorkoutTelemetry)
         if !hasPowerButtonHonkAcknowledgement {
             clearPendingPowerButtonHonkConfiguration()
         }

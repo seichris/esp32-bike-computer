@@ -8,16 +8,166 @@ from pathlib import Path
 
 from .artifacts import create_artifact_store_from_environment
 from .geofabrik_sources import GeofabrikSourceProvider
-from .jobs import JobStore, MapJobService
+from .jobs import ArtifactGarbageCollectionError, JobStore, MapJobService
 from .map_signing import load_map_artifact_signer_from_environment
 from .map_stream_build_identity import (
     image_digest_from_reference,
     verify_map_stream_build_identity,
 )
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
+from .rate_limits import purge_expired_rate_limits
 from .source_cache import SourceCache
 from .sources import SourceIndex
-from .worker import MapWorker, cleanup_work_dirs, expire_ready_jobs
+from .worker import (
+    ExpiredArtifactCleanupError,
+    MapWorker,
+    WorkDirectoryCleanupError,
+    cleanup_work_dirs,
+    expire_ready_jobs,
+)
+
+
+class MaintenanceIterationError(RuntimeError):
+    def __init__(self, result: dict[str, object]):
+        super().__init__("one or more maintenance tasks failed")
+        self.result = result
+
+
+def _safe_error_summary(exc: Exception) -> dict[str, object]:
+    chain: list[Exception] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while isinstance(current, Exception) and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+
+    category = "external_error"
+    if any(isinstance(item, PermissionError) for item in chain):
+        category = "permission_denied"
+    elif any(isinstance(item, FileNotFoundError) for item in chain):
+        category = "missing"
+    elif any(
+        isinstance(item, TimeoutError) or "timeout" in type(item).__name__.lower()
+        for item in chain
+    ):
+        category = "timeout"
+    elif any(
+        isinstance(item, ConnectionError)
+        or "connection" in type(item).__name__.lower()
+        for item in chain
+    ):
+        category = "connection"
+    elif any(isinstance(item, OSError) for item in chain):
+        category = "os_error"
+
+    result: dict[str, object] = {
+        "type": type(exc).__name__,
+        "category": category,
+    }
+    cause_types = [type(item).__name__ for item in chain[1:]]
+    if cause_types:
+        result["causeTypes"] = cause_types
+    for item in chain:
+        if isinstance(item, OSError) and item.errno is not None:
+            result["errno"] = item.errno
+            break
+    return result
+
+
+def _maintenance_failure_detail(
+    exc: Exception,
+    *,
+    data_root: Path,
+) -> dict[str, object]:
+    detail = _safe_error_summary(exc)
+    if isinstance(exc, WorkDirectoryCleanupError):
+        failed_work_directories = []
+        for path, cause in zip(exc.failed_paths, exc.causes):
+            try:
+                identifier = str(path.relative_to(data_root))
+            except ValueError:
+                identifier = path.name
+            failed_work_directories.append(
+                {
+                    "path": identifier,
+                    "cause": _safe_error_summary(cause),
+                }
+            )
+        detail.update(
+            {
+                "removed": exc.removed,
+                "failedWorkDirectories": failed_work_directories,
+            }
+        )
+        return detail
+    if not isinstance(exc, ExpiredArtifactCleanupError):
+        return detail
+    job_record_failures = []
+    for path, cause in zip(
+        exc.failed_job_record_paths,
+        exc.job_record_causes,
+    ):
+        try:
+            identifier = str(path.relative_to(data_root))
+        except ValueError:
+            identifier = path.name
+        job_record_failures.append(
+            {
+                "path": identifier,
+                "cause": _safe_error_summary(cause),
+            }
+        )
+    expiry_failures = []
+    for job_id, cause in zip(
+        exc.failed_expiry_job_ids,
+        exc.expiry_causes,
+    ):
+        expiry_failures.append(
+            {
+                "jobId": job_id,
+                "cause": _safe_error_summary(cause),
+            }
+        )
+    legacy = []
+    for path, cause in zip(exc.failed_legacy_paths, exc.legacy_causes):
+        try:
+            identifier = str(path.relative_to(data_root))
+        except ValueError:
+            identifier = path.name
+        legacy.append(
+            {
+                "path": identifier,
+                "cause": _safe_error_summary(cause),
+            }
+        )
+    objects = []
+    artifact_cleanup_failure = None
+    if isinstance(exc.object_failure, ArtifactGarbageCollectionError):
+        for key, cause in zip(
+            exc.object_failure.failed_object_keys,
+            exc.object_failure.causes,
+        ):
+            objects.append(
+                {
+                    "key": key,
+                    "cause": _safe_error_summary(cause),
+                }
+            )
+    elif exc.object_failure is not None:
+        artifact_cleanup_failure = _safe_error_summary(exc.object_failure)
+    detail.update(
+        {
+            "removed": exc.removed,
+            "failedJobRecords": job_record_failures,
+            "failedJobExpirations": expiry_failures,
+            "failedLegacyPacks": legacy,
+            "failedObjects": objects,
+        }
+    )
+    if artifact_cleanup_failure is not None:
+        detail["artifactCleanupFailure"] = artifact_cleanup_failure
+    return detail
 
 
 def _pipeline_producer_identity(
@@ -40,6 +190,64 @@ def _pipeline_producer_identity(
             raise
         return None, None
     return build_identity.producer_build_sha256, producer_image_digest
+
+
+def _perform_maintenance(
+    store: JobStore,
+    data_root: Path,
+    *,
+    retention_days: int,
+    artifact_store,
+    max_gc_items: int,
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "maintenance": True,
+        "expired": 0,
+        "removedWorkDirs": 0,
+        "removedRateLimits": 0,
+    }
+    failures: dict[str, object] = {}
+    tasks = (
+        (
+            "expired",
+            lambda: expire_ready_jobs(
+                store,
+                older_than_days=retention_days,
+                artifact_store=artifact_store,
+                max_gc_items=max_gc_items,
+            ),
+        ),
+        (
+            "removedWorkDirs",
+            lambda: cleanup_work_dirs(data_root / "work", store),
+        ),
+        (
+            "removedRateLimits",
+            lambda: purge_expired_rate_limits(data_root / "rate-limits.sqlite3"),
+        ),
+    )
+    for field, task in tasks:
+        try:
+            result[field] = task()
+        except Exception as exc:
+            if field == "expired" and isinstance(
+                exc,
+                ExpiredArtifactCleanupError,
+            ):
+                result[field] = exc.expired_jobs
+            elif field == "removedWorkDirs" and isinstance(
+                exc,
+                WorkDirectoryCleanupError,
+            ):
+                result[field] = exc.removed
+            failures[field] = _maintenance_failure_detail(
+                exc,
+                data_root=data_root,
+            )
+    if failures:
+        result["failures"] = failures
+        raise MaintenanceIterationError(result)
+    return result
 
 
 def main() -> int:
@@ -224,22 +432,22 @@ def main() -> int:
         heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
         while True:
             heartbeat_path.write_text(str(time.time()))
-            expired = expire_ready_jobs(
-                store,
-                older_than_days=args.retention_days,
-                artifact_store=artifact_store,
-                max_gc_items=args.max_gc_items,
-            )
-            removed_work_dirs = cleanup_work_dirs(data_root / "work", store)
+            try:
+                maintenance_result = _perform_maintenance(
+                    store,
+                    data_root,
+                    retention_days=args.retention_days,
+                    artifact_store=artifact_store,
+                    max_gc_items=args.max_gc_items,
+                )
+            except MaintenanceIterationError as exc:
+                maintenance_result = exc.result
+                heartbeat_path.write_text(str(time.time()))
+                print(json.dumps(maintenance_result), flush=True)
+                raise
             heartbeat_path.write_text(str(time.time()))
             print(
-                json.dumps(
-                    {
-                        "maintenance": True,
-                        "expired": expired,
-                        "removedWorkDirs": removed_work_dirs,
-                    }
-                ),
+                json.dumps(maintenance_result),
                 flush=True,
             )
             time.sleep(max(args.maintenance_interval_seconds, 1.0))

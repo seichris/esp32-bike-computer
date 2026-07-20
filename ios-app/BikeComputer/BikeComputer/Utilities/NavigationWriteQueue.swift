@@ -7,6 +7,9 @@ struct NavigationWrite {
     let onWrite: (() -> Void)?
     let onDrop: (() -> Void)?
     let onWriteFailure: (() -> Void)?
+    let transportCanSend: (() -> Bool)?
+    let transportExpectsWriteResponse: Bool?
+    fileprivate let coalescingKey: String?
     fileprivate let protectedFromEviction: Bool
 
     init(
@@ -16,6 +19,9 @@ struct NavigationWrite {
         onWrite: (() -> Void)? = nil,
         onDrop: (() -> Void)? = nil,
         onWriteFailure: (() -> Void)? = nil,
+        transportCanSend: (() -> Bool)? = nil,
+        transportExpectsWriteResponse: Bool? = nil,
+        coalescingKey: String? = nil,
         protectedFromEviction: Bool = false
     ) {
         self.data = data
@@ -24,6 +30,9 @@ struct NavigationWrite {
         self.onWrite = onWrite
         self.onDrop = onDrop
         self.onWriteFailure = onWriteFailure
+        self.transportCanSend = transportCanSend
+        self.transportExpectsWriteResponse = transportExpectsWriteResponse
+        self.coalescingKey = coalescingKey
         self.protectedFromEviction = protectedFromEviction
     }
 
@@ -44,6 +53,9 @@ struct NavigationWrite {
             onWrite: onWrite,
             onDrop: onDrop,
             onWriteFailure: onWriteFailure,
+            transportCanSend: transportCanSend,
+            transportExpectsWriteResponse: transportExpectsWriteResponse,
+            coalescingKey: coalescingKey,
             protectedFromEviction: true
         )
     }
@@ -111,9 +123,66 @@ struct NavigationWriteQueue {
         return true
     }
 
+    /// Replaces older pending writes for the same logical state without
+    /// disturbing unrelated priority traffic. This keeps high-rate state
+    /// relays from replaying obsolete values after a newer state transition.
+    @discardableResult
+    mutating func enqueueCoalescing(
+        _ write: NavigationWrite,
+        prioritized: Bool
+    ) -> Bool {
+        guard let key = write.coalescingKey, !key.isEmpty else {
+            if prioritized {
+                return enqueuePrioritizedAtomically([write])
+            }
+            _ = enqueue(write)
+            return true
+        }
+
+        removePendingWrites(withCoalescingKey: key)
+        if prioritized {
+            guard pendingPriorityWrites.count < priorityMaxCount else {
+                return false
+            }
+            pendingPriorityWrites.append(write.protectingAtomicBatch())
+            return true
+        }
+
+        pendingWrites.append(write)
+        guard pendingWrites.count > maxCount else { return true }
+        let droppedIndex = pendingWrites.firstIndex { !$0.protectedFromEviction }
+            ?? pendingWrites.startIndex
+        let rejectedNewWrite = droppedIndex == pendingWrites.index(before: pendingWrites.endIndex)
+        let droppedWrite = pendingWrites.remove(at: droppedIndex)
+        if rejectedNewWrite {
+            // The caller receives `false` and owns retry scheduling. Invoking
+            // onDrop here would schedule a second immediate retry and can spin
+            // while a protected atomic batch keeps the queue full.
+            return false
+        }
+        droppedWrite.onDrop?()
+        return true
+    }
+
     mutating func removeAll() {
         pendingPriorityWrites.removeAll()
         pendingWrites.removeAll()
+    }
+
+    mutating func removePendingWrites(withCoalescingKey key: String) {
+        let priorityMatches = pendingPriorityWrites.indices.reversed().filter {
+            pendingPriorityWrites[$0].coalescingKey == key
+        }
+        for index in priorityMatches {
+            pendingPriorityWrites.remove(at: index).onDrop?()
+        }
+
+        let regularMatches = pendingWrites.indices.reversed().filter {
+            pendingWrites[$0].coalescingKey == key
+        }
+        for index in regularMatches {
+            pendingWrites.remove(at: index).onDrop?()
+        }
     }
 
     mutating func flush(
@@ -121,13 +190,26 @@ struct NavigationWriteQueue {
         maxWrites: Int = .max,
         write: (NavigationWrite) -> Void
     ) {
+        flush(
+            canSend: { _ in canSend() },
+            maxWrites: maxWrites,
+            write: write
+        )
+    }
+
+    mutating func flush(
+        canSend: (NavigationWrite) -> Bool,
+        maxWrites: Int = .max,
+        write: (NavigationWrite) -> Void
+    ) {
         var writesRemaining = max(0, maxWrites)
-        while writesRemaining > 0 && count > 0 && canSend() {
-            if !pendingPriorityWrites.isEmpty {
-                write(pendingPriorityWrites.removeFirst())
-            } else {
-                write(pendingWrites.removeFirst())
-            }
+        while writesRemaining > 0 && count > 0 {
+            let nextWrite = pendingPriorityWrites.first ?? pendingWrites.first!
+            guard canSend(nextWrite) else { break }
+            let dequeued = pendingPriorityWrites.isEmpty
+                ? pendingWrites.removeFirst()
+                : pendingPriorityWrites.removeFirst()
+            write(dequeued)
             writesRemaining -= 1
         }
     }

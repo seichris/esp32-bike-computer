@@ -115,26 +115,50 @@ struct NavigationInstructionBanner: View {
     let iconID: Int
     let distanceToManeuver: Int
     let instruction: String
+    let isCompactHeight: Bool
+
+    init(
+        iconID: Int,
+        distanceToManeuver: Int,
+        instruction: String,
+        isCompactHeight: Bool = false
+    ) {
+        self.iconID = iconID
+        self.distanceToManeuver = distanceToManeuver
+        self.instruction = instruction
+        self.isCompactHeight = isCompactHeight
+    }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 18) {
+        HStack(alignment: .center, spacing: isCompactHeight ? 10 : 18) {
             Image(systemName: NavigationIcon.icon(for: iconID))
-                .font(.system(size: 58, weight: .bold))
+                .font(.system(size: isCompactHeight ? 34 : 58, weight: .bold))
                 .foregroundColor(.white)
-                .frame(width: 70, height: 70)
+                .frame(
+                    width: isCompactHeight ? 42 : 70,
+                    height: isCompactHeight ? 42 : 70
+                )
                 .accessibilityHidden(true)
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: isCompactHeight ? 2 : 6) {
                 Text(formattedDistance)
-                    .font(.system(size: 38, weight: .bold, design: .rounded))
+                    .font(.system(
+                        size: isCompactHeight ? 24 : 38,
+                        weight: .bold,
+                        design: .rounded
+                    ))
                     .foregroundColor(.white)
                     .minimumScaleFactor(0.78)
 
                 Text(instruction)
-                    .font(.system(size: 28, weight: .semibold, design: .rounded))
+                    .font(.system(
+                        size: isCompactHeight ? 17 : 28,
+                        weight: .semibold,
+                        design: .rounded
+                    ))
                     .foregroundColor(.white.opacity(0.72))
                     .multilineTextAlignment(.leading)
-                    .lineLimit(nil)
+                    .lineLimit(isCompactHeight ? 2 : nil)
                     .minimumScaleFactor(0.72)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -142,8 +166,8 @@ struct NavigationInstructionBanner: View {
 
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 18)
+        .padding(.horizontal, isCompactHeight ? 14 : 24)
+        .padding(.vertical, isCompactHeight ? 8 : 18)
         .background(
             RoundedRectangle(cornerRadius: 30, style: .continuous)
                 .fill(Color.black.opacity(0.66))
@@ -157,42 +181,335 @@ struct NavigationInstructionBanner: View {
     }
 }
 
-struct NavigationMetricsPanel: View {
+struct RideMetricsPanel: View {
+    @ObservedObject var workoutStore: WorkoutMetricsStore
+    @ObservedObject var watchAvailability: WorkoutWatchAvailabilityMonitor
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    let isNavigating: Bool
+    let isCompactHeight: Bool
     let arrivalDate: Date?
     let remainingTime: TimeInterval?
     let remainingDistance: CLLocationDistance?
     let onStopNavigation: () -> Void
+    let onStartWorkout: () -> Void
+    let onPauseWorkout: () -> Void
+    let onResumeWorkout: () -> Void
+    let onEndAndSaveWorkout: () -> Void
+    let onDiscardWorkout: () -> Void
 
     var body: some View {
-        VStack(spacing: 12) {
-            HStack(alignment: .center, spacing: 0) {
-                NavigationMetricColumn(value: formattedArrival, label: "arrival")
-                NavigationMetricColumn(value: formattedTime, label: timeUnit)
-                NavigationMetricColumn(value: formattedDistance, label: distanceUnit)
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 18)
+        Group {
+            if isCompactHeight && dynamicTypeSize.isAccessibilitySize {
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(spacing: 8) {
+                        metricContent
+                            .padding(.vertical, 4)
+                        controls
+                            .padding(.top, 2)
+                            .padding(.horizontal, 10)
+                            .padding(.bottom, 8)
+                    }
+                    .padding(.top, 8)
+                }
+            } else {
+                VStack(spacing: isCompactHeight ? 8 : 12) {
+                    if isCompactHeight {
+                        ScrollView(.vertical, showsIndicators: true) {
+                            metricContent
+                                .padding(.vertical, 4)
+                        }
+                        .frame(maxHeight: 140)
+                    } else {
+                        metricContent
+                    }
 
-            Button(action: onStopNavigation) {
-                Text("End")
-                    .font(.headline)
-                    .foregroundColor(.red)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(Color(.secondarySystemBackground), in: Capsule())
+                    controls
+                        .padding(.top, 2)
+                        .padding(.horizontal, isCompactHeight ? 10 : 18)
+                        .padding(.bottom, isCompactHeight ? 8 : 14)
+                }
+                .padding(.top, isCompactHeight ? 8 : 18)
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 18)
-            .padding(.bottom, 14)
-            .accessibilityLabel("End navigation")
         }
         .frame(maxWidth: .infinity)
+        .frame(maxHeight: isCompactHeight ? 215 : nil)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 32, style: .continuous)
                 .stroke(Color.white.opacity(0.35), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 8)
+    }
+
+    @ViewBuilder
+    private var metricContent: some View {
+        if workoutStore.presentation.isWorkoutActive {
+            workoutStatusBanner
+            workoutMetrics
+        }
+
+        if isNavigating {
+            HStack(alignment: .center, spacing: 0) {
+                NavigationMetricColumn(value: formattedArrival, label: "arrival")
+                NavigationMetricColumn(value: formattedTime, label: timeUnit)
+                NavigationMetricColumn(value: formattedDistance, label: distanceUnit)
+            }
+            .padding(.horizontal, 12)
+        }
+    }
+
+    private var workoutMetrics: some View {
+        let snapshot = workoutStore.presentation.snapshot
+        let suppressInstantaneous = suppressInstantaneousMetrics
+        return VStack(spacing: 12) {
+            HStack(alignment: .center, spacing: 0) {
+                RideMetricColumn(
+                    value: valueWithUnit(
+                        WorkoutValueFormatter.whole(
+                            suppressInstantaneous
+                                ? nil
+                                : snapshot.cyclingCadence?.value
+                        ),
+                        unit: "rpm"
+                    ),
+                    label: "cadence"
+                )
+                RideMetricColumn(
+                    value: valueWithUnit(
+                        WorkoutValueFormatter.whole(
+                            suppressInstantaneous
+                                ? nil
+                                : snapshot.cyclingPower?.value
+                        ),
+                        unit: "W"
+                    ),
+                    label: "power"
+                )
+            }
+
+            HStack(alignment: .center, spacing: 0) {
+                RideMetricColumn(
+                    value: valueWithUnit(
+                        WorkoutValueFormatter.speed(
+                            suppressInstantaneous
+                                ? nil
+                                : snapshot.currentSpeed?.value
+                        ),
+                        unit: "km/h"
+                    ),
+                    label: "speed"
+                )
+                RideMetricColumn(
+                    value: valueWithUnit(
+                        WorkoutValueFormatter.distance(snapshot.cyclingDistance?.value),
+                        unit: WorkoutValueFormatter.distanceUnit(
+                            snapshot.cyclingDistance?.value
+                        ).lowercased()
+                    ),
+                    label: "distance"
+                )
+                RideMetricColumn(
+                    value: valueWithUnit(
+                        altitudeValue(
+                            suppressInstantaneous
+                                ? nil
+                                : snapshot.location?.altitude
+                        ),
+                        unit: "m"
+                    ),
+                    label: "altitude"
+                )
+            }
+
+            HStack(alignment: .center, spacing: 0) {
+                RideMetricColumn(
+                    value: valueWithUnit(
+                        WorkoutValueFormatter.heartRate(
+                            suppressInstantaneous
+                                ? nil
+                                : snapshot.currentHeartRate?.value
+                        ),
+                        unit: "bpm"
+                    ),
+                    label: "heart rate"
+                )
+                RideMetricColumn(
+                    value: suppressInstantaneous
+                        ? "--"
+                        : heartRateZone(snapshot),
+                    label: "HR zone"
+                )
+                RideMetricColumn(
+                    value: valueWithUnit(
+                        WorkoutValueFormatter.energy(snapshot.activeEnergy?.value),
+                        unit: "kcal"
+                    ),
+                    label: "energy"
+                )
+            }
+        }
+        .padding(.horizontal, 8)
+    }
+
+    @ViewBuilder
+    private var workoutStatusBanner: some View {
+        let presentation = workoutStore.presentation
+        if presentation.connectionState == .launchingWatch {
+            workoutStatus("Starting workout on Apple Watch", color: .orange)
+        } else if presentation.connectionState == .awaitingFirstSnapshot {
+            workoutStatus("Waiting for Watch metrics", color: .orange)
+        } else if presentation.connectionState == .stale {
+            TimelineView(.periodic(from: Date(), by: 1)) { context in
+                workoutStatus(
+                    delayedWorkoutStatus(at: context.date),
+                    color: .orange
+                )
+            }
+        } else if presentation.connectionState == .disconnected {
+            TimelineView(.periodic(from: Date(), by: 1)) { context in
+                workoutStatus(
+                    disconnectedWorkoutStatus(at: context.date),
+                    color: .red
+                )
+            }
+        } else if presentation.errorCode != nil {
+            workoutStatus("Workout needs attention", color: .orange)
+        }
+    }
+
+    private func workoutStatus(_ title: String, color: Color) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: "applewatch.radiowaves.left.and.right")
+            Text(title)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            Spacer(minLength: 0)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundColor(color)
+        .padding(.horizontal, 14)
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private var controls: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(spacing: 8) {
+                navigationControl
+                workoutControls
+            }
+        } else {
+            HStack(spacing: 8) {
+                navigationControl
+                workoutControls
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var navigationControl: some View {
+        if isNavigating {
+            Button(action: onStopNavigation) {
+                RideControlLabel("End", systemImage: "xmark")
+            }
+            .buttonStyle(.bordered)
+            .tint(.red)
+            .accessibilityLabel("End navigation")
+        }
+    }
+
+    @ViewBuilder
+    private var workoutControls: some View {
+        let presentation = workoutStore.presentation
+        if presentation.isWorkoutActive {
+            if presentation.sessionState == .paused {
+                Button(action: onResumeWorkout) {
+                    RideControlLabel(
+                        "Resume workout",
+                        systemImage: "play.fill"
+                    )
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                .disabled(!canControlWorkout)
+            } else {
+                Button(action: onPauseWorkout) {
+                    RideControlLabel(
+                        "Pause workout",
+                        systemImage: "pause.fill"
+                    )
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+                .disabled(
+                    presentation.sessionState != .running
+                        || !canControlWorkout
+                )
+            }
+
+            WorkoutFinishButton(
+                store: workoutStore,
+                onEndAndSave: onEndAndSaveWorkout,
+                onDiscard: onDiscardWorkout
+            ) {
+                RideControlLabel(
+                    "End workout",
+                    systemImage: "stop.fill"
+                )
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .disabled(
+                presentation.sessionState == .ending
+                    || !canControlWorkout
+            )
+        } else if isNavigating && presentation.canStartNewWorkout {
+            WorkoutStartButton(
+                watchAvailability: watchAvailability,
+                action: onStartWorkout
+            ) {
+                RideControlLabel(
+                    "Start Workout",
+                    systemImage: "figure.outdoor.cycle"
+                )
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .accessibilityLabel("Start workout on Apple Watch")
+        }
+    }
+
+    private var canControlWorkout: Bool {
+        let presentation = workoutStore.presentation
+        return presentation.sessionID != nil
+            && presentation.pendingControl == nil
+            && presentation.connectionState != .disconnected
+    }
+
+    private var suppressInstantaneousMetrics: Bool {
+        let state = workoutStore.presentation.connectionState
+        switch state {
+        case .launchingWatch, .awaitingFirstSnapshot, .stale, .disconnected:
+            return true
+        case .unsupported, .idle, .connected, .ended, .failed:
+            return false
+        }
+    }
+
+    private func delayedWorkoutStatus(at date: Date) -> String {
+        ageQualifiedStatus("Workout data delayed", at: date)
+    }
+
+    private func disconnectedWorkoutStatus(at date: Date) -> String {
+        ageQualifiedStatus("Apple Watch disconnected", at: date)
+    }
+
+    private func ageQualifiedStatus(_ prefix: String, at date: Date) -> String {
+        guard let age = workoutStore.presentation.captureAge(at: date) else {
+            return prefix
+        }
+        return "\(prefix) · \(Int(age.rounded(.down)))s old"
     }
 
     private var formattedArrival: String {
@@ -226,6 +543,65 @@ struct NavigationMetricsPanel: View {
     private var distanceUnit: String {
         guard let remainingDistance, remainingDistance < 1000 else { return "km" }
         return "m"
+    }
+
+    private func heartRateZone(_ snapshot: WorkoutSnapshotV1) -> String {
+        guard let zone = snapshot.currentHeartRateZone else { return "--" }
+        if let count = snapshot.heartRateZoneCount {
+            return "\(zone)/\(count)"
+        }
+        return "\(zone)"
+    }
+
+    private func altitudeValue(_ altitude: Double?) -> String {
+        guard let altitude, altitude.isFinite else { return "--" }
+        return String(format: "%.0f", altitude)
+    }
+
+    private func valueWithUnit(_ value: String, unit: String) -> String {
+        value == "--" ? value : "\(value) \(unit)"
+    }
+}
+
+private struct RideControlLabel: View {
+    let title: String
+    let systemImage: String
+
+    init(_ title: String, systemImage: String) {
+        self.title = title
+        self.systemImage = systemImage
+    }
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.subheadline.weight(.semibold))
+            .lineLimit(1)
+            .minimumScaleFactor(0.62)
+            .frame(maxWidth: .infinity)
+    }
+}
+
+private struct RideMetricColumn: View {
+    let value: String
+    let label: String
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Text(value)
+                .font(.system(size: 25, weight: .bold, design: .rounded))
+                .foregroundColor(.primary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.55)
+
+            Text(label)
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
     }
 }
 

@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .jobs import JobStore
+from .jobs import (
+    ArtifactGarbageCollectionError,
+    JobRecordEnumerationError,
+    JobStore,
+)
 from .models import JobStatus, MapJob
 from .pipeline import MapBuildPipeline
 from .reuse import SubsetReuseUnavailable
@@ -17,6 +21,67 @@ class WorkerResult:
     worker_id: str
     job: MapJob | None
     processed: bool
+
+
+class ExpiredArtifactCleanupError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        removed: int,
+        legacy_failures: list[tuple[Path, Exception]],
+        object_failure: Exception | None,
+        expired_jobs: int = 0,
+        expiry_failures: list[tuple[str, Exception]] | None = None,
+        job_record_failures: list[tuple[Path, Exception]] | None = None,
+    ):
+        self.removed = removed
+        self.expired_jobs = expired_jobs
+        expiry_failures = expiry_failures or []
+        job_record_failures = job_record_failures or []
+        self.failed_expiry_job_ids = tuple(
+            job_id for job_id, _ in expiry_failures
+        )
+        self.expiry_causes = tuple(exc for _, exc in expiry_failures)
+        self.failed_job_record_paths = tuple(
+            path for path, _ in job_record_failures
+        )
+        self.job_record_causes = tuple(
+            exc for _, exc in job_record_failures
+        )
+        self.failed_legacy_paths = tuple(path for path, _ in legacy_failures)
+        self.legacy_causes = tuple(exc for _, exc in legacy_failures)
+        self.object_failure = object_failure
+        object_failure_count = 0
+        if isinstance(object_failure, ArtifactGarbageCollectionError):
+            object_failure_count = len(object_failure.failed_object_keys)
+        elif object_failure is not None:
+            object_failure_count = 1
+        failure_count = (
+            len(expiry_failures)
+            + len(job_record_failures)
+            + len(legacy_failures)
+            + object_failure_count
+        )
+        super().__init__(
+            f"expiry maintenance failed for {failure_count} item(s) after "
+            f"expiring {expired_jobs} job(s) and deleting {removed} artifact(s)"
+        )
+
+
+class WorkDirectoryCleanupError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        removed: int,
+        failures: list[tuple[Path, Exception]],
+    ):
+        self.removed = removed
+        self.failed_paths = tuple(path for path, _ in failures)
+        self.causes = tuple(exc for _, exc in failures)
+        super().__init__(
+            f"work-directory cleanup failed for {len(failures)} item(s) "
+            f"after deleting {removed}"
+        )
 
 
 class MapWorker:
@@ -202,19 +267,94 @@ def expire_ready_jobs(
         raise ValueError("older_than_days must be between 1 and 3650")
     cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
     count = 0
-    for job in store.list():
+    expiry_failures: list[tuple[str, Exception]] = []
+    jobs, job_record_failures = store.list_with_failures()
+    for job in jobs:
         if job.status != JobStatus.READY:
             continue
-        updated = _parse_utc(job.updated_at)
-        if updated >= cutoff:
+        try:
+            # A label change or download receipt is allowed after READY and
+            # updates `updated_at`. Retention must remain anchored to
+            # completion, not to later user activity. Legacy records without
+            # `finished_at` fall back to their immutable creation time so
+            # activity cannot extend them.
+            retention_anchor = _parse_utc(job.finished_at or job.created_at)
+            if retention_anchor >= cutoff:
+                continue
+            store.update_status(
+                job.job_id,
+                JobStatus.EXPIRED,
+                event="expired by retention policy",
+                finished=True,
+            )
+            count += 1
+        except Exception as exc:
+            # `save()` writes the job record before refreshing its indexes. If
+            # a later index write fails, reconcile the persisted status so the
+            # completed expiry is not undercounted.
+            try:
+                persisted = store.get(job.job_id)
+            except Exception:
+                persisted = None
+            if persisted is not None and persisted.status == JobStatus.EXPIRED:
+                count += 1
+            expiry_failures.append((job.job_id, exc))
             continue
-        store.update_status(job.job_id, JobStatus.EXPIRED, event="expired by retention policy", finished=True)
-        count += 1
-    cleanup_expired_pack_artifacts(
-        store,
-        artifact_store=artifact_store,
-        max_gc_items=max_gc_items,
-    )
+    cleanup_removed = 0
+    cleanup_error = None
+    try:
+        cleanup_removed = cleanup_expired_pack_artifacts(
+            store,
+            artifact_store=artifact_store,
+            max_gc_items=max_gc_items,
+        )
+    except ExpiredArtifactCleanupError as exc:
+        cleanup_error = exc
+    except Exception as exc:
+        cleanup_error = ExpiredArtifactCleanupError(
+            removed=0,
+            legacy_failures=[],
+            object_failure=exc,
+        )
+    combined_job_record_failures = list(job_record_failures)
+    known_record_paths = {path for path, _ in combined_job_record_failures}
+    if cleanup_error is not None:
+        for path, cause in zip(
+            cleanup_error.failed_job_record_paths,
+            cleanup_error.job_record_causes,
+        ):
+            if path not in known_record_paths:
+                combined_job_record_failures.append((path, cause))
+                known_record_paths.add(path)
+    if (
+        cleanup_error is not None
+        and not expiry_failures
+        and not combined_job_record_failures
+    ):
+        cleanup_error.expired_jobs = count
+        raise cleanup_error
+    if expiry_failures or combined_job_record_failures or cleanup_error is not None:
+        raise ExpiredArtifactCleanupError(
+            removed=(
+                cleanup_error.removed
+                if cleanup_error
+                else cleanup_removed
+            ),
+            legacy_failures=(
+                list(
+                    zip(
+                        cleanup_error.failed_legacy_paths,
+                        cleanup_error.legacy_causes,
+                    )
+                )
+                if cleanup_error
+                else []
+            ),
+            object_failure=(cleanup_error.object_failure if cleanup_error else None),
+            expired_jobs=count,
+            expiry_failures=expiry_failures,
+            job_record_failures=combined_job_record_failures,
+        ) from cleanup_error
     return count
 
 
@@ -225,38 +365,119 @@ def cleanup_expired_pack_artifacts(
     max_gc_items: int | None = None,
 ) -> int:
     removed = 0
-    with store.lock_artifact_references() as jobs:
-        protected_paths = {
-            Path(job.pack_path)
-            for job in jobs
-            if job.pack_path and job.status != JobStatus.EXPIRED
-        }
-        candidates = {
-            Path(job.pack_path)
-            for job in jobs
-            if job.pack_path and job.status == JobStatus.EXPIRED
-        } - protected_paths
-    for pack_path in candidates:
-        if store.delete_expired_legacy_pack(pack_path):
-            removed += 1
+    legacy_failures: list[tuple[Path, Exception]] = []
+    try:
+        with store.lock_artifact_references() as jobs:
+            protected_paths = {
+                Path(job.pack_path)
+                for job in jobs
+                if job.pack_path and job.status != JobStatus.EXPIRED
+            }
+            candidates = {
+                Path(job.pack_path)
+                for job in jobs
+                if job.pack_path and job.status == JobStatus.EXPIRED
+            } - protected_paths
+    except JobRecordEnumerationError as exc:
+        raise ExpiredArtifactCleanupError(
+            removed=0,
+            legacy_failures=[],
+            object_failure=None,
+            job_record_failures=list(zip(exc.failed_paths, exc.causes)),
+        ) from exc
+    for pack_path in sorted(candidates):
+        try:
+            if store.delete_expired_legacy_pack(pack_path):
+                removed += 1
+        except Exception as exc:
+            legacy_failures.append((pack_path, exc))
+    object_failure = None
     if artifact_store is not None:
-        removed += store.cleanup_artifact_garbage(
-            artifact_store,
-            max_items=max_gc_items,
+        try:
+            removed += store.cleanup_artifact_garbage(
+                artifact_store,
+                max_items=max_gc_items,
+            )
+        except ArtifactGarbageCollectionError as exc:
+            removed += exc.removed
+            object_failure = exc
+        except Exception as exc:
+            object_failure = exc
+    if legacy_failures or object_failure is not None:
+        raise ExpiredArtifactCleanupError(
+            removed=removed,
+            legacy_failures=legacy_failures,
+            object_failure=object_failure,
         )
     return removed
 
 
 def cleanup_work_dirs(work_root: Path, store: JobStore) -> int:
-    active = {job.job_id for job in store.list() if job.status not in {JobStatus.READY, JobStatus.FAILED, JobStatus.EXPIRED, JobStatus.CANCELLED}}
     removed = 0
+    failures: list[tuple[Path, Exception]] = []
     if not work_root.exists():
         return 0
-    for child in work_root.iterdir():
-        if not child.is_dir() or child.name in active:
-            continue
-        shutil.rmtree(child)
-        removed += 1
+    cleanup_root = work_root / ".cleanup"
+    cleanup_root.mkdir(exist_ok=True)
+
+    # Retry tombstones left by an interrupted or failed earlier pass. They are
+    # detached from active job paths, so no global job lock is required.
+    for tombstone in sorted(cleanup_root.iterdir()):
+        try:
+            if not tombstone.is_dir():
+                continue
+            shutil.rmtree(tombstone)
+            removed += 1
+        except Exception as exc:
+            failures.append((tombstone, exc))
+
+    children = [
+        child
+        for child in sorted(work_root.iterdir())
+        if child != cleanup_root
+    ]
+    detached: list[Path] = []
+    # One short, fenced scan keeps maintenance linear in job history. All
+    # recursive deletion remains outside the global queue lock.
+    with store.lock_job_records():
+        jobs, job_record_failures = store.list_with_failures()
+        active = {
+            job.job_id
+            for job in jobs
+            if job.status
+            not in {
+                JobStatus.READY,
+                JobStatus.FAILED,
+                JobStatus.EXPIRED,
+                JobStatus.CANCELLED,
+            }
+        }
+        # A corrupt record may still own a work directory. Preserve the path
+        # named by that record until the record is repaired.
+        active.update(path.stem for path, _ in job_record_failures)
+        for child in children:
+            try:
+                if not child.is_dir() or child.name in active:
+                    continue
+                tombstone = cleanup_root / (
+                    f"{child.name}-{uuid.uuid4().hex}"
+                )
+                child.rename(tombstone)
+                detached.append(tombstone)
+            except Exception as exc:
+                failures.append((child, exc))
+
+    for tombstone in detached:
+        try:
+            shutil.rmtree(tombstone)
+            removed += 1
+        except Exception as exc:
+            failures.append((tombstone, exc))
+    if failures:
+        raise WorkDirectoryCleanupError(
+            removed=removed,
+            failures=failures,
+        )
     return removed
 
 

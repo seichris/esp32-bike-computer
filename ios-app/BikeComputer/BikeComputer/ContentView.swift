@@ -13,13 +13,17 @@ struct ContentView: View {
     
     // MARK: - State
     
-    @StateObject private var coordinator = BikeComputerCoordinator()
+    @StateObject private var coordinator: BikeComputerCoordinator
     @StateObject private var offlineMapManager = OfflineMapManager()
+    @StateObject private var watchAvailability: WorkoutWatchAvailabilityMonitor
+    @ObservedObject private var workoutStore: WorkoutMetricsStore
+    private let workoutMirrorManager: WorkoutMirrorManager
     @Environment(\.scenePhase) private var scenePhase
     
     @State private var sourceAddress = ""
     @State private var destinationAddress = ""
     @State private var showingSettings = false
+    @State private var showingWorkoutDashboard = false
     @State private var isSearchPanelExpanded = false
     @State private var dismissedOfflineMapOnboarding = false
     @State private var confirmedDeviceMapMissing = false
@@ -27,11 +31,29 @@ struct ContentView: View {
     @State private var offlineMapSelectionHeight: CGFloat?
     @State private var offlineMapSelectionCenterY: CGFloat?
     @State private var offlineMapSelectionDragStartFrame: CGRect?
+
+    init(
+        workoutMirrorManager: WorkoutMirrorManager,
+        watchAvailability: WorkoutWatchAvailabilityMonitor = WorkoutWatchAvailabilityMonitor()
+    ) {
+        self.workoutMirrorManager = workoutMirrorManager
+        _watchAvailability = StateObject(wrappedValue: watchAvailability)
+        _workoutStore = ObservedObject(
+            wrappedValue: workoutMirrorManager.store
+        )
+        _coordinator = StateObject(
+            wrappedValue: BikeComputerCoordinator(
+                destinationStore: SavedDestinationStore(),
+                workoutMetricsStore: workoutMirrorManager.store
+            )
+        )
+    }
     
     var body: some View {
         GeometryReader { proxy in
             ZStack {
                 let selectionFrame = offlineMapSelectionFrame(in: proxy.size)
+                let isCompactHeight = proxy.size.height < 600
 
                 mapView(selectionFrame: offlineMapManager.isMapAreaSelectionActive ? selectionFrame : nil)
                     .ignoresSafeArea()
@@ -44,14 +66,31 @@ struct ContentView: View {
                     topOverlay
 
                     if coordinator.isNavigating {
-                        navigationInstructionBanner
+                        navigationInstructionBanner(
+                            isCompactHeight: isCompactHeight
+                        )
                             .padding(.horizontal, 14)
                             .padding(.top, 8)
                     }
 
+                    if !offlineMapManager.isMapAreaSelectionActive,
+                       shouldShowWorkoutStatusCard {
+                        WorkoutCompactCard(
+                            store: workoutStore,
+                            watchAvailability: watchAvailability,
+                            onStart: workoutMirrorManager.startOutdoorCyclingOnWatch,
+                            onOpen: { showingWorkoutDashboard = true }
+                        )
+                        .padding(.horizontal, 14)
+                        .padding(.top, 8)
+                    }
+
                     Spacer()
 
-                    bottomOverlay(maxHeight: proxy.size.height * 0.68)
+                    bottomOverlay(
+                        maxHeight: proxy.size.height * 0.68,
+                        isCompactHeight: isCompactHeight
+                    )
                 }
                 .ignoresSafeArea(.container, edges: .bottom)
 
@@ -103,16 +142,31 @@ struct ContentView: View {
                 )
                     .environmentObject(coordinator.bleManager)
             }
+            .sheet(isPresented: $showingWorkoutDashboard) {
+                WorkoutDashboardView(
+                    store: workoutStore,
+                    watchAvailability: watchAvailability,
+                    onStart: workoutMirrorManager.startOutdoorCyclingOnWatch,
+                    onPause: workoutMirrorManager.pause,
+                    onResume: workoutMirrorManager.resume,
+                    onEndAndSave: workoutMirrorManager.endAndSave,
+                    onDiscard: workoutMirrorManager.discard,
+                    onDone: workoutMirrorManager.resetTerminalPresentation
+                )
+            }
         }
         .onAppear {
+            watchAvailability.activate()
             updateIdleTimer()
             coordinator.applicationDidBecomeActive()
+            workoutMirrorManager.refreshFreshness()
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
         }
         .onChange(of: scenePhase) { newValue in
             updateIdleTimer(for: newValue)
             guard newValue == .active else { return }
             coordinator.applicationDidBecomeActive()
+            workoutMirrorManager.refreshFreshness()
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
         }
         .onChange(of: coordinator.isNavigating) { _ in
@@ -180,10 +234,13 @@ struct ContentView: View {
     }
 
     private var deviceMapMissingCandidate: Bool {
-        coordinator.isLocationAuthorized &&
-            coordinator.bleManager.isNavigationReady &&
-            coordinator.bleManager.deviceHasSDCard == true &&
-            coordinator.bleManager.deviceMapFoundForCurrentLocation == false
+        OfflineMapOnboardingPolicy.shouldOfferDownload(
+            isLocationAuthorized: coordinator.isLocationAuthorized,
+            isNavigationReady: coordinator.bleManager.isNavigationReady,
+            hasSDCard: coordinator.bleManager.deviceHasSDCard,
+            activeMapId: coordinator.bleManager.mapTransferActiveMapId,
+            mapFoundForCurrentLocation: coordinator.bleManager.deviceMapFoundForCurrentLocation
+        )
     }
 
     private var shouldShowOfflineMapOnboarding: Bool {
@@ -224,33 +281,31 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func bottomOverlay(maxHeight: CGFloat) -> some View {
+    private func bottomOverlay(
+        maxHeight: CGFloat,
+        isCompactHeight: Bool
+    ) -> some View {
         VStack(spacing: 12) {
             if coordinator.routeCalculation.isCalculating {
                 CalculationStatusView(status: coordinator.routeCalculation.status)
                     .padding(.horizontal, 18)
-            } else if coordinator.isNavigating {
-                navigationControlPanel
-            } else {
+            }
+
+            if (coordinator.isNavigating || workoutStore.presentation.isWorkoutActive),
+               (coordinator.isNavigating || !isSearchPanelExpanded) {
+                rideControlPanel(isCompactHeight: isCompactHeight)
+            }
+
+            if !coordinator.isNavigating {
                 if shouldShowOfflineMapStatusChip {
                     offlineMapStatusChip
                         .padding(.horizontal, 18)
                 }
 
-                RouteSearchPanel(
-                    sourceAddress: $sourceAddress,
-                    destinationAddress: $destinationAddress,
-                    isExpanded: $isSearchPanelExpanded,
-                    destinationStore: coordinator.destinationStore,
-                    currentAddress: coordinator.currentAddress,
-                    currentLocation: coordinator.currentLocation,
-                    maxExpandedHeight: maxHeight,
-                    onStartNavigation: { source, destination, transport in
-                        isSearchPanelExpanded = false
-                        coordinator.startNavigation(from: source, to: destination, transportType: transport)
-                    }
-                )
-                .padding(.horizontal, 12)
+                if !coordinator.routeCalculation.isCalculating {
+                    routeAndWorkoutStartRow(maxHeight: maxHeight)
+                        .padding(.horizontal, 12)
+                }
             }
         }
         .padding(.bottom, 24)
@@ -259,21 +314,86 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.2), value: coordinator.isNavigating)
     }
 
-    private var navigationControlPanel: some View {
-        NavigationMetricsPanel(
+    private func rideControlPanel(isCompactHeight: Bool) -> some View {
+        RideMetricsPanel(
+            workoutStore: workoutStore,
+            watchAvailability: watchAvailability,
+            isNavigating: coordinator.isNavigating,
+            isCompactHeight: isCompactHeight,
             arrivalDate: coordinator.expectedArrivalDate,
             remainingTime: coordinator.routeRemainingTime,
             remainingDistance: coordinator.routeRemainingDistance,
-            onStopNavigation: { coordinator.stopNavigation() }
+            onStopNavigation: { coordinator.stopNavigation() },
+            onStartWorkout: workoutMirrorManager.startOutdoorCyclingOnWatch,
+            onPauseWorkout: workoutMirrorManager.pause,
+            onResumeWorkout: workoutMirrorManager.resume,
+            onEndAndSaveWorkout: workoutMirrorManager.endAndSave,
+            onDiscardWorkout: workoutMirrorManager.discard
         )
         .padding(.horizontal, 12)
     }
 
-    private var navigationInstructionBanner: some View {
+    private func routeAndWorkoutStartRow(maxHeight: CGFloat) -> some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            RouteSearchPanel(
+                sourceAddress: $sourceAddress,
+                destinationAddress: $destinationAddress,
+                isExpanded: $isSearchPanelExpanded,
+                destinationStore: coordinator.destinationStore,
+                currentAddress: coordinator.currentAddress,
+                currentLocation: coordinator.currentLocation,
+                maxExpandedHeight: maxHeight,
+                onStartNavigation: { source, destination, transport in
+                    isSearchPanelExpanded = false
+                    coordinator.startNavigation(
+                        from: source,
+                        to: destination,
+                        transportType: transport
+                    )
+                }
+            )
+            .layoutPriority(1)
+
+            if !isSearchPanelExpanded,
+               workoutStore.presentation.canStartNewWorkout {
+                WorkoutStartButton(
+                    watchAvailability: watchAvailability,
+                    action: workoutMirrorManager.startOutdoorCyclingOnWatch
+                ) {
+                    Label("Start Workout", systemImage: "figure.outdoor.cycle")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 15)
+                        .foregroundColor(.white)
+                        .background(
+                            Color.blue,
+                            in: RoundedRectangle(
+                                cornerRadius: 24,
+                                style: .continuous
+                            )
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Start workout on Apple Watch")
+            }
+        }
+    }
+
+    private var shouldShowWorkoutStatusCard: Bool {
+        !workoutStore.presentation.isWorkoutActive
+            && workoutStore.presentation.connectionState != .idle
+    }
+
+    private func navigationInstructionBanner(
+        isCompactHeight: Bool
+    ) -> some View {
         NavigationInstructionBanner(
             iconID: coordinator.currentIconID,
             distanceToManeuver: coordinator.distanceToManeuver,
-            instruction: coordinator.currentInstruction
+            instruction: coordinator.currentInstruction,
+            isCompactHeight: isCompactHeight
         )
     }
 
@@ -525,6 +645,6 @@ private enum OfflineMapSelectionResizeEdge {
 
 struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
-        ContentView()
+        ContentView(workoutMirrorManager: WorkoutMirrorManager())
     }
 }

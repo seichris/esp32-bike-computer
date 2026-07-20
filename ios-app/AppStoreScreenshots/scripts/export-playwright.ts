@@ -1,9 +1,10 @@
 #!/usr/bin/env tsx
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import JSZip from "jszip";
 import { chromium, type Page } from "playwright";
+import { buildSourceProvenance } from "./release-package";
 import { formatValidationReport, validateImage, type ValidationResult } from "./validate-exports";
 
 type CliOptions = {
@@ -232,6 +233,7 @@ async function createZip(rootDir: string, manifest: ExportManifestItem[], zipPat
   const zip = new JSZip();
   const files = [
     path.join(rootDir, "_manifest.json"),
+    path.join(rootDir, "_provenance.json"),
     path.join(rootDir, "_validation.txt"),
     path.join(rootDir, "_contact-sheet.jpg"),
     ...manifest.map((item) => path.resolve(rootDir, item.path)),
@@ -257,6 +259,7 @@ async function main() {
   const outRoot = path.resolve(opts.outDir);
   const screenshotDir = path.join(outRoot, "screenshots", slug(opts.locale), slug(opts.device));
   const manifestPath = path.join(outRoot, "_manifest.json");
+  const provenancePath = path.join(outRoot, "_provenance.json");
   const validationPath = path.join(outRoot, "_validation.txt");
   const contactSheetPath = path.join(outRoot, "_contact-sheet.jpg");
   const zipPath = path.resolve(opts.zipPath || path.join(outRoot, `app-store-screenshots-${opts.width}x${opts.height}.zip`));
@@ -264,6 +267,7 @@ async function main() {
   await rm(screenshotDir, { recursive: true, force: true });
   await Promise.all([
     rm(manifestPath, { force: true }),
+    rm(provenancePath, { force: true }),
     rm(validationPath, { force: true }),
     rm(contactSheetPath, { force: true }),
     ...(opts.noZip ? [] : [rm(zipPath, { force: true })]),
@@ -330,6 +334,19 @@ async function main() {
   }
 
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const packageRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    ".."
+  );
+  const provenance = await buildSourceProvenance(packageRoot, {
+    width: opts.width,
+    height: opts.height,
+    locale: opts.locale,
+    device: opts.device,
+    theme: opts.theme,
+    selector: opts.selector,
+  });
+  await writeFile(provenancePath, `${JSON.stringify(provenance, null, 2)}\n`);
   await writeFile(validationPath, `${formatValidationReport(manifest.map((item) => item.validation))}\n`);
   await makeContactSheet(manifest, contactSheetPath, outRoot);
 

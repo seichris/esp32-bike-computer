@@ -53,7 +53,11 @@
 
 #if LV_USE_STDLIB_MALLOC == LV_STDLIB_BUILTIN
     /*Size of the memory available for `lv_malloc()` in bytes (>= 2kB)*/
-    #define LV_MEM_SIZE (64 * 1024U)          /*[bytes]*/
+    // The full-screen map object tree plus LVGL's four-line software image
+    // blend buffer exceeds 64 KiB on the 466x466 displays. Keep enough margin
+    // for the Map + Navigation overlay without exhausting the built-in TLSF
+    // pool during display refresh.
+    #define LV_MEM_SIZE (96 * 1024U)          /*[bytes]*/
 
     /*Size of the memory expand for `lv_malloc()` in bytes*/
     #define LV_MEM_POOL_EXPAND_SIZE 0

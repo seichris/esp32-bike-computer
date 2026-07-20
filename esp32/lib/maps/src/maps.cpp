@@ -1834,9 +1834,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           viewPort.center.toPoint16() -
           mblock->offset.toPoint16(); // screen center with features coordinates
 
-      ESP_LOGI(TAG, "Block Draw: OffsetX=%d OffsetY=%d CenterX=%d CenterY=%d",
-               mblock->offset.x, mblock->offset.y, screen_center_mc.x,
-               screen_center_mc.y);
+      ESP_LOGI(TAG, "Drawing cached map block");
 
       BBox screen_bbox_mc =
           viewPort.bbox -
@@ -2055,10 +2053,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     Maps::totalBounds.lon_min = Maps::mercatorX2lon(viewPort.bbox.min.x);
     Maps::totalBounds.lon_max = Maps::mercatorX2lon(viewPort.bbox.max.x);
 
-    ESP_LOGI(TAG,
-             "Total Bounds: Lat Min: %f, Lat Max: %f, Lon Min: %f, Lon Max: %f",
-             Maps::totalBounds.lat_min, Maps::totalBounds.lat_max,
-             Maps::totalBounds.lon_min, Maps::totalBounds.lon_max);
+    ESP_LOGI(TAG, "Updated rendered map bounds");
 
     if (Maps::isCoordInBounds(Maps::destLat, Maps::destLon, Maps::totalBounds))
       Maps::coords2map(Maps::destLat, Maps::destLon, Maps::totalBounds,
@@ -2758,12 +2753,8 @@ void Maps::displayMap() {
       x = mapOriginX + round(rx) + anchorX - 24;
       y = mapOriginY + round(ry) + anchorY - 24;
 
-      ESP_LOGI(TAG,
-               "GPS indicator: gps(%.6f,%.6f) -> mercator(%d,%d) -> "
-               "screen(%d,%d), viewport center(%d,%d) zoom=%d rot=%.2f",
-               gps.gpsData.latitude, gps.gpsData.longitude, gpsX, gpsY, x, y,
-               Maps::viewPort.center.x, Maps::viewPort.center.y, zoom,
-               rotationRad);
+      ESP_LOGI(TAG, "GPS indicator updated outside follow mode zoom=%d",
+               zoom);
 
       lv_obj_set_pos(Maps::canvasArrow, x, y);
 
@@ -2862,10 +2853,7 @@ bool Maps::generateVectorMap(uint8_t zoom) {
   ESP_LOGI(TAG, "Checking for route overlay: hasRoute=%d",
            routeOverlay.hasRoute());
   if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
-    ESP_LOGI(TAG,
-             "Drawing route overlay: centerMerc=(%d,%d) "
-             "zoom=%d points=%d",
-             Maps::viewPort.center.x, Maps::viewPort.center.y, zoom,
+    ESP_LOGI(TAG, "Drawing route overlay: zoom=%d points=%d", zoom,
              routeOverlay.getPointCount());
 
     // BUGFIX: Use actual canvas height, not mapScrHeight which differs in
@@ -2967,8 +2955,7 @@ void Maps::centerOnGps(double lat, double lon) {
   Maps::point.y = Maps::lat2y(lat);
   Maps::isPosMoved = true;
 
-  ESP_LOGI(TAG, "centerOnGps: lat=%f, lon=%f -> point.x=%d, point.y=%d", lat,
-           lon, Maps::point.x, Maps::point.y);
+  ESP_LOGI(TAG, "centerOnGps: map center updated");
 }
 
 /**

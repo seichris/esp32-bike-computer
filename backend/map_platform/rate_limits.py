@@ -137,6 +137,10 @@ class PersistentRateLimiter:
                     ON rate_limits(expires_at)
                     """
                 )
+                connection.execute(
+                    "DELETE FROM rate_limits WHERE expires_at <= ?",
+                    (int(self._clock()),),
+                )
                 connection.commit()
             finally:
                 connection.close()
@@ -156,6 +160,31 @@ class PersistentRateLimiter:
             hashlib.sha256,
         ).hexdigest()
 
+
+def purge_expired_rate_limits(path: Path, *, now: int | None = None) -> int:
+    """Delete expired pseudonyms without requiring another client request."""
+    if not path.exists():
+        return 0
+    connection = sqlite3.connect(path, timeout=5)
+    connection.execute("PRAGMA busy_timeout=5000")
+    try:
+        table_exists = connection.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'rate_limits'
+            """
+        ).fetchone()
+        if table_exists is None:
+            return 0
+        cursor = connection.execute(
+            "DELETE FROM rate_limits WHERE expires_at <= ?",
+            (int(time.time()) if now is None else int(now),),
+        )
+        connection.commit()
+        return max(cursor.rowcount, 0)
+    finally:
+        connection.close()
 
 class ClientAddressResolver:
     """Resolve proxy chains from the right, trusting forwarded values only from known peers."""

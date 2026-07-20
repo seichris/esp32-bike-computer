@@ -38,21 +38,12 @@ void RouteOverlay::parseRouteData(const uint8_t *data, size_t len) {
     return;
   }
 
-  // Log hex dump of first 32 bytes for debugging
-  Serial.print("Route data hex dump (first 32 bytes): ");
-  for (size_t i = 0; i < std::min(len, (size_t)32); i++) {
-    Serial.printf("%02X ", data[i]);
-  }
-  Serial.println();
-
   // Read start point (8 bytes: 4 lat + 4 lon, little-endian)
   int32_t lat, lon;
   memcpy(&lat, data, 4);
   memcpy(&lon, data + 4, 4);
 
   points.push_back({lat, lon});
-  Serial.printf("Route start point: lat=%d (%.6f°), lon=%d (%.6f°)\n", lat,
-                lat / 1000000.0, lon, lon / 1000000.0);
 
   // Read delta points (4 bytes each: 2 lat + 2 lon, little-endian)
   size_t offset = 8;
@@ -69,11 +60,6 @@ void RouteOverlay::parseRouteData(const uint8_t *data, size_t len) {
   }
 
   Serial.printf("Route parsed: %d points from %d bytes\n", points.size(), len);
-  if (points.size() > 1) {
-    const auto &last = points.back();
-    Serial.printf("Route end point: lat=%d (%.6f°), lon=%d (%.6f°)\n", last.lat,
-                  last.lat / 1000000.0, last.lon, last.lon / 1000000.0);
-  }
 }
 
 void RouteOverlay::clear() {
@@ -277,10 +263,8 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,
     return; // Need at least 2 points to draw a line
   }
 
-  Serial.printf("RouteOverlay::drawRoute: centerMerc=(%d,%d) zoom=%d "
-                "points=%d rot=%.2frad\n",
-                centerMercatorX, centerMercatorY, zoom, points.size(),
-                rotationRad);
+  Serial.printf("RouteOverlay::drawRoute: zoom=%d points=%d rot=%.2frad\n",
+                zoom, points.size(), rotationRad);
 
   // Get canvas buffer
   lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
@@ -342,15 +326,6 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,
           "RouteOverlay",
           "DEBUG_OFFSET: Center(%d,%d) StartPixel(%d,%d) Diff(%d,%d) Rot(%.2f)",
           anchorX, anchorY, x1, y1, x1 - anchorX, y1 - anchorY, rotationRad);
-    }
-
-    // Log first few segments for debugging
-    if (i < 3) {
-      ESP_LOGI("RouteOverlay",
-               "  Segment %d: (%.6f,%.6f)->(%.6f,%.6f) screen(%d,%d)->(%d,%d)",
-               (int)i, points[i].lat / 1000000.0, points[i].lon / 1000000.0,
-               points[i + 1].lat / 1000000.0, points[i + 1].lon / 1000000.0, x1,
-               y1, x2, y2);
     }
 
     // Skip if both endpoints are far off-screen

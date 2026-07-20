@@ -1235,6 +1235,7 @@ class MapJobRunAPITests(unittest.TestCase):
             mapId="map-expired",
             packPath=str(pack_path),
             updatedAt="2020-01-01T00:00:00Z",
+            finishedAt="2020-01-01T00:00:00Z",
         )
         # Keep the artifact present after expiry so the signed-download
         # assertion below proves READY-state gating, not a missing file.

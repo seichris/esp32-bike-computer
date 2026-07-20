@@ -108,7 +108,7 @@ struct RouteSearchPanel: View {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(.secondary)
 
-                Text(destinationAddress.isEmpty ? "Search for a destination" : destinationAddress)
+                Text(destinationAddress.isEmpty ? "Search destination" : destinationAddress)
                     .foregroundColor(destinationAddress.isEmpty ? .secondary : .primary)
                     .lineLimit(1)
 
@@ -116,9 +116,11 @@ struct RouteSearchPanel: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Search for a destination")
+        .accessibilityLabel("Search destination")
     }
 
     private var expandedContent: some View {
@@ -146,7 +148,7 @@ struct RouteSearchPanel: View {
             Image(systemName: "magnifyingglass")
                 .foregroundColor(.secondary)
 
-            TextField("Search for a destination", text: $destinationAddress)
+            TextField("Search destination", text: $destinationAddress)
                 .textContentType(.fullStreetAddress)
                 .focused($focusedField, equals: .destination)
                 .onTapGesture {
@@ -535,7 +537,7 @@ struct RouteInputView: View {
                         Image(systemName: "magnifyingglass")
                             .foregroundColor(.secondary)
                         
-                        TextField("Search for a destination", text: $destinationAddress)
+                        TextField("Search destination", text: $destinationAddress)
                             .textContentType(.fullStreetAddress)
                             .focused($isDestinationFieldFocused)
                             .onChange(of: destinationAddress) { newValue in

@@ -71,7 +71,8 @@ Run the production-style queue worker:
 python -m map_platform.cli worker-loop
 ```
 
-Run retention and artifact garbage collection independently:
+Run ready-time retention, artifact garbage collection, work-directory cleanup,
+and expired rate-limit-pseudonym deletion independently from request traffic:
 
 ```sh
 python -m map_platform.cli maintenance-loop
@@ -188,8 +189,9 @@ Useful production environment variables:
   available.
 - `MAP_PLATFORM_MAX_ACTIVE_JOBS`: maximum queued/running jobs accepted by the
   API, default `25`.
-- `MAP_PLATFORM_JOB_RETENTION_DAYS`: days to retain ready job artifacts,
-  default `30`; must be between `1` and `3650`.
+- `MAP_PLATFORM_JOB_RETENTION_DAYS`: days to retain ready job artifacts from
+  their immutable completion time, default `30`; later downloads and label
+  changes do not extend it. Must be between `1` and `3650`.
 - `MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS`: maintenance-service cleanup interval,
   default `3600`.
 - `MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS`: maximum content objects attempted

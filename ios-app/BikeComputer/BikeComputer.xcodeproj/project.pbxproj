@@ -6,8 +6,59 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		57A0000C2F00000100000001 /* BikeComputerWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 57A000012F00000100000001 /* BikeComputerWatch.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		57A001032F00000100000001 /* WorkoutContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A001002F00000100000001 /* WorkoutContractTests.swift */; };
+		57A001042F00000100000001 /* WorkoutContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A001002F00000100000001 /* WorkoutContractTests.swift */; };
+		57A002012F00000100000001 /* WatchWorkoutRecoveryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A002002F00000100000001 /* WatchWorkoutRecoveryStore.swift */; };
+		57A002022F00000100000001 /* WatchWorkoutRecoveryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A002002F00000100000001 /* WatchWorkoutRecoveryStore.swift */; };
+		57A003032F00000100000001 /* WatchWorkoutManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A003002F00000100000001 /* WatchWorkoutManager.swift */; };
+		57A003042F00000100000001 /* WatchRouteRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A003012F00000100000001 /* WatchRouteRecorder.swift */; };
+		57A003052F00000100000001 /* WatchWorkoutManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A003022F00000100000001 /* WatchWorkoutManagerTests.swift */; };
+		57A004032F00000100000001 /* WorkoutMirrorManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A004002F00000100000001 /* WorkoutMirrorManager.swift */; };
+		57A004042F00000100000001 /* WorkoutMetricsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A004012F00000100000001 /* WorkoutMetricsStore.swift */; };
+		57A004052F00000100000001 /* WorkoutMirrorManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A004022F00000100000001 /* WorkoutMirrorManagerTests.swift */; };
+		57A005012F00000100000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 57A005002F00000100000001 /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		57A0000D2F00000100000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 83E6EF8F2EED853C00AE5F9B /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 57A000072F00000100000001;
+			remoteInfo = BikeComputerWatch;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		57A0000B2F00000100000001 /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
+			dstSubfolderSpec = 16;
+			files = (
+				57A0000C2F00000100000001 /* BikeComputerWatch.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		83E6EF972EED853C00AE5F9B /* BikeComputer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BikeComputer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		57A000012F00000100000001 /* BikeComputerWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BikeComputerWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		57A001002F00000100000001 /* WorkoutContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = WorkoutContractTests.swift; path = ../BikeComputerTests/WorkoutContractTests.swift; sourceTree = "<group>"; };
+		57A001012F00000100000001 /* WorkoutContractiOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WorkoutContractiOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		57A001022F00000100000001 /* WorkoutContractWatchTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WorkoutContractWatchTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		57A002002F00000100000001 /* WatchWorkoutRecoveryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WatchWorkoutRecoveryStore.swift (Tests)"; path = BikeComputerWatch/Managers/WatchWorkoutRecoveryStore.swift; sourceTree = "<group>"; };
+		57A003002F00000100000001 /* WatchWorkoutManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WatchWorkoutManager.swift (Tests)"; path = BikeComputerWatch/Managers/WatchWorkoutManager.swift; sourceTree = "<group>"; };
+		57A003012F00000100000001 /* WatchRouteRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WatchRouteRecorder.swift (Tests)"; path = BikeComputerWatch/Managers/WatchRouteRecorder.swift; sourceTree = "<group>"; };
+		57A003022F00000100000001 /* WatchWorkoutManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputerWatchTests/WatchWorkoutManagerTests.swift; sourceTree = "<group>"; };
+		57A004002F00000100000001 /* WorkoutMirrorManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Managers/WorkoutMirrorManager.swift; sourceTree = "<group>"; };
+		57A004012F00000100000001 /* WorkoutMetricsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Managers/WorkoutMetricsStore.swift; sourceTree = "<group>"; };
+		57A004022F00000100000001 /* WorkoutMirrorManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../BikeComputerTests/WorkoutMirrorManagerTests.swift; sourceTree = "<group>"; };
+		57A005002F00000100000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = BikeComputer/Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -18,6 +69,13 @@
 				Info.plist.template,
 			);
 			target = 83E6EF962EED853C00AE5F9B /* BikeComputer */;
+		};
+		57A000032F00000100000001 /* Exceptions for "BikeComputerWatch" folder in "BikeComputerWatch" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 57A000072F00000100000001 /* BikeComputerWatch */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -30,10 +88,44 @@
 			path = BikeComputer;
 			sourceTree = "<group>";
 		};
+		57A000022F00000100000001 /* BikeComputerWatch */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				57A000032F00000100000001 /* Exceptions for "BikeComputerWatch" folder in "BikeComputerWatch" target */,
+			);
+			path = BikeComputerWatch;
+			sourceTree = "<group>";
+		};
+		57A0000F2F00000100000001 /* WorkoutShared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = WorkoutShared;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		83E6EF942EED853C00AE5F9B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		57A000052F00000100000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		57A001062F00000100000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		57A001092F00000100000001 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -47,6 +139,17 @@
 			isa = PBXGroup;
 			children = (
 				83E6EF992EED853C00AE5F9B /* BikeComputer */,
+				57A000022F00000100000001 /* BikeComputerWatch */,
+				57A0000F2F00000100000001 /* WorkoutShared */,
+				57A001002F00000100000001 /* WorkoutContractTests.swift */,
+				57A002002F00000100000001 /* WatchWorkoutRecoveryStore.swift */,
+				57A003002F00000100000001 /* WatchWorkoutManager.swift */,
+				57A003012F00000100000001 /* WatchRouteRecorder.swift */,
+				57A003022F00000100000001 /* WatchWorkoutManagerTests.swift */,
+				57A004002F00000100000001 /* WorkoutMirrorManager.swift */,
+				57A004012F00000100000001 /* WorkoutMetricsStore.swift */,
+				57A004022F00000100000001 /* WorkoutMirrorManagerTests.swift */,
+				57A005002F00000100000001 /* Assets.xcassets */,
 				83E6EF982EED853C00AE5F9B /* Products */,
 			);
 			sourceTree = "<group>";
@@ -55,6 +158,9 @@
 			isa = PBXGroup;
 			children = (
 				83E6EF972EED853C00AE5F9B /* BikeComputer.app */,
+				57A000012F00000100000001 /* BikeComputerWatch.app */,
+				57A001012F00000100000001 /* WorkoutContractiOSTests.xctest */,
+				57A001022F00000100000001 /* WorkoutContractWatchTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -69,14 +175,17 @@
 				83E6EF932EED853C00AE5F9B /* Sources */,
 				83E6EF942EED853C00AE5F9B /* Frameworks */,
 				83E6EF952EED853C00AE5F9B /* Resources */,
+				57A0000B2F00000100000001 /* Embed Watch Content */,
 				4D53545245414D4944454E54 /* Generate Map Stream Build Identity */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				57A0000E2F00000100000001 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				83E6EF992EED853C00AE5F9B /* BikeComputer */,
+				57A0000F2F00000100000001 /* WorkoutShared */,
 			);
 			name = BikeComputer;
 			packageProductDependencies = (
@@ -84,6 +193,73 @@
 			productName = BikeComputer;
 			productReference = 83E6EF972EED853C00AE5F9B /* BikeComputer.app */;
 			productType = "com.apple.product-type.application";
+		};
+		57A000072F00000100000001 /* BikeComputerWatch */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 57A0000A2F00000100000001 /* Build configuration list for PBXNativeTarget "BikeComputerWatch" */;
+			buildPhases = (
+				57A000042F00000100000001 /* Sources */,
+				57A000052F00000100000001 /* Frameworks */,
+				57A000062F00000100000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				57A000022F00000100000001 /* BikeComputerWatch */,
+				57A0000F2F00000100000001 /* WorkoutShared */,
+			);
+			name = BikeComputerWatch;
+			packageProductDependencies = (
+			);
+			productName = BikeComputerWatch;
+			productReference = 57A000012F00000100000001 /* BikeComputerWatch.app */;
+			productType = "com.apple.product-type.application";
+		};
+		57A0010B2F00000100000001 /* WorkoutContractiOSTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 57A001112F00000100000001 /* Build configuration list for PBXNativeTarget "WorkoutContractiOSTests" */;
+			buildPhases = (
+				57A001052F00000100000001 /* Sources */,
+				57A001062F00000100000001 /* Frameworks */,
+				57A001072F00000100000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				57A0000F2F00000100000001 /* WorkoutShared */,
+			);
+			name = WorkoutContractiOSTests;
+			packageProductDependencies = (
+			);
+			productName = WorkoutContractiOSTests;
+			productReference = 57A001012F00000100000001 /* WorkoutContractiOSTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		57A0010C2F00000100000001 /* WorkoutContractWatchTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 57A001122F00000100000001 /* Build configuration list for PBXNativeTarget "WorkoutContractWatchTests" */;
+			buildPhases = (
+				57A001082F00000100000001 /* Sources */,
+				57A001092F00000100000001 /* Frameworks */,
+				57A0010A2F00000100000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				57A0000F2F00000100000001 /* WorkoutShared */,
+			);
+			name = WorkoutContractWatchTests;
+			packageProductDependencies = (
+			);
+			productName = WorkoutContractWatchTests;
+			productReference = 57A001022F00000100000001 /* WorkoutContractWatchTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -97,6 +273,15 @@
 				TargetAttributes = {
 					83E6EF962EED853C00AE5F9B = {
 						CreatedOnToolsVersion = 26.1.1;
+					};
+					57A000072F00000100000001 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					57A0010B2F00000100000001 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					57A0010C2F00000100000001 = {
+						CreatedOnToolsVersion = 26.6;
 					};
 				};
 			};
@@ -115,12 +300,37 @@
 			projectRoot = "";
 			targets = (
 				83E6EF962EED853C00AE5F9B /* BikeComputer */,
+				57A000072F00000100000001 /* BikeComputerWatch */,
+				57A0010B2F00000100000001 /* WorkoutContractiOSTests */,
+				57A0010C2F00000100000001 /* WorkoutContractWatchTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		83E6EF952EED853C00AE5F9B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		57A000062F00000100000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				57A005012F00000100000001 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		57A001072F00000100000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		57A0010A2F00000100000001 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -137,7 +347,46 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		57A000042F00000100000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		57A001052F00000100000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				57A001032F00000100000001 /* WorkoutContractTests.swift in Sources */,
+				57A002012F00000100000001 /* WatchWorkoutRecoveryStore.swift in Sources */,
+				57A004032F00000100000001 /* WorkoutMirrorManager.swift in Sources */,
+				57A004042F00000100000001 /* WorkoutMetricsStore.swift in Sources */,
+				57A004052F00000100000001 /* WorkoutMirrorManagerTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		57A001082F00000100000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				57A001042F00000100000001 /* WorkoutContractTests.swift in Sources */,
+				57A002022F00000100000001 /* WatchWorkoutRecoveryStore.swift in Sources */,
+				57A003032F00000100000001 /* WatchWorkoutManager.swift in Sources */,
+				57A003042F00000100000001 /* WatchRouteRecorder.swift in Sources */,
+				57A003052F00000100000001 /* WatchWorkoutManagerTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		57A0000E2F00000100000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 57A000072F00000100000001 /* BikeComputerWatch */;
+			targetProxy = 57A0000D2F00000100000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin PBXShellScriptBuildPhase section */
 		4D53545245414D4944454E54 /* Generate Map Stream Build Identity */ = {
@@ -290,7 +539,7 @@
 				CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION = YES;
 				CODE_SIGN_ENTITLEMENTS = BikeComputer/BikeComputer.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_TEAM = 4H5PK8686H;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -306,7 +555,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = LetItRide.BikeComputer;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -333,7 +582,7 @@
 				CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION = YES;
 				CODE_SIGN_ENTITLEMENTS = BikeComputer/BikeComputer.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_TEAM = 4H5PK8686H;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -349,7 +598,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = LetItRide.BikeComputer;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -364,6 +613,147 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		57A000082F00000100000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = BikeComputerWatch/BikeComputerWatch.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 6;
+				DEVELOPMENT_TEAM = 4H5PK8686H;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = BikeComputerWatch/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = BikeComputer;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.1;
+				PRODUCT_BUNDLE_IDENTIFIER = LetItRide.BikeComputer.watchkitapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
+		};
+		57A000092F00000100000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = BikeComputerWatch/BikeComputerWatch.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 6;
+				DEVELOPMENT_TEAM = 4H5PK8686H;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = BikeComputerWatch/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = BikeComputer;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.1;
+				PRODUCT_BUNDLE_IDENTIFIER = LetItRide.BikeComputer.watchkitapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				VALIDATE_PRODUCT = YES;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Release;
+		};
+		57A0010D2F00000100000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 4H5PK8686H;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = LetItRide.BikeComputer.WorkoutContractTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "WORKOUT_CONTRACT_XCTEST $(inherited)";
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		57A0010E2F00000100000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 4H5PK8686H;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = LetItRide.BikeComputer.WorkoutContractTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "WORKOUT_CONTRACT_XCTEST $(inherited)";
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		57A0010F2F00000100000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 4H5PK8686H;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = LetItRide.BikeComputer.watchkitapp.WorkoutContractTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "WORKOUT_CONTRACT_XCTEST $(inherited)";
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
+		};
+		57A001102F00000100000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 4H5PK8686H;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = LetItRide.BikeComputer.watchkitapp.WorkoutContractTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "WORKOUT_CONTRACT_XCTEST $(inherited)";
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
 			};
 			name = Release;
 		};
@@ -384,6 +774,33 @@
 			buildConfigurations = (
 				83E6EFA32EED853D00AE5F9B /* Debug */,
 				83E6EFA42EED853D00AE5F9B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		57A0000A2F00000100000001 /* Build configuration list for PBXNativeTarget "BikeComputerWatch" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				57A000082F00000100000001 /* Debug */,
+				57A000092F00000100000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		57A001112F00000100000001 /* Build configuration list for PBXNativeTarget "WorkoutContractiOSTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				57A0010D2F00000100000001 /* Debug */,
+				57A0010E2F00000100000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		57A001122F00000100000001 /* Build configuration list for PBXNativeTarget "WorkoutContractWatchTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				57A0010F2F00000100000001 /* Debug */,
+				57A001102F00000100000001 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

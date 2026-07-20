@@ -432,8 +432,8 @@ static void logSystemDebugHeartbeat() {
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   Serial.printf("SYS: up=%lus heap=%lu psram=%lu screen=%s tile=%s "
-                "waitRefresh=%d gpsFromApp=%d pendingMap=%d lat=%.6f "
-                "lon=%.6f heading=%u routePts=%u mapFound=%d mapBlocks=%u "
+                "waitRefresh=%d gpsFromApp=%d pendingMap=%d "
+                "gps[fix=%u heading=%u] routePts=%u mapFound=%d mapBlocks=%u "
                 "mapFlags[pos=%d redraw=%d follow=%d vector=%d zoom=%u] "
                 "ui[loop=%lu maxGapMs=%lu lvgl=%lu lastLvglMs=%lu "
                 "lvglUs=%lu/%lu flush=%lu lastFlushMs=%lu flushUs=%lu/%lu] "
@@ -445,7 +445,7 @@ static void logSystemDebugHeartbeat() {
                 (unsigned long)ESP.getFreePsram(), screenName,
                 debugTileName(activeTile), waitScreenRefresh,
                 gpsReceivedFromApp, pendingTransitionToMap,
-                gps.gpsData.latitude, gps.gpsData.longitude,
+                (unsigned)gps.gpsData.fixMode,
                 (unsigned)gps.gpsData.heading,
                 (unsigned)routeOverlay.getPointCount(),
                 mapView.debugIsMapFound(),
@@ -474,8 +474,8 @@ static void logSystemDebugHeartbeat() {
                 static_cast<long long>(rtcStatus.unixTime));
 #else
   Serial.printf("SYS: up=%lus heap=%lu psram=%lu screen=%s tile=%s "
-                "waitRefresh=%d gpsFromApp=%d pendingMap=%d lat=%.6f "
-                "lon=%.6f heading=%u routePts=%u mapFound=%d mapBlocks=%u "
+                "waitRefresh=%d gpsFromApp=%d pendingMap=%d "
+                "gps[fix=%u heading=%u] routePts=%u mapFound=%d mapBlocks=%u "
                 "mapFlags[pos=%d redraw=%d follow=%d vector=%d zoom=%u] "
                 "ui[loop=%lu maxGapMs=%lu lvgl=%lu lastLvglMs=%lu "
                 "lvglUs=%lu/%lu flush=%lu lastFlushMs=%lu flushUs=%lu/%lu] "
@@ -485,7 +485,7 @@ static void logSystemDebugHeartbeat() {
                 (unsigned long)ESP.getFreePsram(), screenName,
                 debugTileName(activeTile), waitScreenRefresh,
                 gpsReceivedFromApp, pendingTransitionToMap,
-                gps.gpsData.latitude, gps.gpsData.longitude,
+                (unsigned)gps.gpsData.fixMode,
                 (unsigned)gps.gpsData.heading,
                 (unsigned)routeOverlay.getPointCount(),
                 mapView.debugIsMapFound(),
@@ -794,8 +794,7 @@ void setup() {
   gps.gpsData.longitude = DEFAULT_LON;
   gps.gpsData.satellites = 0;
   gps.gpsData.fixMode = 0;
-  log_i("Default coordinates set: %f, %f (waiting for app GPS)", DEFAULT_LAT,
-        DEFAULT_LON);
+  log_i("Default map center set while waiting for app GPS");
 #endif
 
   // Show waiting screen - will transition to map when GPS is received via BLE

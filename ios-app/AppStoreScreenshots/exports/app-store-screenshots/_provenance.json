@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "render": {
+    "width": 1242,
+    "height": 2688,
+    "locale": "en-US",
+    "device": "iphone-6.5",
+    "theme": "shibuya-red",
+    "selector": "[data-export-slide]"
+  },
+  "sources": [
+    {
+      "path": "bun.lock",
+      "sha256": "0e673ca33d3d8557e569806560011064f97ad94f48c0066a3896310b1f322c24"
+    },
+    {
+      "path": "next.config.ts",
+      "sha256": "ab4c61f6ee100ae43610a18512f1ebcec842bb2405431e1009266173f21cf772"
+    },
+    {
+      "path": "package.json",
+      "sha256": "f92e0dbcf525d09557e0ed12b5ac7a3bba63ea52b88a0a9dd797f533359a857d"
+    },
+    {
+      "path": "public/screenshots/appstorepic1.png",
+      "sha256": "a2a63f50ca0b240017219a74aa57fa67e2611a96c5e470c78b38165b2256527c"
+    },
+    {
+      "path": "public/screenshots/appstorepic2.png",
+      "sha256": "4916b057be2a3fc695d01f8b8aef00fea57be87809ee301c4ad161395259d582"
+    },
+    {
+      "path": "public/screenshots/appstorepic3.png",
+      "sha256": "4c3baeb642f6338d67f0331eb538821bd10754f3802f634d1d14bbb9464f22b7"
+    },
+    {
+      "path": "public/screenshots/watch/watch-live-workout.jpg",
+      "sha256": "78e8964c3018781b196cc61b04c584ee7bd0c3ed6682bea882bb55e1385be81d"
+    },
+    {
+      "path": "scripts/export-playwright.ts",
+      "sha256": "028a664757a7e608453184efcdd510dc7a622e3145bc4ff2d1905caefb77d62b"
+    },
+    {
+      "path": "scripts/release-package.ts",
+      "sha256": "9aa423224b5ca3943f3ab6396f34da3ff7b4cb81c2ee2370320d1b1d244427a6"
+    },
+    {
+      "path": "scripts/validate-exports.ts",
+      "sha256": "4925c926b9d9c3951465de723457fa96bbc0b9caf8f7e1d56034f9e2d3513a22"
+    },
+    {
+      "path": "src/app/layout.tsx",
+      "sha256": "9d4b7b68968c44da0b32bc6d4b8b7318f690cf6b3945419c9710dfc7cb44d130"
+    },
+    {
+      "path": "src/app/page.tsx",
+      "sha256": "c5ad8e5578f79485f5207b707d499fe6214f126847dbc25a1add71595a468db2"
+    },
+    {
+      "path": "src/app/styles.css",
+      "sha256": "cd155c7e084a33671dad743cdea14451022cd7c57604dc67b0c46de1f3b40db1"
+    },
+    {
+      "path": "tsconfig.json",
+      "sha256": "48a5e9d184300b39024d4071857b82b6806a1ee369c6dd77e7dcfc9228265e05"
+    }
+  ]
+}

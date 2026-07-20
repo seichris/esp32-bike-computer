@@ -29,13 +29,15 @@ navigation-ready.
 | `2A6F` | iOS -> ESP32 | Binary route geometry | Upcoming route polyline for the device map view. |
 | `2A72` | iOS -> ESP32 | Binary GPS position | Current device position and heading for the map view. |
 | `2A73` | iOS -> ESP32 | Binary setting packet | Runtime map-renderer, device-screen, and phone-status values. |
+| `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003` | iOS -> ESP32 | Fixed 16-byte workout frame | Watch-owned workout state and optional live metrics for Ride Stats. |
 
 `DistanceMeters` is an unsigned 16-bit decimal value (`0...65535`). The iOS
 sender saturates larger maneuver distances at `65535` instead of allowing the
 firmware field to wrap.
 
 If iOS has cached an older GATT table and does not discover `2A6F`, `2A72`,
-or `2A73`, the app falls back to framed binary writes over authenticated `2A6E`.
+`2A73`, or the workout characteristic, the app falls back to framed binary
+writes over authenticated `2A6E`.
 Fallback frame prefixes:
 
 | Prefix | Payload |
@@ -43,6 +45,7 @@ Fallback frame prefixes:
 | `MAPR` | route geometry packet |
 | `GPSP` | GPS position packet |
 | `MSET` | map setting packet |
+| `WTLM` | one fixed 16-byte workout frame; prefix plus payload is exactly 20 plaintext bytes before the protected session envelope described below |
 
 ## Device ownership and authentication
 
@@ -111,7 +114,8 @@ owner name to apps.
 Every BLE connection performs a fresh mutual challenge using independent
 random 16-byte nonces from iOS and the ESP32. The device-generated nonce makes
 a captured handshake unusable on a later connection. No navigation, map,
-settings, rename, or deregistration command is accepted before this completes.
+settings, workout, rename, or deregistration command is accepted before this
+completes.
 
 1. iOS writes `OWNER|<OwnerID>|<ClientNonce>`.
 2. ESP32 notifies
@@ -123,8 +127,8 @@ settings, rename, or deregistration command is accepted before this completes.
 
 ### Protected session frames
 
-After `OK2`, all app-to-device writes on the auth, navigation, route, GPS, and
-settings characteristics use AES-256-GCM. Auth replies and every
+After `OK2`, all app-to-device writes on the auth, navigation, route, GPS,
+settings, and workout characteristics use AES-256-GCM. Auth replies and every
 device-to-app navigation notification—including destination requests,
 capabilities, acknowledgements, and transfer status—use the reverse protected
 direction. Plaintext notifications are rejected while a v2 session exists. The
@@ -144,7 +148,8 @@ Ciphertext: 0 or more bytes
 Tag: 16-byte AES-GCM tag
 ```
 
-Channels are `1=auth`, `2=navigation`, `3=route`, `4=GPS`, and `5=settings`.
+Channels are `1=auth`, `2=navigation`, `3=route`, `4=GPS`, `5=settings`, and
+`6=workout`.
 Each direction has an independent strictly increasing sequence per channel.
 Receivers reject zero, replayed, out-of-order, wrong-channel, or invalid-tag
 frames. The 12-byte nonce is `Channel || 7 zero bytes || Sequence`. Additional
@@ -273,6 +278,154 @@ coordinates are converted from GCJ-02 to WGS-84 before writing. Firmware accepts
 the original 8-byte lat/lon payload, the 10-byte lat/lon/heading payload, the
 14-byte payload with Unix time, and the extended 30-byte telemetry payload. The
 Waveshare firmware uses the optional Unix time to sync the onboard PCF85063 RTC.
+
+## Watch Workout Telemetry (`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003`)
+
+Workout telemetry is iOS-to-device, write-without-response, RAM-only, and
+accepted only after the existing local authentication handshake. The logical
+native payload is exactly 16 bytes. In an ownership-v2 session it is carried in
+an `S2` frame on protected channel `6`, for a 38-byte native wire write. A
+cached GATT table carries the same logical payload in the authenticated `2A6E`
+navigation-channel fallback instead:
+
+```text
+"WTLM" | 16-byte workout frame
+```
+
+The fallback plaintext is exactly 20 bytes before ownership-v2 protection and
+the protected fallback wire write is 42 bytes. Native and fallback payloads use
+the same parser after their authenticated channel is unwrapped. The ownership
+handshake already requires an ATT MTU large enough for either protected write.
+iOS sends no workout frames unless capability bit `7` is present, so older
+firmware continues using the existing GPS ride fields unchanged.
+
+### Core frame, kind `1`
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| `0` | 1 | frame kind `1` |
+| `1` | 1 | session state |
+| `2` | 2 | session token, `UInt16LE` |
+| `4` | 4 | elapsed seconds, `UInt32LE` |
+| `8` | 4 | distance meters, `UInt32LE` |
+| `12` | 2 | speed centimeters/second, `UInt16LE` |
+| `14` | 2 | current heart rate BPM, `UInt16LE` |
+
+For the current relay contract, bits `6...7` of the core state byte carry a
+non-zero pair generation (`1...3`); the session state remains in the low six
+bits. Generation zero is the immediately preceding relay contract.
+
+Session states are `0` idle/clear, `1` starting, `2` running, `3` paused, `4`
+ending, `5` ended/final summary, and `6` failed. Idle requires token zero; every
+other state requires a non-zero token. A native iPhone session-ended callback
+does not produce state `5` until the final authoritative Watch snapshot arrives;
+the interim `ending` frame carries unavailable numeric sentinels rather than
+heartbeat-replaying a frozen snapshot.
+
+When firmware has no retained core state, any valid non-idle generation-zero
+core may seed the RAM snapshot so authentication or device-reboot
+resynchronization can restore an ending, ended, or failed presentation. Once a
+generation-zero session is retained, only an active starting/running/paused
+core may replace it with a different token. A complete correlated current-pair
+publication may replace a retained token in any non-idle state, including a
+newer terminal snapshot that was published as the latest batched state.
+
+### Extended frame, kind `2`
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| `0` | 1 | frame kind `2` |
+| `1` | 1 | source/availability flags |
+| `2` | 2 | session token, `UInt16LE` |
+| `4` | 2 | average heart rate BPM, `UInt16LE` |
+| `6` | 2 | active energy in tenths of a kilocalorie, `UInt16LE` |
+| `8` | 2 | cycling power watts, `UInt16LE` |
+| `10` | 2 | cycling cadence in tenths of an RPM, `UInt16LE` |
+| `12` | 1 | current one-based heart-rate zone; zero unavailable |
+| `13` | 2 | altitude meters, `Int16LE` |
+| `15` | 1 | zone count; zero unavailable |
+
+Source flag bit `0` means paired cycling-speed sensor, bit `1` Watch GPS speed,
+bit `2` HealthKit cycling distance, bit `3` valid Watch altitude, and bit `4`
+live HealthKit zone data. Bit `5` means the iPhone's mirrored snapshot is
+current, even when every individual metric is unavailable. Bits `6...7` carry
+the same pair generation (`1...3`) as the core state byte. Generation zero is
+the legacy relay contract. A valid iPhone location fallback may supply altitude
+without setting bit `3`. For compatibility with the immediately preceding
+relay contract, firmware also treats a generation-zero active extended frame
+without bit `5` as current when its preceding core was populated, and uses its
+heartbeat to refresh the retained core. The predecessor contract encoded a
+current-all-unavailable snapshot and transport loss with identical
+generation-zero bytes. Firmware handles that ambiguous all-unavailable pair as
+current-but-unavailable for one 10-second grace window, clears values instead
+of presenting retained speed as live, and does not let later empty
+extended-only heartbeats refresh core freshness. A later populated core or
+extended frame proves recovery.
+
+For unsigned 16-bit metric fields, `0xFFFF` means unavailable. For elapsed and
+distance, `0xFFFFFFFF` means unavailable. Altitude uses `Int16.min` (`0x8000`)
+as unavailable. Valid values saturate one step below their sentinel rather than
+wrapping; valid altitude saturates to `-32767...32767`. Non-finite and negative
+unsigned metrics are unavailable. Heart rate must be positive; zero remains a
+valid speed, energy, power, or cadence value. Active energy therefore ranges
+from `0` through `6553.4` kcal.
+
+iOS coalesces numeric changes to at most one update per second and sends
+state/token and fresh-to-stale transitions immediately. Every new-contract
+publication contains a core and extended frame stamped with the same cycling
+generation; changes and heartbeats are therefore applied as one coherent pair.
+The pair is sent at least every five seconds, including while paused or stale.
+Both latest frames are resent after an authenticated reconnect. Current live
+sessions set source flag bit `5`; an `ending` state that is currently awaiting
+its authoritative final Watch snapshot also sets bit `5` while keeping numeric
+fields unavailable.
+Stale or disconnected live sessions preserve their state and token but send
+unavailable numeric fields with all source flags, including bit `5`, clear.
+Authoritative ended summaries retain final numeric values until an explicit
+idle frame, a newer session, or device reboot.
+
+Firmware decodes native and `WTLM` frames through one authenticated parser and
+keeps the resulting workout state in RAM, separate from legacy `2A72` GPS
+telemetry. For correlated generation `1...3` publications, malformed,
+mismatched, partial, or wrong-generation frames leave the last coherent workout
+state unchanged. A generation `1...3` core is staged and
+becomes visible only after a valid extended frame with the same token and
+generation arrives. This also lets a complete authenticated pair for a newer
+terminal session replace an older retained session without exposing partial
+state. Same-token state changes follow the shared workout transition matrix;
+ending, ended, and failed cannot regress to a live state. A starting core after
+an ended or failed snapshot is treated as an explicit new-session boundary so
+a valid 16-bit token collision cannot hide the newer workout. If authentication
+resynchronizes a colliding newer workout after it has crossed any transition
+that would otherwise be invalid from a retained ending/ended/failed state,
+firmware also accepts the complete correlated pair as a replacement, but only when
+extended bit `5` proves that the resynchronized snapshot is current. This
+includes active, ending, and cross-terminal outcomes. Partial or stale
+same-token pairs leave the retained terminal snapshot unchanged. A live core
+becomes stale after 10 seconds without a confirmed current
+pair; Ride Stats then marks the Watch link lost and suppresses stale speed while
+retaining the last received non-speed values. An all-unavailable active core is
+held without refreshing freshness until its matching extended frame arrives.
+Extended bit `5` set means the current snapshot genuinely has no available
+metrics, so firmware clears the old values without marking the link stale. Bit
+`5` clear on a correlated pair with every field unavailable marks upstream
+transport loss immediately and retains the last snapshot. Explicit idle clears
+the workout state. Ended summaries remain visible until idle, a new session, or
+reboot. Successful local authentication
+starts a transactional resynchronization: firmware keeps displaying the prior
+RAM snapshot until a complete valid replacement core/extended pair arrives,
+then swaps the pair atomically. A missing, malformed, partial, or disconnected
+resynchronization therefore cannot erase the retained snapshot. GPS updates
+continue to populate the legacy ride fields and cannot clear or overwrite Watch
+workout state.
+
+Ride Stats uses the Watch workout state whenever a non-idle core frame has been
+accepted, otherwise it displays the legacy GPS ride fields. The Live page shows
+speed, current heart rate and zone, distance, elapsed time, power, and cadence.
+The Summary page shows average heart rate, active energy, altitude, route
+remaining, and source/freshness. Unavailable workout values display as `--`.
+A long press toggles pages; the existing short-tap and hardware screen cycling
+remain unchanged.
 
 ## Map Settings (`2A73`)
 
@@ -418,7 +571,8 @@ classes. Version `4` advertises that the client understands Battery Status
 screen settings so the device can distinguish a current screen mask from one
 sent by an older four-screen app; older app masks preserve the device's
 existing Battery Status preference. Version `5` advertises destination-catalog
-and device-originated route-request support. Receiving a `CAPS` request alone does not
+and device-originated route-request support. Version `6` advertises that the
+client understands the dedicated Watch-workout telemetry contract. Receiving a `CAPS` request alone does not
 switch the firmware's
 setting semantics: a session switches to independent profiles only after the
 first setting ID in `16...22` is received. This keeps legacy IDs shared when a
@@ -453,6 +607,13 @@ also keeps the preference intact when a `CAPS` response is lost.
 Flag bit `6` reports firmware support for the destination picker described
 below. iOS does not send destination data until this bit is present, so older
 firmware and other board targets continue to use the existing navigation UI.
+
+Flag bit `7` reports complete workout-telemetry support: the dedicated
+characteristic, authenticated native and `WTLM` parsers, RAM-only state, and
+Ride Stats presentation must all be available before firmware sets this bit.
+iOS sends no workout health metrics when the bit is absent. A reconnect or a
+later valid capability response that enables bit `7` triggers one full
+core-plus-extended resynchronization.
 
 ## Destination Picker
 
