@@ -1,30 +1,107 @@
 import SwiftUI
 
-private struct WorkoutStartConfirmationButton<Label: View>: View {
+private enum WorkoutStartAvailabilityAlert: String, Identifiable {
+    case unsupported
+    case activationFailed
+    case noPairedWatch
+    case companionAppNotInstalled
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .unsupported, .noPairedWatch:
+            return "Apple Watch Required"
+        case .activationFailed:
+            return "Unable to Check Apple Watch"
+        case .companionAppNotInstalled:
+            return "Install BikeComputer on Apple Watch"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .unsupported:
+            return "Starting a workout from iPhone requires iOS 17 or later and the BikeComputer app on Apple Watch."
+        case .activationFailed:
+            return "BikeComputer couldn’t check your Apple Watch. Make sure Bluetooth and Wi-Fi are on, then try again."
+        case .noPairedWatch:
+            return "You need the BikeComputer app on an Apple Watch to start tracking your workout. Pair an Apple Watch with this iPhone first."
+        case .companionAppNotInstalled:
+            return "Open the Watch app on this iPhone, tap My Watch, then install BikeComputer under Available Apps."
+        }
+    }
+}
+
+struct WorkoutStartButton<Label: View>: View {
+    @ObservedObject var watchAvailability: WorkoutWatchAvailabilityMonitor
     let action: () -> Void
     @ViewBuilder let label: () -> Label
 
-    @State private var showingConfirmation = false
+    @State private var pendingStart = false
+    @State private var presentedAlert: WorkoutStartAvailabilityAlert?
 
     var body: some View {
         Button {
-            showingConfirmation = true
+            requestStart()
         } label: {
             label()
         }
-        .alert(
-            WorkoutStartDisclosureV1.title,
-            isPresented: $showingConfirmation
-        ) {
-            Button(WorkoutStartDisclosureV1.cancelTitle, role: .cancel) {
-                WorkoutStartDisclosureV1.perform(.cancel, start: action)
-            }
-            Button(WorkoutStartDisclosureV1.confirmTitle) {
-                WorkoutStartDisclosureV1.perform(.startAnyway, start: action)
-            }
-        } message: {
-            Text(WorkoutStartDisclosureV1.message)
+        .alert(item: $presentedAlert) { alert in
+            availabilityAlert(alert)
         }
+        .onChange(of: watchAvailability.availability) { availability in
+            guard pendingStart else { return }
+            handle(availability)
+        }
+    }
+
+    private func requestStart() {
+        handle(watchAvailability.availability)
+    }
+
+    private func handle(_ availability: WorkoutWatchAvailabilityV1) {
+        switch availability {
+        case .activating:
+            pendingStart = true
+            watchAvailability.activate()
+        case .ready:
+            pendingStart = false
+            action()
+        case .unsupported:
+            pendingStart = false
+            presentedAlert = .unsupported
+        case .activationFailed:
+            pendingStart = false
+            presentedAlert = .activationFailed
+        case .noPairedWatch:
+            pendingStart = false
+            presentedAlert = .noPairedWatch
+        case .companionAppNotInstalled:
+            pendingStart = false
+            presentedAlert = .companionAppNotInstalled
+        }
+    }
+
+    private func availabilityAlert(
+        _ alert: WorkoutStartAvailabilityAlert
+    ) -> Alert {
+        if alert == .activationFailed {
+            return Alert(
+                title: Text(alert.title),
+                message: Text(alert.message),
+                primaryButton: .default(Text("Try Again")) {
+                    pendingStart = true
+                    watchAvailability.activate()
+                },
+                secondaryButton: .cancel()
+            )
+        }
+        return Alert(
+            title: Text(alert.title),
+            message: Text(alert.message),
+            dismissButton: .default(Text("OK"))
+        )
     }
 }
 
@@ -43,8 +120,110 @@ private enum WorkoutFinishPrompt {
     }
 }
 
+struct WorkoutFinishButton<Label: View>: View {
+    @ObservedObject var store: WorkoutMetricsStore
+    let onEndAndSave: () -> Void
+    let onDiscard: () -> Void
+    @ViewBuilder let label: () -> Label
+
+    @State private var finishPrompt: WorkoutFinishPrompt?
+
+    var body: some View {
+        Button(role: .destructive) {
+            if let sessionID = store.presentation.sessionID {
+                finishPrompt = .options(sessionID: sessionID)
+            }
+        } label: {
+            label()
+        }
+        .confirmationDialog(
+            "Finish this ride?",
+            isPresented: finishOptionsPresented
+        ) {
+            if case .options(let sessionID) = finishPrompt {
+                Button("End and Save") {
+                    finishPrompt = nil
+                    guard store.presentation.sessionID == sessionID else { return }
+                    onEndAndSave()
+                }
+                Button("Discard Workout", role: .destructive) {
+                    requestDiscardConfirmation(for: sessionID)
+                }
+                Button("Keep Riding", role: .cancel) {
+                    finishPrompt = nil
+                }
+            }
+        } message: {
+            Text("Apple Watch performs the save. If it is unreachable, the workout continues there.")
+        }
+        .alert(
+            WorkoutDiscardDisclosureV1.title,
+            isPresented: discardConfirmationPresented
+        ) {
+            if case .discardConfirmation(let sessionID) = finishPrompt {
+                Button(WorkoutDiscardDisclosureV1.cancelTitle, role: .cancel) {
+                    WorkoutDiscardDisclosureV1.perform(
+                        .cancel,
+                        expectedSessionID: sessionID,
+                        currentSessionID: store.presentation.sessionID,
+                        discard: onDiscard
+                    )
+                }
+                Button(
+                    WorkoutDiscardDisclosureV1.confirmTitle,
+                    role: .destructive
+                ) {
+                    WorkoutDiscardDisclosureV1.perform(
+                        .confirmDiscard,
+                        expectedSessionID: sessionID,
+                        currentSessionID: store.presentation.sessionID,
+                        discard: onDiscard
+                    )
+                }
+            }
+        } message: {
+            Text(WorkoutDiscardDisclosureV1.message)
+        }
+        .onChange(of: store.presentation.sessionID) { _ in
+            finishPrompt = nil
+        }
+    }
+
+    private var finishOptionsPresented: Binding<Bool> {
+        Binding(
+            get: { finishPrompt?.showsOptions == true },
+            set: { isPresented in
+                if !isPresented, finishPrompt?.showsOptions == true {
+                    finishPrompt = nil
+                }
+            }
+        )
+    }
+
+    private var discardConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { finishPrompt?.showsDiscardConfirmation == true },
+            set: { isPresented in
+                if !isPresented,
+                   finishPrompt?.showsDiscardConfirmation == true {
+                    finishPrompt = nil
+                }
+            }
+        )
+    }
+
+    private func requestDiscardConfirmation(for sessionID: UUID) {
+        finishPrompt = nil
+        DispatchQueue.main.async {
+            guard store.presentation.sessionID == sessionID else { return }
+            finishPrompt = .discardConfirmation(sessionID: sessionID)
+        }
+    }
+}
+
 struct WorkoutCompactCard: View {
     @ObservedObject var store: WorkoutMetricsStore
+    @ObservedObject var watchAvailability: WorkoutWatchAvailabilityMonitor
     let onStart: () -> Void
     let onOpen: () -> Void
 
@@ -84,7 +263,10 @@ struct WorkoutCompactCard: View {
     private var action: some View {
         switch store.presentation.connectionState {
         case .idle:
-            WorkoutStartConfirmationButton(action: onStart) {
+            WorkoutStartButton(
+                watchAvailability: watchAvailability,
+                action: onStart
+            ) {
                 Text("Start")
             }
                 .buttonStyle(.borderedProminent)
@@ -216,6 +398,7 @@ struct WorkoutCompactCard: View {
 
 struct WorkoutDashboardView: View {
     @ObservedObject var store: WorkoutMetricsStore
+    @ObservedObject var watchAvailability: WorkoutWatchAvailabilityMonitor
     let onStart: () -> Void
     let onPause: () -> Void
     let onResume: () -> Void
@@ -224,7 +407,6 @@ struct WorkoutDashboardView: View {
     let onDone: () -> Bool
 
     @Environment(\.dismiss) private var dismiss
-    @State private var finishPrompt: WorkoutFinishPrompt?
 
     var body: some View {
         NavigationView {
@@ -250,57 +432,6 @@ struct WorkoutDashboardView: View {
                     Button("Close") { dismiss() }
                 }
             }
-        }
-        .confirmationDialog(
-            "Finish this ride?",
-            isPresented: finishOptionsPresented
-        ) {
-            if case .options(let sessionID) = finishPrompt {
-                Button("End and Save") {
-                    finishPrompt = nil
-                    guard store.presentation.sessionID == sessionID else { return }
-                    onEndAndSave()
-                }
-                Button("Discard Workout", role: .destructive) {
-                    requestDiscardConfirmation(for: sessionID)
-                }
-                Button("Keep Riding", role: .cancel) {
-                    finishPrompt = nil
-                }
-            }
-        } message: {
-            Text("Apple Watch performs the save. If it is unreachable, the workout continues there.")
-        }
-        .alert(
-            WorkoutDiscardDisclosureV1.title,
-            isPresented: discardConfirmationPresented
-        ) {
-            if case .discardConfirmation(let sessionID) = finishPrompt {
-                Button(WorkoutDiscardDisclosureV1.cancelTitle, role: .cancel) {
-                    WorkoutDiscardDisclosureV1.perform(
-                        .cancel,
-                        expectedSessionID: sessionID,
-                        currentSessionID: store.presentation.sessionID,
-                        discard: onDiscard
-                    )
-                }
-                Button(
-                    WorkoutDiscardDisclosureV1.confirmTitle,
-                    role: .destructive
-                ) {
-                    WorkoutDiscardDisclosureV1.perform(
-                        .confirmDiscard,
-                        expectedSessionID: sessionID,
-                        currentSessionID: store.presentation.sessionID,
-                        discard: onDiscard
-                    )
-                }
-            }
-        } message: {
-            Text(WorkoutDiscardDisclosureV1.message)
-        }
-        .onChange(of: store.presentation.sessionID) { _ in
-            finishPrompt = nil
         }
     }
 
@@ -335,7 +466,10 @@ struct WorkoutDashboardView: View {
             Text("Start an outdoor cycling workout on Apple Watch. Your Watch remains the workout owner and the only device that saves to Health.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
-            WorkoutStartConfirmationButton(action: onStart) {
+            WorkoutStartButton(
+                watchAvailability: watchAvailability,
+                action: onStart
+            ) {
                 Text("Start on Apple Watch")
             }
                 .buttonStyle(.borderedProminent)
@@ -491,7 +625,10 @@ struct WorkoutDashboardView: View {
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                 }
-                WorkoutStartConfirmationButton(action: onStart) {
+                WorkoutStartButton(
+                    watchAvailability: watchAvailability,
+                    action: onStart
+                ) {
                     Text("Try Again")
                 }
                     .buttonStyle(.bordered)
@@ -508,7 +645,10 @@ struct WorkoutDashboardView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                WorkoutStartConfirmationButton(action: onStart) {
+                WorkoutStartButton(
+                    watchAvailability: watchAvailability,
+                    action: onStart
+                ) {
                     Text("Try Again")
                 }
                     .buttonStyle(.bordered)
@@ -538,11 +678,11 @@ struct WorkoutDashboardView: View {
                     )
                 }
 
-                Button(role: .destructive) {
-                    if let sessionID = store.presentation.sessionID {
-                        finishPrompt = .options(sessionID: sessionID)
-                    }
-                } label: {
+                WorkoutFinishButton(
+                    store: store,
+                    onEndAndSave: onEndAndSave,
+                    onDiscard: onDiscard
+                ) {
                     Label("End Workout", systemImage: "stop.fill")
                 }
                 .disabled(
@@ -551,37 +691,6 @@ struct WorkoutDashboardView: View {
                 )
             }
             .buttonStyle(.borderedProminent)
-        }
-    }
-
-    private var finishOptionsPresented: Binding<Bool> {
-        Binding(
-            get: { finishPrompt?.showsOptions == true },
-            set: { isPresented in
-                if !isPresented, finishPrompt?.showsOptions == true {
-                    finishPrompt = nil
-                }
-            }
-        )
-    }
-
-    private var discardConfirmationPresented: Binding<Bool> {
-        Binding(
-            get: { finishPrompt?.showsDiscardConfirmation == true },
-            set: { isPresented in
-                if !isPresented,
-                   finishPrompt?.showsDiscardConfirmation == true {
-                    finishPrompt = nil
-                }
-            }
-        )
-    }
-
-    private func requestDiscardConfirmation(for sessionID: UUID) {
-        finishPrompt = nil
-        DispatchQueue.main.async {
-            guard store.presentation.sessionID == sessionID else { return }
-            finishPrompt = .discardConfirmation(sessionID: sessionID)
         }
     }
 

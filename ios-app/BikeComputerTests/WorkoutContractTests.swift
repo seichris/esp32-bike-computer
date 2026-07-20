@@ -118,11 +118,13 @@ private struct WorkoutContractTestSuite {
         testLatestEnvelopeBufferCoalescesBackpressure()
         testWorkoutErrorCopyDistinguishesTerminalUncertainty()
         testTerminalErrorAndTakeoverCopyUseDurableDisposition()
+        testWorkoutWatchAvailabilityPolicy()
         testCrossAppWorkoutStartDisclosureRequiresExplicitConfirmation()
         testWorkoutDiscardDisclosureRequiresFinalConfirmation()
-        testEveryRiderInitiatedStartSurfaceUsesDisclosure()
+        testIPhoneStartsUseWatchAvailabilityAndWatchStartsKeepDisclosure()
         testEveryDiscardSurfaceRequiresFinalConfirmation()
         testWorkoutUICompositionRetainsPhaseThreeExitCriteria()
+        testMainRideControlsComposition()
         testWorkoutFormattingKeepsUnavailableValuesDistinctFromZero()
     }
 
@@ -3680,6 +3682,14 @@ private struct WorkoutContractTestSuite {
             "native end must not permit dismissal before the final Watch snapshot"
         )
         expect(
+            !reducer.presentation.canStartNewWorkout
+                && !reducer.beginWatchLaunch(
+                    id: UUID(),
+                    at: start.addingTimeInterval(11)
+                ),
+            "native end must not admit a new launch before the final outcome is resolved and dismissed"
+        )
+        expect(
             reducer.timeOutFinalSnapshot()
                 && reducer.presentation.errorCode == .finalSummaryUnavailable
                 && reducer.canResetTerminalPresentation,
@@ -4488,6 +4498,72 @@ private struct WorkoutContractTestSuite {
         )
     }
 
+    private mutating func testWorkoutWatchAvailabilityPolicy() {
+        expect(
+            WorkoutWatchAvailabilityPolicyV1.resolve(
+                isSupported: false,
+                isActivated: false,
+                isPaired: false,
+                isCompanionAppInstalled: false,
+                isReachable: false
+            ) == .unsupported,
+            "unsupported devices must not be treated as Watch-ready"
+        )
+        expect(
+            WorkoutWatchAvailabilityPolicyV1.resolve(
+                isSupported: true,
+                isActivated: false,
+                activationFailed: true,
+                isPaired: false,
+                isCompanionAppInstalled: false,
+                isReachable: false
+            ) == .activationFailed,
+            "a failed WCSession activation must become a recoverable error state"
+        )
+        expect(
+            WorkoutWatchAvailabilityPolicyV1.resolve(
+                isSupported: true,
+                isActivated: false,
+                isPaired: false,
+                isCompanionAppInstalled: false,
+                isReachable: false
+            ) == .activating,
+            "pairing state must not be trusted before WCSession activates"
+        )
+        expect(
+            WorkoutWatchAvailabilityPolicyV1.resolve(
+                isSupported: true,
+                isActivated: true,
+                isPaired: false,
+                isCompanionAppInstalled: false,
+                isReachable: false
+            ) == .noPairedWatch,
+            "an activated unpaired phone must report that no Watch is paired"
+        )
+        expect(
+            WorkoutWatchAvailabilityPolicyV1.resolve(
+                isSupported: true,
+                isActivated: true,
+                isPaired: true,
+                isCompanionAppInstalled: false,
+                isReachable: false
+            ) == .companionAppNotInstalled,
+            "a paired Watch without BikeComputer must get install guidance"
+        )
+        for isReachable in [false, true] {
+            expect(
+                WorkoutWatchAvailabilityPolicyV1.resolve(
+                    isSupported: true,
+                    isActivated: true,
+                    isPaired: true,
+                    isCompanionAppInstalled: true,
+                    isReachable: isReachable
+                ) == .ready(isReachable: isReachable),
+                "an installed companion must be start-ready regardless of immediate messaging reachability"
+            )
+        }
+    }
+
     private mutating func testWorkoutDiscardDisclosureRequiresFinalConfirmation() {
         var discardCount = 0
         let discard = { discardCount += 1 }
@@ -4588,7 +4664,7 @@ private struct WorkoutContractTestSuite {
         )
     }
 
-    private mutating func testEveryRiderInitiatedStartSurfaceUsesDisclosure() {
+    private mutating func testIPhoneStartsUseWatchAvailabilityAndWatchStartsKeepDisclosure() {
         let iosAppDirectory = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -4609,16 +4685,16 @@ private struct WorkoutContractTestSuite {
             return
         }
 
-        let iPhoneDisclosureCount = iPhoneSource
-            .components(separatedBy: "WorkoutStartConfirmationButton(action: onStart)")
+        let iPhoneAvailabilityCount = iPhoneSource
+            .components(separatedBy: "WorkoutStartButton(")
             .count - 1
         expect(
-            iPhoneDisclosureCount == 4,
-            "all four iPhone idle, dashboard, failed, and disconnected start routes must use the disclosure component"
+            iPhoneAvailabilityCount == 4,
+            "all four iPhone compact, dashboard, failed, and disconnected start routes must use Watch availability gating"
         )
         expect(
-            !iPhoneSource.contains("Button(\"Try Again\", action: onStart)"),
-            "iPhone retry controls must not call the Watch launch closure directly"
+            !iPhoneSource.contains("WorkoutStartDisclosureV1"),
+            "iPhone start surfaces must not show the cross-app workout warning"
         )
         let iPhoneConfirmationComponent = iPhoneSource
             .components(separatedBy: "struct WorkoutCompactCard").first ?? ""
@@ -4627,25 +4703,24 @@ private struct WorkoutContractTestSuite {
         }
         expect(
             iPhoneConfirmationComponent.contains(
-                "Button {\n            showingConfirmation = true\n        } label:"
+                "case .ready:\n            pendingStart = false\n            action()"
             )
-                && !iPhoneConfirmationComponent.contains("action()")
                 && iPhoneConfirmationComponent.contains(
-                    "WorkoutStartDisclosureV1.perform(.startAnyway, start: action)"
+                    "case .companionAppNotInstalled:"
                 ),
-            "the iPhone confirmation component must open the alert without directly launching"
+            "the iPhone component must start ready Watches directly and gate missing companion apps"
         )
         expect(
             compactIPhoneConfirmation.contains(
-                "Button(WorkoutStartDisclosureV1.cancelTitle,role:.cancel){WorkoutStartDisclosureV1.perform(.cancel,start:action)}"
+                "YouneedtheBikeComputerapponanAppleWatchtostarttrackingyourworkout"
             )
                 && compactIPhoneConfirmation.contains(
-                    "Button(WorkoutStartDisclosureV1.confirmTitle){WorkoutStartDisclosureV1.perform(.startAnyway,start:action)}"
+                    "OpentheWatchapponthisiPhone,tapMyWatch,theninstallBikeComputerunderAvailableApps"
                 )
                 && compactIPhoneConfirmation.contains(
-                    "isPresented:$showingConfirmation"
+                    ".alert(item:$presentedAlert)"
                 ),
-            "iPhone Cancel and Start Anyway must map to their matching shared-policy choices"
+            "iPhone unavailable states must provide paired-Watch and companion-install guidance"
         )
 
         let watchDisclosureActionCount = watchSource
@@ -4655,7 +4730,7 @@ private struct WorkoutContractTestSuite {
             watchSource.contains("showingStartConfirmation = true")
                 && watchDisclosureActionCount == 2
                 && !watchSource.contains("manager.startOutdoorCycling()"),
-            "Watch Start Ride must expose only Cancel and Start Anyway through the shared disclosure policy"
+            "Watch Start Ride must retain its local cross-app workout disclosure"
         )
         let compactWatchSource = watchSource.filter { !$0.isWhitespace }
         expect(
@@ -4852,7 +4927,7 @@ private struct WorkoutContractTestSuite {
                     "WorkoutDiscardDisclosureV1.perform(.confirmDiscard,expectedSessionID:sessionID,currentSessionID:store.presentation.sessionID,discard:onDiscard)"
                 )
                 && compactSource.contains(
-                    "Button(role:.destructive){ifletsessionID=store.presentation.sessionID{finishPrompt=.options(sessionID:sessionID)}}label:{Label(\"EndWorkout\""
+                    "WorkoutFinishButton(store:store,onEndAndSave:onEndAndSave,onDiscard:onDiscard){Label(\"EndWorkout\""
                 ),
             "dashboard labels must remain bound to the matching control closures"
         )
@@ -4866,10 +4941,10 @@ private struct WorkoutContractTestSuite {
         let compactContentView = contentViewSource.filter { !$0.isWhitespace }
         expect(
             compactContentView.contains(
-                "WorkoutCompactCard(store:workoutStore,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onOpen:{showingWorkoutDashboard=true})"
+                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onOpen:{showingWorkoutDashboard=true})"
             )
                 && compactContentView.contains(
-                    ".sheet(isPresented:$showingWorkoutDashboard){WorkoutDashboardView(store:workoutStore,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)}"
+                    ".sheet(isPresented:$showingWorkoutDashboard){WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)}"
                 ),
             "ContentView must present the dashboard from its exact state and inject each production manager action"
         )
@@ -4888,6 +4963,146 @@ private struct WorkoutContractTestSuite {
                     "WorkoutCrossAppTakeoverCopyV1.summary(disposition:summary.outcome==.saved?.save:.discard)"
                 ),
             "Watch takeover copy must remain bound to the live and terminal Save/Discard dispositions"
+        )
+    }
+
+    private mutating func testMainRideControlsComposition() {
+        let iosAppDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer")
+        let contentURL = iosAppDirectory
+            .appendingPathComponent("BikeComputer/ContentView.swift")
+        let navigationURL = iosAppDirectory
+            .appendingPathComponent("BikeComputer/Views/NavigationDetailsView.swift")
+        let routeURL = iosAppDirectory
+            .appendingPathComponent("BikeComputer/Views/RouteInputView.swift")
+        let workoutURL = iosAppDirectory
+            .appendingPathComponent("BikeComputer/Views/WorkoutViews.swift")
+        guard let content = try? String(contentsOf: contentURL, encoding: .utf8),
+              let navigation = try? String(contentsOf: navigationURL, encoding: .utf8),
+              let route = try? String(contentsOf: routeURL, encoding: .utf8),
+              let workout = try? String(contentsOf: workoutURL, encoding: .utf8) else {
+            expect(false, "main ride-control source files must be available")
+            return
+        }
+
+        let compactContent = content.filter { !$0.isWhitespace }
+        let compactNavigation = navigation.filter { !$0.isWhitespace }
+        let compactWorkout = workout.filter { !$0.isWhitespace }
+        expect(
+            route.contains("Search destination")
+                && !route.contains("Search for a destination"),
+            "all destination search surfaces must use the concise label"
+        )
+        expect(
+            compactContent.contains(
+                "HStack(alignment:.bottom,spacing:8){RouteSearchPanel("
+            )
+                && compactContent.contains(
+                    "Label(\"Startworkout\",systemImage:\"figure.outdoor.cycle\")"
+                )
+                && compactContent.contains(
+                    "WorkoutStartButton(watchAvailability:watchAvailability,action:workoutMirrorManager.startOutdoorCyclingOnWatch)"
+                ),
+            "the collapsed destination row must include the blue Watch-gated start button"
+        )
+        expect(
+            compactContent.contains(
+                "if(coordinator.isNavigating||workoutStore.presentation.isWorkoutActive),(coordinator.isNavigating||!isSearchPanelExpanded){rideControlPanel"
+            )
+                && compactContent.contains(
+                    "if!coordinator.isNavigating{"
+                ),
+            "workout metrics must show with or without navigation while destination search remains available without navigation"
+        )
+
+        for binding in [
+            "WorkoutValueFormatter.whole(suppressInstantaneous?nil:snapshot.cyclingCadence?.value)",
+            "WorkoutValueFormatter.whole(suppressInstantaneous?nil:snapshot.cyclingPower?.value)",
+            "WorkoutValueFormatter.speed(suppressInstantaneous?nil:snapshot.currentSpeed?.value)",
+            "WorkoutValueFormatter.distance(snapshot.cyclingDistance?.value)",
+            "altitudeValue(suppressInstantaneous?nil:snapshot.location?.altitude)",
+            "WorkoutValueFormatter.heartRate(suppressInstantaneous?nil:snapshot.currentHeartRate?.value)",
+            "suppressInstantaneous?\"--\":heartRateZone(snapshot)",
+            "WorkoutValueFormatter.energy(snapshot.activeEnergy?.value)",
+        ] {
+            expect(
+                compactNavigation.contains(binding.filter { !$0.isWhitespace }),
+                "main ride panel must bind the requested live metric: \(binding)"
+            )
+        }
+        var previousMetricIndex = compactNavigation.startIndex
+        for label in [
+            "label:\"cadence\"",
+            "label:\"power\"",
+            "label:\"speed\"",
+            "label:\"distance\"",
+            "label:\"altitude\"",
+            "label:\"heartrate\"",
+            "label:\"HRzone\"",
+            "label:\"energy\"",
+        ] {
+            guard let range = compactNavigation.range(
+                of: label,
+                range: previousMetricIndex..<compactNavigation.endIndex
+            ) else {
+                expect(
+                    false,
+                    "main ride panel must keep the requested metric order at \(label)"
+                )
+                break
+            }
+            previousMetricIndex = range.upperBound
+        }
+        for control in [
+            "\"Pauseworkout\"",
+            "\"Resumeworkout\"",
+            "\"Endworkout\"",
+            "onStopNavigation",
+            "onPauseWorkout",
+            "onResumeWorkout",
+            "onEndAndSaveWorkout",
+            "onDiscardWorkout",
+        ] {
+            expect(
+                compactNavigation.contains(control),
+                "main ride panel must retain control route: \(control)"
+            )
+        }
+        expect(
+            compactNavigation.contains(
+                "case.launchingWatch,.awaitingFirstSnapshot,.stale,.disconnected:"
+            )
+                && compactNavigation.contains("Workoutdatadelayed")
+                && compactNavigation.contains("AppleWatchdisconnected")
+                && compactNavigation.contains("captureAge(at:date)"),
+            "unconfirmed, stale, or disconnected workout metrics must suppress instantaneous values and show connection status"
+        )
+        expect(
+            compactNavigation.contains(
+                "ifisCompactHeight{ScrollView(.vertical,showsIndicators:true)"
+            )
+                && compactNavigation.contains(
+                    ".frame(maxHeight:isCompactHeight?215:nil)"
+                ),
+            "compact-height layouts must keep metrics scrollable above pinned controls"
+        )
+        expect(
+            compactNavigation.contains("@Environment(\\.dynamicTypeSize)")
+                && compactNavigation.contains(
+                    "ifdynamicTypeSize.isAccessibilitySize{VStack(spacing:8){navigationControlworkoutControls}"
+                )
+                && compactNavigation.contains(
+                    "ifisCompactHeight&&dynamicTypeSize.isAccessibilitySize{ScrollView(.vertical,showsIndicators:true){VStack(spacing:8){metricContent"
+                ),
+            "accessibility controls must reflow and remain scrollable in compact-height layouts"
+        )
+        expect(
+            compactWorkout.contains("case.activationFailed:")
+                && compactWorkout.contains("Text(\"TryAgain\")")
+                && compactWorkout.contains("watchAvailability.activate()"),
+            "Watch activation failures must offer a retry path before starting"
         )
     }
 

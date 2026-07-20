@@ -33,8 +33,11 @@ You can review or delete saved workouts in Apple's Health or Fitness apps and
 change Bike Computer's Health access in system settings.
 
 Starting a Bike Computer workout may replace another app's active workout on
-Apple Watch. Bike Computer shows a warning and requires confirmation before it
-tries to start. Cancelling the warning does not create a Bike Computer workout.
+Apple Watch. The Bike Computer Watch app shows a warning and requires
+confirmation before it tries to start; cancelling that warning does not create
+a Bike Computer workout. An iPhone-initiated start instead proceeds directly
+after checking for a paired Watch and installed Bike Computer companion because
+public APIs do not reveal whether another workout app is active.
 
 ## Location
 

@@ -18,10 +18,12 @@ iPhone, and optional Apple Watch companion.
 
 - The Apple Watch is the workout owner and the only component that saves an
   `HKWorkout`.
-- A workout can be started from either Watch or iPhone after an explicit
-  confirmation. The Watch must be worn, unlocked, paired, and authorized for
-  Health access. Watch location access is optional; without it, route,
-  elevation, and GPS fallback metrics remain unavailable.
+- A workout can be started from either Watch or iPhone. A Watch-app start asks
+  for explicit confirmation; an iPhone start proceeds directly after checking
+  that a Watch is paired and the BikeComputer companion is installed. The Watch
+  must be worn, unlocked, paired, and authorized for Health access. Watch
+  location access is optional; without it, route, elevation, and GPS fallback
+  metrics remain unavailable.
 - Live heart rate, elapsed time, distance, speed, active energy, and available
   power and cadence values appear on Watch and iPhone. The iPhone also shows
   available altitude. Firmware advertising workout telemetry capability shows

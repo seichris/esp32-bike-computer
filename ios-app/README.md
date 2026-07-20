@@ -21,12 +21,17 @@ Open `BikeComputer/BikeComputer.xcodeproj` in Xcode.
    workout and route permissions.
 3. Allow location while using the Watch app if you want a workout route,
    elevation, and GPS fallback speed.
-4. Return to the start screen and select **Start Ride**, then confirm **Start
-   Anyway**. The confirmation is also required when starting from iPhone.
+4. To start on Watch, return to its start screen, select **Start Ride**, then
+   confirm **Start Anyway**.
+5. To start on iPhone, select **Start workout**. When a Watch is paired and the
+   BikeComputer companion is installed, the iPhone starts the Watch-owned
+   workout directly. Otherwise it explains the required Watch setup.
 
-BikeComputer warns that Apple Watch permits one active workout session and that
+The Watch app warns that Apple Watch permits one active workout session and that
 starting may replace another app's workout. **Cancel** must leave the other
-workout untouched and create no BikeComputer session.
+workout untouched and create no BikeComputer session. The iPhone cannot detect
+another app's active workout through public APIs, so its paired-and-installed
+start path does not show that warning.
 
 ## Workout behavior
 

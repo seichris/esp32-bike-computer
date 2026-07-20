@@ -326,6 +326,16 @@ nonisolated struct WorkoutMirrorPresentationV1: Equatable, Sendable {
         sessionState.isActive
     }
 
+    var canStartNewWorkout: Bool {
+        guard !isWorkoutActive, pendingControl == nil else { return false }
+        switch connectionState {
+        case .idle, .failed, .disconnected, .unsupported:
+            return true
+        case .launchingWatch, .awaitingFirstSnapshot, .connected, .stale, .ended:
+            return false
+        }
+    }
+
     func captureAge(at date: Date) -> TimeInterval? {
         capturedAt.map { max(0, date.timeIntervalSince($0)) }
     }
@@ -632,11 +642,10 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
         at date: Date,
         timeout: TimeInterval = Self.defaultStartTimeout
     ) -> Bool {
-        guard timeout.isFinite,
+        guard presentation.canStartNewWorkout,
+              timeout.isFinite,
               timeout > 0,
-              !presentation.isWorkoutActive,
-              connectionState != .launchingWatch,
-              connectionState != .awaitingFirstSnapshot else {
+              connectionState != .launchingWatch else {
             return false
         }
         activeLaunchID = id

@@ -59,7 +59,7 @@ build into the final-candidate column.
 | # | Scenario and required observation | Final-candidate status | Evidence |
 | --- | --- | --- | --- |
 | 1 | Start on Watch with iPhone foreground and ESP32 connected; one coherent session appears on all three. | Pending | — |
-| 2 | Start on iPhone; Watch wakes, requires the explicit start confirmation, and owns the workout. | Pending | — |
+| 2 | Start on iPhone with a paired Watch and installed companion; start proceeds directly, the Watch wakes, and the Watch owns the workout. | Pending | — |
 | 3 | Start without ESP32, connect it mid-workout, and receive the latest coherent state. | Pending | — |
 | 4 | Disconnect and reconnect ESP32; Watch continues and ESP32 resynchronizes without stale replay. | Pending | — |
 | 5 | Disable and restore Watch/iPhone Bluetooth; Watch continues and iPhone reconciles current state. | Pending | — |
@@ -67,7 +67,7 @@ build into the final-candidate column.
 | 7 | Background iPhone without navigation; ESP32 must become honestly stale rather than show old speed as current. | Pending | — |
 | 8 | Pause and resume from both Watch and iPhone; state agrees and paused time/distance do not inflate. | Pending | — |
 | 9 | End and save once from Watch and once from iPhone in separate runs; each produces one synchronized terminal outcome. | Pending | — |
-| 10 | With Apple's Workout active, test both BikeComputer start surfaces: warning shown, Cancel is a no-op, Start Anyway proceeds only after confirmation and reports any displacement honestly. | Pending | — |
+| 10 | With Apple's Workout active, verify the Watch-app warning, Cancel no-op, and Start Anyway path. Separately verify direct iPhone start after pairing/install checks and honest displacement reporting. | Pending | — |
 | 11 | Deny Health access, then deny Watch location separately; workout setup and unavailable route/GPS metrics remain honest. | Pending | — |
 | 12 | Ride without external sensors; optional power/cadence stay unavailable and GPS fallback behavior is correct. | Pending | — |
 | 13 | Ride with cycling speed, power, and cadence sensors; available values propagate without double counting. | Pending | — |

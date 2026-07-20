@@ -40,12 +40,14 @@ was removed from the repository.
 - The BikeComputer Watch app, not Apple's Workout app, owns the active
   HKWorkoutSession.
 - Apple Watch permits only one active workout session, but public HealthKit APIs
-  do not expose whether another app currently owns it. Before every
-  rider-initiated start from Watch or iPhone, BikeComputer warns that it cannot
-  check for another app's workout and that starting may end that workout.
-  `Cancel` creates no BikeComputer session; `Start Anyway` proceeds with the
-  Watch-owned start. If another app later takes ownership, BikeComputer reports
-  that displacement explicitly and never retries in a loop.
+  do not expose whether another app currently owns it. A rider-initiated start
+  in the Watch app warns that BikeComputer cannot check for another app's
+  workout: `Cancel` creates no BikeComputer session and `Start Anyway` proceeds.
+  An iPhone start instead checks for a paired Watch and installed BikeComputer
+  companion, then starts directly; transient WatchConnectivity reachability is
+  not a hard gate because HealthKit can wake the Watch app. If another app later
+  takes ownership, BikeComputer reports that displacement explicitly and never
+  retries in a loop.
 - Workout and navigation are independent:
   - starting navigation does not silently start a workout;
   - ending navigation does not end a workout;
@@ -773,10 +775,10 @@ Presentation rules:
 
 | Failure | Required behavior |
 | --- | --- |
-| No paired/reachable Watch | iPhone start fails clearly; navigation remains usable. |
+| No paired Watch or missing companion app | iPhone start explains the required setup; navigation remains usable. Transient WatchConnectivity unreachability does not block a paired, installed Watch start. |
 | HealthKit denied | No workout starts; no synthetic workout is saved. |
 | Location denied on Watch | Continue supported sensor metrics; route/elevation unavailable. |
-| Apple Workout already active before BikeComputer starts | Require the cross-app warning before launch/start. Cancel creates no session; Start Anyway may end the existing workout, as disclosed. |
+| Apple Workout already active before BikeComputer starts | A Watch-app start requires the cross-app warning: Cancel creates no session and Start Anyway may end the existing workout, as disclosed. An iPhone start proceeds directly after pairing/install checks because public APIs cannot detect the competing workout. Any resulting displacement is reported honestly. |
 | Another app starts while BikeComputer is active | Report that BikeComputer was displaced, stop safely, and do not retry in a loop. |
 | iPhone disconnects | Watch continues and saves; buffer only the newest pending snapshot. |
 | Mirroring reconnects | Replace session reference and request a full snapshot. |
@@ -932,10 +934,11 @@ Use a real paired Watch and iPhone; simulator-only validation is insufficient.
 7. Background iPhone without navigation and verify honest stale behavior.
 8. Pause/resume from Watch and iPhone.
 9. End from Watch and from iPhone.
-10. With Apple Workout active, open each BikeComputer start surface: verify the
-    warning appears, Cancel leaves Apple Workout active, and Start Anyway only
-    proceeds after the explicit choice and transfers workout ownership as
-    disclosed.
+10. With Apple Workout active, verify the Watch-app start warning: Cancel leaves
+    Apple Workout active and Start Anyway proceeds only after the explicit
+    choice. Separately verify that iPhone start proceeds directly after the
+    paired-Watch/installed-companion check and that any displacement is reported
+    honestly.
 11. Deny HealthKit, then deny Watch location separately.
 12. Ride without external sensors.
 13. Ride with cycling speed, power, and cadence sensors.
@@ -960,9 +963,10 @@ Use a real paired Watch and iPhone; simulator-only validation is insufficient.
 - Reconnection restores one coherent latest snapshot without stale replay.
 - Exactly one HKWorkout is saved, by Watch, with a route when permitted.
 - Navigation and workout can start/end independently.
-- Cross-app workout ownership is handled explicitly: both start surfaces require
-  the warning, Cancel never launches or creates a session, and displacement of
-  an active BikeComputer workout is reported honestly.
+- Cross-app workout ownership is handled explicitly: the Watch start surface
+  requires the warning and Cancel never creates a session; the iPhone starts
+  directly after pairing/install checks; displacement of an active
+  BikeComputer workout is reported honestly.
 - Existing iPhone navigation and legacy firmware GPS telemetry remain working.
 - No raw health metrics are persisted on ESP32 or sent to a backend.
 - iOS, watchOS, and both firmware targets pass their relevant automated and

@@ -36,14 +36,19 @@ To test:
 3. Select **Start Ride**, then confirm **Start Anyway**.
 4. Open BikeComputer on iPhone to view the same live workout and use mirrored
    pause, resume, save, or discard controls.
+5. End that workout, then select **Start workout** on iPhone. With the Watch
+   paired and the companion installed, this starts the Watch-owned workout
+   directly without a second confirmation.
 
 The privacy policy is available from **Settings > Privacy Policy** on iPhone and
 from **Privacy Policy** on the Watch start screen.
 
-The start warning is intentional because Apple Watch permits one active workout
-session. **Cancel** creates no session. Saving creates one Health workout from
-Watch; discarding creates none. A route requires Watch location permission and
-actual outdoor movement.
+The Watch-app start warning is intentional because Apple Watch permits one
+active workout session. **Cancel** creates no session. The iPhone start checks
+for a paired Watch and installed companion but starts directly because public
+APIs cannot detect another app's workout. Saving creates one Health workout
+from Watch; discarding creates none. A route requires Watch location permission
+and actual outdoor movement.
 
 No account or external cycling sensor is required. Optional Bluetooth bike
 computer hardware is not required to review the Watch/iPhone workflow.
