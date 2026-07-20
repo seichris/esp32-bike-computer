@@ -11,9 +11,10 @@ criterion.
 | --- | --- |
 | Branch | `feature/watchos-workout-companion` |
 | Phase 6 base | `cf52c1a26d4068f72d45dab216fb27535a580f92` |
-| Candidate commit | Pending Phase 6 checkpoint |
-| iPhone build | Pending final candidate install |
-| Watch build | Pending final candidate install |
+| Main integration checkpoint | `3b583669de7141c37f00d1f05713f46aced0fa1c` (includes `origin/main` / PR #111 at `e90118509d517bd34e0e5adabfb2f197fcd3ee23`) |
+| Candidate code commit | `40b8e034a75045de51ffd974d2155144bfa2911e` |
+| iPhone build | Exact-candidate unsigned Release container passed; pending final physical install |
+| Watch build | Exact-candidate embedded and standalone unsigned Release builds passed; pending final physical install |
 | ESP32 1.75 firmware SHA | Pending final candidate flash |
 | ESP32 2.06 firmware SHA | Pending final candidate flash |
 
@@ -25,27 +26,27 @@ build into the final-candidate column.
 
 | Gate | Status | Evidence |
 | --- | --- | --- |
-| iOS 15 compatibility/typecheck | Passed | `./scripts/run-workout-contract-tests.sh` and navigation helper suite, 2026-07-19 |
-| iOS workout unit tests | Passed | 36 tests, zero failures/skips, iOS Simulator after privacy-link fix, 2026-07-19 |
-| watchOS workout unit tests | Passed | 92 tests, zero failures/skips, Series 11 Simulator after privacy-link fix, 2026-07-19 |
-| iOS device and Simulator builds with embedded Watch app | Passed | Fresh unsigned Release containers in `/tmp/open-bike-phase6-postfix-device-20260719` and `/tmp/open-bike-phase6-postfix-simulator-20260719`, 2026-07-19 |
-| `ValidateEmbeddedBinary` | Passed | Both post-fix Release container builds, 2026-07-19 |
-| iPhone HealthKit entitlement | Pending final signed archive inspection | Source entitlement and automated contract pass; unsigned Release build cannot prove the signed artifact |
-| Watch HealthKit entitlement | Pending final signed archive inspection | Source entitlement and automated contract pass; unsigned Release build cannot prove the signed artifact |
-| Watch `workout-processing` background mode | Passed | Embedded Release Watch `Info.plist` contains `workout-processing`, 2026-07-19 |
-| iPhone and Watch privacy manifests in bundles | Passed | Post-fix source manifests matched the embedded Release device and Simulator bundles byte-for-byte; iPhone has all four declared collection types and Watch has none, 2026-07-19 |
-| Watch app icon in bundle / asset validation | Passed | Watch `Assets.car` and `CFBundleIcons.CFBundlePrimaryIcon` present in Release bundle, 2026-07-19 |
-| In-app privacy-policy reachability | Passed automated / pending final tap | iPhone Settings and Watch start screen compile against one shared HTTPS URL; URL is present in both fresh Release binaries and four release-asset tests pass. Open it on the final installed build before submission. |
+| iOS 15 compatibility/typecheck | Passed | `./scripts/run-workout-contract-tests.sh` and navigation helper suite on the post-main candidate, 2026-07-20 |
+| iOS workout unit tests | Passed | 36 tests, zero failures/skips, iPhone 17 Pro Simulator from candidate `40b8e034`, 2026-07-20 |
+| watchOS workout unit tests | Passed | 92 tests, zero failures/skips, Series 11 Simulator from candidate `40b8e034`, 2026-07-20 |
+| iOS device and Simulator builds with embedded Watch app | Passed | Fresh unsigned Release containers in `/tmp/open-bike-postmerge-40b8e034-device` and `/tmp/open-bike-postmerge-40b8e034-simulator`, 2026-07-20 |
+| `ValidateEmbeddedBinary` | Passed | Both exact-candidate Release container builds, 2026-07-20 |
+| iPhone HealthKit entitlement | Pending final signed archive inspection | Source entitlement and Debug/Release target wiring tests pass; unsigned Release build cannot prove the signed artifact |
+| Watch HealthKit entitlement | Pending final signed archive inspection | Source entitlement and Debug/Release target wiring tests pass; unsigned Release build cannot prove the signed artifact |
+| Watch `workout-processing` background mode | Passed | Exact-candidate embedded Release Watch `Info.plist` contains `workout-processing`, 2026-07-20 |
+| iPhone and Watch privacy manifests in bundles | Passed | Source manifests matched the exact-candidate embedded Release device and Simulator bundles byte-for-byte; iPhone has all four declared collection types and Watch has none, 2026-07-20 |
+| Watch app icon in bundle / asset validation | Passed | Exact-candidate Watch `Assets.car` and `CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconName = AppIcon` verified; a mutated missing-metadata fixture is rejected, 2026-07-20 |
+| In-app privacy-policy reachability | Passed automated / pending final tap | iPhone Settings and Watch start screen compile against one shared HTTPS URL; URL is present in both exact-candidate Release binaries and release-asset tests pass. Open it on the final installed build before submission. |
 | App Store Connect privacy-policy URL | Pending publication authorization | Enter the same documented public URL in App Store Connect and verify it resolves after merge. |
 | Production privacy retention/provider contract | Pending production check | Public policy states the 30-day artifact window, verified-deletion path, and equivalent provider protection; production configuration and provider obligations must match before submission. |
-| Backend retention/privacy regressions | Passed | 206 backend tests passed (one unrelated skip), including immutable ready-time expiry, valid-job continuation plus fail-closed destructive cleanup for unreadable records, single-scan atomic work-directory tombstoning outside the global lock, aggregate legacy/object/unexpected-GC deletion failures, exact expiry/object/work-directory partial-progress counts, allowlisted diagnostics that never include arbitrary exception text, failure-isolated idle rate-limit-pseudonym cleanup, and unhealthy maintenance signaling, 2026-07-19. |
-| Workout protocol/vector/state/presenter host tests | Passed | Strict C++ protocol and state/presenter/GPS suites, 2026-07-19 |
-| Existing navigation/BLE regression tests | Passed | `./scripts/run-navigation-tests.sh`, 2026-07-19 |
-| `WAVESHARE_AMOLED_175` firmware build | Passed | PlatformIO Release build; RAM 40.7%, flash 87.6%, 2026-07-19 |
-| `WAVESHARE_AMOLED_206` firmware build | Passed | PlatformIO Release build, 2026-07-19 |
-| 1.75 and 2.06 layout/interaction host tests | Passed | Both `test_gui_layout.cpp` variants, 2026-07-19 |
-| App Store iPhone screenshot export validation | Passed | Four opaque 1242x2688 PNGs plus manifest/contact sheet/source provenance/ZIP; CI recomputes every rendering-input hash and byte-compares every committed derivative with its ZIP entry, 2026-07-19 |
-| App Store Watch screenshot dimensions/alpha | Passed | Opaque 416x496 JPEG; `bun run validate:watch`, 2026-07-19 |
+| Backend retention/privacy regressions | Passed | 206 backend tests passed (one unrelated skip) after integrating current main; the subsequent candidate changes do not touch backend code, 2026-07-20. |
+| Workout protocol/vector/state/presenter host tests | Passed | Strict C++ protocol/state/presenter/GPS suites plus exact protected native channel-six dispatch, replay, and wrong-channel checks, 2026-07-20 |
+| Existing navigation/BLE regression tests | Passed | `./scripts/run-navigation-tests.sh` on candidate `40b8e034`, 2026-07-20 |
+| `WAVESHARE_AMOLED_175` firmware build | Passed | Exact-candidate PlatformIO Release build; RAM 40.8%, flash 88.5% (2,785,031 / 3,145,728 bytes), 2026-07-20 |
+| `WAVESHARE_AMOLED_206` firmware build | Passed | Exact-candidate PlatformIO Release build; RAM 40.8%, flash 88.5% (2,784,603 / 3,145,728 bytes), 2026-07-20 |
+| 1.75 and 2.06 layout/interaction host tests | Passed | Both `test_gui_layout.cpp` variants after current-main integration; the candidate changes do not touch layout code, 2026-07-20 |
+| App Store iPhone screenshot export validation | Passed | Four opaque 1242x2688 PNGs plus manifest/contact sheet/source provenance/ZIP; candidate changes do not touch rendering inputs or derivatives, and generation/validation/provenance/package checks passed, 2026-07-20 |
+| App Store Watch screenshot dimensions/alpha | Passed | Opaque 416x496 JPEG; `bun run validate:watch`, candidate changes do not touch the asset, 2026-07-20 |
 
 ## Physical-device matrix
 
