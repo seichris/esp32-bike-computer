@@ -5061,8 +5061,14 @@ private struct WorkoutContractTestSuite {
                 )
                 && compactContent.contains(
                     "WorkoutStartButton(watchAvailability:watchAvailability,action:workoutMirrorManager.startOutdoorCyclingOnWatch)"
+                )
+                && compactContent.contains(
+                    "Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.titleAndIcon)"
+                )
+                && compactContent.contains(
+                    ".buttonStyle(.plain).fixedSize(horizontal:true,vertical:false).layoutPriority(1).accessibilityLabel(\"StartworkoutonAppleWatch\")"
                 ),
-            "the collapsed destination row must include the blue Watch-gated start button"
+            "the collapsed destination row must keep the full blue Watch-gated Start Workout label visible"
         )
         expect(
             compactContent.contains(
