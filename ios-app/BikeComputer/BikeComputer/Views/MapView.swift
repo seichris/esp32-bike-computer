@@ -87,6 +87,10 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.onMapTapped = onMapTapped
         context.coordinator.onOfflineMapSelectionBoundsChanged = onOfflineMapSelectionBoundsChanged
         context.coordinator.onDestinationSelected = onDestinationSelected
+        context.coordinator.isNavigating = isNavigating
+        context.coordinator.isSimulationMode = isSimulationMode
+        context.coordinator.isUserLocationAuthorized = isUserLocationAuthorized
+        context.coordinator.simulatedPosition = simulatedPosition
         
         return mapView
     }
@@ -104,6 +108,10 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.offlineMapSelectionFrame = offlineMapSelectionFrame
         context.coordinator.onOfflineMapSelectionBoundsChanged = onOfflineMapSelectionBoundsChanged
         context.coordinator.onDestinationSelected = onDestinationSelected
+        context.coordinator.isNavigating = isNavigating
+        context.coordinator.isSimulationMode = isSimulationMode
+        context.coordinator.isUserLocationAuthorized = isUserLocationAuthorized
+        context.coordinator.simulatedPosition = simulatedPosition
         context.coordinator.updateControlVisibility(isNavigating: isNavigating)
         context.coordinator.updateOfflineMapSelectionBounds()
         
@@ -223,6 +231,10 @@ struct MapViewContainer: UIViewRepresentable {
         var offlineMapSelectionFrame: CGRect?
         var onOfflineMapSelectionBoundsChanged: ((OfflineMapBounds) -> Void)?
         var onDestinationSelected: ((SavedDestination, CLLocation?) -> Void)?
+        var isNavigating = false
+        var isSimulationMode = false
+        var isUserLocationAuthorized = false
+        var simulatedPosition: CLLocationCoordinate2D?
         var hasSetInitialRegion = false
         private var compassButton: MKCompassButton?
         private var trackingButton: MKUserTrackingButton?
@@ -461,6 +473,35 @@ struct MapViewContainer: UIViewRepresentable {
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
             updateOfflineMapSelectionBounds()
+        }
+
+        func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
+            guard view.annotation is DestinationAnnotation else { return }
+
+            // MapKit reports the temporary deselection used to rebuild a
+            // reverse-geocoded callout too. Defer until a synchronous reselect
+            // has completed, then only resume tracking if free pan truly ended.
+            DispatchQueue.main.async { [weak self, weak mapView] in
+                guard let self, let mapView,
+                      !self.isFreePanActive(
+                          mapView: mapView,
+                          isOfflineMapSelectionActive: self.offlineMapSelectionFrame != nil
+                      ) else { return }
+
+                if self.isSimulationMode, let simulatedPosition = self.simulatedPosition {
+                    self.updateNavigationCamera(
+                        mapView: mapView,
+                        coordinate: simulatedPosition,
+                        animated: true
+                    )
+                } else if self.isUserLocationAuthorized {
+                    self.updateUserTrackingMode(
+                        mapView: mapView,
+                        isNavigating: self.isNavigating,
+                        isOfflineMapSelectionActive: false
+                    )
+                }
+            }
         }
 
         @objc func handleTap(_ gestureRecognizer: UITapGestureRecognizer) {

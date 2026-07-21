@@ -101,7 +101,7 @@ struct DestinationCalloutLayoutTests {
     @MainActor
     static func main() async {
         testLabelExpansion()
-        testDestinationSelectionTrackingIntegration()
+        await testDestinationSelectionTrackingIntegration()
         await testResolvedAddressCallbackAndRecentInsertion()
         await testFallbackAddress()
         await testStaleResolutionCancellation()
@@ -110,11 +110,12 @@ struct DestinationCalloutLayoutTests {
     }
 
     @MainActor
-    private static func testDestinationSelectionTrackingIntegration() {
+    private static func testDestinationSelectionTrackingIntegration() async {
         let coordinate = CLLocationCoordinate2D(latitude: 1.35210, longitude: 103.81980)
         let mapView = RecordingMapView()
         let coordinator = MapViewContainer.Coordinator(addressResolver: { _ in nil })
         coordinator.mapView = mapView
+        coordinator.isUserLocationAuthorized = true
         mapView.convertedCoordinate = coordinate
         mapView.annotationViewProvider = { annotation in
             coordinator.mapView(mapView, viewFor: annotation)
@@ -174,32 +175,36 @@ struct DestinationCalloutLayoutTests {
             "route start and simulation ticks should preserve a selected destination callout"
         )
 
+        guard let annotationView = mapView.view(for: annotation) else {
+            preconditionFailure("the selected destination should have an annotation view")
+        }
+        coordinator.mapView(mapView, didDeselect: annotationView)
+        await waitForMainQueue()
+        precondition(
+            mapView.userTrackingMode == .none,
+            "a temporary callout refresh must not resume tracking after the pin is reselected"
+        )
+
         mapView.deselectAnnotation(annotation, animated: false)
+        coordinator.mapView(mapView, didDeselect: annotationView)
+        await waitForMainQueue()
 
         precondition(
             !mapView.selectedAnnotations.contains { $0 is DestinationAnnotation },
             "dismissing the callout should end destination selection"
         )
-        coordinator.updateUserTrackingMode(
-            mapView: mapView,
-            isNavigating: false,
-            isOfflineMapSelectionActive: false,
-            animated: false
-        )
         precondition(
             mapView.userTrackingMode == .follow,
-            "dot-mode follow should resume after destination selection ends"
+            "the MapKit deselection callback should resume dot-mode follow"
         )
 
-        coordinator.updateUserTrackingMode(
-            mapView: mapView,
-            isNavigating: true,
-            isOfflineMapSelectionActive: false,
-            animated: false
-        )
+        coordinator.isNavigating = true
+        mapView.userTrackingMode = .none
+        coordinator.mapView(mapView, didDeselect: annotationView)
+        await waitForMainQueue()
         precondition(
             mapView.userTrackingMode == .followWithHeading,
-            "navigation heading-follow should resume with a dismissed destination pin"
+            "the MapKit deselection callback should resume navigation heading-follow"
         )
 
         coordinator.updateUserTrackingMode(
@@ -314,6 +319,15 @@ struct DestinationCalloutLayoutTests {
             mapView.userTrackingMode == .follow,
             "dot-mode follow should resume when free-pan selection exits"
         )
+    }
+
+    @MainActor
+    private static func waitForMainQueue() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                continuation.resume()
+            }
+        }
     }
 
     @MainActor
