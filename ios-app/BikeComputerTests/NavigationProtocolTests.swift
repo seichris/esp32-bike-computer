@@ -570,6 +570,7 @@ struct NavigationProtocolTests {
         testNavigationEngineResendsRouteGeometryNearLastLocation()
         testNavigationEngineClearsRouteGeometryOnStop()
         testNavigationEngineClearsRouteGeometryWhenReadyAndIdle()
+        testNavigationEngineRestoresPhysicalGPSAfterSimulation()
         testNavigationEngineOmitsRideTelemetryWhenIdle()
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         testNavigationEngineReplacesRouteWithoutResettingTelemetry()
@@ -11625,6 +11626,52 @@ struct NavigationProtocolTests {
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 
         assertEqual(manager.sentRouteGeometry, [Data()], "idle readiness should clear route geometry")
+    }
+
+    static func testNavigationEngineRestoresPhysicalGPSAfterSimulation() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+
+        let initialPhysicalLocation = CLLocation(latitude: 37.1, longitude: -122.1)
+        engine.processExternalLocation(initialPhysicalLocation)
+        manager.sentGPSPositions.removeAll()
+
+        let route = TestRoute(
+            instructions: "Continue",
+            coordinates: [
+                CLLocationCoordinate2D(latitude: 1.30, longitude: 103.80),
+                CLLocationCoordinate2D(latitude: 1.31, longitude: 103.81)
+            ]
+        )
+        engine.startNavigation(with: route, isTestMode: true)
+
+        let latestPhysicalLocation = CLLocation(latitude: 37.2, longitude: -122.2)
+        engine.processExternalLocation(latestPhysicalLocation)
+        assertEqual(
+            manager.sentGPSPositions.count,
+            0,
+            "physical GPS should be cached without overriding active simulation"
+        )
+
+        engine.stopNavigation()
+
+        assertEqual(
+            manager.sentGPSPositions.count,
+            1,
+            "stopping simulation should immediately restore the latest physical GPS"
+        )
+        guard let packet = manager.sentGPSPositions.first else { return }
+        assertEqual(readInt32LE(packet, offset: 0), 37_200_000, "restored GPS should use physical latitude")
+        assertEqual(readInt32LE(packet, offset: 4), -122_200_000, "restored GPS should use physical longitude")
+        assertEqual(
+            readUInt16LE(packet, offset: 14),
+            DeviceGPSPacketBuilder.invalidSpeedCmps,
+            "restored idle GPS should omit ride speed"
+        )
     }
 
     static func testNavigationEngineOmitsRideTelemetryWhenIdle() {

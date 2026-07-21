@@ -147,6 +147,33 @@ struct DestinationCalloutLayoutTests {
             "a selected destination callout should preserve free panning"
         )
 
+        let destinationFreePanActive = coordinator.isFreePanActive(
+            mapView: mapView,
+            isOfflineMapSelectionActive: false
+        )
+        let cameraUpdatesBeforeDestinationRoute = mapView.cameraUpdateCount
+        let destinationRouteCoordinate = CLLocationCoordinate2D(latitude: 1.3525, longitude: 103.8202)
+        coordinator.configureRouteCamera(
+            mapView: mapView,
+            route: RecordingRoute(),
+            location: nil,
+            simulatedPosition: destinationRouteCoordinate,
+            isSimulationMode: true,
+            isNavigating: true,
+            isFreePanActive: destinationFreePanActive
+        )
+        coordinator.updateSimulatedNavigationCamera(
+            mapView: mapView,
+            coordinate: destinationRouteCoordinate,
+            isFreePanActive: destinationFreePanActive,
+            animated: false
+        )
+        precondition(
+            destinationFreePanActive &&
+                mapView.cameraUpdateCount == cameraUpdatesBeforeDestinationRoute,
+            "route start and simulation ticks should preserve a selected destination callout"
+        )
+
         mapView.deselectAnnotation(annotation, animated: false)
 
         precondition(
@@ -191,7 +218,7 @@ struct DestinationCalloutLayoutTests {
         coordinator.updateSimulatedNavigationCamera(
             mapView: mapView,
             coordinate: simulatedCoordinate,
-            isOfflineMapSelectionActive: true,
+            isFreePanActive: true,
             animated: false
         )
         precondition(
@@ -207,7 +234,7 @@ struct DestinationCalloutLayoutTests {
             simulatedPosition: simulatedCoordinate,
             isSimulationMode: false,
             isNavigating: true,
-            isOfflineMapSelectionActive: true
+            isFreePanActive: true
         )
         precondition(
             mapView.cameraUpdateCount == cameraUpdatesBeforeSelection &&
@@ -218,7 +245,7 @@ struct DestinationCalloutLayoutTests {
         coordinator.updateSimulatedNavigationCamera(
             mapView: mapView,
             coordinate: simulatedCoordinate,
-            isOfflineMapSelectionActive: false,
+            isFreePanActive: false,
             animated: false
         )
         precondition(

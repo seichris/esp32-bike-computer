@@ -93,10 +93,10 @@ struct MapViewContainer: UIViewRepresentable {
     
     func updateUIView(_ uiView: MKMapView, context: Context) {
         let isOfflineMapSelectionActive = offlineMapSelectionFrame != nil
-        let isDestinationSelectionActive = uiView.selectedAnnotations.contains {
-            $0 is DestinationAnnotation
-        }
-        let isFreePanActive = isOfflineMapSelectionActive || isDestinationSelectionActive
+        let isFreePanActive = context.coordinator.isFreePanActive(
+            mapView: uiView,
+            isOfflineMapSelectionActive: isOfflineMapSelectionActive
+        )
 
         // Store reference to map view in coordinator
         context.coordinator.mapView = uiView
@@ -129,7 +129,7 @@ struct MapViewContainer: UIViewRepresentable {
                 simulatedPosition: simulatedPosition,
                 isSimulationMode: isSimulationMode,
                 isNavigating: isNavigating,
-                isOfflineMapSelectionActive: isOfflineMapSelectionActive
+                isFreePanActive: isFreePanActive
             )
             
             // Handle simulated position annotation
@@ -169,7 +169,7 @@ struct MapViewContainer: UIViewRepresentable {
             context.coordinator.updateSimulatedNavigationCamera(
                 mapView: uiView,
                 coordinate: simPos,
-                isOfflineMapSelectionActive: isOfflineMapSelectionActive,
+                isFreePanActive: isFreePanActive,
                 animated: true
             )
             
@@ -298,6 +298,15 @@ struct MapViewContainer: UIViewRepresentable {
             }
         }
 
+        func isFreePanActive(
+            mapView: MKMapView,
+            isOfflineMapSelectionActive: Bool
+        ) -> Bool {
+            isOfflineMapSelectionActive || mapView.selectedAnnotations.contains {
+                $0 is DestinationAnnotation
+            }
+        }
+
         func updateInitialRegionIfNeeded(
             mapView: MKMapView,
             location: CLLocation?,
@@ -378,9 +387,9 @@ struct MapViewContainer: UIViewRepresentable {
             simulatedPosition: CLLocationCoordinate2D?,
             isSimulationMode: Bool,
             isNavigating: Bool,
-            isOfflineMapSelectionActive: Bool
+            isFreePanActive: Bool
         ) {
-            guard !isOfflineMapSelectionActive else {
+            guard !isFreePanActive else {
                 if mapView.userTrackingMode != .none {
                     mapView.setUserTrackingMode(.none, animated: false)
                 }
@@ -406,10 +415,10 @@ struct MapViewContainer: UIViewRepresentable {
         func updateSimulatedNavigationCamera(
             mapView: MKMapView,
             coordinate: CLLocationCoordinate2D,
-            isOfflineMapSelectionActive: Bool,
+            isFreePanActive: Bool,
             animated: Bool
         ) {
-            guard !isOfflineMapSelectionActive else {
+            guard !isFreePanActive else {
                 if mapView.userTrackingMode != .none {
                     mapView.setUserTrackingMode(.none, animated: false)
                 }

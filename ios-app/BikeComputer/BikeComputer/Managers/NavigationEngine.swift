@@ -33,6 +33,7 @@ class NavigationEngine: NSObject, ObservableObject {
     private var sendTracker = NavigationSendTracker(distanceThreshold: 10)
     private var initialNavigationLocation: CLLocation?
     private var lastDeviceGpsLocation: (location: CLLocation, convertFromMapKitRoute: Bool)?
+    private var latestExternalGpsLocation: CLLocation?
     private var hasAcceptedLiveLocation = false
     private var lastSentGeometryHash: Int = 0
     private var geometrySendInterval: TimeInterval = 2.0
@@ -86,6 +87,7 @@ class NavigationEngine: NSObject, ObservableObject {
 
     @discardableResult
     func processExternalLocation(_ location: CLLocation) -> Bool {
+        latestExternalGpsLocation = location
         guard !isSimulationMode else { return false }
         let routeLocation = CoordinateConverter.mapKitRouteLocation(fromGPSLocation: location)
         let acceptedRouteLocation: CLLocation?
@@ -177,6 +179,7 @@ class NavigationEngine: NSObject, ObservableObject {
     
     /// Stop navigation
     func stopNavigation() {
+        let externalLocationToRestore = isSimulationMode ? latestExternalGpsLocation : nil
         bleManager?.clearRouteGeometry()
         isNavigating = false
         currentRoute = nil
@@ -195,6 +198,11 @@ class NavigationEngine: NSObject, ObservableObject {
         expectedArrivalDate = nil
         resetRideTelemetry(startingAt: nil)
         stopSimulation()
+        if let externalLocationToRestore {
+            sendDeviceGpsPosition(externalLocationToRestore,
+                                  convertFromMapKitRoute: false,
+                                  includeRideTelemetry: false)
+        }
         print("Navigation stopped")
     }
     
@@ -238,7 +246,6 @@ class NavigationEngine: NSObject, ObservableObject {
         if simulationProgress >= 1.0 {
             simulationProgress = 1.0
             print("Simulation complete")
-            stopSimulation()
             stopNavigation()
             return
         }
