@@ -286,14 +286,21 @@ struct MapViewContainer: UIViewRepresentable {
             let isDestinationSelectionActive = mapView.selectedAnnotations.contains {
                 $0 is DestinationAnnotation
             }
-            guard let desiredTrackingBehavior = MapTrackingPolicy.desiredMode(
+            let desiredTrackingBehavior = MapTrackingPolicy.desiredMode(
                 isNavigating: isNavigating,
                 isOfflineMapSelectionActive: isOfflineMapSelectionActive,
                 isDestinationSelectionActive: isDestinationSelectionActive
-            ) else { return }
+            )
 
-            let desiredTrackingMode: MKUserTrackingMode =
-                desiredTrackingBehavior == .followWithHeading ? .followWithHeading : .follow
+            let desiredTrackingMode: MKUserTrackingMode
+            switch desiredTrackingBehavior {
+            case .none:
+                desiredTrackingMode = .none
+            case .follow:
+                desiredTrackingMode = .follow
+            case .followWithHeading:
+                desiredTrackingMode = .followWithHeading
+            }
             if mapView.userTrackingMode != desiredTrackingMode {
                 mapView.setUserTrackingMode(desiredTrackingMode, animated: animated)
             }

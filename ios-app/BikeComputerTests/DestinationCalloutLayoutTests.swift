@@ -162,6 +162,17 @@ struct DestinationCalloutLayoutTests {
             mapView.userTrackingMode == .followWithHeading,
             "navigation heading-follow should resume with a dismissed destination pin"
         )
+
+        coordinator.updateUserTrackingMode(
+            mapView: mapView,
+            isNavigating: true,
+            isOfflineMapSelectionActive: true,
+            animated: false
+        )
+        precondition(
+            mapView.userTrackingMode == .none,
+            "offline map selection should disable heading-follow during navigation"
+        )
     }
 
     @MainActor

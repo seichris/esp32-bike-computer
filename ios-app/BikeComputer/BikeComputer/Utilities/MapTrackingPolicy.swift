@@ -1,6 +1,7 @@
 import Foundation
 
 enum MapTrackingBehavior: Equatable {
+    case none
     case follow
     case followWithHeading
 }
@@ -10,9 +11,9 @@ enum MapTrackingPolicy {
         isNavigating: Bool,
         isOfflineMapSelectionActive: Bool,
         isDestinationSelectionActive: Bool
-    ) -> MapTrackingBehavior? {
+    ) -> MapTrackingBehavior {
         guard !isOfflineMapSelectionActive,
-              !isDestinationSelectionActive else { return nil }
+              !isDestinationSelectionActive else { return .none }
         return isNavigating ? .followWithHeading : .follow
     }
 }

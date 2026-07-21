@@ -11697,8 +11697,17 @@ struct NavigationProtocolTests {
                 isOfflineMapSelectionActive: true,
                 isDestinationSelectionActive: false
             ),
-            nil,
+            .none,
             "offline map selection should remain free to pan"
+        )
+        assertEqual(
+            MapTrackingPolicy.desiredMode(
+                isNavigating: true,
+                isOfflineMapSelectionActive: true,
+                isDestinationSelectionActive: false
+            ),
+            .none,
+            "offline map selection should override navigation heading-follow"
         )
         assertEqual(
             MapTrackingPolicy.desiredMode(
@@ -11706,7 +11715,7 @@ struct NavigationProtocolTests {
                 isOfflineMapSelectionActive: false,
                 isDestinationSelectionActive: true
             ),
-            nil,
+            .none,
             "a selected long-press destination should remain visible while GPS updates"
         )
     }
