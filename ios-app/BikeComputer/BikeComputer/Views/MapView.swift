@@ -198,19 +198,11 @@ struct MapViewContainer: UIViewRepresentable {
                 if !uiView.showsUserLocation {
                     uiView.showsUserLocation = true
                 }
-                if let desiredTrackingBehavior = MapTrackingPolicy.desiredMode(
+                context.coordinator.updateUserTrackingMode(
+                    mapView: uiView,
                     isNavigating: isNavigating,
-                    isOfflineMapSelectionActive: offlineMapSelectionFrame != nil,
-                    isDestinationSelectionActive: uiView.selectedAnnotations.contains {
-                        $0 is DestinationAnnotation
-                    }
-                ) {
-                    let desiredTrackingMode: MKUserTrackingMode =
-                        desiredTrackingBehavior == .followWithHeading ? .followWithHeading : .follow
-                    if uiView.userTrackingMode != desiredTrackingMode {
-                        uiView.setUserTrackingMode(desiredTrackingMode, animated: true)
-                    }
-                }
+                    isOfflineMapSelectionActive: offlineMapSelectionFrame != nil
+                )
             } else {
                 if uiView.showsUserLocation {
                     uiView.showsUserLocation = false
@@ -283,6 +275,28 @@ struct MapViewContainer: UIViewRepresentable {
         func updateControlVisibility(isNavigating: Bool) {
             compassButton?.compassVisibility = isNavigating ? .visible : .adaptive
             trackingButton?.isHidden = !isNavigating
+        }
+
+        func updateUserTrackingMode(
+            mapView: MKMapView,
+            isNavigating: Bool,
+            isOfflineMapSelectionActive: Bool,
+            animated: Bool = true
+        ) {
+            let isDestinationSelectionActive = mapView.selectedAnnotations.contains {
+                $0 is DestinationAnnotation
+            }
+            guard let desiredTrackingBehavior = MapTrackingPolicy.desiredMode(
+                isNavigating: isNavigating,
+                isOfflineMapSelectionActive: isOfflineMapSelectionActive,
+                isDestinationSelectionActive: isDestinationSelectionActive
+            ) else { return }
+
+            let desiredTrackingMode: MKUserTrackingMode =
+                desiredTrackingBehavior == .followWithHeading ? .followWithHeading : .follow
+            if mapView.userTrackingMode != desiredTrackingMode {
+                mapView.setUserTrackingMode(desiredTrackingMode, animated: animated)
+            }
         }
 
         func updateOfflineMapSelectionBounds() {

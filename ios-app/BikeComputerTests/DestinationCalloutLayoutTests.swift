@@ -17,10 +17,20 @@ private final class RecordingMapView: MKMapView {
     private(set) var selectionCount = 0
     private(set) var deselectionCount = 0
     private var recordedSelectedAnnotations: [MKAnnotation] = []
+    private var recordedUserTrackingMode: MKUserTrackingMode = .none
 
     override var selectedAnnotations: [MKAnnotation] {
         get { recordedSelectedAnnotations }
         set { recordedSelectedAnnotations = newValue }
+    }
+
+    override var userTrackingMode: MKUserTrackingMode {
+        get { recordedUserTrackingMode }
+        set { recordedUserTrackingMode = newValue }
+    }
+
+    override func setUserTrackingMode(_ mode: MKUserTrackingMode, animated: Bool) {
+        recordedUserTrackingMode = mode
     }
 
     override func view(for annotation: MKAnnotation) -> MKAnnotationView? {
@@ -79,7 +89,7 @@ struct DestinationCalloutLayoutTests {
     @MainActor
     static func main() async {
         testLabelExpansion()
-        testDestinationSelectionTrackingPolicy()
+        testDestinationSelectionTrackingIntegration()
         await testResolvedAddressCallbackAndRecentInsertion()
         await testFallbackAddress()
         await testStaleResolutionCancellation()
@@ -88,26 +98,40 @@ struct DestinationCalloutLayoutTests {
     }
 
     @MainActor
-    private static func testDestinationSelectionTrackingPolicy() {
+    private static func testDestinationSelectionTrackingIntegration() {
         let coordinate = CLLocationCoordinate2D(latitude: 1.35210, longitude: 103.81980)
         let mapView = RecordingMapView()
         let coordinator = MapViewContainer.Coordinator(addressResolver: { _ in nil })
+        coordinator.mapView = mapView
+        mapView.convertedCoordinate = coordinate
         mapView.annotationViewProvider = { annotation in
             coordinator.mapView(mapView, viewFor: annotation)
         }
         coordinator.onDestinationSelected = { _, _ in }
+        mapView.userTrackingMode = .follow
 
-        coordinator.selectDestination(at: coordinate, on: mapView)
+        let longPress = RecordingLongPressGestureRecognizer(
+            state: .began,
+            location: CGPoint(x: 100, y: 100)
+        )
+        coordinator.handleLongPress(longPress)
 
         guard let annotation = mapView.selectedAnnotations.first as? DestinationAnnotation else {
             preconditionFailure("a newly dropped destination should be selected")
         }
         precondition(
-            MapTrackingPolicy.desiredMode(
-                isNavigating: false,
-                isOfflineMapSelectionActive: false,
-                isDestinationSelectionActive: true
-            ) == nil,
+            mapView.userTrackingMode == .none,
+            "long-press destination selection should disable tracking"
+        )
+
+        coordinator.updateUserTrackingMode(
+            mapView: mapView,
+            isNavigating: false,
+            isOfflineMapSelectionActive: false,
+            animated: false
+        )
+        precondition(
+            mapView.userTrackingMode == .none,
             "a selected destination callout should preserve free panning"
         )
 
@@ -117,13 +141,26 @@ struct DestinationCalloutLayoutTests {
             !mapView.selectedAnnotations.contains { $0 is DestinationAnnotation },
             "dismissing the callout should end destination selection"
         )
+        coordinator.updateUserTrackingMode(
+            mapView: mapView,
+            isNavigating: false,
+            isOfflineMapSelectionActive: false,
+            animated: false
+        )
         precondition(
-            MapTrackingPolicy.desiredMode(
-                isNavigating: false,
-                isOfflineMapSelectionActive: false,
-                isDestinationSelectionActive: false
-            ) == .follow,
+            mapView.userTrackingMode == .follow,
             "dot-mode follow should resume after destination selection ends"
+        )
+
+        coordinator.updateUserTrackingMode(
+            mapView: mapView,
+            isNavigating: true,
+            isOfflineMapSelectionActive: false,
+            animated: false
+        )
+        precondition(
+            mapView.userTrackingMode == .followWithHeading,
+            "navigation heading-follow should resume with a dismissed destination pin"
         )
     }
 
