@@ -198,10 +198,15 @@ struct MapViewContainer: UIViewRepresentable {
                 if !uiView.showsUserLocation {
                     uiView.showsUserLocation = true
                 }
-                if isNavigating && uiView.userTrackingMode != .followWithHeading {
-                    uiView.setUserTrackingMode(.followWithHeading, animated: true)
-                } else if !isNavigating && uiView.userTrackingMode == .followWithHeading {
-                    uiView.setUserTrackingMode(.follow, animated: true)
+                if let desiredTrackingBehavior = MapTrackingPolicy.desiredMode(
+                    isNavigating: isNavigating,
+                    isOfflineMapSelectionActive: offlineMapSelectionFrame != nil
+                ) {
+                    let desiredTrackingMode: MKUserTrackingMode =
+                        desiredTrackingBehavior == .followWithHeading ? .followWithHeading : .follow
+                    if uiView.userTrackingMode != desiredTrackingMode {
+                        uiView.setUserTrackingMode(desiredTrackingMode, animated: true)
+                    }
                 }
             } else {
                 if uiView.showsUserLocation {

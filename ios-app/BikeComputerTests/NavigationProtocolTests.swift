@@ -518,6 +518,7 @@ struct NavigationProtocolTests {
         testDestinationPickerProtocol()
         testRouteInitialLocationUsesResolvedSource()
         testRouteTransportTypes()
+        testMapTrackingPolicy()
         testDeviceGPSPacketBuilder()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
@@ -11645,8 +11646,21 @@ struct NavigationProtocolTests {
         )
         engine.processExternalLocation(idleLocation)
 
-        assertEqual(manager.sentGPSPositions.count, 1, "idle GPS sync should still send position/time")
-        let packet = manager.sentGPSPositions[0]
+        let updatedIdleLocation = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 37.0001, longitude: -122.0001),
+            altitude: 43,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 5,
+            course: 95,
+            speed: 6,
+            timestamp: Date()
+        )
+        engine.processExternalLocation(updatedIdleLocation)
+
+        assertEqual(manager.sentGPSPositions.count, 2, "every idle map location should update the device position")
+        let packet = manager.sentGPSPositions[1]
+        assertEqual(readInt32LE(packet, offset: 0), 37_000_100, "idle GPS update should use the latest latitude")
+        assertEqual(readInt32LE(packet, offset: 4), -122_000_100, "idle GPS update should use the latest longitude")
         assertEqual(readUInt16LE(packet, offset: 14),
                     DeviceGPSPacketBuilder.invalidSpeedCmps,
                     "idle GPS sync should omit speed telemetry")
@@ -11656,6 +11670,24 @@ struct NavigationProtocolTests {
         assertEqual(readUInt32LE(packet, offset: 26),
                     DeviceGPSPacketBuilder.invalidRouteRemainingMeters,
                     "idle GPS sync should omit route remaining telemetry")
+    }
+
+    static func testMapTrackingPolicy() {
+        assertEqual(
+            MapTrackingPolicy.desiredMode(isNavigating: false, isOfflineMapSelectionActive: false),
+            .follow,
+            "dot mode should follow the current location"
+        )
+        assertEqual(
+            MapTrackingPolicy.desiredMode(isNavigating: true, isOfflineMapSelectionActive: false),
+            .followWithHeading,
+            "navigation should follow the current location and heading"
+        )
+        assertEqual(
+            MapTrackingPolicy.desiredMode(isNavigating: false, isOfflineMapSelectionActive: true),
+            nil,
+            "offline map selection should remain free to pan"
+        )
     }
 
     static func testNavigationEngineIgnoresLiveLocationFarFromRouteStart() {
