@@ -227,6 +227,14 @@ class NavigationEngine: NSObject, ObservableObject {
         isSimulationMode = false
         simulatedPosition = nil
     }
+
+    #if HOST_TESTING
+    func updateSimulationForTesting(timeInterval: TimeInterval) {
+        guard isSimulationMode else { return }
+        lastSimulationUpdate = Date().addingTimeInterval(-timeInterval)
+        updateSimulation()
+    }
+    #endif
     
     private func updateSimulation() {
         guard let route = currentRoute, let lastUpdate = lastSimulationUpdate else { return }
@@ -266,6 +274,7 @@ class NavigationEngine: NSObject, ObservableObject {
 
             // Also process location for navigation instructions
             processLocation(location)
+            guard isNavigating, isSimulationMode else { return }
             updateRideTelemetry(gpsLocation: location, routeLocation: location)
             sendDeviceGpsPosition(location, convertFromMapKitRoute: true)
         }

@@ -571,6 +571,7 @@ struct NavigationProtocolTests {
         testNavigationEngineClearsRouteGeometryOnStop()
         testNavigationEngineClearsRouteGeometryWhenReadyAndIdle()
         testNavigationEngineRestoresPhysicalGPSAfterSimulation()
+        testNavigationEngineKeepsPhysicalGPSAfterSimulationStepCompletion()
         testNavigationEngineOmitsRideTelemetryWhenIdle()
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         testNavigationEngineReplacesRouteWithoutResettingTelemetry()
@@ -11649,7 +11650,15 @@ struct NavigationProtocolTests {
         )
         engine.startNavigation(with: route, isTestMode: true)
 
-        let latestPhysicalLocation = CLLocation(latitude: 37.2, longitude: -122.2)
+        let latestPhysicalLocation = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 37.2, longitude: -122.2),
+            altitude: 88,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 5,
+            course: 45,
+            speed: 7,
+            timestamp: Date()
+        )
         engine.processExternalLocation(latestPhysicalLocation)
         assertEqual(
             manager.sentGPSPositions.count,
@@ -11671,6 +11680,63 @@ struct NavigationProtocolTests {
             readUInt16LE(packet, offset: 14),
             DeviceGPSPacketBuilder.invalidSpeedCmps,
             "restored idle GPS should omit ride speed"
+        )
+        assertEqual(readInt16LE(packet, offset: 16), 0, "restored idle GPS should omit altitude")
+        assertEqual(readUInt32LE(packet, offset: 18), 0, "restored idle GPS should omit distance")
+        assertEqual(readUInt32LE(packet, offset: 22), 0, "restored idle GPS should omit elapsed time")
+        assertEqual(
+            readUInt32LE(packet, offset: 26),
+            DeviceGPSPacketBuilder.invalidRouteRemainingMeters,
+            "restored idle GPS should omit route remaining distance"
+        )
+    }
+
+    static func testNavigationEngineKeepsPhysicalGPSAfterSimulationStepCompletion() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+
+        let physicalLocation = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 37.3, longitude: -122.3),
+            altitude: 91,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 5,
+            course: 50,
+            speed: 8,
+            timestamp: Date()
+        )
+        engine.processExternalLocation(physicalLocation)
+        manager.sentGPSPositions.removeAll()
+
+        let routeCoordinates = [
+            CLLocationCoordinate2D(latitude: 37.0, longitude: -122.0),
+            CLLocationCoordinate2D(latitude: 37.001, longitude: -122.0)
+        ]
+        let route = TestRoute(
+            steps: [
+                TestRouteStep(instructions: "Continue", coordinates: routeCoordinates),
+                TestRouteStep(instructions: "", coordinates: [])
+            ],
+            coordinates: routeCoordinates
+        )
+        engine.startNavigation(with: route, isTestMode: true)
+        engine.updateSimulationForTesting(timeInterval: 10)
+
+        assertEqual(
+            manager.sentGPSPositions.count,
+            1,
+            "step-based simulation completion should leave one restored physical GPS packet"
+        )
+        guard let packet = manager.sentGPSPositions.first else { return }
+        assertEqual(readInt32LE(packet, offset: 0), 37_300_000, "completion should retain physical latitude")
+        assertEqual(readInt32LE(packet, offset: 4), -122_300_000, "completion should retain physical longitude")
+        assertEqual(
+            readUInt16LE(packet, offset: 14),
+            DeviceGPSPacketBuilder.invalidSpeedCmps,
+            "completion restore should remain idle telemetry"
         )
     }
 
