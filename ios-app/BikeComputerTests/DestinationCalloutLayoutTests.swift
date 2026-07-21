@@ -16,6 +16,7 @@ private final class RecordingMapView: MKMapView {
     var convertedCoordinate: CLLocationCoordinate2D?
     private(set) var selectionCount = 0
     private(set) var deselectionCount = 0
+    private(set) var cameraUpdateCount = 0
     private var recordedSelectedAnnotations: [MKAnnotation] = []
     private var recordedUserTrackingMode: MKUserTrackingMode = .none
 
@@ -31,6 +32,10 @@ private final class RecordingMapView: MKMapView {
 
     override func setUserTrackingMode(_ mode: MKUserTrackingMode, animated: Bool) {
         recordedUserTrackingMode = mode
+    }
+
+    override func setCamera(_ camera: MKMapCamera, animated: Bool) {
+        cameraUpdateCount += 1
     }
 
     override func view(for annotation: MKAnnotation) -> MKAnnotationView? {
@@ -83,6 +88,8 @@ private final class RecordingLongPressGestureRecognizer: UILongPressGestureRecog
         recordedLocation
     }
 }
+
+private final class RecordingRoute: MKRoute {}
 
 @main
 struct DestinationCalloutLayoutTests {
@@ -172,6 +179,57 @@ struct DestinationCalloutLayoutTests {
         precondition(
             mapView.userTrackingMode == .none,
             "offline map selection should disable heading-follow during navigation"
+        )
+
+        let cameraUpdatesBeforeSelection = mapView.cameraUpdateCount
+        let simulatedCoordinate = CLLocationCoordinate2D(latitude: 1.353, longitude: 103.82)
+        coordinator.updateSimulatedNavigationCamera(
+            mapView: mapView,
+            coordinate: simulatedCoordinate,
+            isOfflineMapSelectionActive: true,
+            animated: false
+        )
+        precondition(
+            mapView.cameraUpdateCount == cameraUpdatesBeforeSelection,
+            "simulated navigation updates should not recenter an offline selection"
+        )
+
+        mapView.userTrackingMode = .followWithHeading
+        coordinator.configureRouteCamera(
+            mapView: mapView,
+            route: RecordingRoute(),
+            location: nil,
+            simulatedPosition: simulatedCoordinate,
+            isSimulationMode: false,
+            isNavigating: true,
+            isOfflineMapSelectionActive: true
+        )
+        precondition(
+            mapView.cameraUpdateCount == cameraUpdatesBeforeSelection &&
+                mapView.userTrackingMode == .none,
+            "route replacement should not move a navigating offline selection"
+        )
+
+        coordinator.updateSimulatedNavigationCamera(
+            mapView: mapView,
+            coordinate: simulatedCoordinate,
+            isOfflineMapSelectionActive: false,
+            animated: false
+        )
+        precondition(
+            mapView.cameraUpdateCount == cameraUpdatesBeforeSelection + 1,
+            "simulated navigation camera updates should resume after selection"
+        )
+
+        coordinator.updateUserTrackingMode(
+            mapView: mapView,
+            isNavigating: true,
+            isOfflineMapSelectionActive: false,
+            animated: false
+        )
+        precondition(
+            mapView.userTrackingMode == .followWithHeading,
+            "real navigation heading-follow should resume after offline selection"
         )
     }
 
