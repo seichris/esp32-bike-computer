@@ -911,20 +911,42 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             return
         }
         guard complicationStartTask == nil,
-              !isRecovering,
-              !isRecoveryLoopRunning else {
+              canAdmitPendingComplicationStart else {
             return
         }
-        hasPendingComplicationStartRequest = false
         complicationStartTask = Task { [weak self] in
             guard let self else { return }
+            let admissionRecoveryGeneration = recoverySignalQueue.generation
+            defer {
+                if !isWorkoutActive,
+                   recoverySignalQueue.generation != admissionRecoveryGeneration {
+                    hasPendingComplicationStartRequest = true
+                }
+                complicationStartTask = nil
+                drainPendingComplicationStartIfPossible()
+            }
+            if isWorkoutActive {
+                hasPendingComplicationStartRequest = false
+                return
+            }
+            guard canAdmitPendingComplicationStart else { return }
+            hasPendingComplicationStartRequest = false
             if let injectedComplicationStartOperation {
                 await injectedComplicationStartOperation()
             } else {
                 await startOutdoorCyclingWorkout()
             }
-            complicationStartTask = nil
         }
+    }
+
+    private var canAdmitPendingComplicationStart: Bool {
+        !isRecovering
+            && !isRecoveryLoopRunning
+            && [.ready, .needsAuthorization].contains(setupState)
+            && session == nil
+            && !isAwaitingDetachedSessionCleanup
+            && !hasPendingWorkoutRecovery
+            && [.missing, .valid].contains(recoveryStore.loadState)
     }
 
     private func refreshAuthorizationState() async {
@@ -958,6 +980,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     }
 
     private func authorizeHealthKit() async {
+        defer { drainPendingComplicationStartIfPossible() }
         guard !isWorkoutActive else { return }
         guard HKHealthStore.isHealthDataAvailable() else {
             setupState = .unavailable
@@ -1964,6 +1987,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             isRecovering = false
         }
         drainPendingWorkoutConfigurationIfPossible()
+        drainPendingComplicationStartIfPossible()
     }
 
     private func attachRecoveredRouteBuilder(
