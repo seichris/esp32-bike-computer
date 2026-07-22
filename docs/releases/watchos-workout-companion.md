@@ -76,7 +76,7 @@ parser, RAM-only workout state, staleness handling, and Ride Stats UI.
 
 This copy is prepared metadata, not authorization to publish. Before release,
 complete every pending item in
-[`../watchos-workout-companion-validation.md`](../watchos-workout-companion-validation.md),
+[GitHub issue #117](https://github.com/seichris/open-bike-computer/issues/117),
 export and visually approve the updated screenshots, verify the final App Store
 privacy answers and public policy against production, verify the in-app and App
 Store Connect privacy links resolve to the same policy, and release the app and

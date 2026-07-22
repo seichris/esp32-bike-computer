@@ -74,8 +74,8 @@ shared-key device. Ownership-v2 firmware rejects the old app-wide key, so
 release and install the compatible app before that firmware.
 
 The full wire contract is in [`../docs/ble-protocol.md`](../docs/ble-protocol.md).
-The release acceptance matrix is in
-[`../docs/watchos-workout-companion-validation.md`](../docs/watchos-workout-companion-validation.md).
+The remaining release acceptance checklist is tracked in
+[GitHub issue #117](https://github.com/seichris/open-bike-computer/issues/117).
 
 ## Privacy
 

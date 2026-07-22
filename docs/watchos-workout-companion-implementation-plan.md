@@ -961,10 +961,10 @@ Use a real paired Watch and iPhone; simulator-only validation is insufficient.
 - Reconnection restores one coherent latest snapshot without stale replay.
 - Exactly one HKWorkout is saved, by Watch, with a route when permitted.
 - Navigation and workout can start/end independently.
-- Cross-app workout ownership is handled explicitly: the Watch start surface
-  requires the warning and Cancel never creates a session; the iPhone starts
-  directly after pairing/install checks; displacement of an active
-  BikeComputer workout is reported honestly.
+- Cross-app workout ownership is handled explicitly: Watch and iPhone starts
+  proceed directly after setup checks because public APIs cannot detect another
+  app's workout; displacement of an active BikeComputer workout is reported
+  honestly.
 - Existing iPhone navigation and legacy firmware GPS telemetry remain working.
 - No raw health metrics are persisted on ESP32 or sent to a backend.
 - iOS, watchOS, and both firmware targets pass their relevant automated and
