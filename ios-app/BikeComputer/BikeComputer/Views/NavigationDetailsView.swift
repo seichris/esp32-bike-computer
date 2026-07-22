@@ -338,7 +338,7 @@ struct RideMetricsPanel: View {
                     value: suppressInstantaneous
                         ? "--"
                         : heartRateZone(snapshot),
-                    label: "HR zone"
+                    label: "bike zone"
                 )
                 RideMetricColumn(
                     value: valueWithUnit(

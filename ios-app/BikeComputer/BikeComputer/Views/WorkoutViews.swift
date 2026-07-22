@@ -518,11 +518,12 @@ struct WorkoutDashboardView: View {
                         .red
                     )
                     metric(
-                        "HR Zone",
+                        "BikeComputer Zone",
                         zoneValue(snapshot),
                         "ZONE",
                         "waveform.path.ecg",
-                        .pink
+                        .pink,
+                        source: "Configured max HR"
                     )
                     metric(
                         "Speed",

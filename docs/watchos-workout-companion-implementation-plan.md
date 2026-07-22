@@ -234,8 +234,8 @@ source matters.
 | Current speed | cycling-speed quantity from a paired sensor | Watch CLLocation speed, then iPhone CLLocation speed | Preserve the source for UI and testing. |
 | Cycling power | live builder cycling-power quantity | none | Unavailable without a compatible sensor. |
 | Cycling cadence | live builder cycling-cadence quantity | none | Unavailable without a compatible sensor. |
-| Current HR zone | HealthKit live zone update | none | Availability-gated; do not invent an Apple-equivalent zone. |
-| Zone durations | HealthKit live zone group | completed-workout query | App only; ESP32 needs current zone and zone count. |
+| Current HR zone | BikeComputer max-HR profile applied to fresh Watch heart rate | none | Five app-defined zones; never label them as Apple's system zones. |
+| Zone durations | future HealthKit live zone group | completed-workout query | Unavailable on the current SDK; ESP32 needs only current zone and zone count. |
 | Current location | Watch Core Location | iPhone Core Location for device relay | Keep accuracy and timestamp. |
 | Altitude | Watch CLLocation altitude | iPhone CLLocation, then device GPS | Reject invalid vertical accuracy. |
 | Saved workout route | Watch HKWorkoutRouteBuilder | no route | Store in HealthKit, not in app files. |
@@ -251,17 +251,18 @@ coherent; preserve the oldest component timestamp.
 
 ### Heart-rate zones
 
-The newest public HealthKit zone APIs can provide live zone transitions and
-preferred system/user configurations, but current Apple documentation marks
-parts of this API as beta. Implement zone support behind compile-time and
-runtime availability checks.
+The current shipping SDK does not expose Apple's personalized workout-zone
+stream. BikeComputer therefore provides a separate five-zone profile based on
+the maximum heart rate configured by the rider on the Watch: below 60%, 60-70%,
+70-80%, 80-90%, and 90% or more. A default of 190 BPM is visible and adjustable
+before a ride. The profile reports a one-based current zone and a count of five
+only while the underlying heart-rate sample is fresh and valid.
 
-- Use HealthKit's live zone delegate when it is present in the shipping SDK and
-  final OS.
-- Report the one-based current zone and total zone count.
-- Do not approximate Apple's configured zones on older OS versions.
-- On unsupported OS versions, currentZone and zoneCount remain unavailable
-  while heart rate continues normally.
+These values are always described as BikeComputer zones, not approximations of
+Apple's configured system zones. When Apple's workout-zone API is available in
+a shipping SDK supported by the project, prefer its system/user configuration
+behind compile-time and runtime availability checks. Zone-duration data remains
+unavailable until that production source exists.
 
 ## Shared Watch-to-iPhone contract
 
@@ -650,7 +651,7 @@ Initial flag allocation:
 | 1 | Speed came from Watch GPS |
 | 2 | Distance came from HealthKit distance-cycling statistics |
 | 3 | Altitude came from a valid Watch location |
-| 4 | Live HealthKit zone API supplied the zone |
+| 4 | A live heart-rate zone is available |
 | 5 | Mirrored snapshot is current, including current-but-unavailable metrics |
 | 6...7 | Correlated frame-pair generation; zero is the legacy relay contract |
 

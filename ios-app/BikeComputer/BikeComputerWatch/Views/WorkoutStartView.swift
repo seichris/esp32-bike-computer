@@ -18,6 +18,10 @@ struct WorkoutStartView: View {
 
                 setupContent
 
+                if manager.setupState == .ready {
+                    heartRateZoneSettings
+                }
+
                 if manager.locationAuthorizationState == .denied {
                     Label("Route, altitude, and GPS speed unavailable", systemImage: "location.slash")
                         .font(.caption2)
@@ -53,6 +57,31 @@ struct WorkoutStartView: View {
             Text(
                 "This may abandon an unfinished ride. BikeComputer will preserve the damaged recovery file for diagnosis before resetting setup."
             )
+        }
+    }
+
+    private var heartRateZoneSettings: some View {
+        VStack(spacing: 3) {
+            Stepper(
+                value: Binding(
+                    get: { manager.maximumHeartRateBPM },
+                    set: manager.setMaximumHeartRateBPM
+                ),
+                in: WorkoutHeartRateZoneProfile
+                    .supportedMaximumHeartRateBPM
+            ) {
+                Text("Max HR \(manager.maximumHeartRateBPM)")
+                    .font(.caption)
+                    .monospacedDigit()
+            }
+            .accessibilityLabel("Maximum heart rate")
+            .accessibilityValue("\(manager.maximumHeartRateBPM) beats per minute")
+            .accessibilityHint("Used to calculate five BikeComputer zones")
+
+            Text("BikeComputer zones use this maximum heart rate.")
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
     }
 

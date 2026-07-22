@@ -5,51 +5,53 @@ ESP32 workout companion. A checked result requires evidence from the exact build
 identified below. Unit tests and Simulator results never satisfy a physical
 criterion.
 
-## Candidate identity
+## Current baseline and candidate identity
 
 | Field | Value |
 | --- | --- |
-| Branch | `feature/watchos-workout-companion` |
-| Phase 6 base | `cf52c1a26d4068f72d45dab216fb27535a580f92` |
-| Main integration checkpoint | `3b583669de7141c37f00d1f05713f46aced0fa1c` (includes `origin/main` / PR #111 at `e90118509d517bd34e0e5adabfb2f197fcd3ee23`) |
-| Candidate code commit | `6cf57f3386ae6eee7c870c10791dd2c61ea80cd9` (`1.1 (6)`; includes the LVGL-memory and installed-map onboarding fixes; supersedes `5b8ff662`) |
-| Signed-archive provenance | `/tmp/open-bike-watch-companion-1.1-6-6cf57f33-20260720.xcarchive`, built from clean exact candidate `6cf57f33`; the iPhone container and embedded Watch app passed strict signature and repository release-container verification |
-| iPhone build | Exact-candidate `1.1 (6)` archive installed and launched on an iPhone 16 Pro Max running iOS 26.5.2 through the paired network connection, 2026-07-20; `devicectl` reports bundle `LetItRide.BikeComputer` at `1.1 (6)`; the user confirmed the installed-map onboarding no longer appeared; the remaining matrix is pending |
-| Watch build | Exact-candidate embedded `1.1 (6)` app installed directly on an Apple Watch Series 8 running watchOS 26.5 through the paired network connection, 2026-07-20; `devicectl` reports bundle `LetItRide.BikeComputer.watchkitapp` at `1.1 (6)`; launch remains pending because the Watch re-locked after installation |
-| ESP32 1.75 firmware SHA | `1eb6233f77f46ed34deccdca87c5d600b2401b1c9547276ab2d4a854d2c90701` (`WAVESHARE_AMOLED_175`, clean build from exact candidate `6cf57f33`, 2,785,712-byte binary, flashed to `/dev/cu.usbmodem2101`, 2026-07-20) |
-| ESP32 2.06 firmware SHA | `37c7dacd5cd68826b86f81d098d6a0764ac00d0360ae3ad0481f50ab2bb4c8ed` (`WAVESHARE_AMOLED_206`, clean build from exact candidate `6cf57f33`, 2,785,280-byte binary; physical flash pending) |
+| Baseline branch | `main` |
+| Current GitHub main | `f37249b4cb9cb9c218c57a19b25fd87ce04cf9af` (PR #115; fetched 2026-07-22) |
+| App release identity | iPhone and Watch targets both resolve to `1.1 (7)` on current main |
+| Heart-rate-zone candidate | `agent/heart-rate-zones`, based directly on current main `f37249b4`; the exact PR head must replace this branch reference before final physical validation |
+| Current-main build provenance | `/private/tmp/open-bike-main-ios-watch-f37249b4-dd/Build/Products/Release-iphoneos/BikeComputer.app`, built from clean detached current main `f37249b4` with Xcode 26.6; strict deep signature verification, embedded-Watch validation, version inspection, entitlements, and bundled privacy-manifest comparison passed, 2026-07-22 |
+| iPhone build | Current-main `1.1 (7)` Release app installed over USB on an iPhone 16 Pro Max (`00008140-001055643C81401C`) running iOS 26.5.2, 2026-07-22; launch and on-device version query were not repeated in this pass |
+| Watch build | Current-main embedded `1.1 (7)` Watch app installed on an Apple Watch Series 8 (`00008301-D09E23AC3A0BC02E`) running watchOS 26.5, 2026-07-22; the user confirmed the app is present on the Watch; live workout launch remains pending |
+| Last archived candidate | Historical only: `/tmp/open-bike-watch-companion-1.1-6-6cf57f33-20260720.xcarchive` at `6cf57f33` / `1.1 (6)`. Do not use its physical results as exact-current-main evidence. |
+| ESP32 1.75 firmware | Current-main build/flash pending. Historical artifact: SHA-256 `1eb6233f77f46ed34deccdca87c5d600b2401b1c9547276ab2d4a854d2c90701` from `6cf57f33`, flashed 2026-07-20. |
+| ESP32 2.06 firmware | Current-main build/flash pending. Historical artifact: SHA-256 `37c7dacd5cd68826b86f81d098d6a0764ac00d0360ae3ad0481f50ab2bb4c8ed` from `6cf57f33`; physical flash was not performed. |
 
 Record dates, OS versions, device models, firmware environment, and evidence
 links or filenames with each executed run. Never copy results from a different
-build into the final-candidate column.
+build into the final-candidate column. Evidence explicitly labeled historical
+is context only and does not satisfy a current-baseline or PR-candidate gate.
 
 ## Automated and packaging gates
 
 | Gate | Status | Evidence |
 | --- | --- | --- |
-| iOS 15 compatibility/typecheck | Passed | `./scripts/run-workout-contract-tests.sh` and `./scripts/run-navigation-tests.sh` passed against clean exact candidate `6cf57f33`, 2026-07-20 |
-| iOS workout unit tests | Passed | 36 tests, zero failures/skips, iPhone 17 Pro Simulator from clean exact candidate `6cf57f33`, 2026-07-20 |
-| watchOS workout unit tests | Passed | 92 tests, zero failures/skips, Apple Watch Series 11 (46mm) Simulator from clean exact candidate `6cf57f33`, 2026-07-20 |
-| iOS device and Simulator builds with embedded Watch app | Passed with provenance split | Prior exact-behavior unsigned iPhoneOS/Simulator Release containers cover candidate `40b8e034`. Exact candidate `6cf57f33` is covered by the clean signed Release archive below, including embedded-Watch validation, 2026-07-20. |
-| App Store release identity | Passed locally / pending editable version and upload | App Store Connect app `6788977349` has version 1.0 in `READY_FOR_DISTRIBUTION` and valid builds through 5. Both iPhone and Watch Debug/Release configurations resolve to marketing version 1.1 and build 6; six release-asset tests and target-linked project assertions passed, 2026-07-20. Creating an editable 1.1 version and uploading remain separately authorized actions. |
-| Signed Release archive integrity | Passed for development signing / pending distribution export | `/tmp/open-bike-watch-companion-1.1-6-6cf57f33-20260720.xcarchive`; `xcodebuild clean archive` succeeded without provisioning updates, both nested signatures and the repository release-container verifier passed, and iPhone/Watch metadata report `1.1 (6)` with signing team `4H5PK8686H`, 2026-07-20. The installed identities are development identities with `get-task-allow = true`, so this is not an App Store distribution export. |
+| iOS 15 compatibility/typecheck | Passed in Xcode / standalone host launch pending | The heart-rate-zone candidate built the iPhone target with deployment target iOS 15 and the embedded watchOS 10 app under Xcode 26.6. The standalone contract runner compiled but its new local executable remained blocked in macOS `dyld_start`; the same contract suite passed in both Xcode test bundles, 2026-07-22. |
+| iOS workout unit tests | Passed on heart-rate-zone candidate | 36 tests, zero failures/skips, iPhone 17 Pro Simulator on iOS 26.5; xcresult `Test-WorkoutContractiOSTests-2026.07.22_11-47-11-+0800.xcresult`, 2026-07-22 |
+| watchOS workout unit tests | Passed on heart-rate-zone candidate | 93 tests, zero failures/skips, including the production configured-zone snapshot path, Apple Watch Series 11 (46mm) Simulator on watchOS 26.5; xcresult `Test-WorkoutContractWatchTests-2026.07.22_11-48-02-+0800.xcresult`, 2026-07-22 |
+| iOS device and Simulator builds with embedded Watch app | Passed for current-main baseline and candidate Simulator | Clean current main `f37249b4` produced a development-signed Release iPhone app with embedded Watch app and was installed on both physical devices. The heart-rate-zone candidate produced a clean unsigned Debug Simulator container with the embedded Watch app, 2026-07-22. |
+| App Store release identity | Passed locally / pending editable version and upload | App Store Connect app `6788977349` had version 1.0 in `READY_FOR_DISTRIBUTION` and valid builds through 5 at the last authenticated check. Current main iPhone and Watch targets both resolve to marketing version 1.1 and build 7. Creating an editable 1.1 version and uploading remain separately authorized actions. |
+| Signed Release integrity | Passed for current-main development build / archive and distribution export pending | Exact current-main `1.1 (7)` iPhone and embedded Watch bundles passed strict deep signature verification and metadata inspection, 2026-07-22. The last full archive/repository-verifier result remains historical at `6cf57f33`; create a fresh archive for the final PR head. |
 | App Store distribution signing | Pending signing authority/assets | The iPhone bundle has an active App Store profile, but App Store Connect lists no Watch distribution profile and only a development certificate is available locally/remotely. Creating certificates/profiles or enabling provisioning updates requires separate authorization. |
-| Installed-app launch smoke | iPhone passed / Watch pending unlock | `devicectl` launched the exact-candidate `LetItRide.BikeComputer` successfully and authenticated to the bike computer. The exact Watch app was installed, but its launch request was denied because the Watch had re-locked; unlock and open it before counting Watch launch, 2026-07-20. |
-| `ValidateEmbeddedBinary` | Passed | Exact `6cf57f33` development-signed Release archive, 2026-07-20 |
-| iPhone HealthKit entitlement | Passed in signed Release archive | Signed application identifier `4H5PK8686H.LetItRide.BikeComputer`, team `4H5PK8686H`, and `com.apple.developer.healthkit = true`, 2026-07-20 |
-| Watch HealthKit entitlement | Passed in signed Release archive | Signed application identifier `4H5PK8686H.LetItRide.BikeComputer.watchkitapp`, team `4H5PK8686H`, and `com.apple.developer.healthkit = true`, 2026-07-20 |
-| Watch `workout-processing` background mode | Passed | Development-signed exact-candidate embedded Release Watch `Info.plist` contains `workout-processing` and points to companion `LetItRide.BikeComputer`, 2026-07-20 |
-| iPhone and Watch privacy manifests in bundles | Passed | Source manifests matched the exact `6cf57f33` development-signed archive byte-for-byte through the release-container verifier; source SHA-256 values remain `5f51c506726d785bedd75dba4181b6a564dc0d0ca72de58858242ade6a24842b` (iPhone) and `521eb6ef8430773e5c010e1838fe9dd8fa5d62b7b76d1cea8d7d8daadcb144e2` (Watch), 2026-07-20 |
-| Watch app icon in bundle / asset validation | Passed | Exact-candidate Watch `Assets.car` and `CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconName = AppIcon` verified; a mutated missing-metadata fixture is rejected, 2026-07-20 |
-| In-app privacy-policy reachability | Passed automated / pending final tap | iPhone Settings and Watch start screen compile against one shared HTTPS URL; URL is present in both exact-candidate Release binaries and release-asset tests pass. Open it on the final installed build before submission. |
-| App Store Connect privacy-policy URL | Configured / pending branch publication and final verification | App Store Connect already displays the documented GitHub URL. The current public `main` policy still predates the Watch/HealthKit and 30-day retention text, so the candidate policy must be published before final tap and submission verification. |
+| Installed-app launch smoke | Current-main install passed / launch pending | `1.1 (7)` was installed on the connected iPhone and paired Watch; the user confirmed the Watch app is present. Neither app launch was repeated for this exact-main pass, so launch remains pending, 2026-07-22. |
+| `ValidateEmbeddedBinary` | Passed on current main | Exact current-main `f37249b4` development-signed Release build, 2026-07-22 |
+| iPhone HealthKit entitlement | Passed in current-main signed Release build | `com.apple.developer.healthkit = true`, verified from the exact current-main `1.1 (7)` app, 2026-07-22 |
+| Watch HealthKit entitlement | Passed in current-main signed Release build | `com.apple.developer.healthkit = true`, verified from the exact current-main embedded `1.1 (7)` Watch app, 2026-07-22 |
+| Watch `workout-processing` background mode | Passed on current main | Exact current-main embedded Watch `Info.plist` contains `workout-processing` and targets companion `LetItRide.BikeComputer`, 2026-07-22 |
+| iPhone and Watch privacy manifests in bundles | Passed on current main | Exact current-main bundle manifests match source byte-for-byte. SHA-256 remains `5f51c506726d785bedd75dba4181b6a564dc0d0ca72de58858242ade6a24842b` (iPhone) and `521eb6ef8430773e5c010e1838fe9dd8fa5d62b7b76d1cea8d7d8daadcb144e2` (Watch), 2026-07-22 |
+| Watch app icon in bundle / asset validation | Passed on current main | Exact current-main Watch bundle contains compiled assets and `CFBundleIconName = AppIcon`; final installed-screen review remains part of the physical matrix. |
+| In-app privacy-policy reachability | Passed automated / pending final tap | iPhone Settings and Watch start screen compile against one shared HTTPS URL, and the policy is now published on current main. Open it from the final installed PR build before submission. |
+| App Store Connect privacy-policy URL | Configured / pending final tap and dashboard recheck | The documented public-main policy includes the Apple Watch, HealthKit, and 30-day retention text. App Store Connect displayed that GitHub URL at the last authenticated check; recheck the dashboard and tap the link from the final installed build before submission. |
 | App Store Connect App Privacy declarations | Published but stale / submission blocker | The authenticated App Store Connect dashboard reports the declaration was published 11 days ago and currently shows only **Precise Location** under **Data Not Linked to You**, used for app functionality. Candidate code and `docs/app-store-privacy-disclosures.md` require Precise Location, Device ID, Other User Content, and Product Interaction, all linked to the installation identity and not used for tracking. Update, review the product-page preview, and publish those answers before submission; no dashboard mutation was made, 2026-07-20. |
 | Production privacy retention/provider contract | Pending authenticated production/provider check | Candidate compose defaults and policy agree on 30-day artifact retention, scheduled deletion, and equivalent provider protection, and the public production health endpoint returned HTTP 200 on 2026-07-20. Exact deployed environment values and provider contractual obligations could not be authenticated through the available Coolify or SSH paths and remain required before submission. |
 | Backend retention/privacy regressions | Passed | 206 backend tests passed (one unrelated skip) after integrating current main; the subsequent candidate changes do not touch backend code, 2026-07-20. |
 | Workout protocol/vector/state/presenter host tests | Passed | Strict C++ protocol/state/presenter/GPS suites plus exact protected native channel-six dispatch, replay, and wrong-channel checks, 2026-07-20 |
-| Existing navigation/BLE regression tests | Passed on exact candidate | `./scripts/run-navigation-tests.sh`, including the installed-map onboarding regression, passed against clean exact candidate `6cf57f33`; the user then confirmed on the exact installed build that the Download Map modal did not appear for the connected device's existing map, 2026-07-20. |
-| `WAVESHARE_AMOLED_175` firmware build, flash, and boot | Passed exact-candidate freeze regression | Clean exact candidate `6cf57f33` built at RAM 50.8% and flash 88.5%; binary SHA-256 `1eb6233f77f46ed34deccdca87c5d600b2401b1c9547276ab2d4a854d2c90701` was flashed to `/dev/cu.usbmodem2101`. A clean reset verified display power, SD mount, LVGL/UI, TCA9554/CST9217 initialization, map `custom-map-6354c43431`, and authenticated iPhone GPS. The configured `MAP_GUIDANCE` transition completed and LVGL/display heartbeats continued through 78 seconds and a reconnect, without the prior allocation stall; the user then visually confirmed that connection completed and the device remained operational. Intermittent idle touch/I2C warnings remain observable without stopping the loop; the existing GPIO21 hint-plus-throttled-fallback touch policy is unchanged. |
-| `WAVESHARE_AMOLED_206` firmware build | Passed on exact candidate | Clean exact candidate `6cf57f33` built successfully at RAM 50.8% and flash 88.5% (2,784,739 / 3,145,728 bytes); binary SHA-256 `37c7dacd5cd68826b86f81d098d6a0764ac00d0360ae3ad0481f50ab2bb4c8ed`, 2026-07-20. Physical 2.06 flash remains pending. |
+| Existing navigation/BLE regression tests | Candidate typecheck passed / runtime host launch pending | The complete navigation/BLE host source set typechecked after the zone-availability flag rename, with only existing SDK deprecation warnings, 2026-07-22. The last full host-runtime pass remains historical at `6cf57f33`; the local host executable launch is currently blocked in macOS `dyld_start`. |
+| `WAVESHARE_AMOLED_175` firmware build, flash, and boot | Historical pass / current-main refresh pending | The `6cf57f33` artifact passed its freeze regression and physical 1.75-inch flash on 2026-07-20. Rebuild and reflash the final PR head before using this row as current candidate evidence. |
+| `WAVESHARE_AMOLED_206` firmware build | Historical build / current-main refresh pending | The `6cf57f33` artifact built successfully on 2026-07-20; the final PR head still needs a fresh 2.06 build and physical flash. |
 | 1.75 and 2.06 layout/interaction host tests | Passed | Both `test_gui_layout.cpp` variants after current-main integration; the candidate changes do not touch layout code, 2026-07-20 |
 | App Store iPhone screenshot export validation | Passed | Four opaque 1242x2688 PNGs plus manifest/contact sheet/source provenance/ZIP; candidate changes do not touch rendering inputs or derivatives, and generation/validation/provenance/package checks passed, 2026-07-20 |
 | App Store Watch screenshot dimensions/alpha | Passed | Opaque 416x496 JPEG; `bun run validate:watch`, candidate changes do not touch the asset, 2026-07-20 |
@@ -72,9 +74,10 @@ build into the final-candidate column.
 | 12 | Ride without external sensors; optional power/cadence stay unavailable and GPS fallback behavior is correct. | Pending | — |
 | 13 | Ride with cycling speed, power, and cadence sensors; available values propagate without double counting. | Pending | — |
 | 14 | Terminate/crash the Watch app during a workout; relaunch and recover the same session without duplicate save. | Pending | — |
-| 15 | Save after outdoor movement; Health/Fitness shows exactly one workout with route, distance, energy, and available zone data. | Pending | — |
+| 15 | Save after outdoor movement; Health/Fitness shows exactly one workout with route, distance, energy, and heart rate. | Pending | — |
 | 16 | Run at least two hours; record Watch, iPhone, and ESP32 battery deltas plus thermal observations. | Pending | — |
 | 17 | Validate readable, unclipped live/stale/paused/ended/idle screens on physical 1.75- and 2.06-inch devices. | Pending | — |
+| 18 | Configure maximum heart rate on Watch, start a ride, and verify the same expected BikeComputer `Zx/5` appears from one fresh heart-rate sample on Watch, iPhone, and ESP32. Change max HR between rides and verify the computed boundary changes without being labeled as an Apple system zone. | Pending | — |
 
 ## Exact-build confirmation paths carried from Phase 3
 
@@ -121,7 +124,10 @@ Health/Fitness for:
 - exactly one BikeComputer cycling workout;
 - route present when location was permitted;
 - distance and active energy present;
-- heart rate and available zone information present;
+- heart rate present; any Apple system zone information shown by Fitness is
+  independent of BikeComputer's live max-HR zones;
+- the expected BikeComputer `Zx/5` was observed separately on Watch, iPhone,
+  and ESP32 during the live physical-zone check;
 - source identified as the BikeComputer Watch app;
 - no workout for the final confirmed discard run.
 

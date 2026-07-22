@@ -4,6 +4,55 @@ import XCTest
 
 @MainActor
 final class WatchWorkoutManagerTests: XCTestCase {
+    func testProductionSnapshotPublishesConfiguredHeartRateZone() throws {
+        let defaultsSuiteName = "WatchWorkoutManagerHeartRateZoneTests"
+        let defaults = try XCTUnwrap(
+            UserDefaults(suiteName: defaultsSuiteName)
+        )
+        defaults.removePersistentDomain(forName: defaultsSuiteName)
+        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let capturedAt = Date()
+        let startDate = capturedAt.addingTimeInterval(-30)
+        let identity = try recoveryStore.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            initializeOnLaunch: false,
+            heartRateZoneDefaults: defaults
+        )
+        manager.setMaximumHeartRateBPM(200)
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+        manager.setCurrentHeartRateForTesting(
+            160,
+            capturedAt: capturedAt
+        )
+
+        XCTAssertTrue(manager.publishMirrorSnapshotForTesting())
+        XCTAssertEqual(manager.snapshot.currentHeartRateZone, 4)
+        XCTAssertEqual(
+            manager.snapshot.heartRateZoneCount,
+            WorkoutHeartRateZoneProfile.zoneCount
+        )
+        XCTAssertTrue(manager.snapshot.availability.contains(.heartRateZone))
+        XCTAssertNil(manager.snapshot.heartRateZoneDurations)
+    }
+
     func testActiveSessionIDSurvivesInitialMirrorPublicationFailure() throws {
         let persistence = ToggleRecoveryPersistence()
         let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)

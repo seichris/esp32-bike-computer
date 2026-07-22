@@ -70,6 +70,7 @@ private struct WorkoutContractTestSuite {
         testCyclingDistanceRequiresSource()
         testComponentTimestampsStayWithinWorkoutWindow()
         testHeartRateZonePayloadIsCoherent()
+        testHeartRateZoneProfileAndPersistence()
         testAltitudeRequiresVerticalAccuracy()
         testUnknownErrorCodesBecomeSafeGenericCodes()
         testSequenceGateRejectsDuplicatesAndOlderSnapshots()
@@ -903,6 +904,54 @@ private struct WorkoutContractTestSuite {
         } catch {
             expect(false, "coherent zone payload should be accepted: \(error)")
         }
+    }
+
+    private mutating func testHeartRateZoneProfileAndPersistence() {
+        let profile = WorkoutHeartRateZoneProfile(maximumHeartRateBPM: 200)
+        expect(profile.zone(for: nil) == nil, "missing heart rate has no zone")
+        expect(profile.zone(for: 0) == nil, "zero heart rate has no zone")
+        expect(profile.zone(for: .nan) == nil, "non-finite heart rate has no zone")
+        expect(profile.zone(for: 119.9) == 1, "below 60 percent is zone 1")
+        expect(profile.zone(for: 120) == 2, "60 percent starts zone 2")
+        expect(profile.zone(for: 140) == 3, "70 percent starts zone 3")
+        expect(profile.zone(for: 160) == 4, "80 percent starts zone 4")
+        expect(profile.zone(for: 180) == 5, "90 percent starts zone 5")
+        expect(profile.zone(for: 220) == 5, "above max remains zone 5")
+        expect(
+            WorkoutHeartRateZoneProfile(maximumHeartRateBPM: 20)
+                .maximumHeartRateBPM == 100,
+            "maximum heart rate clamps to the supported lower bound"
+        )
+        expect(
+            WorkoutHeartRateZoneProfile(maximumHeartRateBPM: 900)
+                .maximumHeartRateBPM == 240,
+            "maximum heart rate clamps to the supported upper bound"
+        )
+
+        let suiteName = "WorkoutHeartRateZoneSettingsTests"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            expect(false, "heart-rate zone test defaults should be available")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        expect(
+            WorkoutHeartRateZoneSettings.maximumHeartRateBPM(from: defaults)
+                == WorkoutHeartRateZoneProfile.defaultMaximumHeartRateBPM,
+            "missing setting uses the documented default"
+        )
+        WorkoutHeartRateZoneSettings.saveMaximumHeartRateBPM(205, to: defaults)
+        expect(
+            WorkoutHeartRateZoneSettings.maximumHeartRateBPM(from: defaults)
+                == 205,
+            "maximum heart rate persists"
+        )
+        WorkoutHeartRateZoneSettings.saveMaximumHeartRateBPM(999, to: defaults)
+        expect(
+            WorkoutHeartRateZoneSettings.maximumHeartRateBPM(from: defaults)
+                == 240,
+            "persisted maximum heart rate is clamped"
+        )
     }
 
     private mutating func testAltitudeRequiresVerticalAccuracy() {
@@ -4906,7 +4955,7 @@ private struct WorkoutContractTestSuite {
 
         for metricTitle in [
             "Heart Rate",
-            "HR Zone",
+            "BikeComputer Zone",
             "Speed",
             "Distance",
             "Energy",
@@ -4953,7 +5002,7 @@ private struct WorkoutContractTestSuite {
         let compactSource = source.filter { !$0.isWhitespace }
         for metricBinding in [
             "metric(\"HeartRate\",WorkoutValueFormatter.heartRate(snapshot.currentHeartRate?.value),\"BPM\"",
-            "metric(\"HRZone\",zoneValue(snapshot),\"ZONE\"",
+            "metric(\"BikeComputerZone\",zoneValue(snapshot),\"ZONE\"",
             "metric(\"Speed\",WorkoutValueFormatter.speed(snapshot.currentSpeed?.value),\"KM/H\"",
             "metric(\"Distance\",WorkoutValueFormatter.distance(snapshot.cyclingDistance?.value),WorkoutValueFormatter.distanceUnit(snapshot.cyclingDistance?.value)",
             "metric(\"Energy\",WorkoutValueFormatter.energy(snapshot.activeEnergy?.value),\"KCAL\"",
@@ -5103,7 +5152,7 @@ private struct WorkoutContractTestSuite {
             "label:\"distance\"",
             "label:\"altitude\"",
             "label:\"heartrate\"",
-            "label:\"HRzone\"",
+            "label:\"bikezone\"",
             "label:\"energy\"",
         ] {
             guard let range = compactNavigation.range(
