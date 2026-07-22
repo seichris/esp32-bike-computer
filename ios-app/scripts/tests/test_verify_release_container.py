@@ -15,9 +15,16 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
     def make_fixture(self, root: Path) -> Path:
         app = root / "BikeComputer.app"
         watch = app / "Watch" / "BikeComputerWatch.app"
+        complication = watch / "PlugIns" / "BikeComputerWatchComplications.appex"
         watch.mkdir(parents=True)
+        complication.mkdir(parents=True)
 
-        for path in [app / "BikeComputer", watch / "BikeComputerWatch", watch / "Assets.car"]:
+        for path in [
+            app / "BikeComputer",
+            watch / "BikeComputerWatch",
+            watch / "Assets.car",
+            complication / "BikeComputerWatchComplications",
+        ]:
             path.write_bytes(b"fixture")
 
         shutil.copyfile(
@@ -34,9 +41,25 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
             plistlib.dump(
                 {
                     "CFBundleIdentifier": "LetItRide.BikeComputer.watchkitapp",
+                    "CFBundleURLTypes": [
+                        {"CFBundleURLSchemes": ["another-scheme"]},
+                        {"CFBundleURLSchemes": ["bikecomputer"]},
+                    ],
                     "WKBackgroundModes": ["workout-processing"],
                     "CFBundleIcons": {
                         "CFBundlePrimaryIcon": {"CFBundleIconName": "AppIcon"}
+                    },
+                },
+                handle,
+            )
+        with (complication / "Info.plist").open("wb") as handle:
+            plistlib.dump(
+                {
+                    "CFBundleIdentifier": (
+                        "LetItRide.BikeComputer.watchkitapp.complications"
+                    ),
+                    "NSExtension": {
+                        "NSExtensionPointIdentifier": "com.apple.widgetkit-extension"
                     },
                 },
                 handle,
@@ -64,6 +87,34 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
             with watch_info.open("rb") as handle:
                 payload = plistlib.load(handle)
             del payload["CFBundleIcons"]
+            with watch_info.open("wb") as handle:
+                plistlib.dump(payload, handle)
+
+            result = self.run_verifier(app)
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_rejects_watch_bundle_without_complication_extension(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.make_fixture(Path(temporary))
+            complication = (
+                app
+                / "Watch"
+                / "BikeComputerWatch.app"
+                / "PlugIns"
+                / "BikeComputerWatchComplications.appex"
+            )
+            shutil.rmtree(complication)
+
+            result = self.run_verifier(app)
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_rejects_watch_bundle_without_complication_url_scheme(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.make_fixture(Path(temporary))
+            watch_info = app / "Watch" / "BikeComputerWatch.app" / "Info.plist"
+            with watch_info.open("rb") as handle:
+                payload = plistlib.load(handle)
+            del payload["CFBundleURLTypes"]
             with watch_info.open("wb") as handle:
                 plistlib.dump(payload, handle)
 

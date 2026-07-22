@@ -176,6 +176,242 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertFalse(manager.isRecovering)
     }
 
+    func testComplicationStartWaitsForColdLaunchRecovery() async throws {
+        let recovery = RecoveryProbe()
+        var startCount = 0
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: WatchWorkoutRecoveryStore(
+                persistence: ToggleRecoveryPersistence()
+            ),
+            recoverActiveWorkoutSession: { await recovery.run() },
+            refreshAuthorization: {},
+            authorizationRefreshState: .ready,
+            complicationStartOperation: { startCount += 1 },
+            initializeOnLaunch: true
+        )
+        try await waitUntil { recovery.callCount == 1 }
+
+        manager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+        await Task.yield()
+        XCTAssertEqual(startCount, 0)
+
+        recovery.completeWithoutSession()
+        try await waitUntil { startCount == 1 }
+        XCTAssertFalse(manager.isRecovering)
+    }
+
+    func testComplicationStartIgnoresUnknownAndDuplicateURLs() async throws {
+        let start = AsyncVoidProbe()
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: WatchWorkoutRecoveryStore(
+                persistence: ToggleRecoveryPersistence()
+            ),
+            requestAuthorization: {},
+            refreshAuthorization: {},
+            authorizationRefreshState: .ready,
+            complicationStartOperation: { await start.run() },
+            initializeOnLaunch: false
+        )
+        manager.requestAuthorization()
+        try await waitUntil { manager.setupState == .ready }
+
+        manager.handleLaunchURL(
+            URL(string: "bikecomputer://workout/summary")!
+        )
+        await Task.yield()
+        XCTAssertEqual(start.callCount, 0)
+
+        manager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+        manager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+        try await waitUntil { start.callCount == 1 }
+        start.complete()
+        await Task.yield()
+        XCTAssertEqual(start.callCount, 1)
+    }
+
+    func testComplicationStartWaitsForSuccessfulRecoveryRetry() async throws {
+        let recovery = RecoveryProbe()
+        var startCount = 0
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: WatchWorkoutRecoveryStore(
+                persistence: ToggleRecoveryPersistence()
+            ),
+            recoverActiveWorkoutSession: { await recovery.run() },
+            refreshAuthorization: {},
+            authorizationRefreshState: .ready,
+            complicationStartOperation: { startCount += 1 },
+            initializeOnLaunch: true
+        )
+        try await waitUntil { recovery.callCount == 1 }
+
+        manager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+        recovery.completeWithError()
+        try await waitUntil {
+            manager.setupState == .failed && !manager.isRecovering
+        }
+        await Task.yield()
+        XCTAssertEqual(startCount, 0)
+
+        manager.retrySetup()
+        try await waitUntil { recovery.callCount == 2 }
+        recovery.completeWithoutSession()
+        try await waitUntil { startCount == 1 }
+    }
+
+    func testComplicationStartRequestsRequiredHealthAuthorization() async throws {
+        let recovery = RecoveryProbe()
+        var authorizationRequestCount = 0
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: WatchWorkoutRecoveryStore(
+                persistence: ToggleRecoveryPersistence()
+            ),
+            recoverActiveWorkoutSession: { await recovery.run() },
+            requestAuthorization: { authorizationRequestCount += 1 },
+            refreshAuthorization: {},
+            authorizationRefreshState: .needsAuthorization,
+            initializeOnLaunch: true
+        )
+        try await waitUntil { recovery.callCount == 1 }
+        recovery.completeWithoutSession()
+        try await waitUntil {
+            manager.setupState == .needsAuthorization
+                && !manager.isRecovering
+        }
+
+        manager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+
+        try await waitUntil { authorizationRequestCount == 1 }
+        XCTAssertEqual(manager.setupState, .needsAuthorization)
+    }
+
+    func testComplicationStartRequeuesIfRecoveryBeginsBeforeTaskRuns() async throws {
+        let recovery = RecoveryProbe()
+        var startCount = 0
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: WatchWorkoutRecoveryStore(
+                persistence: ToggleRecoveryPersistence()
+            ),
+            recoverActiveWorkoutSession: { await recovery.run() },
+            refreshAuthorization: {},
+            authorizationRefreshState: .ready,
+            complicationStartOperation: { startCount += 1 },
+            initializeOnLaunch: true
+        )
+        try await waitUntil { recovery.callCount == 1 }
+        recovery.completeWithoutSession()
+        try await waitUntil {
+            manager.setupState == .ready && !manager.isRecovering
+        }
+
+        manager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+        manager.handleActiveWorkoutRecovery()
+        try await waitUntil { recovery.callCount == 2 }
+        await Task.yield()
+        XCTAssertEqual(startCount, 0)
+
+        recovery.completeWithoutSession()
+        try await waitUntil { startCount == 1 }
+    }
+
+    func testComplicationStartRequeuesIfRecoveryBeginsDuringAuthorization() async throws {
+        let recovery = RecoveryProbe()
+        let authorization = AsyncThrowingVoidProbe()
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: WatchWorkoutRecoveryStore(
+                persistence: ToggleRecoveryPersistence()
+            ),
+            recoverActiveWorkoutSession: { await recovery.run() },
+            requestAuthorization: { try await authorization.run() },
+            refreshAuthorization: {},
+            authorizationRefreshState: .needsAuthorization,
+            initializeOnLaunch: true
+        )
+        try await waitUntil { recovery.callCount == 1 }
+        recovery.completeWithoutSession()
+        try await waitUntil {
+            manager.setupState == .needsAuthorization
+                && !manager.isRecovering
+        }
+
+        manager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+        try await waitUntil { authorization.callCount == 1 }
+        manager.handleActiveWorkoutRecovery()
+        try await waitUntil { recovery.callCount == 2 }
+
+        authorization.complete()
+        recovery.completeWithoutSession()
+        try await waitUntil { authorization.callCount == 2 }
+        authorization.complete()
+    }
+
+    func testComplicationStartStaysBlockedForUnsafeRecoveryStores() async throws {
+        let corruptPersistence = ToggleRecoveryPersistence()
+        corruptPersistence.data = Data([0x00, 0x01, 0x02])
+        var corruptStartCount = 0
+        let corruptManager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: WatchWorkoutRecoveryStore(
+                persistence: corruptPersistence
+            ),
+            complicationStartOperation: { corruptStartCount += 1 },
+            initializeOnLaunch: true
+        )
+        try await waitUntil { corruptManager.setupState == .failed }
+        corruptManager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+        await Task.yield()
+        XCTAssertEqual(corruptStartCount, 0)
+        XCTAssertTrue(corruptManager.hasCorruptRecoveryState)
+
+        let unavailablePersistence = ToggleRecoveryPersistence()
+        unavailablePersistence.failsLoad = true
+        var unavailableStartCount = 0
+        let unavailableManager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: WatchWorkoutRecoveryStore(
+                persistence: unavailablePersistence
+            ),
+            complicationStartOperation: { unavailableStartCount += 1 },
+            initializeOnLaunch: true
+        )
+        try await waitUntil { unavailableManager.setupState == .failed }
+        unavailableManager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+        await Task.yield()
+        XCTAssertEqual(unavailableStartCount, 0)
+        XCTAssertTrue(unavailableManager.hasUnavailableRecoveryState)
+    }
+
     func testProductionMirrorStartRetryAndBackpressure() async throws {
         let probe = WatchMirrorTransportProbe()
         let runtime = try makeMirrorRuntime(probe: probe)
@@ -6142,6 +6378,51 @@ final class WatchWorkoutManagerTests: XCTestCase {
 
         XCTAssertEqual(deliveredConfigurations.count, 1)
         XCTAssertTrue(deliveredConfigurations[0] === queuedConfiguration)
+        XCTAssertFalse(manager.hasAttachedSessionForTesting)
+    }
+
+    func testQueuedComplicationStartDrainsAfterRecoveredTombstoneCleanup() async throws {
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let terminalIdentity = try archiveSavedIdentity(in: recoveryStore)
+        let healthStore = HKHealthStore()
+        let sessionConfiguration = HKWorkoutConfiguration()
+        sessionConfiguration.activityType = .cycling
+        sessionConfiguration.locationType = .outdoor
+        let recoveredSession = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: sessionConfiguration
+        )
+        let recoveredBuilder = recoveredSession.associatedWorkoutBuilder()
+        var startCount = 0
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
+                session: recoveredSession,
+                builder: recoveredBuilder,
+                sessionState: { .running }
+            ),
+            complicationStartOperation: { startCount += 1 },
+            initializeOnLaunch: false
+        )
+
+        manager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+        await Task.yield()
+        XCTAssertEqual(startCount, 0)
+
+        manager.completeTerminalTombstoneSessionCleanup(
+            recoveredSession,
+            builder: recoveredBuilder,
+            sessionID: terminalIdentity.sessionID,
+            disposition: .save
+        )
+
+        try await waitUntil { startCount == 1 }
         XCTAssertFalse(manager.hasAttachedSessionForTesting)
     }
 
