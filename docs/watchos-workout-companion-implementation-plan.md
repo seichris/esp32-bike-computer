@@ -40,14 +40,11 @@ was removed from the repository.
 - The BikeComputer Watch app, not Apple's Workout app, owns the active
   HKWorkoutSession.
 - Apple Watch permits only one active workout session, but public HealthKit APIs
-  do not expose whether another app currently owns it. A rider-initiated start
-  in the Watch app warns that BikeComputer cannot check for another app's
-  workout: `Cancel` creates no BikeComputer session and `Start Anyway` proceeds.
-  An iPhone start instead checks for a paired Watch and installed BikeComputer
-  companion, then starts directly; transient WatchConnectivity reachability is
-  not a hard gate because HealthKit can wake the Watch app. If another app later
-  takes ownership, BikeComputer reports that displacement explicitly and never
-  retries in a loop.
+  do not expose whether another app currently owns it. Watch and iPhone starts
+  proceed directly after their setup checks; transient WatchConnectivity
+  reachability is not a hard gate because HealthKit can wake the Watch app. If
+  another app owns or later takes ownership of the workout session,
+  BikeComputer reports the outcome explicitly and never retries in a loop.
 - Workout and navigation are independent:
   - starting navigation does not silently start a workout;
   - ending navigation does not end a workout;
@@ -253,10 +250,13 @@ coherent; preserve the oldest component timestamp.
 
 The current shipping SDK does not expose Apple's personalized workout-zone
 stream. BikeComputer therefore provides a separate five-zone profile based on
-the maximum heart rate configured by the rider on the Watch: below 60%, 60-70%,
-70-80%, 80-90%, and 90% or more. A default of 190 BPM is visible and adjustable
-before a ride. The profile reports a one-based current zone and a count of five
-only while the underlying heart-rate sample is fresh and valid.
+the maximum heart rate configured in the iPhone app's Developer Settings: below
+60%, 60-70%, 70-80%, 80-90%, and 90% or more. The default is 190 BPM. Changes
+persist on iPhone and use WatchConnectivity application context to update the
+paired Watch, which retains its last received value and falls back to the
+default before any setting has arrived. The profile reports a one-based current
+zone and a count of five only while the underlying heart-rate sample is fresh
+and valid.
 
 These values are always described as BikeComputer zones, not approximations of
 Apple's configured system zones. When Apple's workout-zone API is available in
@@ -779,7 +779,7 @@ Presentation rules:
 | No paired Watch or missing companion app | iPhone start explains the required setup; navigation remains usable. Transient WatchConnectivity unreachability does not block a paired, installed Watch start. |
 | HealthKit denied | No workout starts; no synthetic workout is saved. |
 | Location denied on Watch | Continue supported sensor metrics; route/elevation unavailable. |
-| Apple Workout already active before BikeComputer starts | A Watch-app start requires the cross-app warning: Cancel creates no session and Start Anyway may end the existing workout, as disclosed. An iPhone start proceeds directly after pairing/install checks because public APIs cannot detect the competing workout. Any resulting displacement is reported honestly. |
+| Apple Workout already active before BikeComputer starts | Watch and iPhone starts proceed directly after setup checks because public APIs cannot detect the competing workout. Any resulting start failure or displacement is reported honestly. |
 | Another app starts while BikeComputer is active | Report that BikeComputer was displaced, stop safely, and do not retry in a loop. |
 | iPhone disconnects | Watch continues and saves; buffer only the newest pending snapshot. |
 | Mirroring reconnects | Replace session reference and request a full snapshot. |
@@ -935,11 +935,8 @@ Use a real paired Watch and iPhone; simulator-only validation is insufficient.
 7. Background iPhone without navigation and verify honest stale behavior.
 8. Pause/resume from Watch and iPhone.
 9. End from Watch and from iPhone.
-10. With Apple Workout active, verify the Watch-app start warning: Cancel leaves
-    Apple Workout active and Start Anyway proceeds only after the explicit
-    choice. Separately verify that iPhone start proceeds directly after the
-    paired-Watch/installed-companion check and that any displacement is reported
-    honestly.
+10. With Apple Workout active, start directly from Watch and iPhone in separate
+    runs; verify any start failure or displacement is reported honestly.
 11. Deny HealthKit, then deny Watch location separately.
 12. Ride without external sensors.
 13. Ride with cycling speed, power, and cadence sensors.

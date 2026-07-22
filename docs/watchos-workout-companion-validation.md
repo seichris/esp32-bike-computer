@@ -29,9 +29,9 @@ is context only and does not satisfy a current-baseline or PR-candidate gate.
 
 | Gate | Status | Evidence |
 | --- | --- | --- |
-| iOS 15 compatibility/typecheck | Passed in Xcode / standalone host launch pending | The heart-rate-zone candidate built the iPhone target with deployment target iOS 15 and the embedded watchOS 10 app under Xcode 26.6. The standalone contract runner compiled but its new local executable remained blocked in macOS `dyld_start`; the same contract suite passed in both Xcode test bundles, 2026-07-22. |
-| iOS workout unit tests | Passed on heart-rate-zone candidate | 36 tests, zero failures/skips, iPhone 17 Pro Simulator on iOS 26.5; xcresult `Test-WorkoutContractiOSTests-2026.07.22_11-47-11-+0800.xcresult`, 2026-07-22 |
-| watchOS workout unit tests | Passed on heart-rate-zone candidate | 93 tests, zero failures/skips, including the production configured-zone snapshot path, Apple Watch Series 11 (46mm) Simulator on watchOS 26.5; xcresult `Test-WorkoutContractWatchTests-2026.07.22_11-48-02-+0800.xcresult`, 2026-07-22 |
+| iOS 15 compatibility/typecheck | Passed | The follow-up candidate built the iPhone target with deployment target iOS 15 and the embedded watchOS 10 app under Xcode 26.6. The standalone contract runner also launched and passed after the revised labels, direct Watch start, and iPhone-to-Watch max-HR sync changes, 2026-07-22. |
+| iOS workout unit tests | Passed on heart-rate-zone candidate | 36 tests, zero failures/skips, iPhone 17 Pro Simulator on iOS 26.5; xcresult `Test-WorkoutContractiOSTests-2026.07.22_12-40-42-+0800.xcresult`, 2026-07-22 |
+| watchOS workout unit tests | Passed on heart-rate-zone candidate | 93 tests, zero failures/skips, including the production configured-zone snapshot path, Apple Watch Series 11 (46mm) Simulator on watchOS 26.5; xcresult `Test-WorkoutContractWatchTests-2026.07.22_12-41-09-+0800.xcresult`, 2026-07-22 |
 | iOS device and Simulator builds with embedded Watch app | Passed for current-main baseline and candidate Simulator | Clean current main `f37249b4` produced a development-signed Release iPhone app with embedded Watch app and was installed on both physical devices. The heart-rate-zone candidate produced a clean unsigned Debug Simulator container with the embedded Watch app, 2026-07-22. |
 | App Store release identity | Passed locally / pending editable version and upload | App Store Connect app `6788977349` had version 1.0 in `READY_FOR_DISTRIBUTION` and valid builds through 5 at the last authenticated check. Current main iPhone and Watch targets both resolve to marketing version 1.1 and build 7. Creating an editable 1.1 version and uploading remain separately authorized actions. |
 | Signed Release integrity | Passed for current-main development build / archive and distribution export pending | Exact current-main `1.1 (7)` iPhone and embedded Watch bundles passed strict deep signature verification and metadata inspection, 2026-07-22. The last full archive/repository-verifier result remains historical at `6cf57f33`; create a fresh archive for the final PR head. |
@@ -69,7 +69,7 @@ is context only and does not satisfy a current-baseline or PR-candidate gate.
 | 7 | Background iPhone without navigation; ESP32 must become honestly stale rather than show old speed as current. | Pending | — |
 | 8 | Pause and resume from both Watch and iPhone; state agrees and paused time/distance do not inflate. | Pending | — |
 | 9 | End and save once from Watch and once from iPhone in separate runs; each produces one synchronized terminal outcome. | Pending | — |
-| 10 | With Apple's Workout active, verify the Watch-app warning, Cancel no-op, and Start Anyway path. Separately verify direct iPhone start after pairing/install checks and honest displacement reporting. | Pending | — |
+| 10 | With Apple's Workout active, start directly from Watch and iPhone in separate runs and verify any start failure or displacement is reported honestly. | Pending | — |
 | 11 | Deny Health access, then deny Watch location separately; workout setup and unavailable route/GPS metrics remain honest. | Pending | — |
 | 12 | Ride without external sensors; optional power/cadence stay unavailable and GPS fallback behavior is correct. | Pending | — |
 | 13 | Ride with cycling speed, power, and cadence sensors; available values propagate without double counting. | Pending | — |
@@ -77,7 +77,7 @@ is context only and does not satisfy a current-baseline or PR-candidate gate.
 | 15 | Save after outdoor movement; Health/Fitness shows exactly one workout with route, distance, energy, and heart rate. | Pending | — |
 | 16 | Run at least two hours; record Watch, iPhone, and ESP32 battery deltas plus thermal observations. | Pending | — |
 | 17 | Validate readable, unclipped live/stale/paused/ended/idle screens on physical 1.75- and 2.06-inch devices. | Pending | — |
-| 18 | Configure maximum heart rate on Watch, start a ride, and verify the same expected BikeComputer `Zx/5` appears from one fresh heart-rate sample on Watch, iPhone, and ESP32. Change max HR between rides and verify the computed boundary changes without being labeled as an Apple system zone. | Pending | — |
+| 18 | Configure maximum heart rate in iPhone Developer Settings, verify it syncs to Watch, start a ride, and confirm one fresh heart-rate sample produces the same expected zone on Watch, iPhone (`Zone N` / `heart zone`), and ESP32. Change max HR between rides and verify the boundary changes without being labeled as an Apple system zone. | Pending | User confirmed a live zone appeared in the iPhone app on 2026-07-22; setting sync, revised labels, boundary change, and full Watch/iPhone/ESP32 agreement remain pending. |
 
 ## Exact-build confirmation paths carried from Phase 3
 
@@ -126,8 +126,8 @@ Health/Fitness for:
 - distance and active energy present;
 - heart rate present; any Apple system zone information shown by Fitness is
   independent of BikeComputer's live max-HR zones;
-- the expected BikeComputer `Zx/5` was observed separately on Watch, iPhone,
-  and ESP32 during the live physical-zone check;
+- the expected BikeComputer zone was observed separately on Watch, iPhone, and
+  ESP32 during the live physical-zone check;
 - source identified as the BikeComputer Watch app;
 - no workout for the final confirmed discard run.
 

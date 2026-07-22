@@ -69,3 +69,29 @@ nonisolated enum WorkoutHeartRateZoneSettings {
         )
     }
 }
+
+nonisolated enum WorkoutHeartRateZoneSyncContext {
+    static let maximumHeartRateBPMKey =
+        "BikeComputer.workout.maximumHeartRateBPM.v1"
+
+    static func applicationContext(
+        maximumHeartRateBPM: Int
+    ) -> [String: Any] {
+        [
+            maximumHeartRateBPMKey:
+                WorkoutHeartRateZoneProfile.clampedMaximumHeartRateBPM(
+                    maximumHeartRateBPM
+                )
+        ]
+    }
+
+    static func maximumHeartRateBPM(
+        from applicationContext: [String: Any]
+    ) -> Int? {
+        guard let value = applicationContext[maximumHeartRateBPMKey] as? Int
+        else {
+            return nil
+        }
+        return WorkoutHeartRateZoneProfile.clampedMaximumHeartRateBPM(value)
+    }
+}

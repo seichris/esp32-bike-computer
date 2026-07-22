@@ -146,6 +146,7 @@ struct ContentView: View {
                     currentLocation: coordinator.currentLocation,
                     offlineMapManager: offlineMapManager,
                     firmwareUpdateManager: coordinator.firmwareUpdateManager,
+                    watchAvailability: watchAvailability,
                     onStartTestNavigation: { destination in
                         coordinator.startNavigation(
                             from: .currentLocation,
