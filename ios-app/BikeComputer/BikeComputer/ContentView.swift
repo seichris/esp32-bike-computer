@@ -206,6 +206,9 @@ struct ContentView: View {
         .onChange(of: coordinator.isNavigating) { _ in
             updateIdleTimer()
         }
+        .onChange(of: workoutStore.presentation.isWorkoutActive) { _ in
+            updateIdleTimer()
+        }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
         }
@@ -253,7 +256,11 @@ struct ContentView: View {
 
     private func updateIdleTimer(for phase: ScenePhase? = nil) {
         UIApplication.shared.isIdleTimerDisabled =
-            coordinator.isNavigating && (phase ?? scenePhase) == .active
+            RideActivityPolicy.shouldKeepScreenAwake(
+                isNavigating: coordinator.isNavigating,
+                isWorkoutActive: workoutStore.presentation.isWorkoutActive,
+                isApplicationActive: (phase ?? scenePhase) == .active
+            )
     }
 
     private func schedulePendingMapInstallResume() {

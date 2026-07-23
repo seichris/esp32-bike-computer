@@ -200,6 +200,14 @@ class BikeComputerCoordinator: ObservableObject {
         navEngine.$isSimulationMode
             .assign(to: &$isSimulationMode)
 
+        workoutMetricsStore.$presentation
+            .map { $0.isWorkoutActive }
+            .removeDuplicates()
+            .sink { [weak self] isWorkoutActive in
+                self?.locationManager.setWorkoutActive(isWorkoutActive)
+            }
+            .store(in: &cancellables)
+
         navEngine.$simulatedPosition
             .assign(to: &$simulatedPosition)
 

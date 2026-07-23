@@ -519,6 +519,7 @@ struct NavigationProtocolTests {
         testRouteInitialLocationUsesResolvedSource()
         testRouteTransportTypes()
         testMapTrackingPolicy()
+        testRideActivityPolicy()
         testDeviceGPSPacketBuilder()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
@@ -11830,6 +11831,66 @@ struct NavigationProtocolTests {
             ),
             .none,
             "a selected long-press destination should remain visible while GPS updates"
+        )
+    }
+
+    static func testRideActivityPolicy() {
+        assert(
+            RideActivityPolicy.shouldTrackLocation(
+                isNavigating: false,
+                isViewingMap: false,
+                isWorkoutActive: true,
+                isRefreshingDeviceDestinationLocation: false
+            ),
+            "a live workout should keep location tracking active"
+        )
+        assert(
+            RideActivityPolicy.shouldTrackLocationInBackground(
+                isNavigating: false,
+                isWorkoutActive: true,
+                isRefreshingDeviceDestinationLocation: false
+            ),
+            "a live workout should enable background location tracking without navigation"
+        )
+        assert(
+            !RideActivityPolicy.shouldTrackLocationInBackground(
+                isNavigating: false,
+                isWorkoutActive: false,
+                isRefreshingDeviceDestinationLocation: false
+            ),
+            "an idle map view should not enable background location tracking"
+        )
+        assert(
+            RideActivityPolicy.shouldKeepScreenAwake(
+                isNavigating: false,
+                isWorkoutActive: true,
+                isApplicationActive: true
+            ),
+            "a foreground live workout should keep the iPhone screen awake"
+        )
+        assert(
+            RideActivityPolicy.shouldKeepScreenAwake(
+                isNavigating: true,
+                isWorkoutActive: false,
+                isApplicationActive: true
+            ),
+            "foreground navigation should continue keeping the screen awake"
+        )
+        assert(
+            !RideActivityPolicy.shouldKeepScreenAwake(
+                isNavigating: false,
+                isWorkoutActive: true,
+                isApplicationActive: false
+            ),
+            "the app should restore normal idle behavior while backgrounded"
+        )
+        assert(
+            !RideActivityPolicy.shouldKeepScreenAwake(
+                isNavigating: false,
+                isWorkoutActive: false,
+                isApplicationActive: true
+            ),
+            "an idle foreground app should allow Auto-Lock"
         )
     }
 

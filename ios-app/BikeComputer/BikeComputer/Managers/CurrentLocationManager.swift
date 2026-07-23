@@ -12,6 +12,38 @@ import Combine
 import UIKit
 #endif
 
+nonisolated enum RideActivityPolicy {
+    static func shouldTrackLocation(
+        isNavigating: Bool,
+        isViewingMap: Bool,
+        isWorkoutActive: Bool,
+        isRefreshingDeviceDestinationLocation: Bool
+    ) -> Bool {
+        isNavigating ||
+            isViewingMap ||
+            isWorkoutActive ||
+            isRefreshingDeviceDestinationLocation
+    }
+
+    static func shouldTrackLocationInBackground(
+        isNavigating: Bool,
+        isWorkoutActive: Bool,
+        isRefreshingDeviceDestinationLocation: Bool
+    ) -> Bool {
+        isNavigating ||
+            isWorkoutActive ||
+            isRefreshingDeviceDestinationLocation
+    }
+
+    static func shouldKeepScreenAwake(
+        isNavigating: Bool,
+        isWorkoutActive: Bool,
+        isApplicationActive: Bool
+    ) -> Bool {
+        isApplicationActive && (isNavigating || isWorkoutActive)
+    }
+}
+
 class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published var currentLocation: CLLocation?
     @Published var currentAddress: String = "Current Location"
@@ -24,6 +56,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     // MARK: - Optimization #3: Intelligent Location Update Management
     private var isNavigating = false
     private var isViewingMap = false
+    private var isWorkoutActive = false
     private var isLocationUpdating = false
     private var isDeviceDestinationRequestsEnabled = false
     private var isRefreshingDeviceDestinationLocation = false
@@ -103,13 +136,28 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         isViewingMap = viewing
         updateLocationTracking()
     }
+
+    func setWorkoutActive(_ active: Bool) {
+        guard isWorkoutActive != active else { return }
+        isWorkoutActive = active
+        updateLocationTracking()
+    }
     
     public func updateLocationTracking(restart: Bool = false) {
-        let shouldTrack = isNavigating || 
-                         isViewingMap || 
-                         isRefreshingDeviceDestinationLocation
-        let shouldTrackInBackground = isNavigating ||
-                                      isRefreshingDeviceDestinationLocation
+        let shouldTrack = RideActivityPolicy.shouldTrackLocation(
+            isNavigating: isNavigating,
+            isViewingMap: isViewingMap,
+            isWorkoutActive: isWorkoutActive,
+            isRefreshingDeviceDestinationLocation:
+                isRefreshingDeviceDestinationLocation
+        )
+        let shouldTrackInBackground =
+            RideActivityPolicy.shouldTrackLocationInBackground(
+                isNavigating: isNavigating,
+                isWorkoutActive: isWorkoutActive,
+                isRefreshingDeviceDestinationLocation:
+                    isRefreshingDeviceDestinationLocation
+            )
 
         if shouldTrackInBackground &&
             Self.isAuthorizedWhenInUse(locationManager.authorizationStatus) &&
@@ -117,9 +165,9 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             locationManager.requestAlwaysAuthorization()
         }
 
+#if !os(macOS)
         locationManager.allowsBackgroundLocationUpdates = shouldTrackInBackground
         locationManager.pausesLocationUpdatesAutomatically = !shouldTrackInBackground
-#if !os(macOS)
         locationManager.showsBackgroundLocationIndicator = shouldTrackInBackground
 #endif
         
@@ -127,7 +175,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             if isLocationUpdating {
                 locationManager.stopUpdatingLocation()
             }
-            print("🌍 Starting location updates (navigating: \(isNavigating), map: \(isViewingMap), device destination request: \(isRefreshingDeviceDestinationLocation))")
+            print("🌍 Starting location updates (navigating: \(isNavigating), map: \(isViewingMap), workout: \(isWorkoutActive), device destination request: \(isRefreshingDeviceDestinationLocation))")
             locationManager.startUpdatingLocation()
             isLocationUpdating = true
         } else if (!shouldTrack || !isLocationAuthorized) && isLocationUpdating {
