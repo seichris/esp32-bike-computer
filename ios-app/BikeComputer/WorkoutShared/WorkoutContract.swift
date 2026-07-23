@@ -110,6 +110,8 @@ nonisolated enum WorkoutSafeErrorCodeV1: String, Codable, Sendable {
     case terminalChoiceConflict
     case terminalChoiceUnconfirmed
     case segmentMarkFailed
+    case segmentMarkUnconfirmed
+    case segmentFinalizationPending
     case sessionFailed
     case unknown
 
@@ -401,7 +403,8 @@ nonisolated enum WorkoutContractCodec {
             }
             if let errorCode = acknowledgement.errorCode {
                 guard acknowledgement.control == .markSegment,
-                      errorCode == .segmentMarkFailed else {
+                      errorCode == .segmentMarkFailed
+                        || errorCode == .segmentMarkUnconfirmed else {
                     throw WorkoutContractError.invalidEnvelopePayload
                 }
             }

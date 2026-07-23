@@ -142,6 +142,10 @@ struct WorkoutStartView: View {
             "The requested finish choice could not be confirmed."
         case .segmentMarkFailed:
             "A segment could not be marked. The workout itself is unchanged."
+        case .segmentMarkUnconfirmed:
+            "A segment is still being confirmed. Check the live workout."
+        case .segmentFinalizationPending:
+            "Open the live workout to finish saving a pending segment."
         case .sessionFailed, .unknown, nil:
             "The workout couldn’t be started or recovered."
         }

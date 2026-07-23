@@ -409,6 +409,7 @@ struct WorkoutDashboardView: View {
     let onDone: () -> Bool
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var segmentToast: WorkoutCompletedSegmentV1?
     @State private var observedSegmentIndex: UInt32?
 
@@ -449,14 +450,13 @@ struct WorkoutDashboardView: View {
             observedSegmentIndex = currentCompletedSegment?.index
         }
         .onChange(of: currentCompletedSegment?.index) { index in
-            guard let index,
-                  index != observedSegmentIndex,
-                  store.presentation.isWorkoutActive,
-                  let segment = currentCompletedSegment else {
-                observedSegmentIndex = index
-                return
-            }
+            let previousIndex = observedSegmentIndex
             observedSegmentIndex = index
+            guard scenePhase == .active,
+                  let index,
+                  index != previousIndex,
+                  store.presentation.isWorkoutActive,
+                  let segment = currentCompletedSegment else { return }
             UINotificationFeedbackGenerator()
                 .notificationOccurred(.success)
             withAnimation {
@@ -714,6 +714,12 @@ struct WorkoutDashboardView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         } else if presentation.isWorkoutActive {
+            if !store.supportsSegmentMarking {
+                Text("Update BikeComputer on Apple Watch to mark segments from iPhone.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
             HStack(spacing: 12) {
                 Button(action: onMarkSegment) {
                     Label("Segment", systemImage: "flag.checkered")
@@ -722,6 +728,8 @@ struct WorkoutDashboardView: View {
                 .disabled(
                     presentation.sessionState != .running
                         || presentation.pendingControl != nil
+                        || !store.supportsSegmentMarking
+                        || store.isSegmentConfirmationPending
                 )
                 .accessibilityLabel("Mark workout segment")
 
@@ -730,7 +738,10 @@ struct WorkoutDashboardView: View {
                         Label("Resume", systemImage: "play.fill")
                     }
                     .tint(.green)
-                    .disabled(presentation.pendingControl != nil)
+                    .disabled(
+                        presentation.pendingControl != nil
+                            && presentation.pendingControl != .markSegment
+                    )
                 } else {
                     Button(action: onPause) {
                         Label("Pause", systemImage: "pause.fill")
@@ -738,7 +749,9 @@ struct WorkoutDashboardView: View {
                     .tint(.orange)
                     .disabled(
                         presentation.sessionState != .running
-                            || presentation.pendingControl != nil
+                            || (presentation.pendingControl != nil
+                                && presentation.pendingControl
+                                    != .markSegment)
                     )
                 }
 
@@ -751,7 +764,8 @@ struct WorkoutDashboardView: View {
                 }
                 .disabled(
                     presentation.sessionState == .ending
-                        || presentation.pendingControl != nil
+                        || (presentation.pendingControl != nil
+                            && presentation.pendingControl != .markSegment)
                 )
             }
             .buttonStyle(.borderedProminent)

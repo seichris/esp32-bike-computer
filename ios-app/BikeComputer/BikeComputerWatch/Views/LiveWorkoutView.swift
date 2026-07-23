@@ -86,9 +86,16 @@ struct LiveWorkoutView: View {
                         if finishError == .reconciliationFailed
                             || finishError == .saveFailed
                             || finishError == .identityMetadataFailed
+                            || finishError == .segmentConfirmationPending
                             || finishError == .terminalErrorPersistenceFailed {
                             Button(manager.isDiscarding ? "Retry Recovery" : "Retry Save") {
                                 manager.retryFinalization()
+                            }
+                            .font(.caption2)
+                        }
+                        if finishError == .segmentConfirmationPending {
+                            Button("Save Anyway") {
+                                manager.saveWithoutUnconfirmedSegment()
                             }
                             .font(.caption2)
                         }
@@ -204,6 +211,7 @@ struct LiveWorkoutView: View {
                     .disabled(
                         manager.state != .running
                             || manager.isMarkingSegment
+                            || manager.segmentError == .confirmationPending
                     )
                     .accessibilityLabel("Mark workout segment")
 
@@ -219,7 +227,6 @@ struct LiveWorkoutView: View {
                     .tint(manager.state == .paused ? .green : .orange)
                     .disabled(
                         ![.running, .paused].contains(manager.state)
-                            || manager.isMarkingSegment
                     )
                     .accessibilityLabel(manager.state == .paused ? "Resume ride" : "Pause ride")
 
@@ -232,7 +239,6 @@ struct LiveWorkoutView: View {
                     }
                     .disabled(
                         manager.state == .ending
-                            || manager.isMarkingSegment
                     )
                     .accessibilityLabel("End ride")
                 }
@@ -424,6 +430,8 @@ struct LiveWorkoutView: View {
             "Couldn’t verify whether this ride was saved. Retry safely."
         case .identityMetadataFailed:
             "Couldn’t finish the ride safely yet. Retry recovery."
+        case .segmentConfirmationPending:
+            "A segment is still pending. Retry, or save now without guaranteeing it."
         }
     }
 
@@ -435,6 +443,8 @@ struct LiveWorkoutView: View {
             "Resume the ride before marking a segment."
         case .healthKitWriteFailed:
             "Couldn’t mark that segment. The ride is still running."
+        case .confirmationPending:
+            "Still confirming that segment. You can pause or end the ride."
         }
     }
 }

@@ -19,11 +19,13 @@ enum WatchWorkoutFinishRequestError: Equatable {
     case saveFailed
     case reconciliationFailed
     case identityMetadataFailed
+    case segmentConfirmationPending
 }
 
 enum WatchWorkoutSegmentError: Equatable {
     case unavailable
     case healthKitWriteFailed
+    case confirmationPending
 }
 
 struct WatchWorkoutSummary: Equatable {
@@ -307,6 +309,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             "com.openbikecomputer.workout.segment.cumulativeElapsed"
         static let cumulativeDistance =
             "com.openbikecomputer.workout.segment.cumulativeDistance"
+        static let cumulativeDistanceSource =
+            "com.openbikecomputer.workout.segment.cumulativeDistanceSource"
+        static let eventID =
+            "com.openbikecomputer.workout.segment.eventID"
         static let controlSenderID =
             "com.openbikecomputer.workout.segment.controlSenderID"
         static let controlSequence =
@@ -321,7 +327,6 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 
     private struct RemoteSegmentControlContext {
         let envelope: WorkoutEnvelopeV1
-        let acceptedGate: WorkoutRemoteControlSequenceGate
     }
 
     private enum ConfirmedTerminalCompletion {
@@ -382,6 +387,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private let injectedRemoteResumeOperation:
         (@MainActor (HKWorkoutSession) -> Void)?
     private let injectedSegmentEventOperation: WatchSegmentEventOperation?
+    private let injectedEndCollectionOperation:
+        (@MainActor (HKLiveWorkoutBuilder, Date) async throws -> Void)?
+    private let injectedFinishWorkoutOperation:
+        (@MainActor (HKLiveWorkoutBuilder) async throws -> Void)?
     private let segmentNow: @MainActor () -> Date
     private let segmentWriteTimeout: TimeInterval
     private let injectedMirrorStartOperation: WatchMirrorStartOperation?
@@ -404,7 +413,12 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var mirrorShutdownWatchdogTask: Task<Void, Never>?
     private var complicationStartTask: Task<Void, Never>?
     private var segmentOperationTask: Task<Void, Never>?
+    private var segmentOperationTimeoutTask: Task<Void, Never>?
     private var segmentOperationAttemptID: UUID?
+    private var finalSegmentOperationTask: Task<Void, Never>?
+    private var finalSegmentOperationAttemptID: UUID?
+    private var hasAttemptedFinalSegmentClosure = false
+    private var allowsSavingWithUnconfirmedSegment = false
     private var authoritativeFinalizationEndDate: Date?
     private var isBuilderReadyForFinalization = false
     private var isIdentityMetadataRetryPending = false
@@ -435,7 +449,6 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         sequence: UInt64
     )?
     private var remoteSegmentControlContext: RemoteSegmentControlContext?
-    private var deferredRemoteWorkoutEnvelopes: [WorkoutEnvelopeV1] = []
     private var isTerminalMirrorDeliveryPending = false
     private var isStartFailureMirrorDeliveryPending = false
     private var shutdownMirrorFailureRetryCount = 0
@@ -544,6 +557,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         remoteResumeOperation:
             (@MainActor (HKWorkoutSession) -> Void)? = nil,
         segmentEventOperation: WatchSegmentEventOperation? = nil,
+        endCollectionOperation:
+            (@MainActor (HKLiveWorkoutBuilder, Date) async throws -> Void)?
+                = nil,
+        finishWorkoutOperation:
+            (@MainActor (HKLiveWorkoutBuilder) async throws -> Void)? = nil,
         segmentNow: @MainActor @escaping () -> Date = Date.init,
         segmentWriteTimeout: TimeInterval = 10,
         mirrorStartOperation: WatchMirrorStartOperation? = nil,
@@ -579,6 +597,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         self.injectedRemotePauseOperation = remotePauseOperation
         self.injectedRemoteResumeOperation = remoteResumeOperation
         self.injectedSegmentEventOperation = segmentEventOperation
+        self.injectedEndCollectionOperation = endCollectionOperation
+        self.injectedFinishWorkoutOperation = finishWorkoutOperation
         self.segmentNow = segmentNow
         self.segmentWriteTimeout = segmentWriteTimeout.isFinite
             ? min(max(0.01, segmentWriteTimeout), 60)
@@ -632,6 +652,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         mirrorShutdownWatchdogTask?.cancel()
         complicationStartTask?.cancel()
         segmentOperationTask?.cancel()
+        segmentOperationTimeoutTask?.cancel()
+        finalSegmentOperationTask?.cancel()
     }
 
     var state: WorkoutSessionStateV1 { lifecycle.state }
@@ -773,9 +795,12 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     }
 
     func retryFinalization() {
+        let isRetryingSegmentFinalization =
+            finishRequestError == .segmentConfirmationPending
         guard finishRequestError == .reconciliationFailed
                 || finishRequestError == .saveFailed
                 || finishRequestError == .identityMetadataFailed
+                || isRetryingSegmentFinalization
                 || finishRequestError == .terminalErrorPersistenceFailed,
               lifecycle.state == .ending,
               finalizationTask == nil else {
@@ -799,6 +824,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             terminalCauseRetryEndDate = retryEndDate
         }
         finishRequestError = nil
+        if isRetryingSegmentFinalization,
+           lastErrorCode == .segmentFinalizationPending {
+            lastErrorCode = nil
+        }
         Task { [weak self] in
             guard let self else { return }
             if isIdentityMetadataRetryPending {
@@ -831,6 +860,15 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 await resumeRecoveredStoppedSaveFinalization()
             }
         }
+    }
+
+    func saveWithoutUnconfirmedSegment() {
+        guard finishRequestError == .segmentConfirmationPending,
+              lifecycle.state == .ending else {
+            return
+        }
+        allowsSavingWithUnconfirmedSegment = true
+        retryFinalization()
     }
 
     func dismissSummary() {
@@ -1122,7 +1160,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         segmentError = nil
         isMarkingSegment = false
         remoteSegmentControlContext = nil
-        deferredRemoteWorkoutEnvelopes.removeAll()
+        hasAttemptedFinalSegmentClosure = false
+        allowsSavingWithUnconfirmedSegment = false
 
         let configuration: HKWorkoutConfiguration
         if let suppliedConfiguration {
@@ -1611,6 +1650,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
 
         updateAllMetrics(from: recoveredBuilder, capturedAt: Date())
+        resumePersistedRemoteSegmentIntentIfNeeded()
         setupState = .ready
         startMirroringIfNeeded(for: recoveredSession)
         publishSnapshotImmediately()
@@ -2421,7 +2461,19 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         disposition: WorkoutFinishDisposition,
         endDate: Date
     ) async {
-        await waitForSegmentOperationBeforeFinalization()
+        if disposition == .save,
+           !allowsSavingWithUnconfirmedSegment {
+            let segmentResolved =
+                await waitForSegmentOperationBeforeFinalization()
+            guard segmentResolved else {
+                lifecycle.releaseFinalizationClaimForRetry()
+                finishRequestError = .segmentConfirmationPending
+                segmentError = .confirmationPending
+                lastErrorCode = .segmentFinalizationPending
+                publishSnapshotImmediately()
+                return
+            }
+        }
         if disposition == .discard {
             let metadata = injectedRecoveredDiscardFinalizationAdapter?
                 .metadata()
@@ -2505,10 +2557,12 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 },
                 endCollection: { [weak self] in
                     guard let self else { throw WorkoutFinalizationError.managerReleased }
-                    await closeFinalSegmentIfNeeded(
+                    guard await closeFinalSegmentIfNeeded(
                         in: builder,
                         at: endDate
-                    )
+                    ) else {
+                        throw WorkoutSegmentWriteError.finalizationPending
+                    }
                     try await endCollection(builder, at: endDate)
                     updateAllMetrics(from: builder, capturedAt: endDate)
                 },
@@ -2578,6 +2632,16 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     }
 
     func handleFinalizationFailure(_ error: Error) {
+        if case WorkoutSegmentWriteError.finalizationPending = error {
+            lifecycle.releaseFinalizationClaimForRetry()
+            finishRequestError = .segmentConfirmationPending
+            if segmentError == nil {
+                segmentError = .confirmationPending
+            }
+            lastErrorCode = .segmentFinalizationPending
+            publishSnapshotImmediately()
+            return
+        }
         if case WorkoutFinalizationPersistenceError
             .finishFailureRollbackPending = error {
             isFinishFailureRollbackPending = true
@@ -2831,11 +2895,17 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         coalescedSnapshotTask = nil
         segmentOperationTask?.cancel()
         segmentOperationTask = nil
+        segmentOperationTimeoutTask?.cancel()
+        segmentOperationTimeoutTask = nil
         segmentOperationAttemptID = nil
+        finalSegmentOperationTask?.cancel()
+        finalSegmentOperationTask = nil
+        finalSegmentOperationAttemptID = nil
+        hasAttemptedFinalSegmentClosure = false
+        allowsSavingWithUnconfirmedSegment = false
         isMarkingSegment = false
         segmentError = nil
         remoteSegmentControlContext = nil
-        deferredRemoteWorkoutEnvelopes.removeAll()
         segmentAccumulator = WorkoutSegmentAccumulator()
         handleAttachedSessionRelease()
     }
@@ -2866,24 +2936,61 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         coalescedSnapshotTask = nil
         segmentOperationTask?.cancel()
         segmentOperationTask = nil
+        segmentOperationTimeoutTask?.cancel()
+        segmentOperationTimeoutTask = nil
         segmentOperationAttemptID = nil
+        finalSegmentOperationTask?.cancel()
+        finalSegmentOperationTask = nil
+        finalSegmentOperationAttemptID = nil
+        hasAttemptedFinalSegmentClosure = false
+        allowsSavingWithUnconfirmedSegment = false
         isMarkingSegment = false
         segmentError = nil
         remoteSegmentControlContext = nil
-        deferredRemoteWorkoutEnvelopes.removeAll()
         segmentAccumulator = WorkoutSegmentAccumulator()
         handleAttachedSessionRelease()
     }
 
     private func beginSegmentMark(
-        remoteContext: RemoteSegmentControlContext?
+        remoteContext: RemoteSegmentControlContext?,
+        recoveredCandidate: WorkoutSegmentCandidate? = nil
     ) {
-        guard lifecycle.state == .running,
-              !isMarkingSegment,
+        let canWriteRecoveredBoundary = recoveredCandidate != nil
+            && [.running, .paused, .ending].contains(lifecycle.state)
+        guard lifecycle.state == .running || canWriteRecoveredBoundary,
+              segmentOperationAttemptID == nil,
               builder != nil || injectedSegmentEventOperation != nil else {
+            let errorCode: WorkoutSafeErrorCodeV1
+            if segmentOperationAttemptID != nil {
+                if remoteContext == nil {
+                    segmentError = .confirmationPending
+                }
+                errorCode = remoteContext == nil
+                    ? .segmentMarkUnconfirmed
+                    : .segmentMarkFailed
+            } else {
+                segmentError = .unavailable
+                errorCode = .segmentMarkFailed
+            }
+            if let remoteContext {
+                publishAcknowledgement(
+                    for: .markSegment,
+                    acknowledgedSequence: remoteContext.envelope.sequence,
+                    errorCode: errorCode
+                )
+            }
+            return
+        }
+
+        let candidate: WorkoutSegmentCandidate?
+        if let recoveredCandidate {
+            candidate = recoveredCandidate
+        } else {
+            candidate = makeCurrentSegmentCandidate()
+        }
+        guard let candidate else {
             segmentError = .unavailable
             if let remoteContext {
-                commitRemoteSegmentControl(remoteContext)
                 publishAcknowledgement(
                     for: .markSegment,
                     acknowledgedSequence: remoteContext.envelope.sequence,
@@ -2892,24 +2999,19 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             }
             return
         }
-
-        let endedAt = segmentNow()
-        let currentSnapshot = makeSnapshot(capturedAt: endedAt)
-        guard let cumulativeElapsedTime =
-                currentSnapshot.elapsedTime?.value,
-              let candidate = segmentAccumulator.candidate(
-                  endedAt: endedAt,
-                  cumulativeElapsedTime: cumulativeElapsedTime,
-                  cumulativeDistanceMeters:
-                    currentSnapshot.cyclingDistance?.value
-              ) else {
-            segmentError = .unavailable
+        var validationAccumulator = segmentAccumulator
+        guard validationAccumulator.commit(candidate) else {
+            segmentError = .healthKitWriteFailed
             if let remoteContext {
-                commitRemoteSegmentControl(remoteContext)
+                let didClear = clearPersistedRemoteSegmentIntent(
+                    matching: remoteContext.envelope
+                )
                 publishAcknowledgement(
                     for: .markSegment,
                     acknowledgedSequence: remoteContext.envelope.sequence,
-                    errorCode: .segmentMarkFailed
+                    errorCode: didClear
+                        ? .segmentMarkFailed
+                        : .segmentMarkUnconfirmed
                 )
             }
             return
@@ -2925,95 +3027,230 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         let attemptID = UUID()
         segmentOperationAttemptID = attemptID
         let targetBuilder = builder
+        let injectedOperation = injectedSegmentEventOperation
         segmentOperationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
+            let outcome = await Self.segmentEventWriteOutcome(
+                event,
+                to: targetBuilder,
+                injectedOperation: injectedOperation
+            )
+            self?.completeSegmentMark(
+                attemptID: attemptID,
+                candidate: candidate,
+                outcome: outcome
+            )
+        }
+        let timeout = segmentWriteTimeout
+        segmentOperationTimeoutTask = Task { @MainActor [weak self] in
             do {
-                try await addSegmentEvent(event, to: targetBuilder)
-                completeSegmentMark(
-                    attemptID: attemptID,
-                    candidate: candidate,
-                    error: nil
+                try await Task.sleep(
+                    nanoseconds: UInt64(timeout * 1_000_000_000)
                 )
             } catch {
-                completeSegmentMark(
-                    attemptID: attemptID,
-                    candidate: nil,
-                    error: .healthKitWriteFailed
-                )
+                return
             }
+            self?.timeOutSegmentMark(attemptID: attemptID)
+        }
+    }
+
+    private func makeCurrentSegmentCandidate() -> WorkoutSegmentCandidate? {
+        let endedAt = segmentNow()
+        let currentSnapshot = makeSnapshot(capturedAt: endedAt)
+        guard let cumulativeElapsedTime =
+                currentSnapshot.elapsedTime?.value else {
+            return nil
+        }
+        return segmentAccumulator.candidate(
+            endedAt: endedAt,
+            cumulativeElapsedTime: cumulativeElapsedTime,
+            cumulativeDistanceMeters:
+                currentSnapshot.cyclingDistance?.value,
+            cumulativeDistanceSource:
+                currentSnapshot.cyclingDistance?.source
+        )
+    }
+
+    private func timeOutSegmentMark(attemptID: UUID) {
+        guard attemptID == segmentOperationAttemptID else { return }
+        isMarkingSegment = false
+        segmentError = .confirmationPending
+        if let remoteContext = remoteSegmentControlContext {
+            publishAcknowledgement(
+                for: .markSegment,
+                acknowledgedSequence: remoteContext.envelope.sequence,
+                errorCode: .segmentMarkUnconfirmed
+            )
         }
     }
 
     private func completeSegmentMark(
         attemptID: UUID,
-        candidate: WorkoutSegmentCandidate?,
-        error: WatchWorkoutSegmentError?
+        candidate: WorkoutSegmentCandidate,
+        outcome: SegmentEventWriteOutcome
     ) {
         guard attemptID == segmentOperationAttemptID else { return }
         let remoteContext = remoteSegmentControlContext
-        if let candidate, segmentAccumulator.commit(candidate) {
+        let didCommit = outcome == .success
+            && segmentAccumulator.commit(candidate)
+        if didCommit {
             segmentError = nil
             publishSnapshotImmediately()
         } else {
-            segmentError = error ?? .healthKitWriteFailed
+            segmentError = .healthKitWriteFailed
         }
         if let remoteContext {
-            commitRemoteSegmentControl(remoteContext)
+            let didClear = clearPersistedRemoteSegmentIntent(
+                matching: remoteContext.envelope
+            )
             publishAcknowledgement(
                 for: .markSegment,
                 acknowledgedSequence: remoteContext.envelope.sequence,
-                errorCode: candidate == nil ? .segmentMarkFailed : nil
+                errorCode: didCommit
+                    ? nil
+                    : didClear
+                        ? .segmentMarkFailed
+                        : .segmentMarkUnconfirmed
             )
         }
         remoteSegmentControlContext = nil
         isMarkingSegment = false
         segmentOperationAttemptID = nil
-        segmentOperationTask?.cancel()
+        segmentOperationTimeoutTask?.cancel()
+        segmentOperationTimeoutTask = nil
         segmentOperationTask = nil
-        drainDeferredRemoteWorkoutEnvelopes()
     }
 
-    private func waitForSegmentOperationBeforeFinalization() async {
-        while isMarkingSegment {
+    private func waitForSegmentOperationBeforeFinalization() async -> Bool {
+        guard let attemptID = segmentOperationAttemptID,
+              segmentOperationTask != nil else {
+            return true
+        }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(
+            by: .nanoseconds(
+                Int64(segmentWriteTimeout * 1_000_000_000)
+            )
+        )
+        while segmentOperationAttemptID == attemptID,
+              clock.now < deadline {
             do {
-                try await Task.sleep(nanoseconds: 10_000_000)
+                try await Task.sleep(nanoseconds: 25_000_000)
             } catch {
-                return
+                return false
             }
         }
+        return segmentOperationAttemptID != attemptID
     }
 
     private func commitRemoteSegmentControl(
-        _ context: RemoteSegmentControlContext
-    ) {
+        _ envelope: WorkoutEnvelopeV1,
+        candidate: WorkoutSegmentCandidate
+    ) -> Bool {
+        var candidateGate = remoteControlGate
+        guard (try? candidateGate.ingest(envelope)) == true else {
+            return false
+        }
+        let intent = WatchWorkoutRecoveryStore.RemoteSegmentIntent(
+            controlSenderID: envelope.controlSenderID,
+            acknowledgedSequence: envelope.sequence,
+            capturedAt: envelope.capturedAt,
+            completedSegment: candidate.completedSegment,
+            cumulativeElapsedTime: candidate.cumulativeElapsedTime,
+            cumulativeDistanceMeters: candidate.cumulativeDistanceMeters,
+            cumulativeDistanceSource: candidate.cumulativeDistanceSource
+        )
         do {
-            _ = try recoveryStore.persistRemoteControlCheckpoint(
-                context.acceptedGate.checkpoint,
-                finishing: nil,
-                requestedAt: nil,
-                explicitRiderChoice: true,
-                terminalErrorCode: nil,
-                terminalAcknowledgement: nil
+            try recoveryStore.persistRemoteSegmentControl(
+                checkpoint: candidateGate.checkpoint,
+                intent: intent
             )
             if let persistedIdentity = recoveryStore.recoveredIdentity {
                 identity = persistedIdentity
             }
         } catch {
-            // The HealthKit event metadata still provides exact replay
-            // detection if the process exits before this checkpoint is saved.
+            // Do not start HealthKit work until the replay checkpoint and
+            // original boundary are durable as one transaction.
+            return false
         }
-        remoteControlGate = context.acceptedGate
+        remoteControlGate = candidateGate
+        return true
     }
 
-    private func drainDeferredRemoteWorkoutEnvelopes() {
-        guard !isMarkingSegment,
-              !deferredRemoteWorkoutEnvelopes.isEmpty,
-              let session else {
+    private func commitRemoteSegmentRejection(
+        _ envelope: WorkoutEnvelopeV1
+    ) -> Bool {
+        var candidateGate = remoteControlGate
+        guard (try? candidateGate.ingest(envelope)) == true else {
+            return false
+        }
+        do {
+            _ = try recoveryStore.persistRemoteControlCheckpoint(
+                candidateGate.checkpoint
+            )
+            if let persistedIdentity = recoveryStore.recoveredIdentity {
+                identity = persistedIdentity
+            }
+        } catch {
+            return false
+        }
+        remoteControlGate = candidateGate
+        return true
+    }
+
+    @discardableResult
+    private func clearPersistedRemoteSegmentIntent(
+        matching envelope: WorkoutEnvelopeV1
+    ) -> Bool {
+        do {
+            try recoveryStore.clearRemoteSegmentIntent(matching: envelope)
+            if let persistedIdentity = recoveryStore.recoveredIdentity {
+                identity = persistedIdentity
+            }
+            return true
+        } catch {
+            // Event metadata remains the authoritative completion evidence.
+            // A later exact replay will reconcile it and retry this cleanup.
+            return false
+        }
+    }
+
+    private static func segmentCandidate(
+        from intent: WatchWorkoutRecoveryStore.RemoteSegmentIntent
+    ) -> WorkoutSegmentCandidate {
+        WorkoutSegmentCandidate(
+            completedSegment: intent.completedSegment,
+            cumulativeElapsedTime: intent.cumulativeElapsedTime,
+            cumulativeDistanceMeters: intent.cumulativeDistanceMeters,
+            cumulativeDistanceSource: intent.cumulativeDistanceSource
+        )
+    }
+
+    private func resumePersistedRemoteSegmentIntentIfNeeded() {
+        guard segmentOperationAttemptID == nil,
+              let identity,
+              let intent = recoveryStore.recoveredIdentity?
+                .remoteSegmentIntent else {
             return
         }
-        let deferred = deferredRemoteWorkoutEnvelopes
-        deferredRemoteWorkoutEnvelopes.removeAll()
-        handleRemoteWorkoutEnvelopes(deferred, from: session)
+        let envelope = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: identity.sessionID,
+            sessionToken: identity.sessionToken,
+            transportGenerationID:
+                identity.transportGenerationID ?? identity.sessionID,
+            sequence: intent.acknowledgedSequence,
+            capturedAt: intent.capturedAt,
+            controlSenderID: intent.controlSenderID,
+            control: .markSegment
+        )
+        if containsSegmentEvent(matching: envelope) {
+            clearPersistedRemoteSegmentIntent(matching: envelope)
+            return
+        }
+        beginSegmentMark(
+            remoteContext: RemoteSegmentControlContext(envelope: envelope),
+            recoveredCandidate: Self.segmentCandidate(from: intent)
+        )
     }
 
     private func makeSegmentEvent(
@@ -3028,6 +3265,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 NSNumber(value: candidate.completedSegment.duration),
             SegmentMetadataKey.cumulativeElapsed:
                 NSNumber(value: candidate.cumulativeElapsedTime),
+            SegmentMetadataKey.eventID: UUID().uuidString,
         ]
         if let distance = candidate.completedSegment.distanceMeters {
             metadata[SegmentMetadataKey.distanceMeters] = NSNumber(
@@ -3038,6 +3276,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             metadata[SegmentMetadataKey.cumulativeDistance] = NSNumber(
                 value: cumulativeDistance
             )
+        }
+        if let cumulativeDistanceSource =
+                candidate.cumulativeDistanceSource {
+            metadata[SegmentMetadataKey.cumulativeDistanceSource] =
+                cumulativeDistanceSource.rawValue
         }
         if let senderID = remoteEnvelope?.controlSenderID {
             metadata[SegmentMetadataKey.controlSenderID] = senderID.uuidString
@@ -3057,57 +3300,30 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         )
     }
 
-    private func addSegmentEvent(
+    private static func segmentEventWriteOutcome(
         _ event: HKWorkoutEvent,
-        to builder: HKLiveWorkoutBuilder?
-    ) async throws {
-        let operation = Task { @MainActor [weak self] in
-            guard let self else {
-                return SegmentEventWriteOutcome.failure
-            }
-            do {
-                try await performSegmentEventWrite(event, to: builder)
-                return SegmentEventWriteOutcome.success
-            } catch {
-                return SegmentEventWriteOutcome.failure
-            }
-        }
-        let timeout = segmentWriteTimeout
-        let outcomes = AsyncStream<SegmentEventWriteOutcome> {
-            continuation in
-            Task {
-                continuation.yield(await operation.value)
-                continuation.finish()
-            }
-            Task {
-                do {
-                    try await Task.sleep(
-                        nanoseconds: UInt64(timeout * 1_000_000_000)
-                    )
-                } catch {
-                    return
-                }
-                continuation.yield(.failure)
-                continuation.finish()
-            }
-        }
-        var iterator = outcomes.makeAsyncIterator()
-        guard let outcome = await iterator.next() else {
-            operation.cancel()
-            throw WorkoutSegmentWriteError.writeFailed
-        }
-        operation.cancel()
-        guard outcome == .success else {
-            throw WorkoutSegmentWriteError.writeFailed
+        to builder: HKLiveWorkoutBuilder?,
+        injectedOperation: WatchSegmentEventOperation?
+    ) async -> SegmentEventWriteOutcome {
+        do {
+            try await performSegmentEventWrite(
+                event,
+                to: builder,
+                injectedOperation: injectedOperation
+            )
+            return .success
+        } catch {
+            return .failure
         }
     }
 
-    private func performSegmentEventWrite(
+    private static func performSegmentEventWrite(
         _ event: HKWorkoutEvent,
-        to builder: HKLiveWorkoutBuilder?
+        to builder: HKLiveWorkoutBuilder?,
+        injectedOperation: WatchSegmentEventOperation?
     ) async throws {
-        if let injectedSegmentEventOperation {
-            try await injectedSegmentEventOperation(event)
+        if let injectedOperation {
+            try await injectedOperation(event)
             return
         }
         guard let builder else {
@@ -3132,8 +3348,20 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private func closeFinalSegmentIfNeeded(
         in builder: HKLiveWorkoutBuilder?,
         at endDate: Date
-    ) async {
-        guard segmentAccumulator.hasCompletedSegments else { return }
+    ) async -> Bool {
+        if allowsSavingWithUnconfirmedSegment {
+            return true
+        }
+        guard segmentAccumulator.hasCompletedSegments,
+              segmentOperationAttemptID == nil else {
+            return segmentOperationAttemptID == nil
+        }
+        if let attemptID = finalSegmentOperationAttemptID {
+            return await waitForFinalSegmentOperation(attemptID)
+        }
+        guard !hasAttemptedFinalSegmentClosure else {
+            return true
+        }
         let currentSnapshot = makeSnapshot(capturedAt: endDate)
         guard let cumulativeElapsedTime =
                 currentSnapshot.elapsedTime?.value,
@@ -3141,22 +3369,70 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                   endedAt: endDate,
                   cumulativeElapsedTime: cumulativeElapsedTime,
                   cumulativeDistanceMeters:
-                    currentSnapshot.cyclingDistance?.value
+                    currentSnapshot.cyclingDistance?.value,
+                  cumulativeDistanceSource:
+                    currentSnapshot.cyclingDistance?.source
               ),
               candidate.completedSegment.duration > 0 else {
-            return
+            return true
         }
-        do {
-            try await addSegmentEvent(
-                makeSegmentEvent(candidate, remoteEnvelope: nil),
-                to: builder
+        hasAttemptedFinalSegmentClosure = true
+        let attemptID = UUID()
+        finalSegmentOperationAttemptID = attemptID
+        let event = makeSegmentEvent(candidate, remoteEnvelope: nil)
+        let injectedOperation = injectedSegmentEventOperation
+        finalSegmentOperationTask = Task { @MainActor [weak self] in
+            let outcome = await Self.segmentEventWriteOutcome(
+                event,
+                to: builder,
+                injectedOperation: injectedOperation
             )
-            _ = segmentAccumulator.commit(candidate)
-        } catch {
-            // Never hold a completed ride hostage to a best-effort final
-            // segment boundary. Previously committed segments remain valid.
+            self?.completeFinalSegmentWrite(
+                attemptID: attemptID,
+                candidate: candidate,
+                outcome: outcome
+            )
+        }
+        return await waitForFinalSegmentOperation(attemptID)
+    }
+
+    private func waitForFinalSegmentOperation(_ attemptID: UUID) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(
+            by: .nanoseconds(
+                Int64(segmentWriteTimeout * 1_000_000_000)
+            )
+        )
+        while finalSegmentOperationAttemptID == attemptID,
+              clock.now < deadline {
+            do {
+                try await Task.sleep(nanoseconds: 25_000_000)
+            } catch {
+                return false
+            }
+        }
+        if finalSegmentOperationAttemptID == attemptID {
+            segmentError = .confirmationPending
+            return false
+        }
+        return hasAttemptedFinalSegmentClosure
+    }
+
+    private func completeFinalSegmentWrite(
+        attemptID: UUID,
+        candidate: WorkoutSegmentCandidate,
+        outcome: SegmentEventWriteOutcome
+    ) {
+        guard attemptID == finalSegmentOperationAttemptID else { return }
+        if outcome == .success, segmentAccumulator.commit(candidate) {
+            segmentError = nil
+            publishSnapshotImmediately()
+        } else {
+            hasAttemptedFinalSegmentClosure = false
             segmentError = .healthKitWriteFailed
         }
+        finalSegmentOperationAttemptID = nil
+        finalSegmentOperationTask = nil
     }
 
     private func restoreSegmentAccumulator(
@@ -3172,7 +3448,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             workoutStart: workoutStart,
             lastCompletedSegment: restored?.segment,
             cumulativeElapsedTime: restored?.cumulativeElapsedTime,
-            cumulativeDistanceMeters: restored?.cumulativeDistanceMeters
+            cumulativeDistanceMeters: restored?.cumulativeDistanceMeters,
+            cumulativeDistanceSource: restored?.cumulativeDistanceSource
         )
     }
 
@@ -3182,7 +3459,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     ) -> (
         segment: WorkoutCompletedSegmentV1,
         cumulativeElapsedTime: TimeInterval,
-        cumulativeDistanceMeters: Double?
+        cumulativeDistanceMeters: Double?,
+        cumulativeDistanceSource: WorkoutMetricSourceV1?
     )? {
         guard event.type == .segment,
               let metadata = event.metadata,
@@ -3213,6 +3491,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         let cumulativeDistance = (
             metadata[SegmentMetadataKey.cumulativeDistance] as? NSNumber
         )?.doubleValue
+        let cumulativeDistanceSource = (
+            metadata[SegmentMetadataKey.cumulativeDistanceSource] as? String
+        ).flatMap(WorkoutMetricSourceV1.init(rawValue:))
         let distanceIsWithinCumulative: Bool
         if let distance, let cumulativeDistance {
             distanceIsWithinCumulative = distance <= cumulativeDistance
@@ -3235,7 +3516,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 distanceMeters: distance
             ),
             cumulativeElapsed,
-            cumulativeDistance
+            cumulativeDistance,
+            cumulativeDistanceSource
         )
     }
 
@@ -3255,6 +3537,18 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             }
             return sequence == envelope.sequence
         } ?? false
+    }
+
+    private func isPendingSegmentControl(
+        _ envelope: WorkoutEnvelopeV1
+    ) -> Bool {
+        guard let pending = remoteSegmentControlContext?.envelope else {
+            return false
+        }
+        return pending.sessionID == envelope.sessionID
+            && pending.sessionToken == envelope.sessionToken
+            && pending.controlSenderID == envelope.controlSenderID
+            && pending.sequence == envelope.sequence
     }
 
     private func updateMetrics(
@@ -3711,6 +4005,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             startDate: identity.startDate
         )
         segmentAccumulator.reset(workoutStart: identity.startDate)
+        resumePersistedRemoteSegmentIntentIfNeeded()
     }
 
     func startMirroringForTesting() {
@@ -3734,8 +4029,23 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         )
     }
 
-    func closeFinalSegmentForTesting(at endDate: Date) async {
+    func closeFinalSegmentForTesting(at endDate: Date) async -> Bool {
         await closeFinalSegmentIfNeeded(in: builder, at: endDate)
+    }
+
+    func waitForSegmentOperationBeforeFinalizationForTesting() async -> Bool {
+        await waitForSegmentOperationBeforeFinalization()
+    }
+
+    func finalizeForTesting(
+        disposition: WorkoutFinishDisposition,
+        endDate: Date
+    ) async {
+        await finalize(disposition: disposition, endDate: endDate)
+    }
+
+    var allowsSavingWithUnconfirmedSegmentForTesting: Bool {
+        allowsSavingWithUnconfirmedSegment
     }
 
     func markMirrorShutdownDeliveryPendingForTesting(startFailure: Bool) {
@@ -3796,15 +4106,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
               let identity else {
             return
         }
-        if isMarkingSegment {
-            deferredRemoteWorkoutEnvelopes.append(contentsOf: envelopes)
-            return
-        }
         let expectedGeneration = identity.transportGenerationID
             ?? identity.sessionID
         let receivedAt = Date()
 
-        for (offset, envelope) in envelopes.enumerated() {
+        for envelope in envelopes {
             guard envelope.sessionID == identity.sessionID,
                   envelope.sessionToken == identity.sessionToken,
                   envelope.transportGenerationID == expectedGeneration,
@@ -3848,13 +4154,37 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                         let wasWritten = containsSegmentEvent(
                             matching: envelope
                         )
-                        publishAcknowledgement(
-                            for: .markSegment,
-                            acknowledgedSequence: envelope.sequence,
-                            errorCode: wasWritten
-                                ? nil
-                                : .segmentMarkFailed
-                        )
+                        if wasWritten {
+                            clearPersistedRemoteSegmentIntent(
+                                matching: envelope
+                            )
+                            publishAcknowledgement(
+                                for: .markSegment,
+                                acknowledgedSequence: envelope.sequence
+                            )
+                        } else if isPendingSegmentControl(envelope) {
+                            publishAcknowledgement(
+                                for: .markSegment,
+                                acknowledgedSequence: envelope.sequence,
+                                errorCode: .segmentMarkUnconfirmed
+                            )
+                        } else if let intent = recoveryStore
+                            .recoveredIdentity?.remoteSegmentIntent,
+                                  intent.matches(envelope) {
+                            beginSegmentMark(
+                                remoteContext: RemoteSegmentControlContext(
+                                    envelope: envelope
+                                ),
+                                recoveredCandidate:
+                                    Self.segmentCandidate(from: intent)
+                            )
+                        } else {
+                            publishAcknowledgement(
+                                for: .markSegment,
+                                acknowledgedSequence: envelope.sequence,
+                                errorCode: .segmentMarkFailed
+                            )
+                        }
                     }
                     _ = publishDurableTerminalAcknowledgement(
                         matching: envelope
@@ -3863,24 +4193,58 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 }
                 if control == .markSegment {
                     let context = RemoteSegmentControlContext(
-                        envelope: envelope,
-                        acceptedGate: candidateGate
+                        envelope: envelope
                     )
                     if containsSegmentEvent(matching: envelope) {
-                        commitRemoteSegmentControl(context)
                         publishAcknowledgement(
                             for: .markSegment,
                             acknowledgedSequence: envelope.sequence
                         )
                         continue
                     }
-                    beginSegmentMark(remoteContext: context)
-                    if isMarkingSegment {
-                        deferredRemoteWorkoutEnvelopes.append(
-                            contentsOf: envelopes.dropFirst(offset + 1)
+                    guard lifecycle.state == .running,
+                          segmentOperationAttemptID == nil,
+                          builder != nil
+                            || injectedSegmentEventOperation != nil else {
+                        let didPersistRejection =
+                            commitRemoteSegmentRejection(envelope)
+                        publishAcknowledgement(
+                            for: .markSegment,
+                            acknowledgedSequence: envelope.sequence,
+                            errorCode: didPersistRejection
+                                ? .segmentMarkFailed
+                                : .segmentMarkUnconfirmed
                         )
-                        return
+                        continue
                     }
+                    guard let candidate = makeCurrentSegmentCandidate() else {
+                        let didPersistRejection =
+                            commitRemoteSegmentRejection(envelope)
+                        publishAcknowledgement(
+                            for: .markSegment,
+                            acknowledgedSequence: envelope.sequence,
+                            errorCode: didPersistRejection
+                                ? .segmentMarkFailed
+                                : .segmentMarkUnconfirmed
+                        )
+                        continue
+                    }
+                    guard commitRemoteSegmentControl(
+                        envelope,
+                        candidate: candidate
+                    ) else {
+                        segmentError = .healthKitWriteFailed
+                        publishAcknowledgement(
+                            for: .markSegment,
+                            acknowledgedSequence: envelope.sequence,
+                            errorCode: .segmentMarkUnconfirmed
+                        )
+                        continue
+                    }
+                    beginSegmentMark(
+                        remoteContext: context,
+                        recoveredCandidate: candidate
+                    )
                     continue
                 }
                 let terminalAcknowledgement:
@@ -4628,6 +4992,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         _ builder: HKLiveWorkoutBuilder,
         at endDate: Date
     ) async throws {
+        if let injectedEndCollectionOperation {
+            try await injectedEndCollectionOperation(builder, endDate)
+            return
+        }
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Void, Error>) in
             builder.endCollection(withEnd: endDate) { success, error in
@@ -4645,6 +5013,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private func finishWorkout(
         _ builder: HKLiveWorkoutBuilder
     ) async throws {
+        if let injectedFinishWorkoutOperation {
+            try await injectedFinishWorkoutOperation(builder)
+            return
+        }
         try await withCheckedThrowingContinuation { continuation in
             builder.finishWorkout { workout, error in
                 switch WorkoutFinishCallbackPolicy.outcome(
@@ -4990,4 +5362,5 @@ private enum WorkoutFinalizationError: Error {
 private enum WorkoutSegmentWriteError: Error {
     case builderUnavailable
     case writeFailed
+    case finalizationPending
 }

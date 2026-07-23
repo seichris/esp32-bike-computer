@@ -296,6 +296,7 @@ nonisolated struct WorkoutSegmentCandidate: Equatable, Sendable {
     let completedSegment: WorkoutCompletedSegmentV1
     let cumulativeElapsedTime: TimeInterval
     let cumulativeDistanceMeters: Double?
+    let cumulativeDistanceSource: WorkoutMetricSourceV1?
 }
 
 /// Tracks sequential user-marked workout segments using active workout time
@@ -308,6 +309,7 @@ nonisolated struct WorkoutSegmentAccumulator: Equatable, Sendable {
     private(set) var segmentStartedAt: Date?
     private(set) var elapsedTimeAtStart: TimeInterval = 0
     private(set) var distanceAtStartMeters: Double?
+    private(set) var distanceSourceAtStart: WorkoutMetricSourceV1?
     private(set) var lastCompletedSegment: WorkoutCompletedSegmentV1?
 
     var hasCompletedSegments: Bool {
@@ -324,6 +326,7 @@ nonisolated struct WorkoutSegmentAccumulator: Equatable, Sendable {
         segmentStartedAt = workoutStart
         elapsedTimeAtStart = 0
         distanceAtStartMeters = 0
+        distanceSourceAtStart = nil
         lastCompletedSegment = nil
     }
 
@@ -331,7 +334,8 @@ nonisolated struct WorkoutSegmentAccumulator: Equatable, Sendable {
         workoutStart: Date,
         lastCompletedSegment: WorkoutCompletedSegmentV1?,
         cumulativeElapsedTime: TimeInterval?,
-        cumulativeDistanceMeters: Double?
+        cumulativeDistanceMeters: Double?,
+        cumulativeDistanceSource: WorkoutMetricSourceV1? = nil
     ) {
         reset(workoutStart: workoutStart)
         guard let lastCompletedSegment,
@@ -349,12 +353,14 @@ nonisolated struct WorkoutSegmentAccumulator: Equatable, Sendable {
         segmentStartedAt = lastCompletedSegment.endedAt
         elapsedTimeAtStart = cumulativeElapsedTime
         distanceAtStartMeters = cumulativeDistanceMeters
+        distanceSourceAtStart = cumulativeDistanceSource
     }
 
     func candidate(
         endedAt: Date,
         cumulativeElapsedTime: TimeInterval,
-        cumulativeDistanceMeters: Double?
+        cumulativeDistanceMeters: Double?,
+        cumulativeDistanceSource: WorkoutMetricSourceV1? = nil
     ) -> WorkoutSegmentCandidate? {
         guard let workoutStart,
               let segmentStartedAt,
@@ -373,7 +379,9 @@ nonisolated struct WorkoutSegmentAccumulator: Equatable, Sendable {
         let distanceMeters: Double?
         if let cumulativeDistanceMeters,
            let distanceAtStartMeters,
-           cumulativeDistanceMeters >= distanceAtStartMeters {
+           cumulativeDistanceMeters >= distanceAtStartMeters,
+           nextIndex == 1
+            || cumulativeDistanceSource == distanceSourceAtStart {
             distanceMeters = cumulativeDistanceMeters - distanceAtStartMeters
         } else {
             distanceMeters = nil
@@ -387,7 +395,8 @@ nonisolated struct WorkoutSegmentAccumulator: Equatable, Sendable {
                 distanceMeters: distanceMeters
             ),
             cumulativeElapsedTime: cumulativeElapsedTime,
-            cumulativeDistanceMeters: cumulativeDistanceMeters
+            cumulativeDistanceMeters: cumulativeDistanceMeters,
+            cumulativeDistanceSource: cumulativeDistanceSource
         )
     }
 
@@ -402,6 +411,7 @@ nonisolated struct WorkoutSegmentAccumulator: Equatable, Sendable {
         segmentStartedAt = candidate.completedSegment.endedAt
         elapsedTimeAtStart = candidate.cumulativeElapsedTime
         distanceAtStartMeters = candidate.cumulativeDistanceMeters
+        distanceSourceAtStart = candidate.cumulativeDistanceSource
         return true
     }
 }
