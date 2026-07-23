@@ -15,8 +15,179 @@ private final class FakeWatchHeartRateZoneConnectivitySession:
     }
 }
 
+private enum SegmentEventProbeError: Error {
+    case requested
+}
+
 @MainActor
 final class WatchWorkoutManagerTests: XCTestCase {
+    func testLocalSegmentsRecordSequentialHealthKitEventsAndCloseAtFinish()
+        async throws {
+        let startDate = Date().addingTimeInterval(-60)
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let identity = try recoveryStore.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        var elapsedTime: TimeInterval = 50
+        var segmentDate = startDate.addingTimeInterval(60)
+        var events: [HKWorkoutEvent] = []
+        var shouldFail = false
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            builderElapsedTime: { _ in elapsedTime },
+            segmentEventOperation: { event in
+                if shouldFail { throw SegmentEventProbeError.requested }
+                events.append(event)
+            },
+            segmentNow: { segmentDate },
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+
+        manager.markSegment()
+        try await waitUntil { events.count == 1 && !manager.isMarkingSegment }
+        let first = try XCTUnwrap(events.first)
+        XCTAssertEqual(first.type, .segment)
+        XCTAssertEqual(first.dateInterval.start, startDate)
+        XCTAssertEqual(manager.snapshot.lastCompletedSegment?.index, 1)
+        XCTAssertEqual(manager.snapshot.lastCompletedSegment?.duration, 50)
+
+        elapsedTime = 80
+        segmentDate = startDate.addingTimeInterval(100)
+        manager.markSegment()
+        try await waitUntil { events.count == 2 && !manager.isMarkingSegment }
+        XCTAssertEqual(events[1].dateInterval.start, first.dateInterval.end)
+        XCTAssertEqual(manager.snapshot.lastCompletedSegment?.index, 2)
+        XCTAssertEqual(manager.snapshot.lastCompletedSegment?.duration, 30)
+
+        shouldFail = true
+        elapsedTime = 90
+        segmentDate = startDate.addingTimeInterval(110)
+        manager.markSegment()
+        try await waitUntil {
+            !manager.isMarkingSegment
+                && manager.segmentError == .healthKitWriteFailed
+        }
+        XCTAssertEqual(events.count, 2)
+        XCTAssertEqual(manager.snapshot.lastCompletedSegment?.index, 2)
+
+        shouldFail = false
+        elapsedTime = 110
+        let finalEnd = events[1].dateInterval.end.addingTimeInterval(30)
+        await manager.closeFinalSegmentForTesting(at: finalEnd)
+        XCTAssertEqual(events.count, 3)
+        XCTAssertEqual(events[2].dateInterval.start, events[1].dateInterval.end)
+        XCTAssertEqual(events[2].dateInterval.end, finalEnd)
+    }
+
+    func testRemoteSegmentControlIsReplaySafe() async throws {
+        let startDate = Date().addingTimeInterval(-30)
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let identity = try recoveryStore.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        var events: [HKWorkoutEvent] = []
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            builderElapsedTime: { _ in 25 },
+            segmentEventOperation: { events.append($0) },
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+        let control = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: identity.sessionID,
+            sessionToken: identity.sessionToken,
+            transportGenerationID:
+                identity.transportGenerationID ?? identity.sessionID,
+            sequence: 40,
+            capturedAt: Date(),
+            controlSenderID: UUID(),
+            control: .markSegment
+        )
+
+        manager.handleRemoteWorkoutEnvelopes([control], from: session)
+        try await waitUntil { events.count == 1 && !manager.isMarkingSegment }
+        manager.handleRemoteWorkoutEnvelopes([control], from: session)
+        await Task.yield()
+
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(manager.snapshot.lastCompletedSegment?.index, 1)
+    }
+
+    func testSegmentWriteTimeoutUnblocksControlsAndIgnoresLateCompletion()
+        async throws {
+        let startDate = Date().addingTimeInterval(-30)
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let identity = try recoveryStore.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        let probe = AsyncThrowingVoidProbe()
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            builderElapsedTime: { _ in 25 },
+            segmentEventOperation: { _ in try await probe.run() },
+            segmentWriteTimeout: 0.05,
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+
+        manager.markSegment()
+        try await waitUntil { probe.callCount == 1 }
+        try await waitUntil {
+            !manager.isMarkingSegment
+                && manager.segmentError == .healthKitWriteFailed
+        }
+        XCTAssertNil(manager.snapshot.lastCompletedSegment)
+
+        probe.complete()
+        await Task.yield()
+        XCTAssertNil(manager.snapshot.lastCompletedSegment)
+        XCTAssertEqual(manager.segmentError, .healthKitWriteFailed)
+    }
+
     func testProductionSnapshotPublishesConfiguredHeartRateZone() async throws {
         let defaultsSuiteName = "WatchWorkoutManagerHeartRateZoneTests"
         let defaults = try XCTUnwrap(

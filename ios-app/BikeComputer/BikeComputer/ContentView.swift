@@ -183,6 +183,7 @@ struct ContentView: View {
                     onStart: workoutMirrorManager.startOutdoorCyclingOnWatch,
                     onPause: workoutMirrorManager.pause,
                     onResume: workoutMirrorManager.resume,
+                    onMarkSegment: workoutMirrorManager.markSegment,
                     onEndAndSave: workoutMirrorManager.endAndSave,
                     onDiscard: workoutMirrorManager.discard,
                     onDone: workoutMirrorManager.resetTerminalPresentation

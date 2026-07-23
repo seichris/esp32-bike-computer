@@ -56,6 +56,7 @@ private struct WorkoutContractTestSuite {
 
     mutating func run() async {
         testSnapshotRoundTrip()
+        testSegmentRoundTripValidationAndAccumulation()
         testTerminalOutcomeRoundTripAndValidation()
         testAllMessageKindsRoundTrip()
         testCompatibleMinorVersionIgnoresUnknownFields()
@@ -208,6 +209,119 @@ private struct WorkoutContractTestSuite {
             expect(try roundTripWorkoutEnvelope(envelope) == envelope, "snapshot should round-trip")
         } catch {
             expect(false, "snapshot round-trip threw \(error)")
+        }
+    }
+
+    private mutating func testSegmentRoundTripValidationAndAccumulation() {
+        let start = Date(timeIntervalSinceReferenceDate: 800_000_010)
+        let firstEnd = start.addingTimeInterval(60)
+        var accumulator = WorkoutSegmentAccumulator()
+        accumulator.reset(workoutStart: start)
+        let first = accumulator.candidate(
+            endedAt: firstEnd,
+            cumulativeElapsedTime: 55,
+            cumulativeDistanceMeters: 1_000
+        )
+        expect(first?.completedSegment.index == 1, "first segment should be numbered one")
+        expect(first?.completedSegment.duration == 55, "segment duration should use active workout time")
+        expect(first?.completedSegment.distanceMeters == 1_000, "first segment should begin at zero distance")
+        if let first {
+            expect(accumulator.commit(first), "first segment candidate should commit")
+        }
+
+        let secondEnd = firstEnd.addingTimeInterval(40)
+        let second = accumulator.candidate(
+            endedAt: secondEnd,
+            cumulativeElapsedTime: 90,
+            cumulativeDistanceMeters: 1_650
+        )
+        expect(second?.completedSegment.index == 2, "segments should increment monotonically")
+        expect(second?.completedSegment.duration == 35, "pause time must not enter the next segment duration")
+        expect(second?.completedSegment.distanceMeters == 650, "segment distance should use cumulative-distance boundaries")
+        if let second {
+            expect(accumulator.commit(second), "second segment candidate should commit")
+        }
+
+        let snapshot = WorkoutSnapshotV1(
+            state: .running,
+            startDate: start,
+            elapsedTime: metric(90, .seconds, secondEnd),
+            lastCompletedSegment: accumulator.lastCompletedSegment,
+            availability: [.elapsedTime]
+        )
+        let envelope = makeEnvelope(
+            sequence: 1,
+            capturedAt: secondEnd,
+            snapshot: snapshot
+        )
+        do {
+            let decoded = try roundTripWorkoutEnvelope(envelope)
+            expect(
+                decoded.snapshot?.lastCompletedSegment
+                    == accumulator.lastCompletedSegment,
+                "the latest segment summary should round-trip with live metrics"
+            )
+        } catch {
+            expect(false, "segment snapshot round-trip threw \(error)")
+        }
+
+        var restored = WorkoutSegmentAccumulator()
+        restored.restore(
+            workoutStart: start,
+            lastCompletedSegment: accumulator.lastCompletedSegment,
+            cumulativeElapsedTime: 90,
+            cumulativeDistanceMeters: 1_650
+        )
+        expect(
+            restored.candidate(
+                endedAt: secondEnd.addingTimeInterval(30),
+                cumulativeElapsedTime: 120,
+                cumulativeDistanceMeters: 2_100
+            )?.completedSegment.index == 3,
+            "recovered segment state should continue with the next index"
+        )
+
+        let invalidSegment = makeEnvelope(
+            sequence: 2,
+            capturedAt: secondEnd,
+            snapshot: WorkoutSnapshotV1(
+                state: .running,
+                startDate: start,
+                lastCompletedSegment: WorkoutCompletedSegmentV1(
+                    index: 0,
+                    startedAt: start,
+                    endedAt: secondEnd,
+                    duration: 90,
+                    distanceMeters: 1_650
+                )
+            )
+        )
+        expectThrows(.invalidMetric, "zero segment index") {
+            try WorkoutContractCodec.validate(invalidSegment)
+        }
+
+        let failedAcknowledgement = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: envelope.sessionID,
+            sessionToken: envelope.sessionToken,
+            transportGenerationID: envelope.transportGenerationID,
+            sequence: 3,
+            capturedAt: secondEnd,
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .markSegment,
+                resultingState: .running,
+                acknowledgedSequence: 2,
+                errorCode: .segmentMarkFailed
+            )
+        )
+        do {
+            expect(
+                try roundTripWorkoutEnvelope(failedAcknowledgement)
+                    == failedAcknowledgement,
+                "a correlated segment failure acknowledgement should round-trip"
+            )
+        } catch {
+            expect(false, "segment failure acknowledgement threw \(error)")
         }
     }
 
@@ -3671,6 +3785,53 @@ private struct WorkoutContractTestSuite {
             matchingOutcomeReducer.presentation.pendingControl == nil,
             "a matching explicit terminal outcome may confirm the pending choice"
         )
+
+        var segmentReducer = WorkoutMirrorStateReducer()
+        segmentReducer.attachMirroredSession(at: now)
+        _ = segmentReducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sessionToken: 9,
+                    transportGenerationID: generation,
+                    sequence: 1,
+                    capturedAt: now,
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: now
+                    )
+                ),
+            ],
+            receivedAt: now
+        )
+        expect(
+            segmentReducer.markPendingControl(.markSegment, sequence: 77),
+            "an iPhone segment request should become pending"
+        )
+        let segmentFailure = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: sessionID,
+            sessionToken: 9,
+            transportGenerationID: generation,
+            sequence: 2,
+            capturedAt: now.addingTimeInterval(1),
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .markSegment,
+                resultingState: .running,
+                acknowledgedSequence: 77,
+                errorCode: .segmentMarkFailed
+            )
+        )
+        _ = segmentReducer.ingestBatch(
+            [segmentFailure],
+            receivedAt: now.addingTimeInterval(1)
+        )
+        expect(
+            segmentReducer.presentation.pendingControl == nil
+                && segmentReducer.presentation.errorCode
+                    == .segmentMarkFailed,
+            "a correlated segment failure should clear pending state without failing the workout"
+        )
     }
 
     private mutating func testMirrorReducerReplacesTerminalSessionCleanly() {
@@ -5029,6 +5190,7 @@ private struct WorkoutContractTestSuite {
             "dashboard must render live capture age"
         )
         for controlRoute in [
+            "Button(action: onMarkSegment)",
             "Button(action: onResume)",
             "Button(action: onPause)",
             "Button(\"End and Save\") {",
@@ -5072,10 +5234,16 @@ private struct WorkoutContractTestSuite {
         }
         expect(
             compactSource.contains(
-                "ifpresentation.sessionState==.paused{Button(action:onResume){Label(\"ResumeWorkout\""
+                "Button(action:onMarkSegment){Label(\"Segment\",systemImage:\"flag.checkered\")}"
             )
                 && compactSource.contains(
-                    "else{Button(action:onPause){Label(\"PauseWorkout\""
+                    "ifpresentation.sessionState==.paused{Button(action:onResume){Label(\"Resume\""
+                )
+                && compactSource.contains(
+                    "else{Button(action:onPause){Label(\"Pause\""
+                )
+                && compactSource.contains(
+                    ".accessibilityLabel(\"Markworkoutsegment\")"
                 )
                 && compactSource.contains(
                     "Button(\"EndandSave\"){finishPrompt=nilguardstore.presentation.sessionID==sessionIDelse{return}onEndAndSave()}"
@@ -5087,7 +5255,7 @@ private struct WorkoutContractTestSuite {
                     "WorkoutDiscardDisclosureV1.perform(.confirmDiscard,expectedSessionID:sessionID,currentSessionID:store.presentation.sessionID,discard:onDiscard)"
                 )
                 && compactSource.contains(
-                    "WorkoutFinishButton(store:store,onEndAndSave:onEndAndSave,onDiscard:onDiscard){Label(\"EndWorkout\""
+                    "WorkoutFinishButton(store:store,onEndAndSave:onEndAndSave,onDiscard:onDiscard){Label(\"End\""
                 ),
             "dashboard labels must remain bound to the matching control closures"
         )
@@ -5104,7 +5272,7 @@ private struct WorkoutContractTestSuite {
                 "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onOpen:{showingWorkoutDashboard=true})"
             )
                 && compactContentView.contains(
-                    ".sheet(isPresented:$showingWorkoutDashboard){WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)}"
+                    ".sheet(isPresented:$showingWorkoutDashboard){WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onMarkSegment:workoutMirrorManager.markSegment,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)}"
                 ),
             "ContentView must present the dashboard from its exact state and inject each production manager action"
         )
@@ -5115,6 +5283,16 @@ private struct WorkoutContractTestSuite {
         let compactSummaryWatchView = summaryWatchViewSource.filter {
             !$0.isWhitespace
         }
+        expect(
+            compactLiveWatchView.contains("manager.markSegment()")
+                && compactLiveWatchView.contains(
+                    ".accessibilityLabel(\"Markworkoutsegment\")"
+                )
+                && compactLiveWatchView.contains(
+                    "manager.snapshot.lastCompletedSegment"
+                ),
+            "Watch live workout must expose segment marking and its latest completed segment"
+        )
         expect(
             compactLiveWatchView.contains(
                 "WorkoutCrossAppTakeoverCopyV1.live(disposition:manager.isDiscarding?.discard:.save)"

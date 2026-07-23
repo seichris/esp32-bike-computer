@@ -1939,6 +1939,62 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         XCTAssertNil(manager.store.presentation.pendingControl)
     }
 
+    func testProductionSegmentControlReportsWatchWriteFailureWithoutEndingRide()
+        async throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_400_350)
+        let manager = WorkoutMirrorManager(now: { now })
+        let transport = FakeMirroredSessionTransport()
+        manager.acceptMirroredTransport(transport)
+        let snapshot = makeSnapshotEnvelope(sequence: 45, capturedAt: now)
+        manager.applyRemoteEnvelopes(
+            [snapshot],
+            receivedAt: now,
+            from: transport
+        )
+
+        manager.markSegment()
+
+        XCTAssertEqual(transport.sentData.count, 1)
+        let control = try WorkoutContractCodec.decode(transport.sentData[0])
+        XCTAssertEqual(control.control, .markSegment)
+        XCTAssertEqual(
+            manager.store.presentation.pendingControl,
+            .markSegment
+        )
+
+        transport.completeNext(succeeded: true)
+        await Task.yield()
+        let acknowledgement = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: snapshot.sessionID,
+            sessionToken: snapshot.sessionToken,
+            transportGenerationID: snapshot.transportGenerationID,
+            sequence: 46,
+            capturedAt: now.addingTimeInterval(1),
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .markSegment,
+                resultingState: .running,
+                acknowledgedSequence: control.sequence,
+                errorCode: .segmentMarkFailed
+            )
+        )
+        manager.applyRemoteEnvelopes(
+            [acknowledgement],
+            receivedAt: now.addingTimeInterval(1),
+            from: transport
+        )
+
+        XCTAssertNil(manager.store.presentation.pendingControl)
+        XCTAssertEqual(
+            manager.store.presentation.errorCode,
+            .segmentMarkFailed
+        )
+        XCTAssertEqual(
+            manager.store.presentation.sessionState,
+            .running
+        )
+    }
+
     func testProductionReconnectResendsControlBeforeSnapshotRequest() async throws {
         let now = Date(timeIntervalSinceReferenceDate: 800_400_400)
         let manager = WorkoutMirrorManager(now: { now })

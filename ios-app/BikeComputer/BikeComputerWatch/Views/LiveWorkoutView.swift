@@ -1,4 +1,5 @@
 import SwiftUI
+import WatchKit
 
 private enum WorkoutFinishPrompt {
     case options(sessionID: UUID)
@@ -14,6 +15,8 @@ private enum WorkoutFinishPrompt {
 struct LiveWorkoutView: View {
     @ObservedObject var manager: WatchWorkoutManager
     @State private var finishPrompt: WorkoutFinishPrompt?
+    @State private var segmentToast: WorkoutCompletedSegmentV1?
+    @State private var observedSegmentIndex: UInt32?
 
     var body: some View {
         Group {
@@ -25,6 +28,43 @@ struct LiveWorkoutView: View {
         }
         .onChange(of: manager.activeSessionID) {
             finishPrompt = nil
+            observedSegmentIndex = manager.snapshot
+                .lastCompletedSegment?.index
+            segmentToast = nil
+        }
+        .onAppear {
+            observedSegmentIndex = manager.snapshot
+                .lastCompletedSegment?.index
+        }
+        .onChange(of: manager.snapshot.lastCompletedSegment?.index) {
+            let index = manager.snapshot.lastCompletedSegment?.index
+            guard let index,
+                  index != observedSegmentIndex,
+                  manager.state.isActive,
+                  let segment = manager.snapshot.lastCompletedSegment else {
+                observedSegmentIndex = index
+                return
+            }
+            observedSegmentIndex = index
+            WKInterfaceDevice.current().play(.success)
+            withAnimation {
+                segmentToast = segment
+            }
+        }
+        .overlay(alignment: .top) {
+            if let segmentToast {
+                segmentToastView(segmentToast)
+                    .padding(.horizontal, 4)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .task(id: segmentToast?.index) {
+            guard let index = segmentToast?.index else { return }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard segmentToast?.index == index else { return }
+            withAnimation {
+                segmentToast = nil
+            }
         }
     }
 
@@ -55,6 +95,16 @@ struct LiveWorkoutView: View {
                     }
                 }
 
+                if let segmentError = manager.segmentError {
+                    Label(
+                        segmentErrorMessage(segmentError),
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                }
+
                 if manager.snapshot.errorCode == .anotherWorkoutActive {
                     Label(
                         WorkoutCrossAppTakeoverCopyV1.live(
@@ -71,6 +121,15 @@ struct LiveWorkoutView: View {
                     .font(.system(.title2, design: .rounded, weight: .semibold))
                     .monospacedDigit()
                     .accessibilityLabel("Elapsed time")
+
+                if let segment = manager.snapshot.lastCompletedSegment {
+                    Label(
+                        "Segment \(segment.index + 1)",
+                        systemImage: "flag.checkered"
+                    )
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                }
 
                 LazyVGrid(columns: columns, spacing: 8) {
                     metric(
@@ -133,6 +192,22 @@ struct LiveWorkoutView: View {
 
                 HStack(spacing: 8) {
                     Button {
+                        manager.markSegment()
+                    } label: {
+                        if manager.isMarkingSegment {
+                            ProgressView()
+                        } else {
+                            Image(systemName: "flag.checkered")
+                        }
+                    }
+                    .tint(.blue)
+                    .disabled(
+                        manager.state != .running
+                            || manager.isMarkingSegment
+                    )
+                    .accessibilityLabel("Mark workout segment")
+
+                    Button {
                         if manager.state == .paused {
                             manager.resume()
                         } else {
@@ -142,7 +217,10 @@ struct LiveWorkoutView: View {
                         Image(systemName: manager.state == .paused ? "play.fill" : "pause.fill")
                     }
                     .tint(manager.state == .paused ? .green : .orange)
-                    .disabled(![.running, .paused].contains(manager.state))
+                    .disabled(
+                        ![.running, .paused].contains(manager.state)
+                            || manager.isMarkingSegment
+                    )
                     .accessibilityLabel(manager.state == .paused ? "Resume ride" : "Pause ride")
 
                     Button(role: .destructive) {
@@ -152,7 +230,10 @@ struct LiveWorkoutView: View {
                     } label: {
                         Image(systemName: "stop.fill")
                     }
-                    .disabled(manager.state == .ending)
+                    .disabled(
+                        manager.state == .ending
+                            || manager.isMarkingSegment
+                    )
                     .accessibilityLabel("End ride")
                 }
             }
@@ -268,6 +349,35 @@ struct LiveWorkoutView: View {
         .accessibilityLabel("\(title), \(value) \(unit)")
     }
 
+    private func segmentToastView(
+        _ segment: WorkoutCompletedSegmentV1
+    ) -> some View {
+        VStack(spacing: 2) {
+            Label(
+                "Segment \(segment.index)",
+                systemImage: "flag.checkered"
+            )
+            .font(.caption.weight(.semibold))
+            Text(segmentSummary(segment))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+    }
+
+    private func segmentSummary(
+        _ segment: WorkoutCompletedSegmentV1
+    ) -> String {
+        let duration = WorkoutValueFormatter.duration(segment.duration)
+        guard let distance = segment.distanceMeters else {
+            return duration
+        }
+        return "\(duration) · \(WorkoutValueFormatter.distance(distance)) \(WorkoutValueFormatter.distanceUnit(distance))"
+    }
+
     private var columns: [GridItem] {
         [GridItem(.flexible()), GridItem(.flexible())]
     }
@@ -314,6 +424,17 @@ struct LiveWorkoutView: View {
             "Couldn’t verify whether this ride was saved. Retry safely."
         case .identityMetadataFailed:
             "Couldn’t finish the ride safely yet. Retry recovery."
+        }
+    }
+
+    private func segmentErrorMessage(
+        _ error: WatchWorkoutSegmentError
+    ) -> String {
+        switch error {
+        case .unavailable:
+            "Resume the ride before marking a segment."
+        case .healthKitWriteFailed:
+            "Couldn’t mark that segment. The ride is still running."
         }
     }
 }

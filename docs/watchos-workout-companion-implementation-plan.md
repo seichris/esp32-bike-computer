@@ -287,6 +287,9 @@ to a fresh sender generation without reusing the Watch's retained replay
 watermark. Watch retires prior sender UUIDs for the workout; delayed controls
 from a retired process cannot resume.
 
+Version 1.4 adds user-marked workout segments. Segment controls retain the same
+sender and sequence identity so the Watch can make them replay-safe.
+
 WorkoutSnapshotV1 contains:
 
 - session state: idle, starting, running, paused, ending, ended, or failed;
@@ -301,6 +304,8 @@ WorkoutSnapshotV1 contains:
 - current heart-rate zone, zone count, and optional zone durations;
 - latest location coordinate, timestamp, horizontal/vertical accuracy, course,
   speed, and altitude;
+- the most recently completed segment's one-based index, boundary dates, active
+  duration, and optional distance;
 - a compact availability/source mask;
 - an optional user-safe error code, never raw sensitive data; an explicit
   opposite Save/Discard outcome is presented as a terminal-choice conflict,
@@ -313,12 +318,15 @@ WorkoutControlV1 contains:
 
 - pause;
 - resume;
+- mark a segment;
 - request end and save;
 - request discard;
 - request current full snapshot.
 
 The Watch acknowledges state-changing controls with the resulting state and
-sequence. It does not require acknowledgements for every metric snapshot.
+sequence. A rejected segment carries the safe `segmentMarkFailed` error without
+failing or ending the workout. It does not require acknowledgements for every
+metric snapshot.
 
 Decoder rules:
 
@@ -395,6 +403,25 @@ HKWorkoutSessionDelegate.
 - Elapsed time and distance do not advance while paused.
 - Route points received during a pause are ignored.
 - ESP32 displays a PAUSED state without converting unavailable speed to zero.
+
+### Segments
+
+- Marking a segment is available while the workout is running on both Watch and
+  iPhone.
+- The Watch writes an `HKWorkoutEvent` of type `segment` to the live builder and
+  remains the only HealthKit writer.
+- Segment duration uses builder elapsed time so pauses are excluded. Distance is
+  the delta between cumulative Watch workout distances when both boundaries have
+  usable values.
+- A successful boundary is mirrored before either UI shows success feedback.
+- BikeComputer metadata on each event stores the segment index and cumulative
+  values needed to reconstruct the next boundary after workout recovery.
+- A remote segment control stores its sender and sequence in the event metadata
+  so a replay cannot create a duplicate segment.
+- If at least one segment was marked, saving adds the final segment from the last
+  boundary to the authoritative workout end date.
+- Segment writes use a bounded timeout. A failure leaves the workout running and
+  never blocks save or discard.
 
 ### End and save
 
@@ -510,7 +537,7 @@ Create one long-lived manager, available on iOS 17 and later.
 - Install workoutSessionMirroringStartHandler during AppDelegate launch.
 - Decode remote envelopes on the HealthKit delegate queue and hand validated
   snapshots to a MainActor store.
-- Expose start, pause, resume, end, and discard requests.
+- Expose start, pause, resume, mark-segment, end, and discard requests.
 - Track launch timeout, remote disconnect, stale data, and cross-app session
   displacement as explicit states.
 - Treat native terminal state as sticky: freshness ticks or delayed active
@@ -898,6 +925,8 @@ Exit criteria:
 - Batched snapshots publish only the latest valid state.
 - Metric precedence and no double-counting.
 - Elapsed-time behavior across pause/resume.
+- Sequential segment duration/distance accounting, replay safety, recovery, and
+  bounded HealthKit write failure.
 - Sensor/GPS speed source selection.
 - Missing permissions and missing sensor values.
 - Staleness transitions.
@@ -933,8 +962,9 @@ Use a real paired Watch and iPhone; simulator-only validation is insufficient.
 5. Disable Bluetooth between Watch and iPhone, then reconnect.
 6. Lock/background iPhone while navigating and measure update latency.
 7. Background iPhone without navigation and verify honest stale behavior.
-8. Pause/resume from Watch and iPhone.
-9. End from Watch and from iPhone.
+8. Pause/resume and mark multiple segments from Watch and iPhone.
+9. End from Watch and from iPhone, then verify the segment boundaries in
+   Fitness.
 10. With Apple Workout active, start directly from Watch and iPhone in separate
     runs; verify any start failure or displacement is reported honestly.
 11. Deny HealthKit, then deny Watch location separately.

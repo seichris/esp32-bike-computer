@@ -266,6 +266,11 @@ final class WorkoutMirrorManager: NSObject {
         scheduleControlConfirmationTimeout(for: .resume)
     }
 
+    func markSegment() {
+        guard store.presentation.sessionState == .running else { return }
+        enqueueStateChangingControl(.markSegment)
+    }
+
     func endAndSave() {
         enqueueStateChangingControl(.endAndSave)
     }

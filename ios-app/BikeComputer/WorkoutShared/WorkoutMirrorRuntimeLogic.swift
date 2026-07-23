@@ -216,6 +216,8 @@ nonisolated enum WorkoutErrorCopyV1 {
             return "Finish choice not applied"
         case .terminalChoiceUnconfirmed:
             return "Finish choice unconfirmed"
+        case .segmentMarkFailed:
+            return "Segment wasn’t marked"
         case .sessionFailed, .unknown, nil:
             return "Workout needs attention"
         }
@@ -245,6 +247,8 @@ nonisolated enum WorkoutErrorCopyV1 {
             return "Apple Watch had already committed the other finish choice. The saved or discarded result shown above is authoritative."
         case .terminalChoiceUnconfirmed:
             return "BikeComputer could not confirm whether your Save or Discard choice was applied. Check BikeComputer on Apple Watch; if the ride ended, verify the result in Health."
+        case .segmentMarkFailed:
+            return "Apple Watch couldn’t add that segment to the workout. The ride is still running, so you can try again."
         case .sessionFailed, .unknown, nil:
             return "Check BikeComputer on Apple Watch. No workout is saved or ended by iPhone alone."
         }
@@ -466,6 +470,7 @@ nonisolated enum WorkoutIPhoneTelemetryMerge {
             heartRateZoneCount: watch.heartRateZoneCount,
             heartRateZoneDurations: watch.heartRateZoneDurations,
             location: location,
+            lastCompletedSegment: watch.lastCompletedSegment,
             availability: availability,
             errorCode: watch.errorCode,
             terminalOutcome: watch.terminalOutcome
@@ -822,9 +827,14 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
                acknowledgementConfirmsPendingControl(
                    acknowledgement,
                    envelope: envelope
-               ) {
+            ) {
                 pendingControl = nil
                 pendingControlSequence = nil
+                if let acknowledgementError = acknowledgement.errorCode {
+                    commandErrorCode = acknowledgementError
+                } else if timedOutTerminalControl == nil {
+                    commandErrorCode = nil
+                }
             } else if let acknowledgement = envelope.acknowledgement,
                       acknowledgementResolvesTimedOutTerminalControl(
                           acknowledgement,
@@ -1117,14 +1127,26 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
         }
         switch acknowledgement.control {
         case .pause:
-            return acknowledgement.resultingState == .paused
+            return acknowledgement.errorCode == nil
+                && acknowledgement.resultingState == .paused
         case .resume:
-            return acknowledgement.resultingState == .running
+            return acknowledgement.errorCode == nil
+                && acknowledgement.resultingState == .running
+        case .markSegment:
+            return [
+                WorkoutSessionStateV1.running,
+                .paused,
+                .ending,
+                .ended,
+            ].contains(acknowledgement.resultingState)
+                && (acknowledgement.errorCode == nil
+                    || acknowledgement.errorCode == .segmentMarkFailed)
         case .endAndSave, .discard:
-            return acknowledgement.resultingState == .ending
-                || acknowledgement.resultingState == .ended
+            return acknowledgement.errorCode == nil
+                && (acknowledgement.resultingState == .ending
+                    || acknowledgement.resultingState == .ended)
         case .requestCurrentSnapshot:
-            return true
+            return acknowledgement.errorCode == nil
         }
     }
 

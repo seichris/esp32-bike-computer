@@ -208,7 +208,7 @@ nonisolated final class WatchWorkoutRecoveryStore {
                 .save
             case .discard:
                 .discard
-            case .requestCurrentSnapshot, .pause, .resume:
+            case .requestCurrentSnapshot, .pause, .resume, .markSegment:
                 nil
             }
         }
