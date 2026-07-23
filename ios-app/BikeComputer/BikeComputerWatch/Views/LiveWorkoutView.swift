@@ -150,7 +150,7 @@ struct LiveWorkoutView: View {
             .padding(.horizontal, 6)
         }
         .confirmationDialog(
-            "Finish this ride?",
+            "Finish Ride?",
             isPresented: finishOptionsPresented
         ) {
             if case .options(let sessionID) = finishPrompt {
@@ -167,34 +167,33 @@ struct LiveWorkoutView: View {
                 }
             }
         } message: {
-            Text("Saving creates one workout in Health. Discarding saves nothing.")
+            Text("Saving creates a workout in your Fitness app.")
         }
         .alert(
             WorkoutDiscardDisclosureV1.title,
-            isPresented: discardConfirmationPresented
-        ) {
-            if case .discardConfirmation(let sessionID) = finishPrompt {
-                Button(WorkoutDiscardDisclosureV1.cancelTitle, role: .cancel) {
-                    WorkoutDiscardDisclosureV1.perform(
-                        .cancel,
-                        expectedSessionID: sessionID,
-                        currentSessionID: manager.activeSessionID,
-                        discard: manager.discard
-                    )
-                }
-                Button(
-                    WorkoutDiscardDisclosureV1.confirmTitle,
-                    role: .destructive
-                ) {
-                    WorkoutDiscardDisclosureV1.perform(
-                        .confirmDiscard,
-                        expectedSessionID: sessionID,
-                        currentSessionID: manager.activeSessionID,
-                        discard: manager.discard
-                    )
-                }
+            isPresented: discardConfirmationPresented,
+            presenting: discardConfirmationSessionID
+        ) { sessionID in
+            Button(WorkoutDiscardDisclosureV1.cancelTitle, role: .cancel) {
+                WorkoutDiscardDisclosureV1.perform(
+                    .cancel,
+                    expectedSessionID: sessionID,
+                    currentSessionID: manager.activeSessionID,
+                    discard: manager.discard
+                )
             }
-        } message: {
+            Button(
+                WorkoutDiscardDisclosureV1.confirmTitle,
+                role: .destructive
+            ) {
+                WorkoutDiscardDisclosureV1.perform(
+                    .confirmDiscard,
+                    expectedSessionID: sessionID,
+                    currentSessionID: manager.activeSessionID,
+                    discard: manager.discard
+                )
+            }
+        } message: { _ in
             Text(WorkoutDiscardDisclosureV1.message)
         }
         .onChange(of: manager.activeSessionID) {
@@ -223,6 +222,13 @@ struct LiveWorkoutView: View {
                 }
             }
         )
+    }
+
+    private var discardConfirmationSessionID: UUID? {
+        guard case .discardConfirmation(let sessionID) = finishPrompt else {
+            return nil
+        }
+        return sessionID
     }
 
     private func requestDiscardConfirmation(for sessionID: UUID) {
