@@ -9,10 +9,6 @@ private enum WorkoutFinishPrompt {
         return false
     }
 
-    var showsDiscardConfirmation: Bool {
-        if case .discardConfirmation = self { return true }
-        return false
-    }
 }
 
 struct LiveWorkoutView: View {
@@ -20,6 +16,19 @@ struct LiveWorkoutView: View {
     @State private var finishPrompt: WorkoutFinishPrompt?
 
     var body: some View {
+        Group {
+            if case .discardConfirmation(let sessionID) = finishPrompt {
+                discardConfirmationView(sessionID: sessionID)
+            } else {
+                workoutContent
+            }
+        }
+        .onChange(of: manager.activeSessionID) {
+            finishPrompt = nil
+        }
+    }
+
+    private var workoutContent: some View {
         ScrollView {
             VStack(spacing: 10) {
                 stateHeader
@@ -169,36 +178,6 @@ struct LiveWorkoutView: View {
         } message: {
             Text("Saving creates a workout in your Fitness app.")
         }
-        .alert(
-            WorkoutDiscardDisclosureV1.title,
-            isPresented: discardConfirmationPresented,
-            presenting: discardConfirmationSessionID
-        ) { sessionID in
-            Button(WorkoutDiscardDisclosureV1.cancelTitle, role: .cancel) {
-                WorkoutDiscardDisclosureV1.perform(
-                    .cancel,
-                    expectedSessionID: sessionID,
-                    currentSessionID: manager.activeSessionID,
-                    discard: manager.discard
-                )
-            }
-            Button(
-                WorkoutDiscardDisclosureV1.confirmTitle,
-                role: .destructive
-            ) {
-                WorkoutDiscardDisclosureV1.perform(
-                    .confirmDiscard,
-                    expectedSessionID: sessionID,
-                    currentSessionID: manager.activeSessionID,
-                    discard: manager.discard
-                )
-            }
-        } message: { _ in
-            Text(WorkoutDiscardDisclosureV1.message)
-        }
-        .onChange(of: manager.activeSessionID) {
-            finishPrompt = nil
-        }
     }
 
     private var finishOptionsPresented: Binding<Bool> {
@@ -212,23 +191,33 @@ struct LiveWorkoutView: View {
         )
     }
 
-    private var discardConfirmationPresented: Binding<Bool> {
-        Binding(
-            get: { finishPrompt?.showsDiscardConfirmation == true },
-            set: { isPresented in
-                if !isPresented,
-                   finishPrompt?.showsDiscardConfirmation == true {
-                    finishPrompt = nil
-                }
-            }
-        )
-    }
+    private func discardConfirmationView(sessionID: UUID) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "trash.fill")
+                .font(.title2)
+                .foregroundStyle(.red)
 
-    private var discardConfirmationSessionID: UUID? {
-        guard case .discardConfirmation(let sessionID) = finishPrompt else {
-            return nil
+            Text(WorkoutDiscardDisclosureV1.title)
+                .font(.headline)
+                .multilineTextAlignment(.center)
+
+            Text(WorkoutDiscardDisclosureV1.message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            Button(WorkoutDiscardDisclosureV1.confirmTitle, role: .destructive) {
+                finishPrompt = nil
+                guard manager.activeSessionID == sessionID else { return }
+                manager.discard()
+            }
+            .tint(.red)
+
+            Button(WorkoutDiscardDisclosureV1.cancelTitle, role: .cancel) {
+                finishPrompt = nil
+            }
         }
-        return sessionID
+        .padding(.horizontal, 8)
     }
 
     private func requestDiscardConfirmation(for sessionID: UUID) {
