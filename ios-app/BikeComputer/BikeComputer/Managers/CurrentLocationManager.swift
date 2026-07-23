@@ -44,14 +44,119 @@ nonisolated enum RideActivityPolicy {
     }
 }
 
+nonisolated enum RideIdleTimerController {
+    static func update(
+        isNavigating: Bool,
+        isWorkoutActive: Bool,
+        isApplicationActive: Bool,
+        setIdleTimerDisabled: (Bool) -> Void
+    ) {
+        setIdleTimerDisabled(
+            RideActivityPolicy.shouldKeepScreenAwake(
+                isNavigating: isNavigating,
+                isWorkoutActive: isWorkoutActive,
+                isApplicationActive: isApplicationActive
+            )
+        )
+    }
+}
+
+enum LocationAuthorizationLevel {
+    case denied
+    case whenInUse
+    case always
+}
+
+protocol LocationManagerClient: AnyObject {
+    var authorizationStatus: CLAuthorizationStatus { get }
+    var authorizationLevel: LocationAuthorizationLevel { get }
+
+    func setDelegate(_ delegate: CLLocationManagerDelegate?)
+    func configureForCycling()
+    func setBackgroundTrackingEnabled(_ enabled: Bool)
+    func requestLocation()
+    func requestWhenInUseAuthorization()
+    func requestAlwaysAuthorization()
+    func startUpdatingLocation()
+    func stopUpdatingLocation()
+}
+
+final class CoreLocationManagerClient: LocationManagerClient {
+    private let manager = CLLocationManager()
+
+    var authorizationStatus: CLAuthorizationStatus {
+        manager.authorizationStatus
+    }
+
+    var authorizationLevel: LocationAuthorizationLevel {
+        switch manager.authorizationStatus {
+        case .authorizedAlways:
+            return .always
+#if !os(macOS)
+        case .authorizedWhenInUse:
+            return .whenInUse
+#endif
+        case .notDetermined, .restricted, .denied:
+            return .denied
+        @unknown default:
+            return .denied
+        }
+    }
+
+    func setDelegate(_ delegate: CLLocationManagerDelegate?) {
+        manager.delegate = delegate
+    }
+
+    func configureForCycling() {
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.distanceFilter = 5
+        manager.activityType = .fitness
+#if !os(macOS)
+        manager.allowsBackgroundLocationUpdates = false
+        manager.pausesLocationUpdatesAutomatically = true
+        manager.showsBackgroundLocationIndicator = false
+#endif
+    }
+
+    func setBackgroundTrackingEnabled(_ enabled: Bool) {
+#if !os(macOS)
+        manager.allowsBackgroundLocationUpdates = enabled
+        manager.pausesLocationUpdatesAutomatically = !enabled
+        manager.showsBackgroundLocationIndicator = enabled
+#endif
+    }
+
+    func requestLocation() {
+        manager.requestLocation()
+    }
+
+    func requestWhenInUseAuthorization() {
+        manager.requestWhenInUseAuthorization()
+    }
+
+    func requestAlwaysAuthorization() {
+        manager.requestAlwaysAuthorization()
+    }
+
+    func startUpdatingLocation() {
+        manager.startUpdatingLocation()
+    }
+
+    func stopUpdatingLocation() {
+        manager.stopUpdatingLocation()
+    }
+}
+
 class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published var currentLocation: CLLocation?
     @Published var currentAddress: String = "Current Location"
     @Published var authorizationStatus: CLAuthorizationStatus
     
-    private let locationManager = CLLocationManager()
+    private let locationManager: LocationManagerClient
+    private let applicationIsActive: () -> Bool
     private var lastGeocodedLocation: CLLocation?
     private var lastGeocodeTime: Date?
+    private var workoutActivityCancellable: AnyCancellable?
     
     // MARK: - Optimization #3: Intelligent Location Update Management
     private var isNavigating = false
@@ -61,19 +166,19 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     private var isDeviceDestinationRequestsEnabled = false
     private var isRefreshingDeviceDestinationLocation = false
     private var hasRequestedAlwaysAuthorizationForDeviceDestinations = false
+    private var hasRequestedAlwaysAuthorizationForRideActivity = false
     
-    override init() {
+    init(
+        locationManager: LocationManagerClient = CoreLocationManagerClient(),
+        applicationIsActive: @escaping () -> Bool =
+            CurrentLocationManager.defaultApplicationIsActive
+    ) {
+        self.locationManager = locationManager
+        self.applicationIsActive = applicationIsActive
         authorizationStatus = locationManager.authorizationStatus
         super.init()
-        locationManager.delegate = self
-        locationManager.desiredAccuracy = kCLLocationAccuracyBest
-        locationManager.distanceFilter = 5 // Update every 5 meters for better tracking
-        locationManager.activityType = .fitness
-        locationManager.allowsBackgroundLocationUpdates = false
-        locationManager.pausesLocationUpdatesAutomatically = true
-#if !os(macOS)
-        locationManager.showsBackgroundLocationIndicator = false
-#endif
+        locationManager.setDelegate(self)
+        locationManager.configureForCycling()
         // First-run onboarding owns the permission prompt so the user can read
         // the rationale or skip location before iOS asks for access.
     }
@@ -90,8 +195,8 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
 
     func prepareDeviceDestinationRequestsIfNeeded() {
         guard isDeviceDestinationRequestsEnabled,
-              Self.isAuthorizedWhenInUse(authorizationStatus),
-              Self.applicationIsActive,
+              locationManager.authorizationLevel == .whenInUse,
+              applicationIsActive(),
               !hasRequestedAlwaysAuthorizationForDeviceDestinations else {
             return
         }
@@ -102,7 +207,8 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     @discardableResult
     func beginDeviceDestinationLocationRefresh(restart: Bool) -> Bool {
         guard isLocationAuthorized,
-              authorizationStatus == .authorizedAlways || Self.applicationIsActive else {
+              locationManager.authorizationLevel == .always
+                || applicationIsActive() else {
             return false
         }
         isRefreshingDeviceDestinationLocation = true
@@ -121,8 +227,8 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     }
 
     var isLocationAuthorized: Bool {
-        authorizationStatus == .authorizedAlways ||
-            Self.isAuthorizedWhenInUse(authorizationStatus)
+        locationManager.authorizationLevel == .always ||
+            locationManager.authorizationLevel == .whenInUse
     }
     
     // MARK: - Smart Location Update Control (Optimization #3)
@@ -142,11 +248,25 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         isWorkoutActive = active
         updateLocationTracking()
     }
+
+    @MainActor
+    func bindWorkoutMetricsStore(_ store: WorkoutMetricsStore) {
+        workoutActivityCancellable = store.$shouldMaintainWorkoutServices
+            .removeDuplicates()
+            .sink { [weak self] isWorkoutActive in
+                self?.setWorkoutActive(isWorkoutActive)
+            }
+    }
+
+    func applicationDidBecomeActive() {
+        updateLocationTracking()
+    }
     
     public func updateLocationTracking(restart: Bool = false) {
+        let isApplicationActive = applicationIsActive()
         let shouldTrack = RideActivityPolicy.shouldTrackLocation(
             isNavigating: isNavigating,
-            isViewingMap: isViewingMap,
+            isViewingMap: isViewingMap && isApplicationActive,
             isWorkoutActive: isWorkoutActive,
             isRefreshingDeviceDestinationLocation:
                 isRefreshingDeviceDestinationLocation
@@ -160,18 +280,23 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             )
 
         if shouldTrackInBackground &&
-            Self.isAuthorizedWhenInUse(locationManager.authorizationStatus) &&
-            Self.applicationIsActive {
+            locationManager.authorizationLevel == .whenInUse &&
+            isApplicationActive &&
+            !hasRequestedAlwaysAuthorizationForRideActivity {
+            hasRequestedAlwaysAuthorizationForRideActivity = true
             locationManager.requestAlwaysAuthorization()
         }
 
-#if !os(macOS)
-        locationManager.allowsBackgroundLocationUpdates = shouldTrackInBackground
-        locationManager.pausesLocationUpdatesAutomatically = !shouldTrackInBackground
-        locationManager.showsBackgroundLocationIndicator = shouldTrackInBackground
-#endif
+        locationManager.setBackgroundTrackingEnabled(shouldTrackInBackground)
+
+        let canStartUpdates =
+            locationManager.authorizationLevel == .always
+                || isApplicationActive
         
-        if shouldTrack && isLocationAuthorized && (!isLocationUpdating || restart) {
+        if shouldTrack &&
+            isLocationAuthorized &&
+            canStartUpdates &&
+            (!isLocationUpdating || restart) {
             if isLocationUpdating {
                 locationManager.stopUpdatingLocation()
             }
@@ -269,19 +394,12 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         updateLocationTracking()
     }
 
-    private static var applicationIsActive: Bool {
+    private static func defaultApplicationIsActive() -> Bool {
 #if canImport(UIKit) && !HOST_TESTING
-        UIApplication.shared.applicationState == .active
+        return UIApplication.shared.applicationState == .active
 #else
-        true
+        return true
 #endif
     }
 
-    private static func isAuthorizedWhenInUse(_ status: CLAuthorizationStatus) -> Bool {
-#if os(macOS)
-        false
-#else
-        status == .authorizedWhenInUse
-#endif
-    }
 }

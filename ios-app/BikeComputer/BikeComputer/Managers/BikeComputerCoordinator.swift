@@ -66,7 +66,7 @@ class BikeComputerCoordinator: ObservableObject {
     let destinationStore: SavedDestinationStore
     let workoutMetricsStore: WorkoutMetricsStore
     private let navEngine = NavigationEngine()
-    private let locationManager = CurrentLocationManager()
+    private let locationManager: CurrentLocationManager
     private let directionsFactory: NavigationDirectionsFactory
     private let startServices: Bool
     private let now: () -> Date
@@ -144,6 +144,7 @@ class BikeComputerCoordinator: ObservableObject {
     init(
         destinationStore: SavedDestinationStore,
         workoutMetricsStore: WorkoutMetricsStore? = nil,
+        locationManager: CurrentLocationManager? = nil,
         directionsFactory: @escaping NavigationDirectionsFactory = {
             MapKitNavigationDirectionsTask(request: $0)
         },
@@ -153,6 +154,7 @@ class BikeComputerCoordinator: ObservableObject {
         self.destinationStore = destinationStore
         self.workoutMetricsStore = workoutMetricsStore
             ?? WorkoutMetricsStore(now: now)
+        self.locationManager = locationManager ?? CurrentLocationManager()
         self.directionsFactory = directionsFactory
         self.startServices = startServices
         self.now = now
@@ -200,13 +202,7 @@ class BikeComputerCoordinator: ObservableObject {
         navEngine.$isSimulationMode
             .assign(to: &$isSimulationMode)
 
-        workoutMetricsStore.$presentation
-            .map { $0.isWorkoutActive }
-            .removeDuplicates()
-            .sink { [weak self] isWorkoutActive in
-                self?.locationManager.setWorkoutActive(isWorkoutActive)
-            }
-            .store(in: &cancellables)
+        locationManager.bindWorkoutMetricsStore(workoutMetricsStore)
 
         navEngine.$simulatedPosition
             .assign(to: &$simulatedPosition)
@@ -374,9 +370,6 @@ class BikeComputerCoordinator: ObservableObject {
 
         // Start BLE operations
         bleManager.startScanning()
-
-        // Enable location tracking for map view
-        locationManager.setViewingMap(true)
     }
 
     private func processNavigationLocation(_ location: CLLocation) {
@@ -524,6 +517,7 @@ class BikeComputerCoordinator: ObservableObject {
     }
 
     func applicationDidBecomeActive() {
+        locationManager.applicationDidBecomeActive()
         locationManager.prepareDeviceDestinationRequestsIfNeeded()
         bleManager.resumeAutoReconnectIfNeeded()
     }

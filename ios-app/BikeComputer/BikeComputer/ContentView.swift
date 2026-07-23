@@ -43,20 +43,22 @@ struct ContentView: View {
     @MainActor
     init(
         workoutMirrorManager: WorkoutMirrorManager,
+        coordinator: BikeComputerCoordinator? = nil,
         watchAvailability: WorkoutWatchAvailabilityMonitor? = nil
     ) {
         let watchAvailability = watchAvailability
             ?? WorkoutWatchAvailabilityMonitor()
+        let coordinator = coordinator ?? BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(),
+            workoutMetricsStore: workoutMirrorManager.store
+        )
         self.workoutMirrorManager = workoutMirrorManager
         _watchAvailability = StateObject(wrappedValue: watchAvailability)
         _workoutStore = ObservedObject(
             wrappedValue: workoutMirrorManager.store
         )
         _coordinator = StateObject(
-            wrappedValue: BikeComputerCoordinator(
-                destinationStore: SavedDestinationStore(),
-                workoutMetricsStore: workoutMirrorManager.store
-            )
+            wrappedValue: coordinator
         )
     }
     
@@ -191,12 +193,14 @@ struct ContentView: View {
             migrateExistingInstallOnboardingIfNeeded()
             isOfflineMapOnboardingStatePrepared = true
             watchAvailability.activate()
+            coordinator.setViewingMap(scenePhase == .active)
             updateIdleTimer()
             coordinator.applicationDidBecomeActive()
             workoutMirrorManager.refreshFreshness()
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
         }
         .onChange(of: scenePhase) { newValue in
+            coordinator.setViewingMap(newValue == .active)
             updateIdleTimer(for: newValue)
             guard newValue == .active else { return }
             coordinator.applicationDidBecomeActive()
@@ -206,10 +210,11 @@ struct ContentView: View {
         .onChange(of: coordinator.isNavigating) { _ in
             updateIdleTimer()
         }
-        .onChange(of: workoutStore.presentation.isWorkoutActive) { _ in
+        .onChange(of: workoutStore.shouldMaintainWorkoutServices) { _ in
             updateIdleTimer()
         }
         .onDisappear {
+            coordinator.setViewingMap(false)
             UIApplication.shared.isIdleTimerDisabled = false
         }
         .onChange(of: coordinator.bleManager.isConnected) { _ in
@@ -255,12 +260,13 @@ struct ContentView: View {
     }
 
     private func updateIdleTimer(for phase: ScenePhase? = nil) {
-        UIApplication.shared.isIdleTimerDisabled =
-            RideActivityPolicy.shouldKeepScreenAwake(
-                isNavigating: coordinator.isNavigating,
-                isWorkoutActive: workoutStore.presentation.isWorkoutActive,
-                isApplicationActive: (phase ?? scenePhase) == .active
-            )
+        RideIdleTimerController.update(
+            isNavigating: coordinator.isNavigating,
+            isWorkoutActive: workoutStore.shouldMaintainWorkoutServices,
+            isApplicationActive: (phase ?? scenePhase) == .active
+        ) {
+            UIApplication.shared.isIdleTimerDisabled = $0
+        }
     }
 
     private func schedulePendingMapInstallResume() {

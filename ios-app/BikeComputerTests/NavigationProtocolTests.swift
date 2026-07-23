@@ -493,6 +493,55 @@ final class TestRoute: MKRoute {
     }
 }
 
+final class TestLocationManagerClient: LocationManagerClient {
+    var authorizationStatus: CLAuthorizationStatus
+    var authorizationLevel: LocationAuthorizationLevel
+    private(set) weak var delegate: CLLocationManagerDelegate?
+    private(set) var backgroundTrackingEnabledHistory: [Bool] = []
+    private(set) var requestLocationCallCount = 0
+    private(set) var requestWhenInUseAuthorizationCallCount = 0
+    private(set) var requestAlwaysAuthorizationCallCount = 0
+    private(set) var startUpdatingLocationCallCount = 0
+    private(set) var stopUpdatingLocationCallCount = 0
+
+    init(authorizationLevel: LocationAuthorizationLevel) {
+        self.authorizationLevel = authorizationLevel
+        authorizationStatus = authorizationLevel == .always
+            ? .authorizedAlways
+            : .notDetermined
+    }
+
+    func setDelegate(_ delegate: CLLocationManagerDelegate?) {
+        self.delegate = delegate
+    }
+
+    func configureForCycling() {}
+
+    func setBackgroundTrackingEnabled(_ enabled: Bool) {
+        backgroundTrackingEnabledHistory.append(enabled)
+    }
+
+    func requestLocation() {
+        requestLocationCallCount += 1
+    }
+
+    func requestWhenInUseAuthorization() {
+        requestWhenInUseAuthorizationCallCount += 1
+    }
+
+    func requestAlwaysAuthorization() {
+        requestAlwaysAuthorizationCallCount += 1
+    }
+
+    func startUpdatingLocation() {
+        startUpdatingLocationCallCount += 1
+    }
+
+    func stopUpdatingLocation() {
+        stopUpdatingLocationCallCount += 1
+    }
+}
+
 @main
 struct NavigationProtocolTests {
     @MainActor
@@ -504,6 +553,7 @@ struct NavigationProtocolTests {
         testReplacementStepSelectionUsesUnambiguousGeometry()
         testCoordinatorReroutesAndAppliesLatestRoute()
         testWorkoutAndNavigationLifecyclesStayIndependent()
+        testRideActivityRuntimeIntegration()
         testCoordinatorRejectsStaleRerouteLocations()
         testCoordinatorDetectsDeviationFromCurrentStep()
         testCoordinatorEnforcesRerouteCooldown()
@@ -2694,6 +2744,202 @@ struct NavigationProtocolTests {
             coordinator.isNavigating,
             "ending the workout must not stop navigation"
         )
+    }
+
+    @MainActor
+    static func testRideActivityRuntimeIntegration() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_300_100)
+        var currentDate = now
+        var isApplicationActive = false
+        let locationClient = TestLocationManagerClient(
+            authorizationLevel: .whenInUse
+        )
+        let locationManager = CurrentLocationManager(
+            locationManager: locationClient,
+            applicationIsActive: { isApplicationActive }
+        )
+        let store = WorkoutMetricsStore(now: { currentDate })
+        store.attachMirroredSession(at: now)
+        _ = store.ingestBatch(
+            [
+                WorkoutEnvelopeV1(
+                    kind: .snapshot,
+                    sessionID: UUID(),
+                    sessionToken: 4,
+                    sequence: 1,
+                    capturedAt: now,
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: now
+                    )
+                ),
+            ],
+            receivedAt: now
+        )
+
+        locationManager.bindWorkoutMetricsStore(store)
+
+        assertEqual(
+            locationClient.startUpdatingLocationCallCount,
+            0,
+            "a background-launched workout must defer a When-In-Use location start"
+        )
+        assertEqual(
+            locationClient.requestAlwaysAuthorizationCallCount,
+            0,
+            "Always authorization can only be requested after the app becomes active"
+        )
+        assert(
+            locationClient.backgroundTrackingEnabledHistory.last == true,
+            "a connected workout should configure background location delivery"
+        )
+
+        isApplicationActive = true
+        locationManager.applicationDidBecomeActive()
+
+        assertEqual(
+            locationClient.requestAlwaysAuthorizationCallCount,
+            1,
+            "foregrounding a background-launched workout should request Always authorization"
+        )
+        assertEqual(
+            locationClient.startUpdatingLocationCallCount,
+            1,
+            "foregrounding should retry the deferred workout location start"
+        )
+
+        store.disconnect(error: .watchUnavailable)
+        assertEqual(
+            locationClient.stopUpdatingLocationCallCount,
+            0,
+            "a disconnected live workout should keep location active during the reconnection grace period"
+        )
+        assert(
+            locationClient.backgroundTrackingEnabledHistory.last == true,
+            "the reconnection grace period should preserve background workout tracking"
+        )
+
+        currentDate = now.addingTimeInterval(
+            WorkoutServiceActivityTracker.reconnectionGracePeriod + 0.001
+        )
+        store.refreshFreshness(at: currentDate)
+        assertEqual(
+            locationClient.stopUpdatingLocationCallCount,
+            1,
+            "an unverified workout should release location after the bounded grace period"
+        )
+        assert(
+            locationClient.backgroundTrackingEnabledHistory.last == false,
+            "expired workout reconnection grace should release background tracking"
+        )
+
+        locationManager.setNavigating(true)
+        assertEqual(
+            locationClient.startUpdatingLocationCallCount,
+            2,
+            "navigation should remain able to start location after workout grace expires"
+        )
+        locationManager.setNavigating(false)
+        assertEqual(
+            locationClient.stopUpdatingLocationCallCount,
+            2,
+            "ending navigation should release its independent location claim"
+        )
+
+        let alwaysClient = TestLocationManagerClient(
+            authorizationLevel: .always
+        )
+        let backgroundLocationManager = CurrentLocationManager(
+            locationManager: alwaysClient,
+            applicationIsActive: { false }
+        )
+        backgroundLocationManager.bindWorkoutMetricsStore(storeForActiveWorkout(
+            at: now.addingTimeInterval(1)
+        ))
+        assertEqual(
+            alwaysClient.startUpdatingLocationCallCount,
+            1,
+            "Always-authorized workout tracking may start during a background launch"
+        )
+
+        let headlessClient = TestLocationManagerClient(
+            authorizationLevel: .always
+        )
+        var isHeadlessSceneActive = false
+        let headlessLocationManager = CurrentLocationManager(
+            locationManager: headlessClient,
+            applicationIsActive: { isHeadlessSceneActive }
+        )
+        headlessLocationManager.setViewingMap(true)
+        assertEqual(
+            headlessClient.startUpdatingLocationCallCount,
+            0,
+            "a headless background launch must not treat the map as visible"
+        )
+        isHeadlessSceneActive = true
+        headlessLocationManager.applicationDidBecomeActive()
+        assertEqual(
+            headlessClient.startUpdatingLocationCallCount,
+            1,
+            "an active visible map should start foreground location"
+        )
+        isHeadlessSceneActive = false
+        headlessLocationManager.setViewingMap(false)
+        assertEqual(
+            headlessClient.stopUpdatingLocationCallCount,
+            1,
+            "backgrounding the visible map should release its location claim"
+        )
+
+        var idleTimerValues: [Bool] = []
+        RideIdleTimerController.update(
+            isNavigating: false,
+            isWorkoutActive: true,
+            isApplicationActive: true,
+            setIdleTimerDisabled: { idleTimerValues.append($0) }
+        )
+        RideIdleTimerController.update(
+            isNavigating: false,
+            isWorkoutActive: true,
+            isApplicationActive: false,
+            setIdleTimerDisabled: { idleTimerValues.append($0) }
+        )
+        RideIdleTimerController.update(
+            isNavigating: true,
+            isWorkoutActive: false,
+            isApplicationActive: true,
+            setIdleTimerDisabled: { idleTimerValues.append($0) }
+        )
+        assertEqual(
+            idleTimerValues,
+            [true, false, true],
+            "the idle-timer adapter should apply workout, background, and navigation policy"
+        )
+    }
+
+    @MainActor
+    private static func storeForActiveWorkout(
+        at date: Date
+    ) -> WorkoutMetricsStore {
+        let store = WorkoutMetricsStore(now: { date })
+        store.attachMirroredSession(at: date)
+        _ = store.ingestBatch(
+            [
+                WorkoutEnvelopeV1(
+                    kind: .snapshot,
+                    sessionID: UUID(),
+                    sessionToken: 5,
+                    sequence: 1,
+                    capturedAt: date,
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: date
+                    )
+                ),
+            ],
+            receivedAt: date
+        )
+        return store
     }
 
     @MainActor
@@ -11834,7 +12080,97 @@ struct NavigationProtocolTests {
         )
     }
 
+    @MainActor
     static func testRideActivityPolicy() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_500_000)
+        let store = storeForActiveWorkout(at: now)
+        var tracker = WorkoutServiceActivityTracker()
+        assert(
+            tracker.shouldMaintainServices(
+                for: store.presentation,
+                at: now
+            ),
+            "a connected live workout should power companion services"
+        )
+        store.disconnect(error: .watchUnavailable)
+        assert(
+            tracker.shouldMaintainServices(
+                for: store.presentation,
+                at: now
+            ),
+            "a disconnected active workout should start a bounded service grace period"
+        )
+        assert(
+            tracker.shouldMaintainServices(
+                for: store.presentation,
+                at: now.addingTimeInterval(
+                    WorkoutServiceActivityTracker.reconnectionGracePeriod
+                )
+            ),
+            "a disconnected active workout should retain services through the grace boundary"
+        )
+        assert(
+            !tracker.shouldMaintainServices(
+                for: store.presentation,
+                at: now.addingTimeInterval(
+                    WorkoutServiceActivityTracker.reconnectionGracePeriod
+                        + 0.001
+                )
+            ),
+            "an unverified active state should not power services indefinitely"
+        )
+
+        let staleStore = storeForActiveWorkout(at: now)
+        var staleTracker = WorkoutServiceActivityTracker()
+        _ = staleTracker.shouldMaintainServices(
+            for: staleStore.presentation,
+            at: now
+        )
+        let becameStaleAt = now.addingTimeInterval(
+            WorkoutMirrorStateReducer.defaultStaleAfter + 0.001
+        )
+        staleStore.refreshFreshness(at: becameStaleAt)
+        assertEqual(
+            staleStore.presentation.connectionState,
+            .stale,
+            "the service policy test should exercise a genuinely stale mirror"
+        )
+        assert(
+            staleTracker.shouldMaintainServices(
+                for: staleStore.presentation,
+                at: becameStaleAt
+            ),
+            "a stale live workout should retain services during reconnection grace"
+        )
+        assert(
+            !staleTracker.shouldMaintainServices(
+                for: staleStore.presentation,
+                at: becameStaleAt.addingTimeInterval(
+                    WorkoutServiceActivityTracker.reconnectionGracePeriod
+                        + 0.001
+                )
+            ),
+            "stale workout grace should also be bounded"
+        )
+
+        let reconnectedStore = storeForActiveWorkout(
+            at: becameStaleAt.addingTimeInterval(30)
+        )
+        assert(
+            staleTracker.shouldMaintainServices(
+                for: reconnectedStore.presentation,
+                at: becameStaleAt.addingTimeInterval(30)
+            ),
+            "a verified reconnect should reactivate services and clear expired grace"
+        )
+        reconnectedStore.disconnect(error: .watchUnavailable)
+        assert(
+            staleTracker.shouldMaintainServices(
+                for: reconnectedStore.presentation,
+                at: becameStaleAt.addingTimeInterval(30)
+            ),
+            "a later disconnect should receive a fresh bounded grace period"
+        )
         assert(
             RideActivityPolicy.shouldTrackLocation(
                 isNavigating: false,

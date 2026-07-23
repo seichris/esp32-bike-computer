@@ -1,11 +1,40 @@
 import Combine
 import Foundation
 
+nonisolated struct WorkoutServiceActivityTracker: Sendable {
+    static let reconnectionGracePeriod: TimeInterval = 5 * 60
+    private(set) var unverifiedSince: Date?
+
+    mutating func shouldMaintainServices(
+        for presentation: WorkoutMirrorPresentationV1,
+        at date: Date
+    ) -> Bool {
+        guard presentation.isWorkoutActive else {
+            unverifiedSince = nil
+            return false
+        }
+        switch presentation.connectionState {
+        case .awaitingFirstSnapshot, .connected:
+            unverifiedSince = nil
+            return true
+        case .stale, .disconnected:
+            let graceStartedAt = unverifiedSince ?? date
+            unverifiedSince = graceStartedAt
+            return date.timeIntervalSince(graceStartedAt)
+                <= Self.reconnectionGracePeriod
+        case .unsupported, .idle, .launchingWatch, .ended, .failed:
+            unverifiedSince = nil
+            return false
+        }
+    }
+}
+
 /// Main-actor publication boundary for all Watch-owned workout state shown on
 /// iPhone. The store never writes HealthKit data or persists raw health metrics.
 @MainActor
 final class WorkoutMetricsStore: ObservableObject {
     @Published private(set) var presentation: WorkoutMirrorPresentationV1
+    @Published private(set) var shouldMaintainWorkoutServices: Bool
 
     private var reducer: WorkoutMirrorStateReducer
     private var iPhoneTelemetry: WorkoutIPhoneTelemetryV1 = .empty
@@ -15,6 +44,7 @@ final class WorkoutMetricsStore: ObservableObject {
     private var completedNavigationDistanceMeters: Double = 0
     private var wasNavigationDistanceAdvancing = false
     private let now: () -> Date
+    private var workoutServiceActivityTracker: WorkoutServiceActivityTracker
 
     var currentEnvelope: WorkoutEnvelopeV1? {
         reducer.latestEnvelope
@@ -34,11 +64,20 @@ final class WorkoutMetricsStore: ObservableObject {
     ) {
         self.reducer = reducer
         self.now = now
-        presentation = WorkoutIPhoneTelemetryMerge.presentation(
+        let referenceDate = now()
+        let presentation = WorkoutIPhoneTelemetryMerge.presentation(
             reducer.presentation,
             phone: .empty,
-            at: now()
+            at: referenceDate
         )
+        var workoutServiceActivityTracker = WorkoutServiceActivityTracker()
+        self.presentation = presentation
+        shouldMaintainWorkoutServices =
+            workoutServiceActivityTracker.shouldMaintainServices(
+                for: presentation,
+                at: referenceDate
+            )
+        self.workoutServiceActivityTracker = workoutServiceActivityTracker
     }
 
     @discardableResult
@@ -210,11 +249,12 @@ final class WorkoutMetricsStore: ObservableObject {
     }
 
     private func publish() {
+        let referenceDate = now()
         let base = reducer.presentation
         let merged = WorkoutIPhoneTelemetryMerge.presentation(
             base,
             phone: normalizedIPhoneTelemetry(for: base),
-            at: now()
+            at: referenceDate
         )
         let next: WorkoutMirrorPresentationV1
         if base.sessionState == .ended,
@@ -242,6 +282,16 @@ final class WorkoutMetricsStore: ObservableObject {
             )
         } else {
             next = merged
+        }
+        let nextShouldMaintainWorkoutServices =
+            workoutServiceActivityTracker.shouldMaintainServices(
+                for: next,
+                at: referenceDate
+            )
+        if nextShouldMaintainWorkoutServices
+            != shouldMaintainWorkoutServices {
+            shouldMaintainWorkoutServices =
+                nextShouldMaintainWorkoutServices
         }
         guard next != presentation else { return }
         presentation = next
