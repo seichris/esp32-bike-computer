@@ -4709,9 +4709,10 @@ private struct WorkoutContractTestSuite {
             "the final destructive confirmation must discard exactly once"
         )
         expect(
-            WorkoutDiscardDisclosureV1.message.contains("can’t be undone")
-                && WorkoutDiscardDisclosureV1.message.contains("not be saved to Health"),
-            "the final discard warning must disclose irreversibility and the Health outcome"
+            WorkoutDiscardDisclosureV1.title == "Discard Ride?"
+                && WorkoutDiscardDisclosureV1.message
+                    == "Discarding can't be undone.",
+            "the final discard warning must use the concise rider-facing copy"
         )
         expect(
             WorkoutDiscardDisclosureV1.cancelTitle == "Keep Riding"
@@ -4946,6 +4947,24 @@ private struct WorkoutContractTestSuite {
                 "\(surface) finish prompts must be scoped to and invalidated with their session"
             )
         }
+
+        let compactWatchSource = watchSource.filter { !$0.isWhitespace }
+        expect(
+            compactWatchSource.contains(
+                "isPresented:discardConfirmationPresented,presenting:discardConfirmationSessionID"
+            )
+                && compactWatchSource.contains(
+                    "){sessionIDinButton(WorkoutDiscardDisclosureV1.cancelTitle"
+                ),
+            "Watch discard confirmation must capture its session before alert dismissal"
+        )
+        expect(
+            watchSource.contains("\"Finish Ride?\"")
+                && watchSource.contains(
+                    "\"Saving creates a workout in your Fitness app.\""
+                ),
+            "Watch finish confirmation must use the concise rider-facing copy"
+        )
     }
 
     private mutating func testWorkoutUICompositionRetainsPhaseThreeExitCriteria() {

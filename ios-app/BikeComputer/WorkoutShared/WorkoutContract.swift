@@ -129,8 +129,8 @@ nonisolated enum WorkoutDiscardDisclosureV1 {
         case confirmDiscard
     }
 
-    static let title = "Discard Workout?"
-    static let message = "This can’t be undone. This ride will not be saved to Health."
+    static let title = "Discard Ride?"
+    static let message = "Discarding can't be undone."
     static let cancelTitle = "Keep Riding"
     static let confirmTitle = "Discard Workout"
 
