@@ -5287,9 +5287,9 @@ private struct WorkoutContractTestSuite {
             return
         }
 
-        for (surface, source, sessionSource, discardClosure) in [
-            ("iPhone", iPhoneSource, "store.presentation.sessionID", "onDiscard"),
-            ("Watch", watchSource, "manager.activeSessionID", "manager.discard"),
+        for (surface, source, sessionSource) in [
+            ("iPhone", iPhoneSource, "store.presentation.sessionID"),
+            ("Watch", watchSource, "manager.activeSessionID"),
         ] {
             let compactSource = source.filter { !$0.isWhitespace }
             expect(
@@ -5297,21 +5297,6 @@ private struct WorkoutContractTestSuite {
                     "Button(\"DiscardWorkout\",role:.destructive){requestDiscardConfirmation(for:sessionID)}"
                 ),
                 "\(surface) finish options must request, not execute, discard"
-            )
-            expect(
-                compactSource.contains(
-                    "WorkoutDiscardDisclosureV1.perform(.cancel,expectedSessionID:sessionID,currentSessionID:\(sessionSource),discard:\(discardClosure))"
-                )
-                    && compactSource.contains(
-                        "WorkoutDiscardDisclosureV1.perform(.confirmDiscard,expectedSessionID:sessionID,currentSessionID:\(sessionSource),discard:\(discardClosure))"
-                    ),
-                "\(surface) final warning must map Keep Riding and Discard to shared policy choices"
-            )
-            expect(
-                compactSource.contains(
-                    "isPresented:discardConfirmationPresented"
-                ),
-                "\(surface) must present the dedicated final discard warning"
             )
             expect(
                 compactSource.contains(
@@ -5325,15 +5310,32 @@ private struct WorkoutContractTestSuite {
             )
         }
 
+        let compactIPhoneSource = iPhoneSource.filter { !$0.isWhitespace }
+        expect(
+            compactIPhoneSource.contains(
+                "WorkoutDiscardDisclosureV1.perform(.cancel,expectedSessionID:sessionID,currentSessionID:store.presentation.sessionID,discard:onDiscard)"
+            )
+                && compactIPhoneSource.contains(
+                    "WorkoutDiscardDisclosureV1.perform(.confirmDiscard,expectedSessionID:sessionID,currentSessionID:store.presentation.sessionID,discard:onDiscard)"
+                )
+                && compactIPhoneSource.contains(
+                    "isPresented:discardConfirmationPresented"
+                ),
+            "iPhone final warning must preserve shared disclosure policy and session capture"
+        )
+
         let compactWatchSource = watchSource.filter { !$0.isWhitespace }
         expect(
             compactWatchSource.contains(
-                "isPresented:discardConfirmationPresented,presenting:discardConfirmationSessionID"
+                "ifcase.discardConfirmation(letsessionID)=finishPrompt{discardConfirmationView(sessionID:sessionID)}"
             )
                 && compactWatchSource.contains(
-                    "){sessionIDinButton(WorkoutDiscardDisclosureV1.cancelTitle"
+                    "Button(WorkoutDiscardDisclosureV1.confirmTitle,role:.destructive){finishPrompt=nilguardmanager.activeSessionID==sessionIDelse{return}manager.discard()}"
+                )
+                && compactWatchSource.contains(
+                    "Button(WorkoutDiscardDisclosureV1.cancelTitle,role:.cancel){finishPrompt=nil}"
                 ),
-            "Watch discard confirmation must capture its session before alert dismissal"
+            "Watch dedicated discard screen must preserve disclosure choices and capture its session before dismissal"
         )
         expect(
             watchSource.contains("\"Finish Ride?\"")
