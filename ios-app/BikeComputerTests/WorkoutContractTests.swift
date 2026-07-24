@@ -5663,24 +5663,33 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             compactNavigation.contains(
-                "count:isExpanded?2:3"
+                "workoutMetricGrid(metrics:workoutMetricValues,columnCount:3,isExpanded:false)"
             )
                 && compactNavigation.contains(
-                    "expandedWorkoutMetrics"
+                    "metrics.first(where:{$0.id==\"speed\"})"
+                )
+                && compactNavigation.contains(
+                    "isExpanded:true,isHero:true"
+                )
+                && compactNavigation.contains(
+                    "metrics:metrics.filter{$0.id!=\"speed\"},columnCount:2,isExpanded:true"
                 )
                 && compactNavigation.contains(
                     "expandedNavigationMetrics"
                 )
                 && compactNavigation.contains(
-                    "size:isExpanded?42:25"
+                    "size:isHero?64:isExpanded?42:25"
                 )
                 && compactNavigation.contains(
-                    "size:isExpanded?24:16"
+                    "size:isHero?28:isExpanded?24:16"
                 )
                 && compactNavigation.contains(
                     "Text(unit).font(unitFont).foregroundColor(.secondary)"
+                )
+                && compactNavigation.contains(
+                    ".frame(maxWidth:.infinity,minHeight:36)"
                 ),
-            "expanded ride stats must use a larger two-column grid while measurement units remain smaller and secondary"
+            "expanded ride stats must feature a larger centered speed above a two-column grid, keep measurement units secondary, and use taller controls"
         )
 
         for binding in [

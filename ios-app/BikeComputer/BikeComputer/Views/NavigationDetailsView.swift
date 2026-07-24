@@ -373,17 +373,39 @@ struct RideMetricsPanel: View {
     }
 
     private var workoutMetrics: some View {
-        workoutMetricGrid(isExpanded: false)
+        workoutMetricGrid(
+            metrics: workoutMetricValues,
+            columnCount: 3,
+            isExpanded: false
+        )
     }
 
     private var expandedWorkoutMetrics: some View {
-        workoutMetricGrid(isExpanded: true)
+        let metrics = workoutMetricValues
+        return VStack(spacing: 32) {
+            if let speed = metrics.first(where: { $0.id == "speed" }) {
+                RideMetricColumn(
+                    value: speed.value,
+                    unit: speed.unit,
+                    label: speed.label,
+                    isExpanded: true,
+                    isHero: true
+                )
+                .frame(maxWidth: .infinity)
+            }
+
+            workoutMetricGrid(
+                metrics: metrics.filter { $0.id != "speed" },
+                columnCount: 2,
+                isExpanded: true
+            )
+        }
     }
 
-    private func workoutMetricGrid(isExpanded: Bool) -> some View {
+    private var workoutMetricValues: [RideMetric] {
         let snapshot = workoutStore.presentation.snapshot
         let suppressInstantaneous = suppressInstantaneousMetrics
-        let metrics = [
+        return [
             RideMetric(
                 value: WorkoutValueFormatter.duration(snapshot.elapsedTime?.value),
                 label: "elapsed"
@@ -452,12 +474,19 @@ struct RideMetricsPanel: View {
                 label: "energy"
             ),
         ]
+    }
+
+    private func workoutMetricGrid(
+        metrics: [RideMetric],
+        columnCount: Int,
+        isExpanded: Bool
+    ) -> some View {
         let columns = Array(
             repeating: GridItem(
                 .flexible(),
                 spacing: isExpanded ? 24 : 0
             ),
-            count: isExpanded ? 2 : 3
+            count: columnCount
         )
 
         return LazyVGrid(
@@ -725,7 +754,7 @@ private struct RideControlLabel: View {
             .font(.subheadline.weight(.semibold))
             .lineLimit(1)
             .minimumScaleFactor(0.62)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, minHeight: 36)
     }
 }
 
@@ -748,6 +777,7 @@ private struct RideMetricColumn: View {
     let unit: String?
     let label: String
     let isExpanded: Bool
+    var isHero = false
 
     var body: some View {
         VStack(spacing: isExpanded ? 4 : 2) {
@@ -778,7 +808,7 @@ private struct RideMetricColumn: View {
 
     private var valueFont: Font {
         .system(
-            size: isExpanded ? 42 : 25,
+            size: isHero ? 64 : isExpanded ? 42 : 25,
             weight: .bold,
             design: .rounded
         )
@@ -786,7 +816,7 @@ private struct RideMetricColumn: View {
 
     private var unitFont: Font {
         .system(
-            size: isExpanded ? 24 : 16,
+            size: isHero ? 28 : isExpanded ? 24 : 16,
             weight: .semibold,
             design: .rounded
         )
@@ -794,7 +824,7 @@ private struct RideMetricColumn: View {
 
     private var labelFont: Font {
         .system(
-            size: isExpanded ? 20 : 15,
+            size: isHero ? 22 : isExpanded ? 20 : 15,
             weight: .semibold,
             design: .rounded
         )
