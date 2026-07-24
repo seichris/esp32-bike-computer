@@ -18,7 +18,9 @@ struct BikeComputerApp: App {
         WindowGroup {
             ContentView(
                 workoutMirrorManager: appDelegate.workoutMirrorManager,
-                coordinator: appDelegate.coordinator
+                coordinator: appDelegate.coordinator,
+                liveActivityDiagnostics:
+                    appDelegate.workoutLiveActivityDiagnostics
             )
         }
     }
@@ -30,6 +32,8 @@ struct BikeComputerApp: App {
 class AppDelegate: NSObject, UIApplicationDelegate {
     let workoutMirrorManager = WorkoutMirrorManager()
     let locationManager = CurrentLocationManager()
+    let workoutLiveActivityDiagnostics =
+        WorkoutLiveActivityDiagnosticStore()
     private var workoutLiveActivityController: AnyObject?
     private var workoutLiveActivityCommandRouter: AnyObject?
     private var workoutLiveActivityIntentDispatcher: AnyObject?
@@ -68,7 +72,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             AppDependencyManager.shared.add(dependency: dispatcher)
 
             let controller = WorkoutLiveActivityController(
-                store: workoutMirrorManager.store
+                store: workoutMirrorManager.store,
+                diagnostics: workoutLiveActivityDiagnostics
             )
             controller.start(
                 isApplicationForeground: application.applicationState == .active

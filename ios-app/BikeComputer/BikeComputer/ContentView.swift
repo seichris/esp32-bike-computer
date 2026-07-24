@@ -40,6 +40,8 @@ struct ContentView: View {
     @StateObject private var offlineMapManager = OfflineMapManager()
     @StateObject private var watchAvailability: WorkoutWatchAvailabilityMonitor
     @ObservedObject private var workoutStore: WorkoutMetricsStore
+    @ObservedObject private var liveActivityDiagnostics:
+        WorkoutLiveActivityDiagnosticStore
     private let workoutMirrorManager: WorkoutMirrorManager
     @Environment(\.scenePhase) private var scenePhase
     
@@ -68,10 +70,14 @@ struct ContentView: View {
     init(
         workoutMirrorManager: WorkoutMirrorManager,
         coordinator: BikeComputerCoordinator? = nil,
-        watchAvailability: WorkoutWatchAvailabilityMonitor? = nil
+        watchAvailability: WorkoutWatchAvailabilityMonitor? = nil,
+        liveActivityDiagnostics:
+            WorkoutLiveActivityDiagnosticStore? = nil
     ) {
         let watchAvailability = watchAvailability
             ?? WorkoutWatchAvailabilityMonitor()
+        let liveActivityDiagnostics = liveActivityDiagnostics
+            ?? WorkoutLiveActivityDiagnosticStore()
         let coordinator = coordinator ?? BikeComputerCoordinator(
             destinationStore: SavedDestinationStore(),
             workoutMetricsStore: workoutMirrorManager.store
@@ -80,6 +86,9 @@ struct ContentView: View {
         _watchAvailability = StateObject(wrappedValue: watchAvailability)
         _workoutStore = ObservedObject(
             wrappedValue: workoutMirrorManager.store
+        )
+        _liveActivityDiagnostics = ObservedObject(
+            wrappedValue: liveActivityDiagnostics
         )
         _coordinator = StateObject(
             wrappedValue: coordinator
@@ -101,6 +110,14 @@ struct ContentView: View {
 
                 VStack(spacing: 0) {
                     topOverlay
+
+                    if workoutStore.presentation.isWorkoutActive,
+                       let issue =
+                           liveActivityDiagnostics.issueMessage {
+                        liveActivityDiagnosticBanner(issue)
+                            .padding(.horizontal, 14)
+                            .padding(.top, 8)
+                    }
 
                     if coordinator.isNavigating {
                         navigationInstructionBanner(
@@ -298,6 +315,24 @@ struct ContentView: View {
                 workoutSegmentToast = nil
             }
         }
+    }
+
+    private func liveActivityDiagnosticBanner(
+        _ message: String
+    ) -> some View {
+        Label(message, systemImage: "exclamationmark.triangle.fill")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.orange)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.orange.opacity(0.35), lineWidth: 1)
+            }
+            .accessibilityIdentifier("liveActivityDiagnostic")
     }
 
     @ViewBuilder
@@ -600,6 +635,7 @@ struct ContentView: View {
             remainingDistance: coordinator.routeRemainingDistance,
             onStopNavigation: { coordinator.stopNavigation() },
             onStartWorkout: workoutMirrorManager.startOutdoorCyclingOnWatch,
+            onMarkSegment: workoutMirrorManager.markSegment,
             onPauseWorkout: workoutMirrorManager.pause,
             onResumeWorkout: workoutMirrorManager.resume,
             onEndAndSaveWorkout: workoutMirrorManager.endAndSave,

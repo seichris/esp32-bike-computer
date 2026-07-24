@@ -188,15 +188,13 @@ struct LiveWorkoutView: View {
                         icon: "arrow.triangle.2.circlepath",
                         color: .mint
                     )
-                }
-
-                if let segment = manager.snapshot.lastCompletedSegment {
-                    Label(
-                        "Segment \(segment.index + 1)",
-                        systemImage: "flag.checkered"
+                    metric(
+                        title: "Altitude",
+                        value: altitudeValue,
+                        unit: "M",
+                        icon: "mountain.2.fill",
+                        color: .indigo
                     )
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
                 }
 
                 Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))
@@ -211,16 +209,21 @@ struct LiveWorkoutView: View {
                         if manager.isMarkingSegment {
                             ProgressView()
                         } else {
-                            Image(systemName: "flag.checkered")
+                            WatchSegmentNumberBadge(
+                                number: manager.snapshot.currentSegmentIndex
+                            )
                         }
                     }
-                    .tint(.blue)
+                    .tint(.green)
                     .disabled(
                         manager.state != .running
                             || manager.isMarkingSegment
                             || manager.segmentError == .confirmationPending
                     )
                     .accessibilityLabel("Mark workout segment")
+                    .accessibilityValue(
+                        "Current segment \(manager.snapshot.currentSegmentIndex)"
+                    )
 
                     Button {
                         if manager.state == .paused {
@@ -412,6 +415,14 @@ struct LiveWorkoutView: View {
         return "OF \(count)"
     }
 
+    private var altitudeValue: String {
+        guard let altitude = manager.snapshot.location?.altitude,
+              altitude.isFinite else {
+            return "--"
+        }
+        return String(format: "%.0f", altitude)
+    }
+
     private var stateLabel: String? {
         switch manager.state {
         case .starting: "STARTING"
@@ -462,5 +473,24 @@ struct LiveWorkoutView: View {
         case .confirmationPending:
             "Still confirming that segment. You can pause or end the ride."
         }
+    }
+}
+
+private struct WatchSegmentNumberBadge: View {
+    let number: UInt32
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .strokeBorder(lineWidth: 2)
+            Text("\(number)")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+                .padding(3)
+        }
+        .frame(width: 25, height: 25)
+        .accessibilityHidden(true)
     }
 }

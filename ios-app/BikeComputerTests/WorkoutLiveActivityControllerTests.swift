@@ -1488,34 +1488,52 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         enum TestError: Error { case unavailable }
         let source = source()
         let client = FakeWorkoutLiveActivityClient()
+        let diagnostics = WorkoutLiveActivityDiagnosticStore()
         client.requestError = TestError.unavailable
-        let controller = makeController(source: source, client: client)
+        let controller = makeController(
+            source: source,
+            client: client,
+            diagnostics: diagnostics
+        )
         controller.start(isApplicationForeground: true)
         await settle()
 
         XCTAssertEqual(client.requestAttempts, 1)
         XCTAssertTrue(client.requests.isEmpty)
+        XCTAssertTrue(
+            diagnostics.issueMessage?.contains(
+                "Live Activity failed:"
+            ) == true
+        )
 
         client.requestError = nil
         controller.setApplicationForeground(true)
         await settle()
         XCTAssertEqual(client.requestAttempts, 2)
         XCTAssertEqual(client.requests.count, 1)
+        XCTAssertNil(diagnostics.issueMessage)
     }
 
     func testDisabledAuthorizationDoesNotRequestActivity() async {
         let source = source()
         let client = FakeWorkoutLiveActivityClient()
+        let diagnostics = WorkoutLiveActivityDiagnosticStore()
         let controller = makeController(
             source: source,
             client: client,
-            authorization: EnabledWorkoutLiveActivityAuthorization(false)
+            authorization: EnabledWorkoutLiveActivityAuthorization(false),
+            diagnostics: diagnostics
         )
 
         controller.start(isApplicationForeground: true)
         await settle()
 
         XCTAssertEqual(client.requestAttempts, 0)
+        XCTAssertEqual(
+            diagnostics.issueMessage,
+            "Live Activity unavailable: iOS reports that Live Activities "
+                + "are disabled for BikeComputer."
+        )
     }
 
     private func source(
@@ -1536,6 +1554,8 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
             WorkoutLiveActivityAuthorizationProviding? = nil,
         suppression:
             WorkoutLiveActivitySuppressionStoring? = nil,
+        diagnostics:
+            (any WorkoutLiveActivityDiagnosticReporting)? = nil,
         finalizationBackgroundLease:
             (any WorkoutBackgroundExecutionLeasing)? = nil,
         backgroundTimeRemaining: (() -> TimeInterval)? = nil,
@@ -1550,6 +1570,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
                 ?? EnabledWorkoutLiveActivityAuthorization(),
             suppressionStore: suppression
                 ?? MemoryWorkoutLiveActivitySuppressionStore(),
+            diagnostics: diagnostics,
             finalizationBackgroundLease:
                 finalizationBackgroundLease,
             backgroundTimeRemaining:
