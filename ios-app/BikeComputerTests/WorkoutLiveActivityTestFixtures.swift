@@ -7,7 +7,7 @@ func makeLiveActivityPresentation(
     state: WorkoutSessionStateV1 = .running,
     connection: WorkoutMirrorConnectionStateV1 = .connected,
     capturedAt: Date = Date(timeIntervalSinceReferenceDate: 800_500_000),
-    elapsed: Double = 120,
+    elapsed: Double? = 120,
     speedMetersPerSecond: Double? = 8,
     distanceMeters: Double? = 2_500,
     heartRate: Double? = 140,
@@ -16,15 +16,17 @@ func makeLiveActivityPresentation(
     segment: WorkoutCompletedSegmentV1? = nil,
     terminalOutcome: WorkoutTerminalOutcomeV1? = nil
 ) -> WorkoutMirrorPresentationV1 {
-    let startDate = capturedAt.addingTimeInterval(-elapsed)
+    let startDate = capturedAt.addingTimeInterval(-(elapsed ?? 120))
     let snapshot = WorkoutSnapshotV1(
         state: state,
         startDate: startDate,
-        elapsedTime: WorkoutMetricV1(
-            value: elapsed,
-            unit: .seconds,
-            capturedAt: capturedAt
-        ),
+        elapsedTime: elapsed.map {
+            WorkoutMetricV1(
+                value: $0,
+                unit: .seconds,
+                capturedAt: capturedAt
+            )
+        },
         currentHeartRate: heartRate.map {
             WorkoutMetricV1(
                 value: $0,
@@ -79,6 +81,8 @@ final class TestWorkoutLiveActivityPresentationSource:
         AnyPublisher<WorkoutMirrorPresentationV1, Never> {
         subject.eraseToAnyPublisher()
     }
+    var supportsSegmentMarking = true
+    var isSegmentConfirmationPending = false
 
     init(_ presentation: WorkoutMirrorPresentationV1) {
         subject = CurrentValueSubject(presentation)

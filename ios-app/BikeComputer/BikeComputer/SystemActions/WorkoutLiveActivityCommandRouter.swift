@@ -23,7 +23,6 @@ final class WorkoutLiveActivityCommandRouter: @unchecked Sendable {
     private let pauseAction: @MainActor () -> Void
     private let resumeAction: @MainActor () -> Void
     private let recoveryTimeout: TimeInterval
-    private let now: () -> Date
     private let wait:
         @MainActor @Sendable (TimeInterval) async throws -> Void
 
@@ -39,7 +38,6 @@ final class WorkoutLiveActivityCommandRouter: @unchecked Sendable {
     init(
         store: any WorkoutLiveActivityControlStateProviding,
         recoveryTimeout: TimeInterval = defaultRecoveryTimeout,
-        now: @escaping () -> Date = Date.init,
         wait: (@MainActor @Sendable (TimeInterval) async throws -> Void)? = nil,
         markSegment: @escaping @MainActor () -> Void,
         pause: @escaping @MainActor () -> Void,
@@ -49,7 +47,6 @@ final class WorkoutLiveActivityCommandRouter: @unchecked Sendable {
         self.recoveryTimeout = recoveryTimeout.isFinite
             ? min(max(0, recoveryTimeout), 5)
             : Self.defaultRecoveryTimeout
-        self.now = now
         self.wait = wait ?? { interval in
             try await Task.sleep(
                 nanoseconds: UInt64(interval * 1_000_000_000)
@@ -70,7 +67,8 @@ final class WorkoutLiveActivityCommandRouter: @unchecked Sendable {
         let presentation = controlState.presentation
         guard presentation.sessionID == sessionID,
               presentation.connectionState == .connected,
-              presentation.pendingControl == nil else {
+              presentation.pendingControl == nil,
+              presentation.errorCode != .terminalChoiceUnconfirmed else {
             return false
         }
 
@@ -104,13 +102,15 @@ final class WorkoutLiveActivityCommandRouter: @unchecked Sendable {
             return false
         }
 
-        let deadline = now().addingTimeInterval(recoveryTimeout)
-        while recoveryTimeout > 0, now() < deadline {
+        var remaining = recoveryTimeout
+        while remaining > 0 {
+            let interval = min(Self.recoveryPollInterval, remaining)
             do {
-                try await wait(Self.recoveryPollInterval)
+                try await wait(interval)
             } catch {
                 return false
             }
+            remaining -= interval
             if controlState.presentation.sessionID == sessionID {
                 return true
             }

@@ -1,3 +1,4 @@
+import AppIntents
 import XCTest
 
 @available(iOS 17.0, *)
@@ -8,25 +9,24 @@ private final class WorkoutLiveActivityCallCounter {
 
 @available(iOS 17.0, *)
 @MainActor
-private final class WorkoutLiveActivityTestClock {
-    var date: Date
-    private(set) var waits = 0
-
-    init(_ date: Date) {
-        self.date = date
-    }
-
-    func advance(by interval: TimeInterval) {
-        waits += 1
-        date.addTimeInterval(interval)
-    }
-}
-
-@available(iOS 17.0, *)
-@MainActor
 final class WorkoutLiveActivityIntentTests: XCTestCase {
     private let capturedAt =
         Date(timeIntervalSinceReferenceDate: 800_500_000)
+
+    func testControlsRequireAuthentication() {
+        XCTAssertEqual(
+            BikeComputerMarkSegmentIntent.authenticationPolicy,
+            .requiresAuthentication
+        )
+        XCTAssertEqual(
+            BikeComputerPauseWorkoutIntent.authenticationPolicy,
+            .requiresAuthentication
+        )
+        XCTAssertEqual(
+            BikeComputerResumeWorkoutIntent.authenticationPolicy,
+            .requiresAuthentication
+        )
+    }
 
     func testSegmentRoutesOnlyForMatchingConnectedRunningSession() async {
         let sessionID = UUID()
@@ -172,6 +172,25 @@ final class WorkoutLiveActivityIntentTests: XCTestCase {
         XCTAssertEqual(calls.value, 0)
     }
 
+    func testTimedOutTerminalChoiceRejectsConflictingControls() async {
+        let sessionID = UUID()
+        let calls = WorkoutLiveActivityCallCounter()
+        let state = TestWorkoutLiveActivityControlState(
+            makeLiveActivityPresentation(
+                sessionID: sessionID,
+                capturedAt: capturedAt,
+                errorCode: .terminalChoiceUnconfirmed
+            )
+        )
+        let rejected = await router(
+            state: state,
+            calls: calls
+        ).perform(.pause, sessionID: sessionID)
+
+        XCTAssertFalse(rejected)
+        XCTAssertEqual(calls.value, 0)
+    }
+
     func testCommandDoesNotReportSuccessWithoutPendingPublication() async {
         let sessionID = UUID()
         let state = controlState(sessionID: sessionID)
@@ -200,7 +219,6 @@ final class WorkoutLiveActivityIntentTests: XCTestCase {
         let router = WorkoutLiveActivityCommandRouter(
             store: state,
             recoveryTimeout: 1,
-            now: { capturedAt },
             wait: { _ in
                 state.presentation = makeLiveActivityPresentation(
                     sessionID: sessionID,
@@ -234,17 +252,50 @@ final class WorkoutLiveActivityIntentTests: XCTestCase {
         XCTAssertFalse(accepted)
     }
 
+    func testIntentExecutionThrowsWhenCommandIsRejected() async {
+        do {
+            try await WorkoutLiveActivityIntentExecution.perform(
+                .pause,
+                sessionID: UUID().uuidString,
+                dispatcher: .unavailable
+            )
+            XCTFail("A rejected workout command must not report success")
+        } catch let error as WorkoutLiveActivityIntentError {
+            guard case .commandRejected = error else {
+                return XCTFail("Unexpected intent error: \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected intent error: \(error)")
+        }
+    }
+
+    func testIntentExecutionRejectsMalformedSessionIdentifier() async {
+        do {
+            try await WorkoutLiveActivityIntentExecution.perform(
+                .pause,
+                sessionID: "not-a-session",
+                dispatcher: .unavailable
+            )
+            XCTFail("An invalid session must not report success")
+        } catch let error as WorkoutLiveActivityIntentError {
+            guard case .invalidSession = error else {
+                return XCTFail("Unexpected intent error: \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected intent error: \(error)")
+        }
+    }
+
     func testColdIntentStopsAfterBoundedRecoveryTimeout() async {
         let sessionID = UUID()
         let state =
             TestWorkoutLiveActivityControlState(.idle)
-        let clock = WorkoutLiveActivityTestClock(capturedAt)
         let calls = WorkoutLiveActivityCallCounter()
+        var waits: [TimeInterval] = []
         let router = WorkoutLiveActivityCommandRouter(
             store: state,
             recoveryTimeout: 0.25,
-            now: { clock.date },
-            wait: { interval in clock.advance(by: interval) },
+            wait: { interval in waits.append(interval) },
             markSegment: {},
             pause: { calls.value += 1 },
             resume: {}
@@ -257,7 +308,10 @@ final class WorkoutLiveActivityIntentTests: XCTestCase {
 
         XCTAssertFalse(accepted)
         XCTAssertEqual(calls.value, 0)
-        XCTAssertEqual(clock.waits, 3)
+        XCTAssertEqual(waits.count, 3)
+        XCTAssertEqual(waits[0], 0.1, accuracy: 0.000_001)
+        XCTAssertEqual(waits[1], 0.1, accuracy: 0.000_001)
+        XCTAssertEqual(waits[2], 0.05, accuracy: 0.000_001)
     }
 
     private func controlState(

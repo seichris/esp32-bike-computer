@@ -369,6 +369,24 @@ Clear the suppression when the session reaches a terminal state.
 - Saved workout: publish a final summary, then end with dismissal after
   approximately 15 minutes.
 - Discarded workout: end immediately.
+- Missing final Watch snapshot: after the manager's bounded final-snapshot
+  wait expires, publish honest unavailable-final content and end with the same
+  system-owned delayed dismissal. That timeout is the Live Activity correction
+  cutoff: ActivityKit end content is immutable, so a later Watch envelope may
+  still correct the iPhone app's workout presentation but does not revise the
+  already-ended Lock Screen card. Keep background execution asserted from the
+  manager wait through completion of the controller's ActivityKit end call.
+  On relaunch, the recovery grace boundary is the equivalent cutoff for a
+  persisted Finishing card; retain its session tombstone after finalization so
+  a late recovery cannot create a conflicting second card. Bound both waits
+  by the process's remaining background time with a finalization safety margin,
+  leaving time for the normal path to await ActivityKit finalization. Perform
+  expiration bookkeeping synchronously and immediately queue best-effort
+  cleanup, but do not claim that ActivityKit's asynchronous `end` call can
+  complete inside UIKit's expiration callback. If the system suspends before
+  that queued work completes, reconcile it on the next app execution. Re-evaluate
+  recovered truth before every ActivityKit end in a multi-record reconciliation
+  batch.
 - User dismissal: stop managing the activity but do not send a workout command.
 - Activity authorization disabled: stop ActivityKit work silently.
 - System eight-hour expiration: allow it; the Watch workout continues.
@@ -510,7 +528,7 @@ The native Watch workout UI remains the primary Watch control surface.
 | ActivityKit update throws | Keep workout untouched and retry only from a later verified store update |
 | App crashes or is terminated | Reconcile the system Activity with the recovered mirrored session |
 | Workout exceeds Live Activity lifetime | Live Activity may disappear; Watch workout and save remain correct |
-| Workout ends while iPhone is disconnected | End or finalize the activity when the terminal Watch snapshot is later received |
+| Workout ends while iPhone is disconnected | Finalize from the terminal Watch snapshot when it arrives within the bounded wait; otherwise end with honest unavailable-final content and a system-owned delayed dismissal |
 
 ## Implementation phases
 

@@ -18,6 +18,8 @@ nonisolated enum WorkoutLiveActivityPendingAction:
     case segment
     case pause
     case resume
+    case endAndSave
+    case discard
 }
 
 @available(iOS 17.0, *)
@@ -35,6 +37,7 @@ nonisolated enum WorkoutLiveActivityDisplayError:
     case segmentRejected
     case segmentUnconfirmed
     case controlsUnavailable
+    case finalSummaryUnavailable
 }
 
 @available(iOS 17.0, *)
@@ -50,13 +53,14 @@ nonisolated struct WorkoutLiveActivityAttributes:
     struct ContentState: Codable, Hashable, Sendable {
         let phase: WorkoutLiveActivityPhase
         let capturedAt: Date
-        let elapsedActiveSeconds: TimeInterval
+        let elapsedActiveSeconds: TimeInterval?
         let currentSpeedKilometersPerHour: Double?
         let cyclingDistanceMeters: Double?
         let currentHeartRateBPM: Double?
         let lastCompletedSegmentIndex: UInt32?
         let lastCompletedSegmentDuration: TimeInterval?
         let lastCompletedSegmentDistanceMeters: Double?
+        let isSegmentControlAvailable: Bool
         let pendingAction: WorkoutLiveActivityPendingAction
         let finalOutcome: WorkoutLiveActivityFinalOutcome
         let displayError: WorkoutLiveActivityDisplayError
@@ -69,11 +73,15 @@ nonisolated struct WorkoutLiveActivityAttributes:
         }
 
         var controlsEnabled: Bool {
-            phase == .running && pendingAction == .none
+            phase == .running
+                && pendingAction == .none
+                && displayError != .controlsUnavailable
         }
 
         var canMarkSegment: Bool {
             controlsEnabled
+                && isSegmentControlAvailable
+                && displayError != .segmentUnconfirmed
         }
 
         var canPause: Bool {
@@ -81,11 +89,37 @@ nonisolated struct WorkoutLiveActivityAttributes:
         }
 
         var canResume: Bool {
-            phase == .paused && pendingAction == .none
+            phase == .paused
+                && pendingAction == .none
+                && displayError != .controlsUnavailable
         }
 
         var isTerminal: Bool {
             phase == .final
+        }
+
+        func displayState(isSystemStale: Bool) -> Self {
+            guard isSystemStale,
+                  phase == .running || phase == .paused else {
+                return self
+            }
+            return Self(
+                phase: .stale,
+                capturedAt: capturedAt,
+                elapsedActiveSeconds: elapsedActiveSeconds,
+                currentSpeedKilometersPerHour: nil,
+                cyclingDistanceMeters: cyclingDistanceMeters,
+                currentHeartRateBPM: nil,
+                lastCompletedSegmentIndex: lastCompletedSegmentIndex,
+                lastCompletedSegmentDuration:
+                    lastCompletedSegmentDuration,
+                lastCompletedSegmentDistanceMeters:
+                    lastCompletedSegmentDistanceMeters,
+                isSegmentControlAvailable: isSegmentControlAvailable,
+                pendingAction: pendingAction,
+                finalOutcome: finalOutcome,
+                displayError: .controlsUnavailable
+            )
         }
     }
 

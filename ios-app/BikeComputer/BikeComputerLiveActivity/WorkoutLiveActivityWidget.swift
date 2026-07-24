@@ -11,29 +11,32 @@ struct WorkoutLiveActivityWidget: Widget {
                 .activityBackgroundTint(Color.black.opacity(0.92))
                 .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
-            DynamicIsland {
+            let state = context.state.displayState(
+                isSystemStale: context.isStale
+            )
+            return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     WorkoutLiveActivityStatusView(
-                        state: context.state,
+                        state: state,
                         compact: true
                     )
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     WorkoutLiveActivityElapsedView(
-                        state: context.state,
+                        state: state,
                         font: .title3.monospacedDigit()
                     )
                 }
                 DynamicIslandExpandedRegion(.center) {
                     WorkoutLiveActivityMetricStrip(
-                        state: context.state,
+                        state: state,
                         compact: true
                     )
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     WorkoutLiveActivityControls(
                         sessionID: context.attributes.sessionID,
-                        state: context.state
+                        state: state
                     )
                     .padding(.top, 4)
                 }
@@ -41,19 +44,19 @@ struct WorkoutLiveActivityWidget: Widget {
                 HStack(spacing: 3) {
                     Image(systemName: "figure.outdoor.cycle")
                     Circle()
-                        .fill(context.state.statusColor)
+                        .fill(state.statusColor)
                         .frame(width: 6, height: 6)
                 }
-                .accessibilityLabel(context.state.statusTitle)
+                .accessibilityLabel(state.statusTitle)
             } compactTrailing: {
                 WorkoutLiveActivityElapsedView(
-                    state: context.state,
+                    state: state,
                     font: .caption.monospacedDigit()
                 )
             } minimal: {
-                Image(systemName: context.state.minimalSymbolName)
-                    .foregroundStyle(context.state.statusColor)
-                    .accessibilityLabel(context.state.statusTitle)
+                Image(systemName: state.minimalSymbolName)
+                    .foregroundStyle(state.statusColor)
+                    .accessibilityLabel(state.statusTitle)
             }
             .keylineTint(.green)
         }

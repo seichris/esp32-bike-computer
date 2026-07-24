@@ -1,6 +1,7 @@
 import ActivityKit
 import Combine
 import Foundation
+import UIKit
 
 @available(iOS 17.0, *)
 enum WorkoutLiveActivitySystemState: Equatable, Sendable {
@@ -64,6 +65,8 @@ protocol WorkoutLiveActivitySuppressionStoring: AnyObject {
 @MainActor
 protocol WorkoutLiveActivityPresentationProviding: AnyObject {
     var presentation: WorkoutMirrorPresentationV1 { get }
+    var supportsSegmentMarking: Bool { get }
+    var isSegmentConfirmationPending: Bool { get }
     var presentationPublisher:
         AnyPublisher<WorkoutMirrorPresentationV1, Never> { get }
 }
@@ -243,13 +246,17 @@ final class SystemWorkoutLiveActivityClient: WorkoutLiveActivityClient {
 final class WorkoutLiveActivityController {
     nonisolated static let metricUpdateInterval: TimeInterval = 1
     nonisolated static let finalSummaryDismissalInterval: TimeInterval = 15 * 60
-    nonisolated static let reconciliationGracePeriod: TimeInterval = 3
+    nonisolated static let reconciliationGracePeriod: TimeInterval =
+        WorkoutMirrorStateReducer.defaultStartTimeout
 
     private let presentationSource:
         any WorkoutLiveActivityPresentationProviding
     private let client: WorkoutLiveActivityClient
     private let authorization: WorkoutLiveActivityAuthorizationProviding
     private let suppressionStore: WorkoutLiveActivitySuppressionStoring
+    private let finalizationBackgroundLease:
+        any WorkoutBackgroundExecutionLeasing
+    private let backgroundTimeRemaining: () -> TimeInterval
     private let now: () -> Date
     private let wait:
         @MainActor @Sendable (TimeInterval) async throws -> Void
@@ -261,14 +268,18 @@ final class WorkoutLiveActivityController {
         WorkoutLiveActivityAttributes.ContentState?
     private var lastPublishedAt: Date?
     private var latestPresentation: WorkoutMirrorPresentationV1
+    private var pendingPresentation: WorkoutMirrorPresentationV1?
+    private var presentationProcessingTask: Task<Void, Never>?
     private var pendingMetricContent:
         WorkoutLiveActivityAttributes.ContentState?
+    private var isMetricUpdateDue = false
     private var metricUpdateTask: Task<Void, Never>?
     private var activityStateTask: Task<Void, Never>?
     private var reconciliationTask: Task<Void, Never>?
     private var reconciliationGraceTask: Task<Void, Never>?
     private var hasReconciled = false
     private var isWithinReconciliationGrace = false
+    private var isReconciliationGraceExpiryPending = false
     private var isApplicationForeground = false
     private var systemEndedSessionIDs: Set<UUID> = []
 
@@ -277,6 +288,9 @@ final class WorkoutLiveActivityController {
         client: WorkoutLiveActivityClient? = nil,
         authorization: WorkoutLiveActivityAuthorizationProviding? = nil,
         suppressionStore: WorkoutLiveActivitySuppressionStoring? = nil,
+        finalizationBackgroundLease:
+            (any WorkoutBackgroundExecutionLeasing)? = nil,
+        backgroundTimeRemaining: (() -> TimeInterval)? = nil,
         now: @escaping () -> Date = Date.init,
         wait: (@MainActor @Sendable (TimeInterval) async throws -> Void)? = nil
     ) {
@@ -286,6 +300,11 @@ final class WorkoutLiveActivityController {
             ?? SystemWorkoutLiveActivityAuthorizationProvider()
         self.suppressionStore = suppressionStore
             ?? WorkoutLiveActivitySuppressionStore()
+        self.finalizationBackgroundLease =
+            finalizationBackgroundLease
+            ?? SystemWorkoutBackgroundExecutionLease()
+        self.backgroundTimeRemaining = backgroundTimeRemaining
+            ?? Self.defaultBackgroundTimeRemaining
         self.now = now
         self.wait = wait ?? { interval in
             try await Task.sleep(
@@ -301,6 +320,9 @@ final class WorkoutLiveActivityController {
         client: WorkoutLiveActivityClient,
         authorization: WorkoutLiveActivityAuthorizationProviding,
         suppressionStore: WorkoutLiveActivitySuppressionStoring,
+        finalizationBackgroundLease:
+            (any WorkoutBackgroundExecutionLeasing)? = nil,
+        backgroundTimeRemaining: (() -> TimeInterval)? = nil,
         now: @escaping () -> Date = Date.init,
         wait: (@MainActor @Sendable (TimeInterval) async throws -> Void)? = nil
     ) {
@@ -308,6 +330,11 @@ final class WorkoutLiveActivityController {
         self.client = client
         self.authorization = authorization
         self.suppressionStore = suppressionStore
+        self.finalizationBackgroundLease =
+            finalizationBackgroundLease
+            ?? SystemWorkoutBackgroundExecutionLease()
+        self.backgroundTimeRemaining = backgroundTimeRemaining
+            ?? Self.defaultBackgroundTimeRemaining
         self.now = now
         self.wait = wait ?? { interval in
             try await Task.sleep(
@@ -317,7 +344,16 @@ final class WorkoutLiveActivityController {
         latestPresentation = presentationSource.presentation
     }
 
+    private static func defaultBackgroundTimeRemaining() -> TimeInterval {
+#if WORKOUT_CONTRACT_XCTEST
+        .greatestFiniteMagnitude
+#else
+        UIApplication.shared.backgroundTimeRemaining
+#endif
+    }
+
     deinit {
+        presentationProcessingTask?.cancel()
         metricUpdateTask?.cancel()
         activityStateTask?.cancel()
         reconciliationTask?.cancel()
@@ -336,10 +372,16 @@ final class WorkoutLiveActivityController {
             [weak self] presentation in
             guard let self else { return }
             latestPresentation = presentation
+            // Initial reconciliation may already have retained the matching
+            // Activity and be suspended while ending a duplicate. Preserve
+            // the manager-to-controller finalization lease handoff even
+            // though presentation processing must remain serialized behind
+            // reconciliation.
+            retainFinalizationBackgroundExecutionIfNeeded(
+                for: presentation
+            )
             guard hasReconciled else { return }
-            Task { @MainActor [weak self] in
-                await self?.handle(presentation)
-            }
+            enqueue(presentation)
         }
         reconciliationTask = Task { @MainActor [weak self] in
             await self?.reconcileExistingActivities()
@@ -349,10 +391,7 @@ final class WorkoutLiveActivityController {
     func setApplicationForeground(_ isForeground: Bool) {
         isApplicationForeground = isForeground
         guard isForeground, hasReconciled else { return }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            await handle(latestPresentation)
-        }
+        enqueue(latestPresentation)
     }
 
     private func reconcileExistingActivities() async {
@@ -372,7 +411,11 @@ final class WorkoutLiveActivityController {
         }
         let mapped = WorkoutLiveActivityStateMapper.map(
             latestPresentation,
-            at: now()
+            at: now(),
+            supportsSegmentMarking:
+                presentationSource.supportsSegmentMarking,
+            isSegmentConfirmationPending:
+                presentationSource.isSegmentConfirmationPending
         )
 
         if let mapped {
@@ -383,6 +426,18 @@ final class WorkoutLiveActivityController {
                 retain(retained)
             }
             for record in records where record.id != managedActivityID {
+                let currentSessionID = WorkoutLiveActivityStateMapper.map(
+                    latestPresentation,
+                    at: now(),
+                    supportsSegmentMarking:
+                        presentationSource.supportsSegmentMarking,
+                    isSegmentConfirmationPending:
+                        presentationSource.isSegmentConfirmationPending
+                )?.attributes.sessionID
+                guard currentSessionID == mapped.attributes.sessionID else {
+                    await reconcileExistingActivities()
+                    return
+                }
                 await client.end(
                     id: record.id,
                     contentState: nil,
@@ -394,13 +449,32 @@ final class WorkoutLiveActivityController {
         }
 
         hasReconciled = true
-        await handle(latestPresentation)
+        enqueue(latestPresentation)
+        if !isWithinReconciliationGrace {
+            releaseReconciliationLeaseIfNoTerminalFinalization()
+        }
     }
 
     private func beginReconciliationGrace() {
         isWithinReconciliationGrace = true
+        isReconciliationGraceExpiryPending = false
         reconciliationGraceTask?.cancel()
-        let grace = Self.reconciliationGracePeriod
+        finalizationBackgroundLease.begin { [weak self] in
+            guard let self, isWithinReconciliationGrace else { return }
+            reconciliationGraceTask?.cancel()
+            reconciliationGraceTask = nil
+            isReconciliationGraceExpiryPending = true
+            enqueue(latestPresentation)
+        }
+        let grace = WorkoutBackgroundExecutionBudget.boundedDelay(
+            requested: Self.reconciliationGracePeriod,
+            backgroundTimeRemaining: backgroundTimeRemaining()
+        )
+        if grace == 0 {
+            isReconciliationGraceExpiryPending = true
+            enqueue(latestPresentation)
+            return
+        }
         let wait = wait
         reconciliationGraceTask = Task { @MainActor [weak self] in
             do {
@@ -409,26 +483,180 @@ final class WorkoutLiveActivityController {
                 return
             }
             guard let self, !Task.isCancelled else { return }
-            isWithinReconciliationGrace = false
+            isReconciliationGraceExpiryPending = true
+            enqueue(latestPresentation)
+        }
+    }
+
+    private func enqueue(
+        _ presentation: WorkoutMirrorPresentationV1
+    ) {
+        retainFinalizationBackgroundExecutionIfNeeded(
+            for: presentation
+        )
+        pendingPresentation = presentation
+        guard presentationProcessingTask == nil else { return }
+        presentationProcessingTask = Task { @MainActor [weak self] in
+            await self?.processPendingPresentations()
+        }
+    }
+
+    private func processPendingPresentations() async {
+        while !Task.isCancelled,
+              let presentation = pendingPresentation {
+            pendingPresentation = nil
+            if isReconciliationGraceExpiryPending {
+                isReconciliationGraceExpiryPending = false
+                await expireReconciliationGrace()
+            } else {
+                await handle(presentation)
+            }
+        }
+        presentationProcessingTask = nil
+    }
+
+    private func expireReconciliationGrace() async {
+        guard isWithinReconciliationGrace else { return }
+        isWithinReconciliationGrace = false
+        reconciliationGraceTask = nil
+
+        if WorkoutLiveActivityStateMapper.map(
+            latestPresentation,
+            at: now(),
+            supportsSegmentMarking:
+                presentationSource.supportsSegmentMarking,
+            isSegmentConfirmationPending:
+                presentationSource.isSegmentConfirmationPending
+        ) != nil {
+            await reconcileExistingActivities()
+            releaseReconciliationLeaseIfNoTerminalFinalization()
+            return
+        }
+
+        // Give a terminal or active recovery already queued on the main actor
+        // one final chance to win before ActivityKit end content becomes
+        // immutable. Recovery after the call below starts is past this
+        // relaunch correction cutoff.
+        await Task.yield()
+        if WorkoutLiveActivityStateMapper.map(
+            latestPresentation,
+            at: now(),
+            supportsSegmentMarking:
+                presentationSource.supportsSegmentMarking,
+            isSegmentConfirmationPending:
+                presentationSource.isSegmentConfirmationPending
+        ) != nil {
+            await reconcileExistingActivities()
+            releaseReconciliationLeaseIfNoTerminalFinalization()
+            return
+        }
+
+        let records = client.records().filter {
+            $0.systemState == .active || $0.systemState == .stale
+        }
+        for record in records {
             if WorkoutLiveActivityStateMapper.map(
                 latestPresentation,
-                at: now()
+                at: now(),
+                supportsSegmentMarking:
+                    presentationSource.supportsSegmentMarking,
+                isSegmentConfirmationPending:
+                    presentationSource.isSegmentConfirmationPending
             ) != nil {
                 await reconcileExistingActivities()
+                releaseReconciliationLeaseIfNoTerminalFinalization()
                 return
             }
-            let records = client.records().filter {
-                $0.systemState == .active || $0.systemState == .stale
+            let recoveredFinalContent =
+                record.contentState.phase == .ending
+                ? unavailableFinalContent(from: record.contentState)
+                : nil
+            if recoveredFinalContent != nil {
+                finalizationBackgroundLease.begin {}
             }
-            for record in records {
-                await client.end(
-                    id: record.id,
-                    contentState: nil,
-                    dismissal: .immediate
-                )
+            await client.end(
+                id: record.id,
+                contentState: recoveredFinalContent,
+                dismissal: recoveredFinalContent == nil
+                    ? .immediate
+                    : .after(
+                        now().addingTimeInterval(
+                            Self.finalSummaryDismissalInterval
+                        )
+                    )
+            )
+            if recoveredFinalContent == nil {
+                // A generic orphan is removed immediately, so a late verified
+                // active session may create its one replacement.
+                suppressionStore.remove(record.attributes.sessionID)
+            } else {
+                // Finalization is the relaunch correction cutoff. Keep the
+                // tombstone so a later recovery cannot create a second card
+                // beside immutable unavailable-final content.
+                suppressionStore.insert(record.attributes.sessionID)
             }
-            await handle(latestPresentation)
         }
+        finalizationBackgroundLease.end()
+        enqueue(latestPresentation)
+    }
+
+    private func retainFinalizationBackgroundExecutionIfNeeded(
+        for presentation: WorkoutMirrorPresentationV1
+    ) {
+        guard managedActivityID != nil,
+              let managedSessionID,
+              let mapped = WorkoutLiveActivityStateMapper.map(
+                  presentation,
+                  at: now(),
+                  supportsSegmentMarking:
+                      presentationSource.supportsSegmentMarking,
+                  isSegmentConfirmationPending:
+                      presentationSource.isSegmentConfirmationPending
+              ),
+              mapped.isTerminal,
+              mapped.attributes.sessionID == managedSessionID else {
+            return
+        }
+        // Combine delivery is synchronous. Acquiring here bridges the manager
+        // wait lease to the separately queued ActivityKit end operation.
+        finalizationBackgroundLease.begin {}
+    }
+
+    private func releaseReconciliationLeaseIfNoTerminalFinalization() {
+        let current = WorkoutLiveActivityStateMapper.map(
+            latestPresentation,
+            at: now(),
+            supportsSegmentMarking:
+                presentationSource.supportsSegmentMarking,
+            isSegmentConfirmationPending:
+                presentationSource.isSegmentConfirmationPending
+        )
+        if managedActivityID == nil || current?.isTerminal != true {
+            finalizationBackgroundLease.end()
+        }
+    }
+
+    private func unavailableFinalContent(
+        from content: WorkoutLiveActivityAttributes.ContentState
+    ) -> WorkoutLiveActivityAttributes.ContentState {
+        WorkoutLiveActivityAttributes.ContentState(
+            phase: .final,
+            capturedAt: content.capturedAt,
+            elapsedActiveSeconds: content.elapsedActiveSeconds,
+            currentSpeedKilometersPerHour: nil,
+            cyclingDistanceMeters: content.cyclingDistanceMeters,
+            currentHeartRateBPM: nil,
+            lastCompletedSegmentIndex:
+                content.lastCompletedSegmentIndex,
+            lastCompletedSegmentDuration:
+                content.lastCompletedSegmentDuration,
+            lastCompletedSegmentDistanceMeters:
+                content.lastCompletedSegmentDistanceMeters,
+            isSegmentControlAvailable: false,
+            pendingAction: .none,
+            finalOutcome: .none,
+            displayError: .finalSummaryUnavailable
+        )
     }
 
     private func handle(
@@ -440,18 +668,27 @@ final class WorkoutLiveActivityController {
         }
         guard let mapped = WorkoutLiveActivityStateMapper.map(
             presentation,
-            at: now()
+            at: now(),
+            supportsSegmentMarking:
+                presentationSource.supportsSegmentMarking,
+            isSegmentConfirmationPending:
+                presentationSource.isSegmentConfirmationPending
         ) else {
             guard !isWithinReconciliationGrace else { return }
+            if shouldRetainManagedActivity(while: presentation) {
+                return
+            }
             await endManagedActivity(dismissal: .immediate)
             return
         }
 
         if isWithinReconciliationGrace {
             isWithinReconciliationGrace = false
+            isReconciliationGraceExpiryPending = false
             reconciliationGraceTask?.cancel()
             reconciliationGraceTask = nil
             await reconcileExistingActivities()
+            releaseReconciliationLeaseIfNoTerminalFinalization()
             return
         }
 
@@ -461,19 +698,22 @@ final class WorkoutLiveActivityController {
         }
 
         if mapped.isTerminal {
-            suppressionStore.remove(mapped.attributes.sessionID)
             systemEndedSessionIDs.remove(mapped.attributes.sessionID)
             guard managedSessionID == mapped.attributes.sessionID else {
                 return
             }
-            let dismissal: WorkoutLiveActivityDismissal =
-                mapped.contentState.finalOutcome == .saved
-                ? .after(
+            suppressionStore.remove(mapped.attributes.sessionID)
+            let dismissal: WorkoutLiveActivityDismissal
+            switch mapped.contentState.finalOutcome {
+            case .saved, .none:
+                dismissal = .after(
                     now().addingTimeInterval(
                         Self.finalSummaryDismissalInterval
                     )
                 )
-                : .immediate
+            case .discarded:
+                dismissal = .immediate
+            }
             await endManagedActivity(
                 finalContent: mapped.contentState,
                 dismissal: dismissal
@@ -502,6 +742,21 @@ final class WorkoutLiveActivityController {
         )
     }
 
+    private func shouldRetainManagedActivity(
+        while presentation: WorkoutMirrorPresentationV1
+    ) -> Bool {
+        guard let managedSessionID,
+              presentation.sessionID == managedSessionID else {
+            return false
+        }
+        switch presentation.connectionState {
+        case .launchingWatch, .awaitingFirstSnapshot:
+            return true
+        default:
+            return false
+        }
+    }
+
     private func requestActivity(
         _ mapped: WorkoutLiveActivityMappedPresentation
     ) {
@@ -525,7 +780,10 @@ final class WorkoutLiveActivityController {
         _ content: WorkoutLiveActivityAttributes.ContentState,
         to activityID: String
     ) async {
-        guard content != lastPublishedContent else { return }
+        guard content != lastPublishedContent else {
+            cancelPendingMetricUpdate()
+            return
+        }
         let elapsedSinceLastUpdate = lastPublishedAt.map {
             max(0, now().timeIntervalSince($0))
         } ?? Self.metricUpdateInterval
@@ -535,6 +793,7 @@ final class WorkoutLiveActivityController {
         )
 
         guard requiresImmediateUpdate
+            || isMetricUpdateDue
             || elapsedSinceLastUpdate >= Self.metricUpdateInterval else {
             pendingMetricContent = content
             scheduleMetricUpdate(
@@ -557,13 +816,13 @@ final class WorkoutLiveActivityController {
             }
             guard let self, !Task.isCancelled else { return }
             metricUpdateTask = nil
-            guard let content = pendingMetricContent,
-                  let activityID = managedActivityID else {
+            guard pendingMetricContent != nil,
+                  managedActivityID != nil else {
                 pendingMetricContent = nil
                 return
             }
-            pendingMetricContent = nil
-            await update(content, activityID: activityID)
+            isMetricUpdateDue = true
+            enqueue(latestPresentation)
         }
     }
 
@@ -577,6 +836,10 @@ final class WorkoutLiveActivityController {
                 contentState: content,
                 staleDate: staleDate(for: content)
             )
+            guard !Task.isCancelled,
+                  managedActivityID == activityID else {
+                return
+            }
             lastPublishedContent = content
             lastPublishedAt = now()
         } catch {
@@ -598,6 +861,7 @@ final class WorkoutLiveActivityController {
             contentState: finalContent,
             dismissal: dismissal
         )
+        finalizationBackgroundLease.end()
         managedActivityID = nil
         managedSessionID = nil
         lastPublishedContent = nil
@@ -607,6 +871,10 @@ final class WorkoutLiveActivityController {
     private func retain(_ record: WorkoutLiveActivityRecord) {
         managedActivityID = record.id
         managedSessionID = record.attributes.sessionID
+        // Persist that this session has already owned a Live Activity. If the
+        // process is absent when the user dismisses it or the system expires
+        // it, a later launch must not create a replacement for the same ride.
+        suppressionStore.insert(record.attributes.sessionID)
         lastPublishedContent = record.contentState
         observeSystemState(
             activityID: record.id,
@@ -645,6 +913,7 @@ final class WorkoutLiveActivityController {
 
     private func abandonManagedActivity() {
         cancelPendingMetricUpdate()
+        finalizationBackgroundLease.end()
         managedActivityID = nil
         managedSessionID = nil
         lastPublishedContent = nil
@@ -657,6 +926,7 @@ final class WorkoutLiveActivityController {
         metricUpdateTask?.cancel()
         metricUpdateTask = nil
         pendingMetricContent = nil
+        isMetricUpdateDue = false
     }
 
     private func staleDate(

@@ -15,7 +15,9 @@ nonisolated struct WorkoutLiveActivityMappedPresentation: Equatable, Sendable {
 nonisolated enum WorkoutLiveActivityStateMapper {
     static func map(
         _ presentation: WorkoutMirrorPresentationV1,
-        at referenceDate: Date
+        at referenceDate: Date,
+        supportsSegmentMarking: Bool = true,
+        isSegmentConfirmationPending: Bool = false
     ) -> WorkoutLiveActivityMappedPresentation? {
         let snapshot = presentation.finalSnapshot ?? presentation.snapshot
         guard let sessionID = presentation.sessionID,
@@ -53,14 +55,19 @@ nonisolated enum WorkoutLiveActivityStateMapper {
                 snapshot.elapsedTime,
                 unit: .seconds,
                 allowZero: true
-            ) ?? 0,
+            ),
             currentSpeedKilometersPerHour: hidesInstantaneousMetrics
                 ? nil
                 : metric(
                     snapshot.currentSpeed,
                     unit: .metersPerSecond,
                     allowZero: true
-                ).map { $0 * 3.6 },
+                ).flatMap {
+                    let kilometersPerHour = $0 * 3.6
+                    return kilometersPerHour.isFinite
+                        ? kilometersPerHour
+                        : nil
+                },
             cyclingDistanceMeters: metric(
                 snapshot.cyclingDistance,
                 unit: .meters,
@@ -76,6 +83,8 @@ nonisolated enum WorkoutLiveActivityStateMapper {
             lastCompletedSegmentIndex: segment?.index,
             lastCompletedSegmentDuration: segment?.duration,
             lastCompletedSegmentDistanceMeters: segment?.distanceMeters,
+            isSegmentControlAvailable: supportsSegmentMarking
+                && !isSegmentConfirmationPending,
             pendingAction: pendingAction,
             finalOutcome: finalOutcome,
             displayError: displayError(
@@ -103,10 +112,14 @@ nonisolated enum WorkoutLiveActivityStateMapper {
         for presentation: WorkoutMirrorPresentationV1,
         snapshot: WorkoutSnapshotV1
     ) -> WorkoutLiveActivityPhase? {
+        let errorCode = presentation.errorCode ?? snapshot.errorCode
         if snapshot.terminalOutcome != nil
-            || presentation.connectionState == .ended
-            || presentation.sessionState == .ended {
+            || errorCode == .finalSummaryUnavailable {
             return .final
+        }
+        if presentation.connectionState == .ended
+            || presentation.sessionState == .ended {
+            return .ending
         }
 
         switch presentation.connectionState {
@@ -146,7 +159,11 @@ nonisolated enum WorkoutLiveActivityStateMapper {
             return .pause
         case .resume:
             return .resume
-        case .endAndSave, .discard, .requestCurrentSnapshot, nil:
+        case .endAndSave:
+            return .endAndSave
+        case .discard:
+            return .discard
+        case .requestCurrentSnapshot, nil:
             return .none
         }
     }
@@ -173,6 +190,12 @@ nonisolated enum WorkoutLiveActivityStateMapper {
             return .segmentRejected
         case .segmentMarkUnconfirmed:
             return .segmentUnconfirmed
+        case .terminalChoiceUnconfirmed:
+            return phase == .final
+                ? .finalSummaryUnavailable
+                : .controlsUnavailable
+        case .finalSummaryUnavailable:
+            return .finalSummaryUnavailable
         default:
             if phase == .stale || phase == .disconnected {
                 return .controlsUnavailable

@@ -76,6 +76,38 @@ final class WorkoutLiveActivityStateMapperTests: XCTestCase {
         XCTAssertFalse(mapped.isStartEligible)
     }
 
+    func testSystemStaleStateFreezesDisplayWithoutAppRefresh() throws {
+        let capturedAt = Date(timeIntervalSinceReferenceDate: 800_500_000)
+        let mapped = try XCTUnwrap(
+            WorkoutLiveActivityStateMapper.map(
+                makeLiveActivityPresentation(capturedAt: capturedAt),
+                at: capturedAt
+            )
+        )
+
+        let stale = mapped.contentState.displayState(isSystemStale: true)
+
+        XCTAssertEqual(stale.phase, .stale)
+        XCTAssertEqual(
+            stale.elapsedActiveSeconds,
+            mapped.contentState.elapsedActiveSeconds
+        )
+        XCTAssertNil(stale.currentSpeedKilometersPerHour)
+        XCTAssertNil(stale.currentHeartRateBPM)
+        XCTAssertEqual(
+            stale.cyclingDistanceMeters,
+            mapped.contentState.cyclingDistanceMeters
+        )
+        XCTAssertEqual(stale.displayError, .controlsUnavailable)
+        XCTAssertFalse(stale.canMarkSegment)
+        XCTAssertFalse(stale.canPause)
+
+        XCTAssertEqual(
+            mapped.contentState.displayState(isSystemStale: false),
+            mapped.contentState
+        )
+    }
+
     func testPausedAndTerminalStatesRemainHonest() throws {
         let capturedAt = Date(timeIntervalSinceReferenceDate: 800_500_000)
         let paused = try XCTUnwrap(
@@ -124,6 +156,25 @@ final class WorkoutLiveActivityStateMapperTests: XCTestCase {
             saved.contentState.finalOutcome,
             discarded.contentState.finalOutcome
         )
+
+        let unavailable = try XCTUnwrap(
+            WorkoutLiveActivityStateMapper.map(
+                makeLiveActivityPresentation(
+                    state: .ended,
+                    connection: .ended,
+                    capturedAt: capturedAt,
+                    errorCode: .finalSummaryUnavailable
+                ),
+                at: capturedAt
+            )
+        )
+        XCTAssertEqual(unavailable.contentState.phase, .final)
+        XCTAssertEqual(unavailable.contentState.finalOutcome, .none)
+        XCTAssertEqual(
+            unavailable.contentState.displayError,
+            .finalSummaryUnavailable
+        )
+        XCTAssertTrue(unavailable.isTerminal)
     }
 
     func testDisconnectedAndEndingVariantsDisableInstantControls() throws {
@@ -201,6 +252,86 @@ final class WorkoutLiveActivityStateMapperTests: XCTestCase {
         XCTAssertEqual(rejected.contentState.lastCompletedSegmentIndex, 2)
     }
 
+    func testTerminalPendingAndUnconfirmedStatesDisableControls() throws {
+        let capturedAt = Date(timeIntervalSinceReferenceDate: 800_500_000)
+        for pendingControl in [
+            WorkoutControlV1.endAndSave,
+            WorkoutControlV1.discard,
+        ] {
+            let pending = try XCTUnwrap(
+                WorkoutLiveActivityStateMapper.map(
+                    makeLiveActivityPresentation(
+                        capturedAt: capturedAt,
+                        pendingControl: pendingControl
+                    ),
+                    at: capturedAt
+                )
+            )
+            XCTAssertFalse(pending.contentState.canMarkSegment)
+            XCTAssertFalse(pending.contentState.canPause)
+        }
+
+        let unconfirmed = try XCTUnwrap(
+            WorkoutLiveActivityStateMapper.map(
+                makeLiveActivityPresentation(
+                    capturedAt: capturedAt,
+                    errorCode: .terminalChoiceUnconfirmed
+                ),
+                at: capturedAt
+            )
+        )
+        XCTAssertEqual(
+            unconfirmed.contentState.displayError,
+            .controlsUnavailable
+        )
+        XCTAssertFalse(unconfirmed.contentState.canMarkSegment)
+        XCTAssertFalse(unconfirmed.contentState.canPause)
+
+        let endedUnconfirmed = try XCTUnwrap(
+            WorkoutLiveActivityStateMapper.map(
+                makeLiveActivityPresentation(
+                    state: .ended,
+                    connection: .ended,
+                    capturedAt: capturedAt,
+                    errorCode: .terminalChoiceUnconfirmed
+                ),
+                at: capturedAt
+            )
+        )
+        XCTAssertFalse(endedUnconfirmed.isTerminal)
+        XCTAssertEqual(endedUnconfirmed.contentState.phase, .ending)
+        XCTAssertEqual(
+            endedUnconfirmed.contentState.displayError,
+            .controlsUnavailable
+        )
+    }
+
+    func testUnsupportedAndUnconfirmedSegmentDisableSegmentOnly() throws {
+        let capturedAt = Date(timeIntervalSinceReferenceDate: 800_500_000)
+        let unsupported = try XCTUnwrap(
+            WorkoutLiveActivityStateMapper.map(
+                makeLiveActivityPresentation(capturedAt: capturedAt),
+                at: capturedAt,
+                supportsSegmentMarking: false
+            )
+        )
+        XCTAssertFalse(unsupported.contentState.canMarkSegment)
+        XCTAssertTrue(unsupported.contentState.canPause)
+
+        let unconfirmed = try XCTUnwrap(
+            WorkoutLiveActivityStateMapper.map(
+                makeLiveActivityPresentation(
+                    capturedAt: capturedAt,
+                    errorCode: .segmentMarkUnconfirmed
+                ),
+                at: capturedAt,
+                isSegmentConfirmationPending: true
+            )
+        )
+        XCTAssertFalse(unconfirmed.contentState.canMarkSegment)
+        XCTAssertTrue(unconfirmed.contentState.canPause)
+    }
+
     func testInvalidMetricsRemainUnavailableInsteadOfZero() throws {
         let capturedAt = Date(timeIntervalSinceReferenceDate: 800_500_000)
         let mapped = try XCTUnwrap(
@@ -218,6 +349,39 @@ final class WorkoutLiveActivityStateMapperTests: XCTestCase {
         XCTAssertNil(mapped.contentState.currentSpeedKilometersPerHour)
         XCTAssertNil(mapped.contentState.cyclingDistanceMeters)
         XCTAssertNil(mapped.contentState.currentHeartRateBPM)
+    }
+
+    func testSpeedConversionOverflowRemainsUnavailable() throws {
+        let capturedAt = Date(timeIntervalSinceReferenceDate: 800_500_000)
+        let mapped = try XCTUnwrap(
+            WorkoutLiveActivityStateMapper.map(
+                makeLiveActivityPresentation(
+                    capturedAt: capturedAt,
+                    speedMetersPerSecond: .greatestFiniteMagnitude
+                ),
+                at: capturedAt
+            )
+        )
+
+        XCTAssertNil(mapped.contentState.currentSpeedKilometersPerHour)
+    }
+
+    func testMissingElapsedTimeRemainsUnavailableInsteadOfFalseZero()
+        throws {
+        let capturedAt = Date(timeIntervalSinceReferenceDate: 800_500_000)
+        let presentation = makeLiveActivityPresentation(
+            capturedAt: capturedAt,
+            elapsed: nil
+        )
+
+        let mapped = try XCTUnwrap(
+            WorkoutLiveActivityStateMapper.map(
+                presentation,
+                at: capturedAt
+            )
+        )
+
+        XCTAssertNil(mapped.contentState.elapsedActiveSeconds)
     }
 
     func testUnverifiedAndMismatchedDataCannotStartActivity() {

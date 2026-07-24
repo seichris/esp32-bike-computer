@@ -9,22 +9,26 @@ typealias WorkoutLiveActivityContext =
 struct WorkoutLiveActivityLockScreenView: View {
     let context: WorkoutLiveActivityContext
 
+    private var state: WorkoutLiveActivityAttributes.ContentState {
+        context.state.displayState(isSystemStale: context.isStale)
+    }
+
     var body: some View {
         VStack(spacing: 12) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                WorkoutLiveActivityStatusView(state: context.state)
+                WorkoutLiveActivityStatusView(state: state)
                 Spacer(minLength: 4)
                 WorkoutLiveActivityElapsedView(
-                    state: context.state,
+                    state: state,
                     font: .title2.bold().monospacedDigit()
                 )
             }
 
-            WorkoutLiveActivityMetricStrip(state: context.state)
+            WorkoutLiveActivityMetricStrip(state: state)
 
             WorkoutLiveActivityControls(
                 sessionID: context.attributes.sessionID,
-                state: context.state
+                state: state
             )
         }
         .padding(14)
@@ -69,21 +73,27 @@ struct WorkoutLiveActivityElapsedView: View {
 
     var body: some View {
         Group {
-            if state.phase == .running {
-                Text(state.timerAnchor, style: .timer)
-            } else {
+            if state.phase == .running,
+               let timerAnchor = state.timerAnchor {
+                Text(timerAnchor, style: .timer)
+            } else if let elapsedActiveSeconds =
+                state.elapsedActiveSeconds {
                 Text(
                     WorkoutLiveActivityFormatting.duration(
-                        state.elapsedActiveSeconds
+                        elapsedActiveSeconds
                     )
                 )
+            } else {
+                Text("—")
             }
         }
         .font(font)
         .lineLimit(1)
         .minimumScaleFactor(0.7)
         .accessibilityLabel(
-            "Active time \(WorkoutLiveActivityFormatting.duration(state.elapsedActiveSeconds))"
+            state.elapsedActiveSeconds.map {
+                "Active time \(WorkoutLiveActivityFormatting.duration($0))"
+            } ?? "Active time unavailable"
         )
     }
 }
@@ -216,8 +226,10 @@ private struct WorkoutLiveActivityButtonStyle: ButtonStyle {
 }
 
 extension WorkoutLiveActivityAttributes.ContentState {
-    var timerAnchor: Date {
-        capturedAt.addingTimeInterval(-elapsedActiveSeconds)
+    var timerAnchor: Date? {
+        elapsedActiveSeconds.map {
+            capturedAt.addingTimeInterval(-$0)
+        }
     }
 
     var statusColor: Color {
@@ -265,6 +277,8 @@ extension WorkoutLiveActivityAttributes.ContentState {
             return "Segment confirmation pending"
         case .controlsUnavailable:
             return "Ride continues on Apple Watch"
+        case .finalSummaryUnavailable:
+            return "Final summary unavailable"
         case .none:
             break
         }

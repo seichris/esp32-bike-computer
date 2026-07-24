@@ -28,14 +28,33 @@ final class WorkoutLiveActivityIntentDispatcher: @unchecked Sendable {
 }
 
 @available(iOS 17.0, *)
-private enum WorkoutLiveActivityIntentExecution {
+enum WorkoutLiveActivityIntentError: LocalizedError {
+    case invalidSession
+    case commandRejected
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidSession:
+            return "This workout control is no longer valid."
+        case .commandRejected:
+            return "The workout control could not be sent to Apple Watch."
+        }
+    }
+}
+
+@available(iOS 17.0, *)
+enum WorkoutLiveActivityIntentExecution {
     static func perform(
         _ action: WorkoutLiveActivityAction,
         sessionID: String,
         dispatcher: WorkoutLiveActivityIntentDispatcher
-    ) async {
-        guard let sessionID = UUID(uuidString: sessionID) else { return }
-        _ = await dispatcher.perform(action, sessionID: sessionID)
+    ) async throws {
+        guard let sessionID = UUID(uuidString: sessionID) else {
+            throw WorkoutLiveActivityIntentError.invalidSession
+        }
+        guard await dispatcher.perform(action, sessionID: sessionID) else {
+            throw WorkoutLiveActivityIntentError.commandRejected
+        }
     }
 }
 
@@ -46,6 +65,8 @@ struct BikeComputerMarkSegmentIntent: LiveActivityIntent {
         "Marks a segment in the active BikeComputer workout on Apple Watch."
     )
     static let openAppWhenRun = false
+    static let authenticationPolicy: IntentAuthenticationPolicy =
+        .requiresAuthentication
 
     @Parameter(title: "Workout Session")
     var sessionID: String
@@ -60,7 +81,7 @@ struct BikeComputerMarkSegmentIntent: LiveActivityIntent {
     }
 
     func perform() async throws -> some IntentResult {
-        await WorkoutLiveActivityIntentExecution.perform(
+        try await WorkoutLiveActivityIntentExecution.perform(
             .segment,
             sessionID: sessionID,
             dispatcher: dispatcher
@@ -76,6 +97,8 @@ struct BikeComputerPauseWorkoutIntent: LiveActivityIntent {
         "Pauses the active BikeComputer workout on Apple Watch."
     )
     static let openAppWhenRun = false
+    static let authenticationPolicy: IntentAuthenticationPolicy =
+        .requiresAuthentication
 
     @Parameter(title: "Workout Session")
     var sessionID: String
@@ -90,7 +113,7 @@ struct BikeComputerPauseWorkoutIntent: LiveActivityIntent {
     }
 
     func perform() async throws -> some IntentResult {
-        await WorkoutLiveActivityIntentExecution.perform(
+        try await WorkoutLiveActivityIntentExecution.perform(
             .pause,
             sessionID: sessionID,
             dispatcher: dispatcher
@@ -106,6 +129,8 @@ struct BikeComputerResumeWorkoutIntent: LiveActivityIntent {
         "Resumes the paused BikeComputer workout on Apple Watch."
     )
     static let openAppWhenRun = false
+    static let authenticationPolicy: IntentAuthenticationPolicy =
+        .requiresAuthentication
 
     @Parameter(title: "Workout Session")
     var sessionID: String
@@ -120,7 +145,7 @@ struct BikeComputerResumeWorkoutIntent: LiveActivityIntent {
     }
 
     func perform() async throws -> some IntentResult {
-        await WorkoutLiveActivityIntentExecution.perform(
+        try await WorkoutLiveActivityIntentExecution.perform(
             .resume,
             sessionID: sessionID,
             dispatcher: dispatcher
