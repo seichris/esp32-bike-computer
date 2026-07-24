@@ -20,7 +20,10 @@ struct BikeComputerApp: App {
                 workoutMirrorManager: appDelegate.workoutMirrorManager,
                 coordinator: appDelegate.coordinator,
                 liveActivityDiagnostics:
-                    appDelegate.workoutLiveActivityDiagnostics
+                    appDelegate.workoutLiveActivityDiagnostics,
+                onApplicationActiveChange: {
+                    appDelegate.setApplicationActive($0)
+                }
             )
         }
     }
@@ -58,19 +61,6 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         _ = coordinator
         workoutMirrorManager.installMirroringHandler()
         if #available(iOS 17.0, *) {
-            let commandRouter = WorkoutLiveActivityCommandRouter(
-                manager: workoutMirrorManager
-            )
-            let dispatcher = WorkoutLiveActivityIntentDispatcher {
-                [weak commandRouter] action, sessionID in
-                guard let commandRouter else { return false }
-                return await commandRouter.perform(
-                    action,
-                    sessionID: sessionID
-                )
-            }
-            AppDependencyManager.shared.add(dependency: dispatcher)
-
             let controller = WorkoutLiveActivityController(
                 store: workoutMirrorManager.store,
                 diagnostics: workoutLiveActivityDiagnostics
@@ -78,6 +68,32 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             controller.start(
                 isApplicationForeground: application.applicationState == .active
             )
+            let commandRouter = WorkoutLiveActivityCommandRouter(
+                manager: workoutMirrorManager
+            )
+            let dispatcher = WorkoutLiveActivityIntentDispatcher {
+                [weak commandRouter, weak controller] action, sessionID in
+                guard let commandRouter, let controller else { return false }
+                guard await commandRouter.perform(
+                    action,
+                    sessionID: sessionID
+                ) else {
+                    return false
+                }
+                _ = await controller.publishCurrentStateForIntent(
+                    sessionID: sessionID
+                )
+                await commandRouter.waitForResolution(
+                    of: action,
+                    sessionID: sessionID
+                )
+                _ = await controller.publishCurrentStateForIntent(
+                    sessionID: sessionID
+                )
+                return true
+            }
+            AppDependencyManager.shared.add(dependency: dispatcher)
+
             workoutLiveActivityCommandRouter = commandRouter
             workoutLiveActivityIntentDispatcher = dispatcher
             workoutLiveActivityController = controller
@@ -88,23 +104,22 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         coordinator.applicationDidBecomeActive()
-        if #available(iOS 17.0, *),
-           let controller =
-               workoutLiveActivityController
-                as? WorkoutLiveActivityController {
-            controller.setApplicationForeground(true)
-        }
+        setApplicationActive(true)
     }
     
     func applicationDidEnterBackground(_ application: UIApplication) {
         coordinator.setViewingMap(false)
+        setApplicationActive(false)
+        print("App entered background - navigation continues")
+    }
+
+    func setApplicationActive(_ isActive: Bool) {
         if #available(iOS 17.0, *),
            let controller =
                workoutLiveActivityController
                 as? WorkoutLiveActivityController {
-            controller.setApplicationForeground(false)
+            controller.setApplicationForeground(isActive)
         }
-        print("App entered background - navigation continues")
     }
     
     func applicationWillEnterForeground(_ application: UIApplication) {
