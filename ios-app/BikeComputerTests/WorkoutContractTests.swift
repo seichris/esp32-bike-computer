@@ -5505,7 +5505,7 @@ private struct WorkoutContractTestSuite {
         expect(
             compactContentViewSource.contains("scenePhase==.active")
                 && compactContentViewSource.contains(
-                    "!showingWorkoutDashboard"
+                    "presentedSheet!=.workoutDashboard"
                 )
                 && compactSource.contains("scenePhase==.active"),
             "segment feedback must be foreground-only and avoid dashboard duplicates"
@@ -5539,10 +5539,10 @@ private struct WorkoutContractTestSuite {
         let compactContentView = contentViewSource.filter { !$0.isWhitespace }
         expect(
             compactContentView.contains(
-                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onOpen:{showingWorkoutDashboard=true})"
+                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onOpen:{presentedSheet=.workoutDashboard})"
             )
                 && compactContentView.contains(
-                    ".sheet(isPresented:$showingWorkoutDashboard){WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onMarkSegment:workoutMirrorManager.markSegment,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)}"
+                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onMarkSegment:workoutMirrorManager.markSegment,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)"
                 ),
             "ContentView must present the dashboard from its exact state and inject each production manager action"
         )
@@ -5563,6 +5563,36 @@ private struct WorkoutContractTestSuite {
                 ),
             "Watch live workout must expose segment marking and its latest completed segment"
         )
+        expect(
+            compactLiveWatchView.contains("case.running:nil")
+                && !liveWatchViewSource.contains("\"LIVE\"")
+                && compactLiveWatchView.contains(
+                    "metric(title:\"HRZone\",value:heartRateZoneValue,unit:heartRateZoneUnit"
+                )
+                && compactLiveWatchView.contains(
+                    "Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))"
+                ),
+            "Watch live workout must omit LIVE, expose heart-rate zone, and retain the elapsed timer"
+        )
+        if let gridIndex = compactLiveWatchView.range(
+            of: "LazyVGrid(columns:columns,spacing:8)"
+        )?.lowerBound,
+           let timerIndex = compactLiveWatchView.range(
+            of: "Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))"
+           )?.lowerBound,
+           let controlsIndex = compactLiveWatchView.range(
+            of: "HStack(spacing:8){Button{manager.markSegment()"
+           )?.lowerBound {
+            expect(
+                gridIndex < timerIndex && timerIndex < controlsIndex,
+                "Watch elapsed timer must appear below the stat grid and above workout controls"
+            )
+        } else {
+            expect(
+                false,
+                "Watch live workout grid, timer, and controls must remain discoverable"
+            )
+        }
         expect(
             compactLiveWatchView.contains(
                 "WorkoutCrossAppTakeoverCopyV1.live(disposition:manager.isDiscarding?.discard:.save)"
@@ -5623,12 +5653,85 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             compactContent.contains(
-                "if(coordinator.isNavigating||workoutStore.presentation.isWorkoutActive),(coordinator.isNavigating||!isSearchPanelExpanded){rideControlPanel"
+                "ifcoordinator.isNavigating,!workoutStore.presentation.isWorkoutActive{rideControlPanel"
             )
                 && compactContent.contains(
                     "if!coordinator.isNavigating{"
+                )
+                && compactContent.contains(
+                    ".onChange(of:workoutStore.presentation.isWorkoutActive){_insynchronizeRideMetricsSheet()}"
+                )
+                && compactContent.contains(
+                    "ifworkoutStore.presentation.isWorkoutActive{guardpresentedSheet==nilelse{return}rideMetricsDetent=.rideMetricsCompactpresentedSheet=.rideMetrics}"
+                )
+                && compactContent.contains(
+                    ".sheet(item:$presentedSheet,onDismiss:restoreRideMetricsSheetIfNeeded){destinationinpresentedSheetContent(for:destination)}"
+                )
+                && compactContent.contains(
+                    ".presentationDetents([.rideMetricsCompact,.large],selection:$rideMetricsDetent)"
+                )
+                && compactContent.contains(
+                    "context.dynamicTypeSize.isAccessibilitySize?360:280"
+                )
+                && compactContent.contains(
+                    ".presentationDragIndicator(.visible)"
+                )
+                && compactContent.contains(
+                    ".presentationBackgroundInteraction(.enabled(upThrough:.rideMetricsCompact))"
+                )
+                && compactContent.contains(
+                    ".interactiveDismissDisabled()"
+                )
+                && compactNavigation.contains(
+                    "compactSheetMetricContent:someView{ifworkoutStore.presentation.isWorkoutActive{workoutStatusBannerworkoutMetrics}ifisNavigating{navigationMetrics}}"
+                )
+                && !compactNavigation.contains("Text(\"RideStats\")")
+                && !compactNavigation.contains("chevron.up")
+                && !compactNavigation.contains("chevron.down")
+                && !compactNavigation.contains("onToggleExpansion"),
+            "active workouts must own the expandable native stats sheet while navigation-only keeps the compact overlay"
+        )
+        expect(
+            compactNavigation.contains(
+                "workoutMetricGrid(metrics:workoutMetricValues,columnCount:3,isExpanded:false)"
+            )
+                && compactNavigation.contains(
+                    "metrics.first(where:{$0.id==\"speed\"})"
+                )
+                && compactNavigation.contains(
+                    "isExpanded:true,isHero:true"
+                )
+                && compactNavigation.contains(
+                    "metrics:metrics.filter{$0.id!=\"speed\"},columnCount:2,isExpanded:true"
+                )
+                && compactNavigation.contains(
+                    "expandedNavigationMetrics"
+                )
+                && compactNavigation.contains(
+                    "size:isHero?64:isExpanded?42:25"
+                )
+                && compactNavigation.contains(
+                    "size:isHero?28:isExpanded?24:16"
+                )
+                && compactNavigation.contains(
+                    "Text(unit).font(unitFont).foregroundColor(.secondary)"
+                )
+                && compactNavigation.contains(
+                    ".frame(maxWidth:.infinity,minHeight:36)"
+                )
+                && compactNavigation.contains(
+                    ".padding(.bottom,4)"
                 ),
-            "workout metrics must show with or without navigation while destination search remains available without navigation"
+            "expanded ride stats must feature a larger centered speed above a two-column grid, keep measurement units secondary, use taller controls, and avoid excess space below them"
+        )
+        expect(
+            compactContent.contains(
+                "guard!isOnlyCheckingForServerMapselse{returnfalse}"
+            )
+                && compactContent.contains(
+                    "offlineMapManager.isServerRecoveryCheckPending&&offlineMapManager.currentJob==nil&&offlineMapManager.downloadedPackURL==nil&&offlineMapManager.errorMessage==nil"
+                ),
+            "the passive offline-map recovery scan must not flash a startup status chip"
         )
 
         for binding in [
