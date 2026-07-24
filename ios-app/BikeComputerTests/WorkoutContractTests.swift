@@ -5505,7 +5505,7 @@ private struct WorkoutContractTestSuite {
         expect(
             compactContentViewSource.contains("scenePhase==.active")
                 && compactContentViewSource.contains(
-                    "!showingWorkoutDashboard"
+                    "presentedSheet!=.workoutDashboard"
                 )
                 && compactSource.contains("scenePhase==.active"),
             "segment feedback must be foreground-only and avoid dashboard duplicates"
@@ -5539,10 +5539,10 @@ private struct WorkoutContractTestSuite {
         let compactContentView = contentViewSource.filter { !$0.isWhitespace }
         expect(
             compactContentView.contains(
-                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onOpen:{showingWorkoutDashboard=true})"
+                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onOpen:{presentedSheet=.workoutDashboard})"
             )
                 && compactContentView.contains(
-                    ".sheet(isPresented:$showingWorkoutDashboard){WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onMarkSegment:workoutMirrorManager.markSegment,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)}"
+                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onMarkSegment:workoutMirrorManager.markSegment,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)"
                 ),
             "ContentView must present the dashboard from its exact state and inject each production manager action"
         )
@@ -5623,12 +5623,30 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             compactContent.contains(
-                "if(coordinator.isNavigating||workoutStore.presentation.isWorkoutActive),(coordinator.isNavigating||!isSearchPanelExpanded){rideControlPanel"
+                "if!coordinator.isNavigating,workoutStore.presentation.isWorkoutActive,!isSearchPanelExpanded{rideControlPanel"
             )
                 && compactContent.contains(
                     "if!coordinator.isNavigating{"
+                )
+                && compactContent.contains(
+                    "ifcoordinator.isNavigating{guardpresentedSheet==nilelse{return}rideMetricsDetent=.rideMetricsCompactpresentedSheet=.rideMetrics}"
+                )
+                && compactContent.contains(
+                    ".sheet(item:$presentedSheet,onDismiss:restoreRideMetricsSheetIfNeeded){destinationinpresentedSheetContent(for:destination)}"
+                )
+                && compactContent.contains(
+                    ".presentationDetents([.rideMetricsCompact,.large],selection:$rideMetricsDetent)"
+                )
+                && compactContent.contains(
+                    ".presentationDragIndicator(.visible)"
+                )
+                && compactContent.contains(
+                    ".presentationBackgroundInteraction(.enabled(upThrough:.rideMetricsCompact))"
+                )
+                && compactContent.contains(
+                    ".interactiveDismissDisabled()"
                 ),
-            "workout metrics must show with or without navigation while destination search remains available without navigation"
+            "navigation must use a native expandable stats sheet while workout-only metrics and destination search remain available"
         )
 
         for binding in [
