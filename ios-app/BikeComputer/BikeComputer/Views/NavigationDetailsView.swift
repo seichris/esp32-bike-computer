@@ -193,6 +193,7 @@ struct RideMetricsPanel: View {
     let remainingDistance: CLLocationDistance?
     let onStopNavigation: () -> Void
     let onStartWorkout: () -> Void
+    let onMarkSegment: () -> Void
     let onPauseWorkout: () -> Void
     let onResumeWorkout: () -> Void
     let onEndAndSaveWorkout: () -> Void
@@ -606,6 +607,19 @@ struct RideMetricsPanel: View {
     private var workoutControls: some View {
         let presentation = workoutStore.presentation
         if presentation.isWorkoutActive {
+            Button(action: onMarkSegment) {
+                RideSegmentControlLabel(
+                    number: presentation.snapshot.currentSegmentIndex
+                )
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.green)
+            .disabled(!canMarkSegment)
+            .accessibilityLabel("Mark workout segment")
+            .accessibilityValue(
+                "Current segment \(presentation.snapshot.currentSegmentIndex)"
+            )
+
             if presentation.sessionState == .paused {
                 Button(action: onResumeWorkout) {
                     RideControlLabel(
@@ -669,6 +683,16 @@ struct RideMetricsPanel: View {
             && (presentation.pendingControl == nil
                 || presentation.pendingControl == .markSegment)
             && presentation.connectionState != .disconnected
+    }
+
+    private var canMarkSegment: Bool {
+        let presentation = workoutStore.presentation
+        return presentation.sessionID != nil
+            && presentation.sessionState == .running
+            && presentation.pendingControl == nil
+            && presentation.connectionState != .disconnected
+            && workoutStore.supportsSegmentMarking
+            && !workoutStore.isSegmentConfirmationPending
     }
 
     private var suppressInstantaneousMetrics: Bool {
@@ -755,6 +779,21 @@ private struct RideControlLabel: View {
             .lineLimit(1)
             .minimumScaleFactor(0.62)
             .frame(maxWidth: .infinity, minHeight: 36)
+    }
+}
+
+private struct RideSegmentControlLabel: View {
+    let number: UInt32
+
+    var body: some View {
+        HStack(spacing: 6) {
+            WorkoutSegmentNumberBadge(number: number, diameter: 22)
+            Text("Segment")
+        }
+        .font(.subheadline.weight(.semibold))
+        .lineLimit(1)
+        .minimumScaleFactor(0.62)
+        .frame(maxWidth: .infinity, minHeight: 36)
     }
 }
 

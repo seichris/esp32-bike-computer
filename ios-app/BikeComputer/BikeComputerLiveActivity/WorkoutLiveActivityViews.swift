@@ -180,10 +180,19 @@ struct WorkoutLiveActivityControls: View {
             Button(
                 intent: BikeComputerMarkSegmentIntent(sessionID: sessionID)
             ) {
-                Label("Segment", systemImage: "flag.checkered")
+                HStack(spacing: 6) {
+                    WorkoutLiveActivitySegmentNumberBadge(
+                        number: state.currentSegmentIndex
+                    )
+                    Text("Segment")
+                }
                     .frame(maxWidth: .infinity, minHeight: 44)
             }
             .disabled(!state.canMarkSegment)
+            .accessibilityLabel("Mark workout segment")
+            .accessibilityValue(
+                "Current segment \(state.currentSegmentIndex)"
+            )
 
             if state.phase == .paused {
                 Button(
@@ -211,6 +220,25 @@ struct WorkoutLiveActivityControls: View {
         .labelStyle(.titleAndIcon)
         .buttonStyle(WorkoutLiveActivityButtonStyle())
         .opacity(state.controlsAreVisuallyAvailable ? 1 : 0.55)
+    }
+}
+
+private struct WorkoutLiveActivitySegmentNumberBadge: View {
+    let number: UInt32
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .strokeBorder(lineWidth: 2)
+            Text("\(number)")
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+                .padding(3)
+        }
+        .frame(width: 22, height: 22)
+        .accessibilityHidden(true)
     }
 }
 

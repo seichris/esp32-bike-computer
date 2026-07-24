@@ -190,15 +190,6 @@ struct LiveWorkoutView: View {
                     )
                 }
 
-                if let segment = manager.snapshot.lastCompletedSegment {
-                    Label(
-                        "Segment \(segment.index + 1)",
-                        systemImage: "flag.checkered"
-                    )
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                }
-
                 Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))
                     .font(.system(.title2, design: .rounded, weight: .semibold))
                     .monospacedDigit()
@@ -211,16 +202,21 @@ struct LiveWorkoutView: View {
                         if manager.isMarkingSegment {
                             ProgressView()
                         } else {
-                            Image(systemName: "flag.checkered")
+                            WatchSegmentNumberBadge(
+                                number: manager.snapshot.currentSegmentIndex
+                            )
                         }
                     }
-                    .tint(.blue)
+                    .tint(.green)
                     .disabled(
                         manager.state != .running
                             || manager.isMarkingSegment
                             || manager.segmentError == .confirmationPending
                     )
                     .accessibilityLabel("Mark workout segment")
+                    .accessibilityValue(
+                        "Current segment \(manager.snapshot.currentSegmentIndex)"
+                    )
 
                     Button {
                         if manager.state == .paused {
@@ -462,5 +458,24 @@ struct LiveWorkoutView: View {
         case .confirmationPending:
             "Still confirming that segment. You can pause or end the ride."
         }
+    }
+}
+
+private struct WatchSegmentNumberBadge: View {
+    let number: UInt32
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .strokeBorder(lineWidth: 2)
+            Text("\(number)")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+                .padding(3)
+        }
+        .frame(width: 25, height: 25)
+        .accessibilityHidden(true)
     }
 }

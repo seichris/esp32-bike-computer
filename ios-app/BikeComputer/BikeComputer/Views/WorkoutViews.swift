@@ -478,6 +478,11 @@ struct WorkoutDashboardView: View {
             .lastCompletedSegment
     }
 
+    private var currentSegmentNumber: UInt32 {
+        (store.presentation.finalSnapshot ?? store.presentation.snapshot)
+            .currentSegmentIndex
+    }
+
     @ViewBuilder
     private var connectionBanner: some View {
         TimelineView(.periodic(from: Date(), by: 1)) { context in
@@ -552,12 +557,15 @@ struct WorkoutDashboardView: View {
                     .monospacedDigit()
                     .accessibilityLabel("Elapsed time")
 
-                if let segment = snapshot.lastCompletedSegment,
+                if snapshot.lastCompletedSegment != nil,
                    store.presentation.isWorkoutActive {
-                    Label(
-                        "Segment \(segment.index + 1) in progress",
-                        systemImage: "flag.checkered"
-                    )
+                    HStack(spacing: 7) {
+                        WorkoutSegmentNumberBadge(
+                            number: snapshot.currentSegmentIndex,
+                            diameter: 22
+                        )
+                        Text("Segment \(snapshot.currentSegmentIndex) in progress")
+                    }
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
                 }
@@ -722,9 +730,15 @@ struct WorkoutDashboardView: View {
             }
             HStack(spacing: 12) {
                 Button(action: onMarkSegment) {
-                    Label("Segment", systemImage: "flag.checkered")
+                    HStack(spacing: 6) {
+                        WorkoutSegmentNumberBadge(
+                            number: currentSegmentNumber,
+                            diameter: 22
+                        )
+                        Text("Segment")
+                    }
                 }
-                .tint(.blue)
+                .tint(.green)
                 .disabled(
                     presentation.sessionState != .running
                         || presentation.pendingControl != nil
@@ -732,6 +746,9 @@ struct WorkoutDashboardView: View {
                         || store.isSegmentConfirmationPending
                 )
                 .accessibilityLabel("Mark workout segment")
+                .accessibilityValue(
+                    "Current segment \(currentSegmentNumber)"
+                )
 
                 if presentation.sessionState == .paused {
                     Button(action: onResume) {
@@ -919,6 +936,33 @@ struct WorkoutDashboardView: View {
         case .unknown: return "Unknown source"
         case nil: return nil
         }
+    }
+}
+
+struct WorkoutSegmentNumberBadge: View {
+    let number: UInt32
+    let diameter: CGFloat
+    var lineWidth: CGFloat = 2
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .strokeBorder(lineWidth: lineWidth)
+            Text("\(number)")
+                .font(
+                    .system(
+                        size: diameter * 0.56,
+                        weight: .bold,
+                        design: .rounded
+                    )
+                )
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+                .padding(diameter * 0.12)
+        }
+        .frame(width: diameter, height: diameter)
+        .accessibilityHidden(true)
     }
 }
 

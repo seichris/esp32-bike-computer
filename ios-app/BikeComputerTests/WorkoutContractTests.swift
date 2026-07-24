@@ -243,6 +243,10 @@ private struct WorkoutContractTestSuite {
         if let second {
             expect(accumulator.commit(second), "second segment candidate should commit")
         }
+        expect(
+            WorkoutSnapshotV1(state: .running).currentSegmentIndex == 1,
+            "a workout should begin with segment one in progress"
+        )
 
         let snapshot = WorkoutSnapshotV1(
             state: .running,
@@ -250,6 +254,10 @@ private struct WorkoutContractTestSuite {
             elapsedTime: metric(90, .seconds, secondEnd),
             lastCompletedSegment: accumulator.lastCompletedSegment,
             availability: [.elapsedTime]
+        )
+        expect(
+            snapshot.currentSegmentIndex == 3,
+            "the current segment number should follow the latest completed segment"
         )
         let envelope = makeEnvelope(
             sequence: 1,
@@ -5468,7 +5476,7 @@ private struct WorkoutContractTestSuite {
         }
         expect(
             compactSource.contains(
-                "Button(action:onMarkSegment){Label(\"Segment\",systemImage:\"flag.checkered\")}"
+                "Button(action:onMarkSegment){HStack(spacing:6){WorkoutSegmentNumberBadge(number:currentSegmentNumber,diameter:22)Text(\"Segment\")}}"
             )
                 && compactSource.contains(
                     "ifpresentation.sessionState==.paused{Button(action:onResume){Label(\"Resume\""
@@ -5555,6 +5563,9 @@ private struct WorkoutContractTestSuite {
         }
         expect(
             compactLiveWatchView.contains("manager.markSegment()")
+                && compactLiveWatchView.contains(
+                    "WatchSegmentNumberBadge(number:manager.snapshot.currentSegmentIndex)"
+                )
                 && compactLiveWatchView.contains(
                     ".accessibilityLabel(\"Markworkoutsegment\")"
                 )
@@ -5777,10 +5788,12 @@ private struct WorkoutContractTestSuite {
             "the main ride panel must render the zone as Zone N"
         )
         for control in [
+            "\"Segment\"",
             "\"Pauseworkout\"",
             "\"Resumeworkout\"",
             "\"Endworkout\"",
             "onStopNavigation",
+            "onMarkSegment",
             "onPauseWorkout",
             "onResumeWorkout",
             "onEndAndSaveWorkout",
@@ -5791,6 +5804,18 @@ private struct WorkoutContractTestSuite {
                 "main ride panel must retain control route: \(control)"
             )
         }
+        expect(
+            compactNavigation.contains(
+                "Button(action:onMarkSegment){RideSegmentControlLabel(number:presentation.snapshot.currentSegmentIndex)}"
+            )
+                && compactNavigation.contains(
+                    "presentation.pendingControl==nil"
+                )
+                && compactContent.contains(
+                    "onMarkSegment:workoutMirrorManager.markSegment"
+                ),
+            "the ride sheet must expose the numbered segment action with safe production wiring"
+        )
         expect(
             compactNavigation.contains(
                 "case.launchingWatch,.awaitingFirstSnapshot,.stale,.disconnected:"

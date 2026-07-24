@@ -600,6 +600,7 @@ struct ContentView: View {
             remainingDistance: coordinator.routeRemainingDistance,
             onStopNavigation: { coordinator.stopNavigation() },
             onStartWorkout: workoutMirrorManager.startOutdoorCyclingOnWatch,
+            onMarkSegment: workoutMirrorManager.markSegment,
             onPauseWorkout: workoutMirrorManager.pause,
             onResumeWorkout: workoutMirrorManager.resume,
             onEndAndSaveWorkout: workoutMirrorManager.endAndSave,

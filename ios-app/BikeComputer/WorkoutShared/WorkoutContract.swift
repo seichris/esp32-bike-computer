@@ -220,6 +220,13 @@ nonisolated struct WorkoutSnapshotV1: Codable, Equatable, Sendable {
         self.errorCode = errorCode
         self.terminalOutcome = terminalOutcome
     }
+
+    var currentSegmentIndex: UInt32 {
+        guard let lastCompletedSegment else { return 1 }
+        return lastCompletedSegment.index == .max
+            ? .max
+            : lastCompletedSegment.index + 1
+    }
 }
 
 nonisolated enum WorkoutControlV1: String, Codable, Sendable {
