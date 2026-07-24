@@ -188,6 +188,13 @@ struct LiveWorkoutView: View {
                         icon: "arrow.triangle.2.circlepath",
                         color: .mint
                     )
+                    metric(
+                        title: "Altitude",
+                        value: altitudeValue,
+                        unit: "M",
+                        icon: "mountain.2.fill",
+                        color: .indigo
+                    )
                 }
 
                 Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))
@@ -406,6 +413,14 @@ struct LiveWorkoutView: View {
             return "ZONE"
         }
         return "OF \(count)"
+    }
+
+    private var altitudeValue: String {
+        guard let altitude = manager.snapshot.location?.altitude,
+              altitude.isFinite else {
+            return "--"
+        }
+        return String(format: "%.0f", altitude)
     }
 
     private var stateLabel: String? {

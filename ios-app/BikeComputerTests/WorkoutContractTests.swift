@@ -5581,9 +5581,12 @@ private struct WorkoutContractTestSuite {
                     "metric(title:\"HRZone\",value:heartRateZoneValue,unit:heartRateZoneUnit"
                 )
                 && compactLiveWatchView.contains(
+                    "metric(title:\"Altitude\",value:altitudeValue,unit:\"M\""
+                )
+                && compactLiveWatchView.contains(
                     "Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))"
                 ),
-            "Watch live workout must omit LIVE, expose heart-rate zone, and retain the elapsed timer"
+            "Watch live workout must omit LIVE, expose heart-rate zone and altitude, and retain the elapsed timer"
         )
         if let gridIndex = compactLiveWatchView.range(
             of: "LazyVGrid(columns:columns,spacing:8)"

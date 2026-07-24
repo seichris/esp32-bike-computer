@@ -1,7 +1,24 @@
 import ActivityKit
 import Combine
 import Foundation
+import OSLog
 import UIKit
+
+@MainActor
+protocol WorkoutLiveActivityDiagnosticReporting: AnyObject {
+    func setIssue(_ message: String?)
+}
+
+@MainActor
+final class WorkoutLiveActivityDiagnosticStore:
+    ObservableObject,
+    WorkoutLiveActivityDiagnosticReporting {
+    @Published private(set) var issueMessage: String?
+
+    func setIssue(_ message: String?) {
+        issueMessage = message
+    }
+}
 
 @available(iOS 17.0, *)
 enum WorkoutLiveActivitySystemState: Equatable, Sendable {
@@ -248,12 +265,17 @@ final class WorkoutLiveActivityController {
     nonisolated static let finalSummaryDismissalInterval: TimeInterval = 15 * 60
     nonisolated static let reconciliationGracePeriod: TimeInterval =
         WorkoutMirrorStateReducer.defaultStartTimeout
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "BikeComputer",
+        category: "WorkoutLiveActivity"
+    )
 
     private let presentationSource:
         any WorkoutLiveActivityPresentationProviding
     private let client: WorkoutLiveActivityClient
     private let authorization: WorkoutLiveActivityAuthorizationProviding
     private let suppressionStore: WorkoutLiveActivitySuppressionStoring
+    private let diagnostics: any WorkoutLiveActivityDiagnosticReporting
     private let finalizationBackgroundLease:
         any WorkoutBackgroundExecutionLeasing
     private let backgroundTimeRemaining: () -> TimeInterval
@@ -282,12 +304,15 @@ final class WorkoutLiveActivityController {
     private var isReconciliationGraceExpiryPending = false
     private var isApplicationForeground = false
     private var systemEndedSessionIDs: Set<UUID> = []
+    private var lastDiagnosticIssue: String?
 
     init(
         store: WorkoutMetricsStore,
         client: WorkoutLiveActivityClient? = nil,
         authorization: WorkoutLiveActivityAuthorizationProviding? = nil,
         suppressionStore: WorkoutLiveActivitySuppressionStoring? = nil,
+        diagnostics:
+            (any WorkoutLiveActivityDiagnosticReporting)? = nil,
         finalizationBackgroundLease:
             (any WorkoutBackgroundExecutionLeasing)? = nil,
         backgroundTimeRemaining: (() -> TimeInterval)? = nil,
@@ -300,6 +325,8 @@ final class WorkoutLiveActivityController {
             ?? SystemWorkoutLiveActivityAuthorizationProvider()
         self.suppressionStore = suppressionStore
             ?? WorkoutLiveActivitySuppressionStore()
+        self.diagnostics = diagnostics
+            ?? WorkoutLiveActivityDiagnosticStore()
         self.finalizationBackgroundLease =
             finalizationBackgroundLease
             ?? SystemWorkoutBackgroundExecutionLease()
@@ -320,6 +347,8 @@ final class WorkoutLiveActivityController {
         client: WorkoutLiveActivityClient,
         authorization: WorkoutLiveActivityAuthorizationProviding,
         suppressionStore: WorkoutLiveActivitySuppressionStoring,
+        diagnostics:
+            (any WorkoutLiveActivityDiagnosticReporting)? = nil,
         finalizationBackgroundLease:
             (any WorkoutBackgroundExecutionLeasing)? = nil,
         backgroundTimeRemaining: (() -> TimeInterval)? = nil,
@@ -330,6 +359,8 @@ final class WorkoutLiveActivityController {
         self.client = client
         self.authorization = authorization
         self.suppressionStore = suppressionStore
+        self.diagnostics = diagnostics
+            ?? WorkoutLiveActivityDiagnosticStore()
         self.finalizationBackgroundLease =
             finalizationBackgroundLease
             ?? SystemWorkoutBackgroundExecutionLease()
@@ -365,6 +396,9 @@ final class WorkoutLiveActivityController {
             setApplicationForeground(isApplicationForeground)
             return
         }
+        Self.logger.notice(
+            "Starting Live Activity controller; foreground=\(isApplicationForeground)"
+        )
         self.isApplicationForeground = isApplicationForeground
         latestPresentation = presentationSource.presentation
         let publisher = presentationSource.presentationPublisher
@@ -389,6 +423,9 @@ final class WorkoutLiveActivityController {
     }
 
     func setApplicationForeground(_ isForeground: Bool) {
+        Self.logger.debug(
+            "Application foreground state changed to \(isForeground)"
+        )
         isApplicationForeground = isForeground
         guard isForeground, hasReconciled else { return }
         enqueue(latestPresentation)
@@ -664,6 +701,10 @@ final class WorkoutLiveActivityController {
     ) async {
         guard authorization.areActivitiesEnabled else {
             cancelPendingMetricUpdate()
+            reportIssue(
+                "Live Activity unavailable: iOS reports that Live Activities "
+                    + "are disabled for BikeComputer."
+            )
             return
         }
         guard let mapped = WorkoutLiveActivityStateMapper.map(
@@ -676,9 +717,13 @@ final class WorkoutLiveActivityController {
         ) else {
             guard !isWithinReconciliationGrace else { return }
             if shouldRetainManagedActivity(while: presentation) {
+                Self.logger.debug(
+                    "Keeping the existing Live Activity while waiting for a fresh workout snapshot"
+                )
                 return
             }
             await endManagedActivity(dismissal: .immediate)
+            clearIssue()
             return
         }
 
@@ -698,6 +743,7 @@ final class WorkoutLiveActivityController {
         }
 
         if mapped.isTerminal {
+            clearIssue()
             systemEndedSessionIDs.remove(mapped.attributes.sessionID)
             guard managedSessionID == mapped.attributes.sessionID else {
                 return
@@ -722,14 +768,34 @@ final class WorkoutLiveActivityController {
         }
 
         guard let managedActivityID else {
-            guard mapped.isStartEligible,
-                  isApplicationForeground,
-                  !suppressionStore.contains(
-                      mapped.attributes.sessionID
-                  ),
-                  !systemEndedSessionIDs.contains(
-                      mapped.attributes.sessionID
-                  ) else {
+            guard mapped.isStartEligible else {
+                Self.logger.debug(
+                    "Live Activity request is waiting for a verified running or paused workout"
+                )
+                return
+            }
+            guard isApplicationForeground else {
+                Self.logger.notice(
+                    "Live Activity request deferred because the app is not foreground"
+                )
+                return
+            }
+            guard !suppressionStore.contains(
+                mapped.attributes.sessionID
+            ) else {
+                reportIssue(
+                    "Live Activity hidden because it was dismissed for this "
+                        + "workout. Start a new workout to try again."
+                )
+                return
+            }
+            guard !systemEndedSessionIDs.contains(
+                mapped.attributes.sessionID
+            ) else {
+                reportIssue(
+                    "Live Activity unavailable because iOS already ended it "
+                        + "for this workout. Start a new workout to try again."
+                )
                 return
             }
             requestActivity(mapped)
@@ -760,6 +826,10 @@ final class WorkoutLiveActivityController {
     private func requestActivity(
         _ mapped: WorkoutLiveActivityMappedPresentation
     ) {
+        let sessionID = mapped.attributes.sessionID.uuidString
+        Self.logger.notice(
+            "Requesting Live Activity for session \(sessionID, privacy: .public)"
+        )
         do {
             let content = mapped.contentState
             let record = try client.request(
@@ -770,10 +840,31 @@ final class WorkoutLiveActivityController {
             retain(record)
             lastPublishedContent = content
             lastPublishedAt = now()
+            clearIssue()
+            Self.logger.notice(
+                "Live Activity created; id=\(record.id, privacy: .public)"
+            )
         } catch {
-            // ActivityKit failure is display-only. A later verified store
-            // update or foreground transition may safely try again.
+            let nsError = error as NSError
+            reportIssue(
+                "Live Activity failed: \(error.localizedDescription) "
+                    + "(\(nsError.domain) \(nsError.code))."
+            )
         }
+    }
+
+    private func reportIssue(_ message: String) {
+        guard message != lastDiagnosticIssue else { return }
+        lastDiagnosticIssue = message
+        diagnostics.setIssue(message)
+        Self.logger.error("\(message, privacy: .public)")
+    }
+
+    private func clearIssue() {
+        guard lastDiagnosticIssue != nil else { return }
+        lastDiagnosticIssue = nil
+        diagnostics.setIssue(nil)
+        Self.logger.notice("Cleared Live Activity diagnostic issue")
     }
 
     private func publish(
