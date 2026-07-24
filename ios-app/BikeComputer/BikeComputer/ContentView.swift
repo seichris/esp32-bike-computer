@@ -21,7 +21,7 @@ private enum ContentSheetDestination: String, Identifiable {
 private struct RideMetricsCompactDetent: CustomPresentationDetent {
     static func height(in context: Context) -> CGFloat? {
         let preferredHeight: CGFloat =
-            context.dynamicTypeSize.isAccessibilitySize ? 440 : 360
+            context.dynamicTypeSize.isAccessibilitySize ? 360 : 280
         return min(preferredHeight, context.maxDetentValue * 0.72)
     }
 }

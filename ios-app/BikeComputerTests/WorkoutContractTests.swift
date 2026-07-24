@@ -5641,6 +5641,9 @@ private struct WorkoutContractTestSuite {
                     ".presentationDetents([.rideMetricsCompact,.large],selection:$rideMetricsDetent)"
                 )
                 && compactContent.contains(
+                    "context.dynamicTypeSize.isAccessibilitySize?360:280"
+                )
+                && compactContent.contains(
                     ".presentationDragIndicator(.visible)"
                 )
                 && compactContent.contains(
